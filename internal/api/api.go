@@ -21,22 +21,25 @@ const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
 // Server is the Phoenix HTTP API server.
 type Server struct {
-	store     *store.Store
-	acl       *acl.ACL
-	audit     *audit.Logger
-	auditPath string
-	ca        *ca.CA // nil when mTLS is disabled
-	mux       *http.ServeMux
+	store        *store.Store
+	acl          *acl.ACL
+	audit        *audit.Logger
+	auditPath    string
+	ca           *ca.CA // nil when mTLS is disabled
+	bearerEnabled bool  // whether bearer token auth is allowed
+	mux          *http.ServeMux
 }
 
 // NewServer creates a new API server with all dependencies.
+// Bearer auth is enabled by default.
 func NewServer(s *store.Store, a *acl.ACL, al *audit.Logger, auditPath string) *Server {
 	srv := &Server{
-		store:     s,
-		acl:       a,
-		audit:     al,
-		auditPath: auditPath,
-		mux:       http.NewServeMux(),
+		store:         s,
+		acl:           a,
+		audit:         al,
+		auditPath:     auditPath,
+		bearerEnabled: true,
+		mux:           http.NewServeMux(),
 	}
 	srv.routes()
 	return srv
@@ -47,6 +50,11 @@ func NewServer(s *store.Store, a *acl.ACL, al *audit.Logger, auditPath string) *
 // to bearer tokens. The certificate CN is used as the agent identity.
 func (s *Server) SetCA(c *ca.CA) {
 	s.ca = c
+}
+
+// SetBearerEnabled controls whether bearer token authentication is allowed.
+func (s *Server) SetBearerEnabled(enabled bool) {
+	s.bearerEnabled = enabled
 }
 
 // ServeHTTP implements http.Handler.
@@ -68,6 +76,7 @@ func (s *Server) routes() {
 // authenticate identifies the calling agent from the request.
 // It tries mTLS client certificate first (if CA is configured and client
 // presented a cert), then falls back to bearer token authentication.
+// Both paths are gated by their respective feature flags.
 // Returns the agent name or an error.
 func (s *Server) authenticate(r *http.Request) (string, error) {
 	// Try mTLS first: check for verified client certificate
@@ -80,7 +89,10 @@ func (s *Server) authenticate(r *http.Request) (string, error) {
 		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
 	}
 
-	// Fall back to bearer token
+	// Fall back to bearer token if enabled
+	if !s.bearerEnabled {
+		return "", fmt.Errorf("no valid authentication credentials provided")
+	}
 	token := extractToken(r)
 	if token == "" {
 		return "", fmt.Errorf("no authentication credentials provided")

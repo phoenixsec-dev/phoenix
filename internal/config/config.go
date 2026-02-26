@@ -32,10 +32,13 @@ type BearerAuthConfig struct {
 
 // MTLSConfig controls mTLS client certificate authentication.
 type MTLSConfig struct {
-	Enabled bool   `json:"enabled"`
-	CACert  string `json:"ca_cert,omitempty"`
-	CAKey   string `json:"ca_key,omitempty"`
-	Require bool   `json:"require"` // If true, reject connections without client cert
+	Enabled    bool   `json:"enabled"`
+	CACert     string `json:"ca_cert,omitempty"`
+	CAKey      string `json:"ca_key,omitempty"`
+	ServerCert string `json:"server_cert,omitempty"` // Leaf cert for TLS server identity
+	ServerKey  string `json:"server_key,omitempty"`  // Key for TLS server identity
+	CRLPath    string `json:"crl_path,omitempty"`    // Path to CRL file for persistence
+	Require    bool   `json:"require"`               // If true, reject connections without client cert
 }
 
 // CryptoConfig controls the key management provider.
@@ -135,6 +138,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Audit.Path == "" {
 		return errors.New("audit.path is required")
+	}
+	// At least one auth mode must be enabled
+	if !c.Auth.Bearer.Enabled && !c.Auth.MTLS.Enabled {
+		return errors.New("at least one auth mode must be enabled (auth.bearer.enabled or auth.mtls.enabled)")
+	}
+	// mTLS requires CA and server cert paths
+	if c.Auth.MTLS.Enabled {
+		if c.Auth.MTLS.CACert == "" || c.Auth.MTLS.CAKey == "" {
+			return errors.New("auth.mtls.enabled requires ca_cert and ca_key paths")
+		}
+		if c.Auth.MTLS.ServerCert == "" || c.Auth.MTLS.ServerKey == "" {
+			return errors.New("auth.mtls.enabled requires server_cert and server_key paths")
+		}
 	}
 	return nil
 }

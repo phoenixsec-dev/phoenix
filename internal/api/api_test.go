@@ -478,7 +478,9 @@ func TestMTLSRevokedCertFallsBackToBearer(t *testing.T) {
 	bundle, _ := authority.IssueAgentCert("admin")
 	block, _ := pem.Decode(bundle.CertPEM)
 	cert, _ := x509.ParseCertificate(block.Bytes)
-	authority.RevokeCert(cert.SerialNumber, "admin")
+	if err := authority.RevokeCert(cert.SerialNumber, "admin"); err != nil {
+		t.Fatalf("RevokeCert: %v", err)
+	}
 
 	// Request with revoked mTLS cert + valid bearer token → should succeed via bearer fallback
 	req := makeMTLSRequest("GET", "/v1/health", nil, bundle.CertPEM)
@@ -516,6 +518,48 @@ func TestIssueCertWithoutCA(t *testing.T) {
 
 	if w.Code != 501 {
 		t.Fatalf("issue cert without CA: expected 501, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBearerDisabledRejectsTokenAuth(t *testing.T) {
+	srv, _, adminToken := setupTestServerWithCA(t)
+	srv.SetBearerEnabled(false)
+
+	// Bearer token should be rejected when bearer auth is disabled
+	req := httptest.NewRequest("GET", "/v1/secrets/test/key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("bearer disabled: expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBearerDisabledStillAllowsMTLS(t *testing.T) {
+	srv, authority, adminToken := setupTestServerWithCA(t)
+	srv.SetBearerEnabled(false)
+
+	// First set a secret with bearer (re-enable temporarily)
+	srv.SetBearerEnabled(true)
+	body, _ := json.Marshal(setSecretRequest{Value: "mtls-only"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/mtls-key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup: expected 200, got %d", w.Code)
+	}
+	srv.SetBearerEnabled(false)
+
+	// mTLS should still work
+	bundle, _ := authority.IssueAgentCert("reader")
+	req = makeMTLSRequest("GET", "/v1/secrets/test/mtls-key", nil, bundle.CertPEM)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("mTLS with bearer disabled: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

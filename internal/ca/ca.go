@@ -14,14 +14,18 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -29,6 +33,7 @@ import (
 const (
 	CAValidityYears    = 5
 	AgentValidityDays  = 90
+	ServerValidityDays = 365
 	SerialNumberBits   = 128
 )
 
@@ -237,6 +242,69 @@ func (ca *CA) IssueAgentCert(agentName string) (*CertBundle, error) {
 	}, nil
 }
 
+// IssueServerCert creates a TLS server certificate signed by the CA.
+// The hosts parameter should include hostnames and/or IP addresses
+// that the server will be accessed at.
+func (ca *CA) IssueServerCert(hosts []string) (*CertBundle, error) {
+	ca.mu.RLock()
+	defer ca.mu.RUnlock()
+
+	if ca.cert == nil || ca.key == nil {
+		return nil, ErrCANotInitialized
+	}
+
+	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generating server key: %w", err)
+	}
+
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName: "Phoenix Server",
+		},
+		NotBefore: now,
+		NotAfter:  now.AddDate(0, 0, ServerValidityDays),
+		KeyUsage:  x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+		},
+	}
+
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			template.DNSNames = append(template.DNSNames, h)
+		}
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &serverKey.PublicKey, ca.key)
+	if err != nil {
+		return nil, fmt.Errorf("signing server certificate: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	keyDER, err := x509.MarshalECPrivateKey(serverKey)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling server key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	return &CertBundle{
+		CertPEM: certPEM,
+		KeyPEM:  keyPEM,
+		CACert:  ca.certPEM,
+	}, nil
+}
+
 // CertPEM returns the CA certificate in PEM format.
 func (ca *CA) CertPEM() []byte {
 	ca.mu.RLock()
@@ -244,12 +312,13 @@ func (ca *CA) CertPEM() []byte {
 	return ca.certPEM
 }
 
-// Fingerprint returns the SHA-256 fingerprint of the CA certificate
-// for out-of-band verification.
+// Fingerprint returns the SHA-256 fingerprint of the CA certificate's
+// DER encoding for out-of-band verification.
 func (ca *CA) Fingerprint() string {
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
-	return fmt.Sprintf("%X", ca.cert.SubjectKeyId)
+	hash := sha256.Sum256(ca.cert.Raw)
+	return fmt.Sprintf("%X", hash[:])
 }
 
 // TLSConfig returns a tls.Config configured for mTLS server mode.
@@ -276,8 +345,9 @@ func (ca *CA) TLSConfig() *tls.Config {
 	}
 }
 
-// VerifyClientCert validates a client certificate chain and extracts the agent name.
-// Returns the CN (agent name) from the leaf certificate.
+// VerifyClientCert validates a client certificate chain against the CA
+// and extracts the agent name. Performs full x509 chain verification,
+// checks CRL revocation, and returns the CN (agent name) from the leaf.
 func (ca *CA) VerifyClientCert(certs []*x509.Certificate) (string, error) {
 	if len(certs) == 0 {
 		return "", errors.New("no client certificate provided")
@@ -285,10 +355,15 @@ func (ca *CA) VerifyClientCert(certs []*x509.Certificate) (string, error) {
 
 	leaf := certs[0]
 
-	// Check expiry
-	now := time.Now()
-	if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
-		return "", ErrCertExpired
+	// Verify the certificate chain against our CA
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	opts := x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	if _, err := leaf.Verify(opts); err != nil {
+		return "", fmt.Errorf("certificate chain verification failed: %w", err)
 	}
 
 	// Check CRL
@@ -305,9 +380,9 @@ func (ca *CA) VerifyClientCert(certs []*x509.Certificate) (string, error) {
 	return agentName, nil
 }
 
-// RevokeCert adds a certificate to the CRL.
-func (ca *CA) RevokeCert(serial *big.Int, agentName string) {
-	ca.crl.Revoke(serial, agentName)
+// RevokeCert adds a certificate to the CRL and persists if a CRL path is set.
+func (ca *CA) RevokeCert(serial *big.Int, agentName string) error {
+	return ca.crl.Revoke(serial, agentName)
 }
 
 // IsRevoked checks whether a serial number has been revoked.
@@ -315,10 +390,39 @@ func (ca *CA) IsRevoked(serial *big.Int) bool {
 	return ca.crl.IsRevoked(serial)
 }
 
+// SetCRL replaces the CA's CRL with the given one.
+func (ca *CA) SetCRL(crl *CRL) {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	ca.crl = crl
+}
+
 // --- CRL methods ---
 
+// NewCRL creates a new empty CRL, optionally loading from a file.
+func NewCRL(path string) (*CRL, error) {
+	crl := &CRL{path: path}
+	if path == "" {
+		return crl, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return crl, nil
+		}
+		return nil, fmt.Errorf("reading CRL file: %w", err)
+	}
+
+	if err := json.Unmarshal(data, crl); err != nil {
+		return nil, fmt.Errorf("parsing CRL file: %w", err)
+	}
+	return crl, nil
+}
+
 // Revoke adds a serial number to the revocation list.
-func (crl *CRL) Revoke(serial *big.Int, agentName string) {
+// If a file path is set, the CRL is persisted to disk.
+func (crl *CRL) Revoke(serial *big.Int, agentName string) error {
 	crl.mu.Lock()
 	defer crl.mu.Unlock()
 	crl.Revoked = append(crl.Revoked, RevokedEntry{
@@ -326,6 +430,10 @@ func (crl *CRL) Revoke(serial *big.Int, agentName string) {
 		AgentName:    agentName,
 		RevokedAt:    time.Now().UTC(),
 	})
+	if crl.path != "" {
+		return crl.saveLocked()
+	}
+	return nil
 }
 
 // IsRevoked checks if a serial number is in the revocation list.
@@ -339,6 +447,29 @@ func (crl *CRL) IsRevoked(serial *big.Int) bool {
 		}
 	}
 	return false
+}
+
+// saveLocked writes the CRL to disk. Caller must hold crl.mu.
+func (crl *CRL) saveLocked() error {
+	data, err := json.MarshalIndent(crl, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling CRL: %w", err)
+	}
+
+	dir := filepath.Dir(crl.path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("creating CRL directory: %w", err)
+	}
+
+	tmp := crl.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("writing CRL temp file: %w", err)
+	}
+	if err := os.Rename(tmp, crl.path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("renaming CRL temp file: %w", err)
+	}
+	return nil
 }
 
 // --- Helpers ---

@@ -89,23 +89,32 @@ func main() {
 
 	// Create API server
 	srv := api.NewServer(s, a, al, cfg.Audit.Path)
+	srv.SetBearerEnabled(cfg.Auth.Bearer.Enabled)
 
 	// Initialize CA for mTLS if enabled
 	var tlsCfg *tls.Config
 	if cfg.Auth.MTLS.Enabled {
-		if cfg.Auth.MTLS.CACert == "" || cfg.Auth.MTLS.CAKey == "" {
-			log.Fatal("auth.mtls.enabled requires ca_cert and ca_key paths")
-		}
 		authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
 		if err != nil {
 			log.Fatalf("loading CA for mTLS: %v", err)
 		}
+
+		// Load CRL for revocation persistence
+		if cfg.Auth.MTLS.CRLPath != "" {
+			crl, err := ca.NewCRL(cfg.Auth.MTLS.CRLPath)
+			if err != nil {
+				log.Fatalf("loading CRL: %v", err)
+			}
+			authority.SetCRL(crl)
+		}
+
 		srv.SetCA(authority)
 		tlsCfg = authority.TLSConfig()
 		if cfg.Auth.MTLS.Require {
 			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 		}
 		log.Printf("  mTLS: enabled (require=%v)", cfg.Auth.MTLS.Require)
+		log.Printf("  Bearer: %v", cfg.Auth.Bearer.Enabled)
 	}
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
@@ -125,10 +134,9 @@ func main() {
 	}
 
 	if tlsCfg != nil {
-		// When mTLS is enabled, we need a server certificate.
-		// Use the CA cert + key as the server's TLS identity.
-		log.Printf("  TLS: enabled (listening with mTLS)")
-		if err := httpSrv.ListenAndServeTLS(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey); err != nil {
+		// Use the dedicated server leaf cert for TLS identity (NOT the CA cert)
+		log.Printf("  TLS: enabled (server cert: %s)", cfg.Auth.MTLS.ServerCert)
+		if err := httpSrv.ListenAndServeTLS(cfg.Auth.MTLS.ServerCert, cfg.Auth.MTLS.ServerKey); err != nil {
 			log.Fatalf("server error: %v", err)
 		}
 	} else {
@@ -189,8 +197,22 @@ func runInit(dir string) error {
 		return fmt.Errorf("saving CA: %w", err)
 	}
 	fmt.Printf("Generated CA certificate: %s\n", caCertPath)
+	fmt.Printf("  Fingerprint: %s\n", authority.Fingerprint())
+
+	// Generate server leaf certificate (for TLS server identity)
+	serverCertPath := filepath.Join(dir, "server.crt")
+	serverKeyPath := filepath.Join(dir, "server.key")
+	serverBundle, err := authority.IssueServerCert([]string{"localhost", "127.0.0.1", "0.0.0.0"})
+	if err != nil {
+		return fmt.Errorf("generating server cert: %w", err)
+	}
+	if err := serverBundle.Save(serverCertPath, serverKeyPath, caCertPath); err != nil {
+		return fmt.Errorf("saving server cert: %w", err)
+	}
+	fmt.Printf("Generated server certificate: %s\n", serverCertPath)
 
 	// Write config with actual paths
+	crlPath := filepath.Join(dir, "crl.json")
 	cfgPath := filepath.Join(dir, "config.json")
 	cfg := config.DefaultConfig()
 	cfg.Store.Path = filepath.Join(dir, "store.json")
@@ -199,6 +221,9 @@ func runInit(dir string) error {
 	cfg.Audit.Path = filepath.Join(dir, "audit.log")
 	cfg.Auth.MTLS.CACert = caCertPath
 	cfg.Auth.MTLS.CAKey = caKeyPath
+	cfg.Auth.MTLS.ServerCert = serverCertPath
+	cfg.Auth.MTLS.ServerKey = serverKeyPath
+	cfg.Auth.MTLS.CRLPath = crlPath
 
 	cfgData, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

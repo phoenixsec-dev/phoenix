@@ -16,6 +16,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,8 +28,9 @@ import (
 )
 
 var (
-	serverURL string
-	token     string
+	serverURL  string
+	token      string
+	httpClient *http.Client
 )
 
 func init() {
@@ -36,6 +39,55 @@ func init() {
 		serverURL = "http://127.0.0.1:9090"
 	}
 	token = os.Getenv("PHOENIX_TOKEN")
+
+	httpClient = buildHTTPClient()
+}
+
+// buildHTTPClient creates an HTTP client with optional TLS configuration.
+// Set PHOENIX_CA_CERT to trust the Phoenix CA for TLS connections.
+// Set PHOENIX_CLIENT_CERT and PHOENIX_CLIENT_KEY for mTLS client auth.
+func buildHTTPClient() *http.Client {
+	caCertPath := os.Getenv("PHOENIX_CA_CERT")
+	clientCertPath := os.Getenv("PHOENIX_CLIENT_CERT")
+	clientKeyPath := os.Getenv("PHOENIX_CLIENT_KEY")
+
+	// No TLS config needed if no CA cert specified
+	if caCertPath == "" {
+		return http.DefaultClient
+	}
+
+	caCert, err := os.ReadFile(caCertPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot read PHOENIX_CA_CERT %q: %v\n", caCertPath, err)
+		return http.DefaultClient
+	}
+
+	rootPool := x509.NewCertPool()
+	if !rootPool.AppendCertsFromPEM(caCert) {
+		fmt.Fprintf(os.Stderr, "warning: PHOENIX_CA_CERT contains no valid certificates\n")
+		return http.DefaultClient
+	}
+
+	tlsCfg := &tls.Config{
+		RootCAs:    rootPool,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Load client cert for mTLS if both cert and key are provided
+	if clientCertPath != "" && clientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot load client cert: %v\n", err)
+		} else {
+			tlsCfg.Certificates = []tls.Certificate{cert}
+		}
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsCfg,
+		},
+	}
 }
 
 func main() {
@@ -122,15 +174,24 @@ Usage:
   phoenix init <dir>                          Initialize data directory
 
 Environment:
-  PHOENIX_SERVER   Server URL (default: http://127.0.0.1:9090)
-  PHOENIX_TOKEN    Bearer token for authentication`)
+  PHOENIX_SERVER       Server URL (default: http://127.0.0.1:9090)
+  PHOENIX_TOKEN        Bearer token for authentication
+  PHOENIX_CA_CERT      CA certificate for TLS verification
+  PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
+  PHOENIX_CLIENT_KEY   Client key for mTLS authentication`)
 }
 
-func requireToken() error {
-	if token == "" {
-		return fmt.Errorf("PHOENIX_TOKEN not set")
+// requireAuth checks that at least one auth method is configured
+// (bearer token or mTLS client cert).
+func requireAuth() error {
+	if token != "" {
+		return nil
 	}
-	return nil
+	// Check if mTLS client cert is configured
+	if os.Getenv("PHOENIX_CLIENT_CERT") != "" && os.Getenv("PHOENIX_CLIENT_KEY") != "" {
+		return nil
+	}
+	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN or PHOENIX_CLIENT_CERT + PHOENIX_CLIENT_KEY")
 }
 
 func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
@@ -145,11 +206,11 @@ func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 func cmdGet(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 	if len(args) < 1 {
@@ -175,7 +236,7 @@ func cmdGet(args []string) error {
 }
 
 func cmdSet(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -235,7 +296,7 @@ func cmdSet(args []string) error {
 }
 
 func cmdDelete(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 	if len(args) < 1 {
@@ -257,7 +318,7 @@ func cmdDelete(args []string) error {
 }
 
 func cmdList(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -288,7 +349,7 @@ func cmdList(args []string) error {
 }
 
 func cmdExport(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -358,7 +419,7 @@ func cmdExport(args []string) error {
 }
 
 func cmdImport(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -434,7 +495,7 @@ func cmdImport(args []string) error {
 }
 
 func cmdAudit(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -501,7 +562,7 @@ func cmdAudit(args []string) error {
 }
 
 func cmdAgentCreate(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -569,7 +630,7 @@ func cmdAgentCreate(args []string) error {
 }
 
 func cmdAgentList() error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -595,7 +656,7 @@ func cmdAgentList() error {
 }
 
 func cmdCertIssue(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 

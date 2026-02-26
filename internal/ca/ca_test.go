@@ -1,11 +1,15 @@
 package ca
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,7 +154,9 @@ func TestCRLRevocation(t *testing.T) {
 	}
 
 	// Revoke
-	ca.RevokeCert(cert.SerialNumber, "badagent")
+	if err := ca.RevokeCert(cert.SerialNumber, "badagent"); err != nil {
+		t.Fatalf("RevokeCert: %v", err)
+	}
 
 	// Should fail after revocation
 	_, err = ca.VerifyClientCert([]*x509.Certificate{cert})
@@ -167,7 +173,9 @@ func TestCRLIsRevoked(t *testing.T) {
 		t.Fatal("should not be revoked initially")
 	}
 
-	crl.Revoke(serial, "test")
+	if err := crl.Revoke(serial, "test"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
 	if !crl.IsRevoked(serial) {
 		t.Fatal("should be revoked after Revoke()")
 	}
@@ -272,15 +280,152 @@ func TestWrongCARejectsAgentCert(t *testing.T) {
 	block, _ := pem.Decode(bundle.CertPEM)
 	cert, _ := x509.ParseCertificate(block.Bytes)
 
-	// Verify against CA2 — should fail standard x509 verification
-	pool := x509.NewCertPool()
-	pool.AddCert(ca2.cert)
-	opts := x509.VerifyOptions{
-		Roots:     pool,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	_, err := cert.Verify(opts)
+	// VerifyClientCert on CA2 should reject cert from CA1
+	_, err := ca2.VerifyClientCert([]*x509.Certificate{cert})
 	if err == nil {
 		t.Fatal("cert from CA1 should not verify against CA2")
+	}
+	if !strings.Contains(err.Error(), "certificate chain verification failed") {
+		t.Fatalf("expected chain verification error, got: %v", err)
+	}
+}
+
+func TestIssueServerCert(t *testing.T) {
+	authority, _ := GenerateCA("TestOrg")
+
+	bundle, err := authority.IssueServerCert([]string{"localhost", "127.0.0.1", "phoenix.local"})
+	if err != nil {
+		t.Fatalf("IssueServerCert: %v", err)
+	}
+
+	if len(bundle.CertPEM) == 0 {
+		t.Fatal("server cert PEM is empty")
+	}
+
+	block, _ := pem.Decode(bundle.CertPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse server cert: %v", err)
+	}
+
+	// Check EKU is serverAuth
+	found := false
+	for _, eku := range cert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageServerAuth {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("server cert missing serverAuth EKU")
+	}
+
+	// Check SANs
+	if len(cert.DNSNames) != 2 || cert.DNSNames[0] != "localhost" || cert.DNSNames[1] != "phoenix.local" {
+		t.Fatalf("unexpected DNS SANs: %v", cert.DNSNames)
+	}
+	if len(cert.IPAddresses) != 1 || cert.IPAddresses[0].String() != "127.0.0.1" {
+		t.Fatalf("unexpected IP SANs: %v", cert.IPAddresses)
+	}
+
+	// Check not CA
+	if cert.IsCA {
+		t.Fatal("server cert should not be CA")
+	}
+
+	// Verify chain against CA
+	pool := x509.NewCertPool()
+	pool.AddCert(authority.cert)
+	opts := x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if _, err := cert.Verify(opts); err != nil {
+		t.Fatalf("server cert chain verification failed: %v", err)
+	}
+
+	// Check validity period is ~365 days
+	validity := cert.NotAfter.Sub(cert.NotBefore)
+	expected := time.Duration(ServerValidityDays) * 24 * time.Hour
+	diff := validity - expected
+	if diff < -time.Hour || diff > time.Hour {
+		t.Fatalf("validity %v is not ~%d days", validity, ServerValidityDays)
+	}
+}
+
+func TestCRLPersistence(t *testing.T) {
+	dir := t.TempDir()
+	crlPath := filepath.Join(dir, "crl.json")
+
+	// Create CRL, revoke a serial, check it persists
+	crl, err := NewCRL(crlPath)
+	if err != nil {
+		t.Fatalf("NewCRL: %v", err)
+	}
+
+	serial := big.NewInt(42)
+	if err := crl.Revoke(serial, "badagent"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	// File should exist now
+	data, err := os.ReadFile(crlPath)
+	if err != nil {
+		t.Fatalf("CRL file not written: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("CRL file is empty")
+	}
+
+	// Verify JSON is valid
+	var parsed CRL
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("CRL file is not valid JSON: %v", err)
+	}
+	if len(parsed.Revoked) != 1 {
+		t.Fatalf("expected 1 revoked entry, got %d", len(parsed.Revoked))
+	}
+
+	// Load CRL from file and check revocation survives
+	crl2, err := NewCRL(crlPath)
+	if err != nil {
+		t.Fatalf("NewCRL reload: %v", err)
+	}
+	if !crl2.IsRevoked(serial) {
+		t.Fatal("revocation should persist across reload")
+	}
+	if crl2.IsRevoked(big.NewInt(999)) {
+		t.Fatal("unrevoked serial should not be revoked")
+	}
+}
+
+func TestCRLPersistenceNoPath(t *testing.T) {
+	// CRL without a path should not fail on Revoke
+	crl, err := NewCRL("")
+	if err != nil {
+		t.Fatalf("NewCRL empty: %v", err)
+	}
+	if err := crl.Revoke(big.NewInt(1), "test"); err != nil {
+		t.Fatalf("Revoke without path should not error: %v", err)
+	}
+	if !crl.IsRevoked(big.NewInt(1)) {
+		t.Fatal("should be revoked in memory")
+	}
+}
+
+func TestFingerprintIsSHA256(t *testing.T) {
+	authority, _ := GenerateCA("TestOrg")
+	fp := authority.Fingerprint()
+
+	// Compute expected SHA-256
+	expected := sha256.Sum256(authority.cert.Raw)
+	expectedStr := fmt.Sprintf("%X", expected[:])
+
+	if fp != expectedStr {
+		t.Fatalf("Fingerprint mismatch:\n  got:      %s\n  expected: %s", fp, expectedStr)
+	}
+
+	// SHA-256 hex should be 64 chars
+	if len(fp) != 64 {
+		t.Fatalf("fingerprint should be 64 hex chars, got %d: %s", len(fp), fp)
 	}
 }
