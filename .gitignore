@@ -1,0 +1,29 @@
+# Binaries
+phoenix-server
+phoenix
+*.exe
+
+# Build artifacts
+/bin/
+/dist/
+
+# Data (never commit secrets or keys)
+/data/
+*.enc
+*.key
+master.key
+audit.log
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
