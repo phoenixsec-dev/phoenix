@@ -2,17 +2,20 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"git.home/vector/phoenix/internal/acl"
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/ca"
+	"git.home/vector/phoenix/internal/crypto"
 	"git.home/vector/phoenix/internal/store"
 )
 
@@ -21,13 +24,14 @@ const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
 // Server is the Phoenix HTTP API server.
 type Server struct {
-	store        *store.Store
-	acl          *acl.ACL
-	audit        *audit.Logger
-	auditPath    string
-	ca           *ca.CA // nil when mTLS is disabled
-	bearerEnabled bool  // whether bearer token auth is allowed
-	mux          *http.ServeMux
+	store         *store.Store
+	acl           *acl.ACL
+	audit         *audit.Logger
+	auditPath     string
+	masterKeyPath string // path to master.key file (needed for KEK rotation)
+	ca            *ca.CA // nil when mTLS is disabled
+	bearerEnabled bool   // whether bearer token auth is allowed
+	mux           *http.ServeMux
 }
 
 // NewServer creates a new API server with all dependencies.
@@ -57,6 +61,12 @@ func (s *Server) SetBearerEnabled(enabled bool) {
 	s.bearerEnabled = enabled
 }
 
+// SetMasterKeyPath sets the path to the master key file.
+// Required for the rotate-master endpoint to persist the new key.
+func (s *Server) SetMasterKeyPath(path string) {
+	s.masterKeyPath = path
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -71,6 +81,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/agents", s.handleCreateAgent)
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
+	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 }
 
 // authenticate identifies the calling agent from the request.
@@ -432,5 +443,72 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		"cert":    string(bundle.CertPEM),
 		"key":     string(bundle.KeyPEM),
 		"ca_cert": string(bundle.CACert),
+	})
+}
+
+func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Only admin agents can rotate the master key
+	if err := s.acl.Authorize(agentName, "master-key", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	ip := clientIP(r)
+
+	if s.masterKeyPath == "" {
+		jsonError(w, "master key path not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Backup the old master key as .prev
+	oldKey, err := os.ReadFile(s.masterKeyPath)
+	if err != nil {
+		log.Printf("error reading old master key: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	prevPath := s.masterKeyPath + ".prev"
+	if err := os.WriteFile(prevPath, oldKey, 0600); err != nil {
+		log.Printf("error backing up master key to %s: %v", prevPath, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Rotate: re-wrap all DEKs under a new master key
+	rotated, err := s.store.RotateMasterKey()
+	if err != nil {
+		log.Printf("error rotating master key: %v", err)
+		jsonError(w, "rotation failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Persist the new master key to disk
+	provider, ok := s.store.Provider().(*crypto.FileKeyProvider)
+	if !ok {
+		log.Printf("rotation succeeded but cannot persist key: provider is %T, not FileKeyProvider", s.store.Provider())
+		jsonError(w, "rotation succeeded but key persistence not supported for this provider", http.StatusInternalServerError)
+		return
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(provider.MasterKey())
+	if err := os.WriteFile(s.masterKeyPath, []byte(encoded), 0600); err != nil {
+		log.Printf("error writing new master key: %v", err)
+		jsonError(w, "rotation succeeded but key write failed — restore from .prev", http.StatusInternalServerError)
+		return
+	}
+
+	s.audit.LogAllowed(agentName, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip)
+	log.Printf("master key rotated by %s: %d namespaces re-wrapped", agentName, rotated)
+
+	jsonOK(w, map[string]interface{}{
+		"status":     "ok",
+		"rotated":    rotated,
+		"backup":     prevPath,
 	})
 }

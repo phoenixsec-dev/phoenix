@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +25,8 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	dir := t.TempDir()
 
 	// Master key
-	masterKey, _ := crypto.GenerateAndSaveMasterKey(filepath.Join(dir, "master.key"))
+	keyPath := filepath.Join(dir, "master.key")
+	masterKey, _ := crypto.GenerateAndSaveMasterKey(keyPath)
 
 	// Store
 	s, err := store.New(filepath.Join(dir, "store.json"), masterKey)
@@ -58,6 +60,7 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	al, _ := audit.NewLogger(auditPath)
 
 	srv := NewServer(s, a, al, auditPath)
+	srv.SetMasterKeyPath(keyPath)
 	return srv, "admin-token"
 }
 
@@ -577,5 +580,144 @@ func TestIssueCertRequiresAdmin(t *testing.T) {
 
 	if w.Code != 403 {
 		t.Fatalf("reader issue cert: expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRotateMasterKeyEndpoint(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets
+	for _, path := range []string{"ns1/key1", "ns2/key2"} {
+		body, _ := json.Marshal(setSecretRequest{Value: "value-" + path})
+		req := httptest.NewRequest("PUT", "/v1/secrets/"+path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("setup SET %s: expected 200, got %d", path, w.Code)
+		}
+	}
+
+	// Rotate
+	req := httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("rotate: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["status"] != "ok" {
+		t.Fatalf("rotate status: %v", resp["status"])
+	}
+	rotated := int(resp["rotated"].(float64))
+	if rotated != 2 {
+		t.Fatalf("expected 2 namespaces rotated, got %d", rotated)
+	}
+
+	// Verify secrets are still readable after rotation
+	for _, path := range []string{"ns1/key1", "ns2/key2"} {
+		req := httptest.NewRequest("GET", "/v1/secrets/"+path, nil)
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+
+		if w.Code != 200 {
+			t.Fatalf("GET %s after rotation: expected 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+
+		var secret store.Secret
+		json.NewDecoder(w.Body).Decode(&secret)
+		if secret.Value != "value-"+path {
+			t.Fatalf("GET %s after rotation: expected 'value-%s', got %q", path, path, secret.Value)
+		}
+	}
+}
+
+func TestRotateMasterKeyRequiresAdmin(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	// Reader tries to rotate — should be denied
+	req := httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("reader rotate: expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRotateMasterKeyRequiresAuth(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("unauthenticated rotate: expected 401, got %d", w.Code)
+	}
+}
+
+func TestRotateMasterKeyBackupCreated(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret so there's something to rotate
+	body, _ := json.Marshal(setSecretRequest{Value: "v"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Rotate
+	req = httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("rotate: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	backup := resp["backup"].(string)
+	if !strings.HasSuffix(backup, ".prev") {
+		t.Fatalf("expected backup path ending in .prev, got %q", backup)
+	}
+
+	// Verify the backup file exists
+	info, err := os.Stat(backup)
+	if err != nil {
+		t.Fatalf("backup file %s not found: %v", backup, err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("backup file is empty")
+	}
+}
+
+func TestRotateMasterKeyEmptyStore(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Rotate on empty store — should succeed with 0 namespaces
+	req := httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("rotate empty: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	rotated := int(resp["rotated"].(float64))
+	if rotated != 0 {
+		t.Fatalf("expected 0 namespaces rotated on empty store, got %d", rotated)
 	}
 }

@@ -326,6 +326,58 @@ func (s *Store) Count() int {
 	return len(s.data.Secrets)
 }
 
+// RotateMasterKey re-wraps all namespace DEKs under a new master key.
+// The caller is responsible for persisting the new master key to disk
+// (via FileKeyProvider.MasterKey()) and backing up the old key.
+// This operation is O(namespaces), not O(secrets), because only the
+// DEK wrappers change — secret ciphertext remains untouched.
+func (s *Store) RotateMasterKey() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Collect namespace names and their wrapped DEKs in stable order
+	nsNames := make([]string, 0, len(s.data.Namespaces))
+	for name := range s.data.Namespaces {
+		nsNames = append(nsNames, name)
+	}
+	sort.Strings(nsNames)
+
+	if len(nsNames) == 0 {
+		return 0, nil
+	}
+
+	wrappedDEKs := make([]*crypto.WrappedDEK, len(nsNames))
+	for i, name := range nsNames {
+		w := s.data.Namespaces[name].Wrapped
+		wrappedDEKs[i] = &w
+	}
+
+	// Rotate: unwrap all with old key, generate new key, re-wrap all
+	newWrapped, err := s.provider.RotateMaster(wrappedDEKs)
+	if err != nil {
+		return 0, fmt.Errorf("rotating master key: %w", err)
+	}
+
+	// Replace namespace entries with re-wrapped DEKs
+	for i, name := range nsNames {
+		s.data.Namespaces[name] = namespaceDEK{Wrapped: *newWrapped[i]}
+	}
+
+	// Persist the updated store atomically
+	if err := s.save(); err != nil {
+		return 0, fmt.Errorf("saving store after rotation: %w", err)
+	}
+
+	return len(nsNames), nil
+}
+
+// Provider returns the store's KeyProvider.
+// Used by the server to access the provider after rotation (e.g., to persist
+// the new master key via FileKeyProvider.MasterKey()).
+func (s *Store) Provider() crypto.KeyProvider {
+	return s.provider
+}
+
 // GetMetadata returns just the metadata for a secret (no decryption needed).
 func (s *Store) GetMetadata(path string) (*SecretMetadata, error) {
 	s.mu.RLock()

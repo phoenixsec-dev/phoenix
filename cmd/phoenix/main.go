@@ -129,6 +129,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "rotate-master":
+		err = cmdRotateMaster()
 	case "cert":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: phoenix cert <issue>")
@@ -170,6 +172,7 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
+  phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix init <dir>                          Initialize data directory
 
@@ -652,6 +655,33 @@ func cmdAgentList() error {
 	for _, name := range result.Agents {
 		fmt.Println(name)
 	}
+	return nil
+}
+
+func cmdRotateMaster() error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	resp, err := apiRequest("POST", "/v1/rotate-master", nil)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Rotated int    `json:"rotated"`
+		Backup  string `json:"backup"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	fmt.Printf("Master key rotated successfully\n")
+	fmt.Printf("  Namespaces re-wrapped: %d\n", result.Rotated)
+	fmt.Printf("  Old key backed up to: %s\n", result.Backup)
 	return nil
 }
 
