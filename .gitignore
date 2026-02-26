@@ -1,6 +1,6 @@
-# Binaries
-phoenix-server
-phoenix
+# Binaries (root-level only, not cmd/ dirs)
+/phoenix-server
+/phoenix
 *.exe
 
 # Build artifacts
