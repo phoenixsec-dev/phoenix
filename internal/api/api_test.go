@@ -3,8 +3,10 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"git.home/vector/phoenix/internal/acl"
@@ -310,5 +312,43 @@ func TestSetInvalidPath(t *testing.T) {
 
 	if w.Code != 400 {
 		t.Fatalf("expected 400 for invalid set path, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestClientIPIgnoresXFF(t *testing.T) {
+	// X-Forwarded-For should be ignored — spoofed header must not affect audit
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "192.168.0.115:12345"
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+
+	ip := clientIP(req)
+	if ip != "192.168.0.115" {
+		t.Fatalf("expected RemoteAddr IP '192.168.0.115', got %q (XFF was trusted)", ip)
+	}
+}
+
+func TestClientIPIPv6(t *testing.T) {
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "[::1]:12345"
+
+	ip := clientIP(req)
+	if ip != "::1" {
+		t.Fatalf("expected '::1', got %q", ip)
+	}
+}
+
+func TestOversizedRequestBody(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Create a body larger than MaxRequestBodyBytes (1 MB)
+	bigValue := strings.Repeat("x", MaxRequestBodyBytes+1)
+	body, _ := json.Marshal(setSecretRequest{Value: bigValue})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/big", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized body, got %d: %s", w.Code, w.Body.String())
 	}
 }

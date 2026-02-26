@@ -63,17 +63,18 @@ type Secret struct {
 
 // Store is the main secret storage engine.
 type Store struct {
-	mu        sync.RWMutex
-	masterKey []byte
-	data      *storeData
-	filePath  string
+	mu       sync.RWMutex
+	provider crypto.KeyProvider
+	data     *storeData
+	filePath string
 }
 
-// New creates a new Store backed by the given file, using the provided master key.
-func New(filePath string, masterKey []byte) (*Store, error) {
+// NewWithProvider creates a new Store using a KeyProvider for all key operations.
+// This is the preferred constructor for Phase 2+.
+func NewWithProvider(filePath string, provider crypto.KeyProvider) (*Store, error) {
 	s := &Store{
-		masterKey: masterKey,
-		filePath:  filePath,
+		provider: provider,
+		filePath: filePath,
 	}
 
 	if err := s.load(); err != nil {
@@ -81,6 +82,16 @@ func New(filePath string, masterKey []byte) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// New creates a new Store backed by the given file, using the provided master key.
+// This wraps the key in a FileKeyProvider for backward compatibility.
+func New(filePath string, masterKey []byte) (*Store, error) {
+	provider, err := crypto.NewFileKeyProvider(masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("creating file key provider: %w", err)
+	}
+	return NewWithProvider(filePath, provider)
 }
 
 // load reads the store from disk, or initializes an empty store if the file doesn't exist.
@@ -166,7 +177,7 @@ func ValidatePath(path string) error {
 // getDEK returns the DEK for a namespace, creating one if it doesn't exist.
 func (s *Store) getDEK(ns string) ([]byte, error) {
 	if wrapped, ok := s.data.Namespaces[ns]; ok {
-		return crypto.UnwrapDEK(s.masterKey, &wrapped.Wrapped)
+		return s.provider.UnwrapKey(&wrapped.Wrapped)
 	}
 
 	// Generate new DEK for this namespace
@@ -175,7 +186,7 @@ func (s *Store) getDEK(ns string) ([]byte, error) {
 		return nil, fmt.Errorf("generating DEK for namespace %q: %w", ns, err)
 	}
 
-	wrapped, err := crypto.WrapDEK(s.masterKey, dek)
+	wrapped, err := s.provider.WrapKey(dek)
 	if err != nil {
 		return nil, fmt.Errorf("wrapping DEK for namespace %q: %w", ns, err)
 	}
@@ -272,7 +283,7 @@ func (s *Store) getDEKReadOnly(ns string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("no DEK for namespace %q", ns)
 	}
-	return crypto.UnwrapDEK(s.masterKey, &wrapped.Wrapped)
+	return s.provider.UnwrapKey(&wrapped.Wrapped)
 }
 
 // Delete removes a secret by path.

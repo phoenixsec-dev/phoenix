@@ -10,11 +10,17 @@ import (
 
 // Config is the top-level server configuration.
 type Config struct {
-	Server    ServerConfig    `json:"server"`
-	Store     StoreConfig     `json:"store"`
-	ACL       ACLFileConfig   `json:"acl"`
-	Audit     AuditConfig     `json:"audit"`
+	Server      ServerConfig  `json:"server"`
+	Store       StoreConfig   `json:"store"`
+	Crypto      CryptoConfig  `json:"crypto"`
+	ACL         ACLFileConfig `json:"acl"`
+	Audit       AuditConfig   `json:"audit"`
 	OnePassword OPConfig      `json:"onepassword,omitempty"`
+}
+
+// CryptoConfig controls the key management provider.
+type CryptoConfig struct {
+	Provider string `json:"provider"` // "file" (default, only option in Phase 2 spike)
 }
 
 // ServerConfig controls the HTTP server.
@@ -53,6 +59,9 @@ func DefaultConfig() *Config {
 		Store: StoreConfig{
 			Path:      "/data/store.json",
 			MasterKey: "/data/master.key",
+		},
+		Crypto: CryptoConfig{
+			Provider: "file",
 		},
 		ACL: ACLFileConfig{
 			Path: "/data/acl.json",

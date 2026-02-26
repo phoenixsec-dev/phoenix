@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +14,9 @@ import (
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/store"
 )
+
+// MaxRequestBodyBytes limits the size of request bodies to prevent DoS.
+const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
 // Server is the Phoenix HTTP API server.
 type Server struct {
@@ -61,18 +65,14 @@ func extractToken(r *http.Request) string {
 }
 
 // clientIP extracts the client IP from the request.
+// X-Forwarded-For is intentionally ignored — Phoenix is not behind a
+// reverse proxy, and trusting XFF allows audit log IP spoofing.
 func clientIP(r *http.Request) string {
-	// Check X-Forwarded-For for proxy setups
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		return strings.TrimSpace(parts[0])
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	// Strip port from RemoteAddr
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx != -1 {
-		return addr[:idx]
-	}
-	return addr
+	return host
 }
 
 // secretPath extracts the secret path from the URL.
@@ -187,6 +187,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req setSecretRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -330,6 +331,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createAgentRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
