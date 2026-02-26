@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"git.home/vector/phoenix/internal/acl"
 	"git.home/vector/phoenix/internal/api"
@@ -52,14 +53,21 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
-	// Load master key
-	masterKey, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
-	if err != nil {
-		log.Fatalf("loading master key: %v", err)
+	// Initialize key provider
+	var keyProvider crypto.KeyProvider
+	switch cfg.Crypto.Provider {
+	case "file", "":
+		p, err := crypto.NewFileKeyProviderFromPath(cfg.Store.MasterKey)
+		if err != nil {
+			log.Fatalf("loading file key provider: %v", err)
+		}
+		keyProvider = p
+	default:
+		log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
 	}
 
 	// Initialize store
-	s, err := store.New(cfg.Store.Path, masterKey)
+	s, err := store.NewWithProvider(cfg.Store.Path, keyProvider)
 	if err != nil {
 		log.Fatalf("initializing store: %v", err)
 	}
@@ -82,10 +90,19 @@ func main() {
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
 	log.Printf("  Store: %s (%d secrets)", cfg.Store.Path, s.Count())
+	log.Printf("  Key provider: %s", keyProvider.Name())
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
 	log.Printf("  Audit: %s", cfg.Audit.Path)
 
-	if err := http.ListenAndServe(cfg.Server.Listen, srv); err != nil {
+	httpSrv := &http.Server{
+		Addr:              cfg.Server.Listen,
+		Handler:           srv,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
@@ -115,11 +132,18 @@ func runInit(dir string) error {
 
 	// Create initial ACL with admin agent
 	aclPath := filepath.Join(dir, "acl.json")
-	a, _ := acl.New(aclPath)
-	a.AddAgent("admin", adminToken, []acl.Permission{
+	a, err := acl.New(aclPath)
+	if err != nil {
+		return fmt.Errorf("creating ACL: %w", err)
+	}
+	if err := a.AddAgent("admin", adminToken, []acl.Permission{
 		{Path: "*", Actions: []acl.Action{acl.ActionAdmin}},
-	})
-	a.Save()
+	}); err != nil {
+		return fmt.Errorf("adding admin agent: %w", err)
+	}
+	if err := a.Save(); err != nil {
+		return fmt.Errorf("saving ACL: %w", err)
+	}
 	fmt.Printf("Created ACL: %s\n", aclPath)
 	fmt.Printf("\n*** ADMIN TOKEN (save this — it won't be shown again): ***\n%s\n\n", adminToken)
 
