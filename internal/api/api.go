@@ -119,9 +119,6 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// List mode: path is empty or ends with /
 	if path == "" || strings.HasSuffix(path, "/") {
-		if err := s.acl.Authorize(agentName, path+"*", acl.ActionRead); err != nil {
-			// List all paths the agent can see
-		}
 		allPaths := s.store.List(path)
 		var visible []string
 		for _, p := range allPaths {
@@ -142,6 +139,10 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	secret, err := s.store.Get(path)
+	if err == store.ErrInvalidPath {
+		jsonError(w, "invalid secret path", http.StatusBadRequest)
+		return
+	}
 	if err == store.ErrSecretNotFound {
 		jsonError(w, "secret not found", http.StatusNotFound)
 		return
@@ -233,6 +234,10 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.Delete(path); err != nil {
+		if err == store.ErrInvalidPath {
+			jsonError(w, "invalid secret path", http.StatusBadRequest)
+			return
+		}
 		if err == store.ErrSecretNotFound {
 			jsonError(w, "secret not found", http.StatusNotFound)
 			return

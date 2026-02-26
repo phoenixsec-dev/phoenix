@@ -103,7 +103,7 @@ Usage:
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
-  phoenix agent create <name> -t <token> -acl <perms>
+  phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
   phoenix init <dir>                          Initialize data directory
 
@@ -514,10 +514,11 @@ func cmdAgentCreate(args []string) error {
 	}
 
 	if name == "" || agentToken == "" {
-		return fmt.Errorf("usage: phoenix agent create <name> -t <token> [--acl <path:actions,...>]")
+		return fmt.Errorf("usage: phoenix agent create <name> -t <token> [--acl <path:action,action;path:action>]")
 	}
 
-	// Parse ACL string: "openclaw/*:read,vector/*:read,write"
+	// Parse ACL string: "openclaw/*:read,write;vector/*:read"
+	// Rules separated by ";", actions within a rule separated by ","
 	var permissions []map[string]interface{}
 	if aclStr != "" {
 		for _, rule := range strings.Split(aclStr, ";") {

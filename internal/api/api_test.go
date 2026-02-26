@@ -271,3 +271,44 @@ func TestNotFound(t *testing.T) {
 		t.Fatalf("expected 404, got %d", w.Code)
 	}
 }
+
+func TestGetInvalidPath(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Path with no slash (fails ValidatePath)
+	req := httptest.NewRequest("GET", "/v1/secrets/noslash", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400 for invalid path, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDeleteInvalidPath(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	req := httptest.NewRequest("DELETE", "/v1/secrets/noslash", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400 for invalid delete path, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSetInvalidPath(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "test"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/noslash", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400 for invalid set path, got %d: %s", w.Code, w.Body.String())
+	}
+}
