@@ -13,9 +13,32 @@ type Config struct {
 	Server      ServerConfig  `json:"server"`
 	Store       StoreConfig   `json:"store"`
 	Crypto      CryptoConfig  `json:"crypto"`
+	Auth        AuthConfig    `json:"auth"`
 	ACL         ACLFileConfig `json:"acl"`
 	Audit       AuditConfig   `json:"audit"`
 	OnePassword OPConfig      `json:"onepassword,omitempty"`
+}
+
+// AuthConfig controls authentication methods.
+type AuthConfig struct {
+	Bearer BearerAuthConfig `json:"bearer"`
+	MTLS   MTLSConfig       `json:"mtls"`
+}
+
+// BearerAuthConfig controls bearer token authentication.
+type BearerAuthConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// MTLSConfig controls mTLS client certificate authentication.
+type MTLSConfig struct {
+	Enabled    bool   `json:"enabled"`
+	CACert     string `json:"ca_cert,omitempty"`
+	CAKey      string `json:"ca_key,omitempty"`
+	ServerCert string `json:"server_cert,omitempty"` // Leaf cert for TLS server identity
+	ServerKey  string `json:"server_key,omitempty"`  // Key for TLS server identity
+	CRLPath    string `json:"crl_path,omitempty"`    // Path to CRL file for persistence
+	Require    bool   `json:"require"`               // If true, reject connections without client cert
 }
 
 // CryptoConfig controls the key management provider.
@@ -62,6 +85,10 @@ func DefaultConfig() *Config {
 		},
 		Crypto: CryptoConfig{
 			Provider: "file",
+		},
+		Auth: AuthConfig{
+			Bearer: BearerAuthConfig{Enabled: true},
+			MTLS:   MTLSConfig{Enabled: false},
 		},
 		ACL: ACLFileConfig{
 			Path: "/data/acl.json",
@@ -111,6 +138,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Audit.Path == "" {
 		return errors.New("audit.path is required")
+	}
+	// At least one auth mode must be enabled
+	if !c.Auth.Bearer.Enabled && !c.Auth.MTLS.Enabled {
+		return errors.New("at least one auth mode must be enabled (auth.bearer.enabled or auth.mtls.enabled)")
+	}
+	// mTLS requires CA and server cert paths
+	if c.Auth.MTLS.Enabled {
+		if c.Auth.MTLS.CACert == "" || c.Auth.MTLS.CAKey == "" {
+			return errors.New("auth.mtls.enabled requires ca_cert and ca_key paths")
+		}
+		if c.Auth.MTLS.ServerCert == "" || c.Auth.MTLS.ServerKey == "" {
+			return errors.New("auth.mtls.enabled requires server_cert and server_key paths")
+		}
 	}
 	return nil
 }

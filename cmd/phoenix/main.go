@@ -16,17 +16,21 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 var (
-	serverURL string
-	token     string
+	serverURL  string
+	token      string
+	httpClient *http.Client
 )
 
 func init() {
@@ -35,6 +39,55 @@ func init() {
 		serverURL = "http://127.0.0.1:9090"
 	}
 	token = os.Getenv("PHOENIX_TOKEN")
+
+	httpClient = buildHTTPClient()
+}
+
+// buildHTTPClient creates an HTTP client with optional TLS configuration.
+// Set PHOENIX_CA_CERT to trust the Phoenix CA for TLS connections.
+// Set PHOENIX_CLIENT_CERT and PHOENIX_CLIENT_KEY for mTLS client auth.
+func buildHTTPClient() *http.Client {
+	caCertPath := os.Getenv("PHOENIX_CA_CERT")
+	clientCertPath := os.Getenv("PHOENIX_CLIENT_CERT")
+	clientKeyPath := os.Getenv("PHOENIX_CLIENT_KEY")
+
+	// No TLS config needed if no CA cert specified
+	if caCertPath == "" {
+		return http.DefaultClient
+	}
+
+	caCert, err := os.ReadFile(caCertPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot read PHOENIX_CA_CERT %q: %v\n", caCertPath, err)
+		return http.DefaultClient
+	}
+
+	rootPool := x509.NewCertPool()
+	if !rootPool.AppendCertsFromPEM(caCert) {
+		fmt.Fprintf(os.Stderr, "warning: PHOENIX_CA_CERT contains no valid certificates\n")
+		return http.DefaultClient
+	}
+
+	tlsCfg := &tls.Config{
+		RootCAs:    rootPool,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Load client cert for mTLS if both cert and key are provided
+	if clientCertPath != "" && clientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot load client cert: %v\n", err)
+		} else {
+			tlsCfg.Certificates = []tls.Certificate{cert}
+		}
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsCfg,
+		},
+	}
 }
 
 func main() {
@@ -76,6 +129,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "cert":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix cert <issue>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "issue":
+			err = cmdCertIssue(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown cert subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "init":
 		err = cmdInit(args)
 	case "help", "--help", "-h":
@@ -105,18 +170,28 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
+  phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix init <dir>                          Initialize data directory
 
 Environment:
-  PHOENIX_SERVER   Server URL (default: http://127.0.0.1:9090)
-  PHOENIX_TOKEN    Bearer token for authentication`)
+  PHOENIX_SERVER       Server URL (default: http://127.0.0.1:9090)
+  PHOENIX_TOKEN        Bearer token for authentication
+  PHOENIX_CA_CERT      CA certificate for TLS verification
+  PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
+  PHOENIX_CLIENT_KEY   Client key for mTLS authentication`)
 }
 
-func requireToken() error {
-	if token == "" {
-		return fmt.Errorf("PHOENIX_TOKEN not set")
+// requireAuth checks that at least one auth method is configured
+// (bearer token or mTLS client cert).
+func requireAuth() error {
+	if token != "" {
+		return nil
 	}
-	return nil
+	// Check if mTLS client cert is configured
+	if os.Getenv("PHOENIX_CLIENT_CERT") != "" && os.Getenv("PHOENIX_CLIENT_KEY") != "" {
+		return nil
+	}
+	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN or PHOENIX_CLIENT_CERT + PHOENIX_CLIENT_KEY")
 }
 
 func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
@@ -131,11 +206,11 @@ func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 func cmdGet(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 	if len(args) < 1 {
@@ -161,7 +236,7 @@ func cmdGet(args []string) error {
 }
 
 func cmdSet(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -221,7 +296,7 @@ func cmdSet(args []string) error {
 }
 
 func cmdDelete(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 	if len(args) < 1 {
@@ -243,7 +318,7 @@ func cmdDelete(args []string) error {
 }
 
 func cmdList(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -274,7 +349,7 @@ func cmdList(args []string) error {
 }
 
 func cmdExport(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -344,7 +419,7 @@ func cmdExport(args []string) error {
 }
 
 func cmdImport(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -420,7 +495,7 @@ func cmdImport(args []string) error {
 }
 
 func cmdAudit(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -487,7 +562,7 @@ func cmdAudit(args []string) error {
 }
 
 func cmdAgentCreate(args []string) error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -555,7 +630,7 @@ func cmdAgentCreate(args []string) error {
 }
 
 func cmdAgentList() error {
-	if err := requireToken(); err != nil {
+	if err := requireAuth(); err != nil {
 		return err
 	}
 
@@ -577,6 +652,77 @@ func cmdAgentList() error {
 	for _, name := range result.Agents {
 		fmt.Println(name)
 	}
+	return nil
+}
+
+func cmdCertIssue(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	var name, outDir string
+	i := 0
+	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+		name = args[i]
+		i++
+	}
+	for i < len(args) {
+		switch args[i] {
+		case "-o", "--output":
+			i++
+			if i < len(args) {
+				outDir = args[i]
+			}
+		}
+		i++
+	}
+
+	if name == "" {
+		return fmt.Errorf("usage: phoenix cert issue <agent-name> [-o output-dir]")
+	}
+	if outDir == "" {
+		outDir = "."
+	}
+
+	body, _ := json.Marshal(map[string]string{"agent_name": name})
+	resp, err := apiRequest("POST", "/v1/certs/issue", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Cert   string `json:"cert"`
+		Key    string `json:"key"`
+		CACert string `json:"ca_cert"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	// Write cert files
+	certPath := filepath.Join(outDir, name+".crt")
+	keyPath := filepath.Join(outDir, name+".key")
+	caPath := filepath.Join(outDir, "ca.crt")
+
+	if err := os.WriteFile(certPath, []byte(result.Cert), 0644); err != nil {
+		return fmt.Errorf("writing cert: %w", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(result.Key), 0600); err != nil {
+		return fmt.Errorf("writing key: %w", err)
+	}
+	if err := os.WriteFile(caPath, []byte(result.CACert), 0644); err != nil {
+		return fmt.Errorf("writing CA cert: %w", err)
+	}
+
+	fmt.Printf("Certificate issued for agent %q\n", name)
+	fmt.Printf("  cert: %s\n", certPath)
+	fmt.Printf("  key:  %s\n", keyPath)
+	fmt.Printf("  CA:   %s\n", caPath)
 	return nil
 }
 
