@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -76,6 +77,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "cert":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix cert <issue>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "issue":
+			err = cmdCertIssue(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown cert subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "init":
 		err = cmdInit(args)
 	case "help", "--help", "-h":
@@ -105,6 +118,7 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
+  phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix init <dir>                          Initialize data directory
 
 Environment:
@@ -577,6 +591,77 @@ func cmdAgentList() error {
 	for _, name := range result.Agents {
 		fmt.Println(name)
 	}
+	return nil
+}
+
+func cmdCertIssue(args []string) error {
+	if err := requireToken(); err != nil {
+		return err
+	}
+
+	var name, outDir string
+	i := 0
+	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+		name = args[i]
+		i++
+	}
+	for i < len(args) {
+		switch args[i] {
+		case "-o", "--output":
+			i++
+			if i < len(args) {
+				outDir = args[i]
+			}
+		}
+		i++
+	}
+
+	if name == "" {
+		return fmt.Errorf("usage: phoenix cert issue <agent-name> [-o output-dir]")
+	}
+	if outDir == "" {
+		outDir = "."
+	}
+
+	body, _ := json.Marshal(map[string]string{"agent_name": name})
+	resp, err := apiRequest("POST", "/v1/certs/issue", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Cert   string `json:"cert"`
+		Key    string `json:"key"`
+		CACert string `json:"ca_cert"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	// Write cert files
+	certPath := filepath.Join(outDir, name+".crt")
+	keyPath := filepath.Join(outDir, name+".key")
+	caPath := filepath.Join(outDir, "ca.crt")
+
+	if err := os.WriteFile(certPath, []byte(result.Cert), 0644); err != nil {
+		return fmt.Errorf("writing cert: %w", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(result.Key), 0600); err != nil {
+		return fmt.Errorf("writing key: %w", err)
+	}
+	if err := os.WriteFile(caPath, []byte(result.CACert), 0644); err != nil {
+		return fmt.Errorf("writing CA cert: %w", err)
+	}
+
+	fmt.Printf("Certificate issued for agent %q\n", name)
+	fmt.Printf("  cert: %s\n", certPath)
+	fmt.Printf("  key:  %s\n", keyPath)
+	fmt.Printf("  CA:   %s\n", caPath)
 	return nil
 }
 

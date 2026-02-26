@@ -7,6 +7,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"git.home/vector/phoenix/internal/acl"
 	"git.home/vector/phoenix/internal/api"
 	"git.home/vector/phoenix/internal/audit"
+	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/config"
 	"git.home/vector/phoenix/internal/crypto"
 	"git.home/vector/phoenix/internal/store"
@@ -88,6 +90,24 @@ func main() {
 	// Create API server
 	srv := api.NewServer(s, a, al, cfg.Audit.Path)
 
+	// Initialize CA for mTLS if enabled
+	var tlsCfg *tls.Config
+	if cfg.Auth.MTLS.Enabled {
+		if cfg.Auth.MTLS.CACert == "" || cfg.Auth.MTLS.CAKey == "" {
+			log.Fatal("auth.mtls.enabled requires ca_cert and ca_key paths")
+		}
+		authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
+		if err != nil {
+			log.Fatalf("loading CA for mTLS: %v", err)
+		}
+		srv.SetCA(authority)
+		tlsCfg = authority.TLSConfig()
+		if cfg.Auth.MTLS.Require {
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+		log.Printf("  mTLS: enabled (require=%v)", cfg.Auth.MTLS.Require)
+	}
+
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
 	log.Printf("  Store: %s (%d secrets)", cfg.Store.Path, s.Count())
 	log.Printf("  Key provider: %s", keyProvider.Name())
@@ -97,13 +117,24 @@ func main() {
 	httpSrv := &http.Server{
 		Addr:              cfg.Server.Listen,
 		Handler:           srv,
+		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	if err := httpSrv.ListenAndServe(); err != nil {
-		log.Fatalf("server error: %v", err)
+
+	if tlsCfg != nil {
+		// When mTLS is enabled, we need a server certificate.
+		// Use the CA cert + key as the server's TLS identity.
+		log.Printf("  TLS: enabled (listening with mTLS)")
+		if err := httpSrv.ListenAndServeTLS(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey); err != nil {
+			log.Fatalf("server error: %v", err)
+		}
+	} else {
+		if err := httpSrv.ListenAndServe(); err != nil {
+			log.Fatalf("server error: %v", err)
+		}
 	}
 }
 
@@ -147,6 +178,18 @@ func runInit(dir string) error {
 	fmt.Printf("Created ACL: %s\n", aclPath)
 	fmt.Printf("\n*** ADMIN TOKEN (save this — it won't be shown again): ***\n%s\n\n", adminToken)
 
+	// Generate internal CA
+	caCertPath := filepath.Join(dir, "ca.crt")
+	caKeyPath := filepath.Join(dir, "ca.key")
+	authority, err := ca.GenerateCA("Phoenix")
+	if err != nil {
+		return fmt.Errorf("generating CA: %w", err)
+	}
+	if err := authority.Save(caCertPath, caKeyPath); err != nil {
+		return fmt.Errorf("saving CA: %w", err)
+	}
+	fmt.Printf("Generated CA certificate: %s\n", caCertPath)
+
 	// Write config with actual paths
 	cfgPath := filepath.Join(dir, "config.json")
 	cfg := config.DefaultConfig()
@@ -154,6 +197,8 @@ func runInit(dir string) error {
 	cfg.Store.MasterKey = keyPath
 	cfg.ACL.Path = aclPath
 	cfg.Audit.Path = filepath.Join(dir, "audit.log")
+	cfg.Auth.MTLS.CACert = caCertPath
+	cfg.Auth.MTLS.CAKey = caKeyPath
 
 	cfgData, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

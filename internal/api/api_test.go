@@ -2,7 +2,10 @@ package api
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 
 	"git.home/vector/phoenix/internal/acl"
 	"git.home/vector/phoenix/internal/audit"
+	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/crypto"
 	"git.home/vector/phoenix/internal/store"
 )
@@ -350,5 +354,184 @@ func TestOversizedRequestBody(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for oversized body, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// setupTestServerWithCA creates a test server with mTLS support.
+func setupTestServerWithCA(t *testing.T) (*Server, *ca.CA, string) {
+	t.Helper()
+	srv, adminToken := setupTestServer(t)
+
+	authority, err := ca.GenerateCA("TestOrg")
+	if err != nil {
+		t.Fatalf("generating CA: %v", err)
+	}
+	srv.SetCA(authority)
+
+	return srv, authority, adminToken
+}
+
+// makeMTLSRequest creates an HTTP request that simulates a verified mTLS client cert.
+// In real mTLS the TLS handshake populates r.TLS; in tests we set it directly.
+func makeMTLSRequest(method, url string, body []byte, certPEM []byte) *http.Request {
+	var req *http.Request
+	if body != nil {
+		req = httptest.NewRequest(method, url, bytes.NewReader(body))
+	} else {
+		req = httptest.NewRequest(method, url, nil)
+	}
+
+	block, _ := pem.Decode(certPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{cert},
+	}
+	return req
+}
+
+func TestMTLSAuthentication(t *testing.T) {
+	srv, authority, adminToken := setupTestServerWithCA(t)
+
+	// Create a secret via bearer token first
+	body, _ := json.Marshal(setSecretRequest{Value: "mtls-test-value"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/mtls-key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup SET: expected 200, got %d", w.Code)
+	}
+
+	// Issue a client cert for "reader" agent
+	bundle, err := authority.IssueAgentCert("reader")
+	if err != nil {
+		t.Fatalf("issuing cert: %v", err)
+	}
+
+	// Read the secret using mTLS auth (no bearer token)
+	req = makeMTLSRequest("GET", "/v1/secrets/test/mtls-key", nil, bundle.CertPEM)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("mTLS GET: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var secret store.Secret
+	json.NewDecoder(w.Body).Decode(&secret)
+	if secret.Value != "mtls-test-value" {
+		t.Fatalf("expected 'mtls-test-value', got %q", secret.Value)
+	}
+}
+
+func TestMTLSAdminCanIssueCerts(t *testing.T) {
+	srv, authority, _ := setupTestServerWithCA(t)
+
+	// Issue an admin cert
+	adminBundle, err := authority.IssueAgentCert("admin")
+	if err != nil {
+		t.Fatalf("issuing admin cert: %v", err)
+	}
+
+	// Use mTLS admin cert to issue another cert via the API
+	body, _ := json.Marshal(issueCertRequest{AgentName: "newagent"})
+	req := makeMTLSRequest("POST", "/v1/certs/issue", body, adminBundle.CertPEM)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("issue cert: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["agent"] != "newagent" {
+		t.Fatalf("expected agent 'newagent', got %v", resp["agent"])
+	}
+	if resp["cert"] == nil || resp["cert"] == "" {
+		t.Fatal("expected cert in response")
+	}
+	if resp["key"] == nil || resp["key"] == "" {
+		t.Fatal("expected key in response")
+	}
+}
+
+func TestBearerTokenStillWorksWithCA(t *testing.T) {
+	srv, _, adminToken := setupTestServerWithCA(t)
+
+	// Bearer token should still work even when CA is configured
+	req := httptest.NewRequest("GET", "/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("bearer with CA: expected 200, got %d", w.Code)
+	}
+}
+
+func TestMTLSRevokedCertFallsBackToBearer(t *testing.T) {
+	srv, authority, adminToken := setupTestServerWithCA(t)
+
+	// Issue and then revoke a cert for "admin"
+	bundle, _ := authority.IssueAgentCert("admin")
+	block, _ := pem.Decode(bundle.CertPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+	authority.RevokeCert(cert.SerialNumber, "admin")
+
+	// Request with revoked mTLS cert + valid bearer token → should succeed via bearer fallback
+	req := makeMTLSRequest("GET", "/v1/health", nil, bundle.CertPEM)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("revoked cert + bearer: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestNoAuthReturns401(t *testing.T) {
+	srv, _, _ := setupTestServerWithCA(t)
+
+	// No mTLS cert, no bearer token
+	req := httptest.NewRequest("GET", "/v1/secrets/test/key", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("no auth: expected 401, got %d", w.Code)
+	}
+}
+
+func TestIssueCertWithoutCA(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// No CA configured — should return 501
+	body, _ := json.Marshal(issueCertRequest{AgentName: "test"})
+	req := httptest.NewRequest("POST", "/v1/certs/issue", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 501 {
+		t.Fatalf("issue cert without CA: expected 501, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestIssueCertRequiresAdmin(t *testing.T) {
+	srv, authority, _ := setupTestServerWithCA(t)
+
+	// Issue cert for reader agent
+	readerBundle, _ := authority.IssueAgentCert("reader")
+
+	// Reader tries to issue a cert — should be denied
+	body, _ := json.Marshal(issueCertRequest{AgentName: "sneaky"})
+	req := makeMTLSRequest("POST", "/v1/certs/issue", body, readerBundle.CertPEM)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("reader issue cert: expected 403, got %d: %s", w.Code, w.Body.String())
 	}
 }

@@ -13,9 +13,29 @@ type Config struct {
 	Server      ServerConfig  `json:"server"`
 	Store       StoreConfig   `json:"store"`
 	Crypto      CryptoConfig  `json:"crypto"`
+	Auth        AuthConfig    `json:"auth"`
 	ACL         ACLFileConfig `json:"acl"`
 	Audit       AuditConfig   `json:"audit"`
 	OnePassword OPConfig      `json:"onepassword,omitempty"`
+}
+
+// AuthConfig controls authentication methods.
+type AuthConfig struct {
+	Bearer BearerAuthConfig `json:"bearer"`
+	MTLS   MTLSConfig       `json:"mtls"`
+}
+
+// BearerAuthConfig controls bearer token authentication.
+type BearerAuthConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// MTLSConfig controls mTLS client certificate authentication.
+type MTLSConfig struct {
+	Enabled bool   `json:"enabled"`
+	CACert  string `json:"ca_cert,omitempty"`
+	CAKey   string `json:"ca_key,omitempty"`
+	Require bool   `json:"require"` // If true, reject connections without client cert
 }
 
 // CryptoConfig controls the key management provider.
@@ -62,6 +82,10 @@ func DefaultConfig() *Config {
 		},
 		Crypto: CryptoConfig{
 			Provider: "file",
+		},
+		Auth: AuthConfig{
+			Bearer: BearerAuthConfig{Enabled: true},
+			MTLS:   MTLSConfig{Enabled: false},
 		},
 		ACL: ACLFileConfig{
 			Path: "/data/acl.json",

@@ -12,6 +12,7 @@ import (
 
 	"git.home/vector/phoenix/internal/acl"
 	"git.home/vector/phoenix/internal/audit"
+	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/store"
 )
 
@@ -20,11 +21,12 @@ const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
 // Server is the Phoenix HTTP API server.
 type Server struct {
-	store    *store.Store
-	acl      *acl.ACL
-	audit    *audit.Logger
+	store     *store.Store
+	acl       *acl.ACL
+	audit     *audit.Logger
 	auditPath string
-	mux      *http.ServeMux
+	ca        *ca.CA // nil when mTLS is disabled
+	mux       *http.ServeMux
 }
 
 // NewServer creates a new API server with all dependencies.
@@ -40,6 +42,13 @@ func NewServer(s *store.Store, a *acl.ACL, al *audit.Logger, auditPath string) *
 	return srv
 }
 
+// SetCA configures the CA for mTLS authentication.
+// When set, the server will accept client certificates as an alternative
+// to bearer tokens. The certificate CN is used as the agent identity.
+func (s *Server) SetCA(c *ca.CA) {
+	s.ca = c
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -53,6 +62,30 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/audit", s.handleAuditQuery)
 	s.mux.HandleFunc("POST /v1/agents", s.handleCreateAgent)
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
+	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
+}
+
+// authenticate identifies the calling agent from the request.
+// It tries mTLS client certificate first (if CA is configured and client
+// presented a cert), then falls back to bearer token authentication.
+// Returns the agent name or an error.
+func (s *Server) authenticate(r *http.Request) (string, error) {
+	// Try mTLS first: check for verified client certificate
+	if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		agentName, err := s.ca.VerifyClientCert(r.TLS.PeerCertificates)
+		if err == nil {
+			return agentName, nil
+		}
+		// mTLS verification failed — log but fall through to bearer
+		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
+	}
+
+	// Fall back to bearer token
+	token := extractToken(r)
+	if token == "" {
+		return "", fmt.Errorf("no authentication credentials provided")
+	}
+	return s.acl.Authenticate(token)
 }
 
 // extractToken gets the bearer token from the Authorization header.
@@ -102,15 +135,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
-	token := extractToken(r)
-	if token == "" {
-		jsonError(w, "missing authorization token", http.StatusUnauthorized)
-		return
-	}
-
-	agentName, err := s.acl.Authenticate(token)
+	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "invalid token", http.StatusUnauthorized)
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -165,15 +192,9 @@ type setSecretRequest struct {
 }
 
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
-	token := extractToken(r)
-	if token == "" {
-		jsonError(w, "missing authorization token", http.StatusUnauthorized)
-		return
-	}
-
-	agentName, err := s.acl.Authenticate(token)
+	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "invalid token", http.StatusUnauthorized)
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -213,15 +234,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
-	token := extractToken(r)
-	if token == "" {
-		jsonError(w, "missing authorization token", http.StatusUnauthorized)
-		return
-	}
-
-	agentName, err := s.acl.Authenticate(token)
+	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "invalid token", http.StatusUnauthorized)
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -253,15 +268,9 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
-	token := extractToken(r)
-	if token == "" {
-		jsonError(w, "missing authorization token", http.StatusUnauthorized)
-		return
-	}
-
-	agentName, err := s.acl.Authenticate(token)
+	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "invalid token", http.StatusUnauthorized)
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -312,15 +321,9 @@ type createAgentRequest struct {
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
-	token := extractToken(r)
-	if token == "" {
-		jsonError(w, "missing authorization token", http.StatusUnauthorized)
-		return
-	}
-
-	agentName, err := s.acl.Authenticate(token)
+	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "invalid token", http.StatusUnauthorized)
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -353,15 +356,9 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	token := extractToken(r)
-	if token == "" {
-		jsonError(w, "missing authorization token", http.StatusUnauthorized)
-		return
-	}
-
-	agentName, err := s.acl.Authenticate(token)
+	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "invalid token", http.StatusUnauthorized)
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -372,4 +369,56 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 	names := s.acl.ListAgents()
 	jsonOK(w, map[string]interface{}{"agents": names})
+}
+
+// issueCertRequest is the JSON body for certificate issuance.
+type issueCertRequest struct {
+	AgentName string `json:"agent_name"`
+}
+
+func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
+	if s.ca == nil {
+		jsonError(w, "mTLS is not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Only admin agents can issue certificates
+	if err := s.acl.Authorize(agentName, "certs", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	var req issueCertRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.AgentName == "" {
+		jsonError(w, "agent_name is required", http.StatusBadRequest)
+		return
+	}
+
+	bundle, err := s.ca.IssueAgentCert(req.AgentName)
+	if err != nil {
+		log.Printf("error issuing cert for %q: %v", req.AgentName, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.audit.LogAllowed(agentName, "issue-cert", req.AgentName, clientIP(r))
+	jsonOK(w, map[string]interface{}{
+		"status":  "ok",
+		"agent":   req.AgentName,
+		"cert":    string(bundle.CertPEM),
+		"key":     string(bundle.KeyPEM),
+		"ca_cert": string(bundle.CACert),
+	})
 }
