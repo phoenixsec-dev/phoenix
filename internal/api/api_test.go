@@ -1976,3 +1976,97 @@ func TestShortLivedTokenFreshAttestationOnResolve(t *testing.T) {
 		t.Fatalf("expected attestation required for bearer without timestamp, got: %v", resp)
 	}
 }
+
+func TestProcessAttestationViaToken(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	ti, _ := token.NewIssuer(5 * time.Minute)
+	srv.SetTokenIssuer(ti)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "process-guarded"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/agent/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure process attestation policy requiring UID 1001
+	uid := 1001
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"agent/*": {
+				"process": {
+					"uid": 1001
+				}
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Mint token WITH matching process UID — should succeed
+	tok, _, _ := ti.Mint("admin", &uid, "")
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://agent/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://agent/key"] != "process-guarded" {
+		t.Fatalf("expected process-guarded, got: %v", resp)
+	}
+
+	// Mint token WITH wrong process UID — should fail
+	wrongUID := 9999
+	tok2, _, _ := ti.Mint("admin", &wrongUID, "")
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://agent/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok2)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ := resp["errors"].(map[string]interface{})
+	if errors["phoenix://agent/key"] != "attestation required" {
+		t.Fatalf("expected attestation required for wrong UID, got: %v", resp)
+	}
+
+	// Mint token WITHOUT process claims — should fail
+	tok3, _, _ := ti.Mint("admin", nil, "")
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://agent/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok3)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ = resp["errors"].(map[string]interface{})
+	if errors["phoenix://agent/key"] != "attestation required" {
+		t.Fatalf("expected attestation required without process claims, got: %v", resp)
+	}
+
+	// Bearer token (no process context at all) — should fail
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://agent/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ = resp["errors"].(map[string]interface{})
+	if errors["phoenix://agent/key"] != "attestation required" {
+		t.Fatalf("expected attestation required for bearer, got: %v", resp)
+	}
+}

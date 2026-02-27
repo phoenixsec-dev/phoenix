@@ -123,7 +123,8 @@ type authInfo struct {
 	UsedMTLS        bool
 	UsedBearer      bool
 	CertFingerprint string // "sha256:<hex>" or empty
-	TokenIssuedAt   *time.Time // set when authenticated via short-lived token
+	TokenIssuedAt   *time.Time              // set when authenticated via short-lived token
+	Process         *policy.ProcessContext   // set when token carries process attestation claims
 }
 
 // authenticate identifies the calling agent from the request.
@@ -163,10 +164,21 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		claims, err := s.tokens.Validate(tok)
 		if err == nil {
 			iat := claims.IssuedAt
-			return &authInfo{
+			info := &authInfo{
 				Agent:         claims.Agent,
 				TokenIssuedAt: &iat,
-			}, nil
+			}
+			// Propagate process attestation claims from the token
+			if claims.ProcessUID != nil || claims.BinaryHash != "" {
+				pc := &policy.ProcessContext{
+					BinaryHash: claims.BinaryHash,
+				}
+				if claims.ProcessUID != nil {
+					pc.UID = *claims.ProcessUID
+				}
+				info.Process = pc
+			}
+			return info, nil
 		}
 		// Not a valid short-lived token — fall through to bearer
 	}
@@ -207,6 +219,7 @@ func (s *Server) attest(r *http.Request, path string, info *authInfo, nonceValid
 		SourceIP:        clientIP(r),
 		CertFingerprint: info.CertFingerprint,
 		Tool:            r.Header.Get("X-Phoenix-Tool"),
+		Process:         info.Process,
 		NonceValidated:  nonceValidated,
 		TokenIssuedAt:   info.TokenIssuedAt,
 	}
