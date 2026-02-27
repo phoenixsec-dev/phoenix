@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -331,8 +332,9 @@ func (s *Store) Count() int {
 // The afterSave callback, if non-nil, runs after the store is persisted
 // but before the store lock is released. This lets the caller atomically
 // write the key file while no concurrent reads can observe partial state.
-// If afterSave returns an error, the store reverts to the old namespace
-// entries and re-saves, and the provider's pending key is rolled back.
+// If afterSave returns an error, the store file is restored from a
+// pre-rotation backup (atomic rename), and the provider's pending key
+// is rolled back.
 //
 // When afterSave is nil (e.g. in unit tests), the provider's rotation is
 // auto-committed after a successful save.
@@ -354,13 +356,25 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 		return 0, nil
 	}
 
-	// Snapshot old namespace entries for rollback
+	// Snapshot old namespace entries for in-memory rollback
 	oldEntries := make([]namespaceDEK, len(nsNames))
 	wrappedDEKs := make([]*crypto.WrappedDEK, len(nsNames))
 	for i, name := range nsNames {
 		oldEntries[i] = s.data.Namespaces[name]
 		w := s.data.Namespaces[name].Wrapped
 		wrappedDEKs[i] = &w
+	}
+
+	// Backup the store file before mutation. On callback failure we
+	// restore via atomic rename instead of re-marshaling, which
+	// eliminates the double-failure path where both callback and
+	// rollback-save fail.
+	preRotatePath := s.filePath + ".pre-rotate"
+	if afterSave != nil {
+		if err := copyFile(s.filePath, preRotatePath); err != nil {
+			return 0, fmt.Errorf("backing up store before rotation: %w", err)
+		}
+		defer os.Remove(preRotatePath)
 	}
 
 	// Rotate: unwrap all with old key, generate new key, re-wrap all.
@@ -377,7 +391,9 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 
 	// Persist the updated store atomically
 	if err := s.save(); err != nil {
-		// Rollback: restore old namespace entries + discard staged key
+		// Rollback: restore old namespace entries + discard staged key.
+		// The store file on disk is unchanged (save() uses tmp+rename;
+		// if rename failed, the old file is still intact).
 		for i, name := range nsNames {
 			s.data.Namespaces[name] = oldEntries[i]
 		}
@@ -389,16 +405,25 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	// No concurrent reads can see the new DEKs until we release the lock.
 	if afterSave != nil {
 		if err := afterSave(); err != nil {
-			// Rollback: restore old namespace entries and re-save
+			// Restore in-memory state
 			for i, name := range nsNames {
 				s.data.Namespaces[name] = oldEntries[i]
 			}
-			if saveErr := s.save(); saveErr != nil {
-				// Both the callback and rollback save failed — critical state.
-				// Log both errors so an operator can recover from .prev backup.
+
+			// Restore store file from pre-rotation backup via atomic rename.
+			// This is more reliable than re-marshaling + re-saving because
+			// it's a single rename syscall on the same filesystem.
+			if restoreErr := os.Rename(preRotatePath, s.filePath); restoreErr != nil {
+				// CRITICAL: store on disk has new DEKs but key file has
+				// old key, and we cannot restore the old store. Persist the
+				// pending key to an emergency file so an operator can
+				// forward-recover using the new key + on-disk store.
+				s.emergencyPersistPendingKey()
 				s.provider.RollbackRotation()
-				return 0, fmt.Errorf("post-save callback failed: %w; rollback save also failed: %v (restore from .prev backup)", err, saveErr)
+				return 0, fmt.Errorf("CRITICAL: callback failed: %w; store restore failed: %v; "+
+					"check for %s.emergency-key or use .prev backup", err, restoreErr, s.filePath)
 			}
+
 			s.provider.RollbackRotation()
 			return 0, fmt.Errorf("post-save callback: %w", err)
 		}
@@ -407,6 +432,34 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	// Both writes succeeded — commit the provider key swap
 	s.provider.CommitRotation()
 	return len(nsNames), nil
+}
+
+// emergencyPersistPendingKey saves the provider's staged key to an
+// emergency recovery file as a last resort. This is called only in the
+// double-failure path where both the afterSave callback and the store
+// file restore fail, to prevent the new key from being lost.
+func (s *Store) emergencyPersistPendingKey() {
+	fkp, ok := s.provider.(*crypto.FileKeyProvider)
+	if !ok || fkp.PendingMasterKey() == nil {
+		return
+	}
+	emergencyPath := s.filePath + ".emergency-key"
+	if err := crypto.SaveMasterKeyAtomic(emergencyPath, fkp.PendingMasterKey()); err != nil {
+		log.Printf("CRITICAL: failed to save emergency key to %s: %v", emergencyPath, err)
+		return
+	}
+	log.Printf("CRITICAL: emergency recovery key saved to %s — "+
+		"use this key with the current store file to recover, "+
+		"or restore store from .pre-rotate backup with the old key", emergencyPath)
+}
+
+// copyFile copies src to dst with 0600 permissions.
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0600)
 }
 
 // Provider returns the store's KeyProvider.

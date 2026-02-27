@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"git.home/vector/phoenix/internal/crypto"
@@ -401,6 +402,11 @@ func TestRotateMasterKeyCallbackFailureRollsBack(t *testing.T) {
 		t.Fatal("pending key not cleared after callback failure rollback")
 	}
 
+	// Pre-rotate backup should be cleaned up
+	if _, err := os.Stat(storePath + ".pre-rotate"); !os.IsNotExist(err) {
+		t.Fatal("pre-rotate backup was not cleaned up")
+	}
+
 	// Secrets should still be readable with old key
 	sec1, err := s.Get("ns1/key1")
 	if err != nil {
@@ -417,8 +423,8 @@ func TestRotateMasterKeyCallbackFailureRollsBack(t *testing.T) {
 		t.Fatalf("ns2/key2 = %q, want 'value2'", sec2.Value)
 	}
 
-	// Store file should also be rolled back (old DEKs re-saved)
-	// Verify by opening a new store with the old key
+	// Store file should be restored from pre-rotate backup (old DEKs).
+	// Verify by opening a new store with the old key.
 	s2, err := New(storePath, oldKey)
 	if err != nil {
 		t.Fatalf("reopen store with old key after rollback: %v", err)
@@ -429,6 +435,91 @@ func TestRotateMasterKeyCallbackFailureRollsBack(t *testing.T) {
 	}
 	if sec.Value != "value1" {
 		t.Fatalf("persisted value = %q, want 'value1'", sec.Value)
+	}
+}
+
+func TestRotateMasterKeyDoubleFailureEmergencyKey(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "master.key")
+	masterKey, _ := crypto.GenerateAndSaveMasterKey(keyPath)
+	storePath := filepath.Join(dir, "store.json")
+
+	s, _ := New(storePath, masterKey)
+	s.Set("ns1/key1", "value1", "vector", "", nil)
+	s.Set("ns2/key2", "value2", "vector", "", nil)
+
+	provider := s.Provider().(*crypto.FileKeyProvider)
+	oldKey := make([]byte, len(provider.MasterKey()))
+	copy(oldKey, provider.MasterKey())
+
+	preRotatePath := storePath + ".pre-rotate"
+	emergencyKeyPath := storePath + ".emergency-key"
+
+	// Rotate with a callback that:
+	// 1. Deletes the pre-rotate backup (simulating it being lost)
+	// 2. Returns an error (simulating key file write failure)
+	// This forces the double-failure: callback fails AND pre-rotate
+	// restore fails (file is gone).
+	_, err := s.RotateMasterKey(func() error {
+		os.Remove(preRotatePath)
+		return fmt.Errorf("simulated key file write failure")
+	})
+	if err == nil {
+		t.Fatal("expected error from double failure")
+	}
+
+	// Error should indicate CRITICAL state
+	if !strings.Contains(err.Error(), "CRITICAL") {
+		t.Fatalf("error should contain CRITICAL, got: %v", err)
+	}
+
+	// Emergency key file should exist
+	if _, statErr := os.Stat(emergencyKeyPath); statErr != nil {
+		t.Fatalf("emergency key file not created: %v", statErr)
+	}
+
+	// Provider should be rolled back (old key, no pending)
+	if !bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("provider key changed after double failure")
+	}
+	if provider.PendingMasterKey() != nil {
+		t.Fatal("pending key not cleared after double failure")
+	}
+
+	// In-memory secrets should still be readable (old entries restored)
+	sec, err := s.Get("ns1/key1")
+	if err != nil {
+		t.Fatalf("in-memory Get after double failure: %v", err)
+	}
+	if sec.Value != "value1" {
+		t.Fatalf("in-memory value = %q, want 'value1'", sec.Value)
+	}
+
+	// --- Verify emergency key enables forward recovery ---
+	// The store file on disk has NEW DEKs (first save succeeded,
+	// restore failed). The emergency key should decrypt them.
+	emergencyKey, err := crypto.LoadMasterKey(emergencyKeyPath)
+	if err != nil {
+		t.Fatalf("loading emergency key: %v", err)
+	}
+
+	recovered, err := New(storePath, emergencyKey)
+	if err != nil {
+		t.Fatalf("opening store with emergency key: %v", err)
+	}
+	sec1, err := recovered.Get("ns1/key1")
+	if err != nil {
+		t.Fatalf("recovered Get ns1/key1: %v", err)
+	}
+	if sec1.Value != "value1" {
+		t.Fatalf("recovered ns1/key1 = %q, want 'value1'", sec1.Value)
+	}
+	sec2, err := recovered.Get("ns2/key2")
+	if err != nil {
+		t.Fatalf("recovered Get ns2/key2: %v", err)
+	}
+	if sec2.Value != "value2" {
+		t.Fatalf("recovered ns2/key2 = %q, want 'value2'", sec2.Value)
 	}
 }
 
