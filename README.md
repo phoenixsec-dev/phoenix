@@ -4,7 +4,7 @@
 
 Phoenix is a single-binary secrets manager purpose-built for AI agent workflows. LLM agents are powerful but fundamentally untrusted — they can leak secrets through output, store them in context or memory, or be tricked into passing them to attacker-controlled tools. Phoenix solves this by ensuring agents only ever handle opaque `phoenix://` references, resolved through authenticated, attested, policy-checked API calls. Every access is audited.
 
-Phoenix is designed to be set up and operated by your AI agent. The security is real — AES-256-GCM envelope encryption, mutual TLS, attestation policies — but the complexity is absorbed by the agent, not by you. Tell your agent to set up Phoenix, point it at your secrets, and verify the result.
+Phoenix is designed to be set up and operated by your AI agent. The security is real — AES-256-GCM envelope encryption, mutual TLS, attestation policies — but the complexity is absorbed by the agent, not by you. Your agent configures policies, issues certificates, and manages access. You store the secrets and verify the result.
 
 ```
 # Store a secret
