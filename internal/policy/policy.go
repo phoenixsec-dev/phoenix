@@ -2,7 +2,8 @@
 //
 // Attestation policies bind secrets to specific identity evidence beyond
 // basic ACL checks. They enforce requirements like mTLS authentication,
-// source IP restrictions, and certificate fingerprint pinning.
+// source IP restrictions, certificate fingerprint pinning, tool-scoped
+// access, time-window restrictions, process identity, and nonce challenges.
 //
 // Policies are keyed by secret path patterns (using the same glob syntax
 // as ACL rules) and evaluated after ACL authorization succeeds.
@@ -15,7 +16,19 @@
 //	      "require_mtls": true,
 //	      "source_ip": ["192.168.0.115"],
 //	      "cert_fingerprint": "sha256:abc123",
-//	      "deny_bearer": true
+//	      "deny_bearer": true,
+//	      "allowed_tools": ["git-sync", "api-call"],
+//	      "deny_tools": ["shell", "file-write"],
+//	      "time_window": "06:00-23:00",
+//	      "time_zone": "America/New_York",
+//	      "process": {
+//	        "uid": 1001,
+//	        "binary_hash": "sha256:DEF456..."
+//	      },
+//	      "require_nonce": true,
+//	      "nonce_max_age": "30s",
+//	      "credential_ttl": "15m",
+//	      "require_fresh_attestation": true
 //	    }
 //	  }
 //	}
@@ -27,14 +40,47 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 )
+
+// ProcessRule defines process-level attestation requirements.
+type ProcessRule struct {
+	UID        *int   `json:"uid,omitempty"`
+	BinaryHash string `json:"binary_hash,omitempty"`
+}
 
 // Rule defines attestation requirements for secrets matching a path pattern.
 type Rule struct {
+	// L0-L3: existing attestation checks
 	RequireMTLS     bool     `json:"require_mtls"`
 	AllowedIPs      []string `json:"source_ip,omitempty"`
 	CertFingerprint string   `json:"cert_fingerprint,omitempty"`
 	DenyBearer      bool     `json:"deny_bearer"`
+
+	// L4: tool-scoped policies
+	AllowedTools []string `json:"allowed_tools,omitempty"`
+	DenyTools    []string `json:"deny_tools,omitempty"`
+
+	// L5: process identity attestation
+	Process *ProcessRule `json:"process,omitempty"`
+
+	// L6: time-window restrictions
+	TimeWindow string `json:"time_window,omitempty"` // "HH:MM-HH:MM"
+	TimeZone   string `json:"time_zone,omitempty"`   // IANA timezone (e.g. "America/New_York")
+
+	// L7: short-lived credential requirements
+	CredentialTTL           string `json:"credential_ttl,omitempty"`            // e.g. "15m"
+	RequireFreshAttestation bool   `json:"require_fresh_attestation,omitempty"`
+
+	// L8: nonce challenge-response
+	RequireNonce bool   `json:"require_nonce"`
+	NonceMaxAge  string `json:"nonce_max_age,omitempty"` // e.g. "30s"
+}
+
+// ProcessContext contains process-level attestation evidence.
+type ProcessContext struct {
+	UID        int
+	BinaryHash string // "sha256:<hex>"
 }
 
 // RequestContext contains attestation evidence extracted from an HTTP request.
@@ -43,6 +89,22 @@ type RequestContext struct {
 	UsedBearer      bool
 	SourceIP        string
 	CertFingerprint string // "sha256:<hex>"
+
+	// Tool context (set by MCP server or skills adapter)
+	Tool string
+
+	// Process attestation (set by Unix socket agent)
+	Process *ProcessContext
+
+	// Nonce validation (set by challenge-response flow)
+	NonceValidated bool
+
+	// Token freshness (set by short-lived token validator)
+	TokenIssuedAt *time.Time
+	TokenTTL      time.Duration
+
+	// Override evaluation time (for testing; zero means use time.Now())
+	EvalTime time.Time
 }
 
 // Engine loads and evaluates attestation policies.
@@ -94,7 +156,7 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		return nil // no policy = allow
 	}
 
-	// Check deny_bearer first
+	// L0: Check deny_bearer first
 	if rule.DenyBearer && ctx.UsedBearer {
 		return &DeniedError{
 			Pattern: pattern,
@@ -102,7 +164,7 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		}
 	}
 
-	// Check require_mtls
+	// L1: Check require_mtls
 	if rule.RequireMTLS && !ctx.UsedMTLS {
 		return &DeniedError{
 			Pattern: pattern,
@@ -110,7 +172,7 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		}
 	}
 
-	// Check source_ip
+	// L2: Check source_ip
 	if len(rule.AllowedIPs) > 0 {
 		if !matchIP(ctx.SourceIP, rule.AllowedIPs) {
 			return &DeniedError{
@@ -120,7 +182,7 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		}
 	}
 
-	// Check cert_fingerprint
+	// L3: Check cert_fingerprint
 	if rule.CertFingerprint != "" {
 		if ctx.CertFingerprint == "" {
 			return &DeniedError{
@@ -136,7 +198,186 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		}
 	}
 
+	// L4: Check tool-scoped policies
+	if len(rule.AllowedTools) > 0 {
+		if ctx.Tool == "" {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  "tool context required but not provided",
+			}
+		}
+		if !containsString(rule.AllowedTools, ctx.Tool) {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  fmt.Sprintf("tool %q not in allowed list", ctx.Tool),
+			}
+		}
+	}
+	if len(rule.DenyTools) > 0 && ctx.Tool != "" {
+		if containsString(rule.DenyTools, ctx.Tool) {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  fmt.Sprintf("tool %q is explicitly denied", ctx.Tool),
+			}
+		}
+	}
+
+	// L5: Check process attestation
+	if rule.Process != nil {
+		if ctx.Process == nil {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  "process attestation required but not provided",
+			}
+		}
+		if rule.Process.UID != nil && ctx.Process.UID != *rule.Process.UID {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  fmt.Sprintf("process UID %d does not match required %d", ctx.Process.UID, *rule.Process.UID),
+			}
+		}
+		if rule.Process.BinaryHash != "" {
+			if ctx.Process.BinaryHash == "" {
+				return &DeniedError{
+					Pattern: pattern,
+					Reason:  "binary hash required but not provided",
+				}
+			}
+			if !strings.EqualFold(ctx.Process.BinaryHash, rule.Process.BinaryHash) {
+				return &DeniedError{
+					Pattern: pattern,
+					Reason:  fmt.Sprintf("binary hash mismatch: got %s", ctx.Process.BinaryHash),
+				}
+			}
+		}
+	}
+
+	// L6: Check time-window
+	if rule.TimeWindow != "" {
+		now := ctx.EvalTime
+		if now.IsZero() {
+			now = time.Now()
+		}
+		if rule.TimeZone != "" {
+			loc, err := time.LoadLocation(rule.TimeZone)
+			if err != nil {
+				return &DeniedError{
+					Pattern: pattern,
+					Reason:  fmt.Sprintf("invalid time zone %q: %v", rule.TimeZone, err),
+				}
+			}
+			now = now.In(loc)
+		}
+		if err := checkTimeWindow(rule.TimeWindow, now); err != nil {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  err.Error(),
+			}
+		}
+	}
+
+	// L7: Check credential freshness
+	if rule.RequireFreshAttestation {
+		if ctx.TokenIssuedAt == nil {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  "fresh attestation required but no token timestamp provided",
+			}
+		}
+		maxTTL := 15 * time.Minute // default
+		if rule.CredentialTTL != "" {
+			parsed, err := time.ParseDuration(rule.CredentialTTL)
+			if err != nil {
+				return &DeniedError{
+					Pattern: pattern,
+					Reason:  fmt.Sprintf("invalid credential_ttl %q: %v", rule.CredentialTTL, err),
+				}
+			}
+			maxTTL = parsed
+		}
+		now := ctx.EvalTime
+		if now.IsZero() {
+			now = time.Now()
+		}
+		age := now.Sub(*ctx.TokenIssuedAt)
+		if age > maxTTL {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  fmt.Sprintf("credential expired: age %s exceeds TTL %s", age.Round(time.Second), maxTTL),
+			}
+		}
+	}
+
+	// L8: Check nonce requirement
+	if rule.RequireNonce && !ctx.NonceValidated {
+		return &DeniedError{
+			Pattern: pattern,
+			Reason:  "nonce challenge-response required but not completed",
+		}
+	}
+
 	return nil
+}
+
+// containsString checks if a slice contains a string.
+func containsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+// checkTimeWindow verifies that the given time falls within the HH:MM-HH:MM window.
+// Handles midnight crossover (e.g., "22:00-06:00").
+func checkTimeWindow(window string, now time.Time) error {
+	parts := strings.SplitN(window, "-", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid time_window format %q (expected HH:MM-HH:MM)", window)
+	}
+
+	startH, startM, err := parseHHMM(parts[0])
+	if err != nil {
+		return fmt.Errorf("invalid time_window start: %w", err)
+	}
+	endH, endM, err := parseHHMM(parts[1])
+	if err != nil {
+		return fmt.Errorf("invalid time_window end: %w", err)
+	}
+
+	startMin := startH*60 + startM
+	endMin := endH*60 + endM
+	nowMin := now.Hour()*60 + now.Minute()
+
+	var inWindow bool
+	if startMin <= endMin {
+		// Normal range: 06:00-23:00
+		inWindow = nowMin >= startMin && nowMin < endMin
+	} else {
+		// Midnight crossover: 22:00-06:00
+		inWindow = nowMin >= startMin || nowMin < endMin
+	}
+
+	if !inWindow {
+		return fmt.Errorf("access denied outside time window %s (current time %02d:%02d)",
+			window, now.Hour(), now.Minute())
+	}
+	return nil
+}
+
+// parseHHMM parses "HH:MM" into hours and minutes.
+func parseHHMM(s string) (int, int, error) {
+	s = strings.TrimSpace(s)
+	var h, m int
+	n, err := fmt.Sscanf(s, "%d:%d", &h, &m)
+	if err != nil || n != 2 {
+		return 0, 0, fmt.Errorf("invalid time %q (expected HH:MM)", s)
+	}
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, fmt.Errorf("time %q out of range", s)
+	}
+	return h, m, nil
 }
 
 // RuleFor returns the attestation rule and pattern matching a secret path,

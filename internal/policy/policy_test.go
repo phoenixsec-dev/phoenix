@@ -2,6 +2,7 @@ package policy
 
 import (
 	"testing"
+	"time"
 )
 
 func TestLoadEmpty(t *testing.T) {
@@ -351,5 +352,498 @@ func TestRulesReturnsCopy(t *testing.T) {
 	delete(rules, "ns/*")
 	if len(e.Rules()) != 1 {
 		t.Fatal("Rules() should return a copy")
+	}
+}
+
+// --- Wave 2: Tool-scoped policy tests ---
+
+func TestToolScopedAllowedTools(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"api/*": {
+				"allowed_tools": ["git-sync", "api-call"]
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		tool    string
+		wantErr bool
+	}{
+		{"allowed tool passes", "git-sync", false},
+		{"another allowed tool passes", "api-call", false},
+		{"denied tool fails", "shell", true},
+		{"empty tool fails", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := e.Evaluate("api/key", &RequestContext{Tool: tt.tool})
+			if (err != nil) != tt.wantErr {
+				t.Errorf("tool=%q: err=%v, wantErr=%v", tt.tool, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestToolScopedDenyTools(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"secure/*": {
+				"deny_tools": ["shell", "file-write"]
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Denied tool should fail
+	err = e.Evaluate("secure/key", &RequestContext{Tool: "shell"})
+	if err == nil {
+		t.Fatal("denied tool should fail")
+	}
+
+	// Non-denied tool should pass
+	err = e.Evaluate("secure/key", &RequestContext{Tool: "api-call"})
+	if err != nil {
+		t.Fatalf("non-denied tool should pass: %v", err)
+	}
+
+	// Empty tool should pass (deny_tools only applies when tool is set)
+	err = e.Evaluate("secure/key", &RequestContext{})
+	if err != nil {
+		t.Fatalf("empty tool should pass with deny_tools: %v", err)
+	}
+}
+
+// --- Wave 2: Time-window policy tests ---
+
+func TestTimeWindowNormalRange(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"prod/*": {
+				"time_window": "06:00-23:00"
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// 14:00 is within range
+	at14 := time.Date(2026, 2, 27, 14, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at14}); err != nil {
+		t.Fatalf("14:00 should be within 06:00-23:00: %v", err)
+	}
+
+	// 03:00 is outside range
+	at03 := time.Date(2026, 2, 27, 3, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at03}); err == nil {
+		t.Fatal("03:00 should be outside 06:00-23:00")
+	}
+
+	// 06:00 is at boundary (inclusive start)
+	at06 := time.Date(2026, 2, 27, 6, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at06}); err != nil {
+		t.Fatalf("06:00 should be within window (inclusive start): %v", err)
+	}
+
+	// 23:00 is at boundary (exclusive end)
+	at23 := time.Date(2026, 2, 27, 23, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at23}); err == nil {
+		t.Fatal("23:00 should be at boundary (exclusive end)")
+	}
+}
+
+func TestTimeWindowMidnightCrossover(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"night/*": {
+				"time_window": "22:00-06:00"
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// 23:00 is within range (after start)
+	at23 := time.Date(2026, 2, 27, 23, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("night/key", &RequestContext{EvalTime: at23}); err != nil {
+		t.Fatalf("23:00 should be within 22:00-06:00: %v", err)
+	}
+
+	// 03:00 is within range (before end)
+	at03 := time.Date(2026, 2, 27, 3, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("night/key", &RequestContext{EvalTime: at03}); err != nil {
+		t.Fatalf("03:00 should be within 22:00-06:00: %v", err)
+	}
+
+	// 12:00 is outside range
+	at12 := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("night/key", &RequestContext{EvalTime: at12}); err == nil {
+		t.Fatal("12:00 should be outside 22:00-06:00")
+	}
+}
+
+func TestTimeWindowWithTimezone(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"prod/*": {
+				"time_window": "09:00-17:00",
+				"time_zone": "America/New_York"
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// 14:00 EST = within window
+	ny, _ := time.LoadLocation("America/New_York")
+	at14NY := time.Date(2026, 2, 27, 14, 0, 0, 0, ny)
+	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at14NY}); err != nil {
+		t.Fatalf("14:00 NY should be within 09:00-17:00 NY: %v", err)
+	}
+
+	// 14:00 UTC = 09:00 EST = within window
+	at14UTC := time.Date(2026, 2, 27, 14, 0, 0, 0, time.UTC)
+	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at14UTC}); err != nil {
+		t.Fatalf("14:00 UTC (09:00 EST) should be within window: %v", err)
+	}
+}
+
+func TestTimeWindowInvalidFormat(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"bad/*": {
+				"time_window": "not-a-time"
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if err := e.Evaluate("bad/key", &RequestContext{
+		EvalTime: time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC),
+	}); err == nil {
+		t.Fatal("invalid time_window should fail")
+	}
+}
+
+// --- Wave 2: Process attestation tests ---
+
+func TestProcessAttestation(t *testing.T) {
+	uid := 1001
+	cfg := `{
+		"attestation": {
+			"prod/*": {
+				"process": {
+					"uid": 1001,
+					"binary_hash": "sha256:ABC123"
+				}
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Correct process context passes
+	err = e.Evaluate("prod/key", &RequestContext{
+		Process: &ProcessContext{
+			UID:        uid,
+			BinaryHash: "sha256:abc123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("correct process context should pass: %v", err)
+	}
+
+	// No process context fails
+	err = e.Evaluate("prod/key", &RequestContext{})
+	if err == nil {
+		t.Fatal("missing process context should fail")
+	}
+
+	// Wrong UID fails
+	err = e.Evaluate("prod/key", &RequestContext{
+		Process: &ProcessContext{
+			UID:        9999,
+			BinaryHash: "sha256:abc123",
+		},
+	})
+	if err == nil {
+		t.Fatal("wrong UID should fail")
+	}
+
+	// Wrong hash fails
+	err = e.Evaluate("prod/key", &RequestContext{
+		Process: &ProcessContext{
+			UID:        uid,
+			BinaryHash: "sha256:wrong",
+		},
+	})
+	if err == nil {
+		t.Fatal("wrong hash should fail")
+	}
+}
+
+func TestProcessAttestationUIDOnly(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"dev/*": {
+				"process": {
+					"uid": 1000
+				}
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Correct UID without hash passes
+	err = e.Evaluate("dev/key", &RequestContext{
+		Process: &ProcessContext{UID: 1000},
+	})
+	if err != nil {
+		t.Fatalf("correct UID should pass: %v", err)
+	}
+}
+
+// --- Wave 2: Nonce requirement tests ---
+
+func TestNonceRequirement(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"secure/*": {
+				"require_nonce": true
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Without nonce validation, fails
+	err = e.Evaluate("secure/key", &RequestContext{})
+	if err == nil {
+		t.Fatal("missing nonce should fail")
+	}
+
+	// With nonce validation, passes
+	err = e.Evaluate("secure/key", &RequestContext{NonceValidated: true})
+	if err != nil {
+		t.Fatalf("validated nonce should pass: %v", err)
+	}
+}
+
+// --- Wave 2: Credential freshness tests ---
+
+func TestCredentialFreshness(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"prod/*": {
+				"credential_ttl": "15m",
+				"require_fresh_attestation": true
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	now := time.Now()
+
+	// Fresh token passes
+	fresh := now.Add(-5 * time.Minute)
+	err = e.Evaluate("prod/key", &RequestContext{
+		TokenIssuedAt: &fresh,
+		EvalTime:      now,
+	})
+	if err != nil {
+		t.Fatalf("fresh token should pass: %v", err)
+	}
+
+	// Expired token fails
+	old := now.Add(-20 * time.Minute)
+	err = e.Evaluate("prod/key", &RequestContext{
+		TokenIssuedAt: &old,
+		EvalTime:      now,
+	})
+	if err == nil {
+		t.Fatal("expired token should fail")
+	}
+
+	// No token timestamp fails
+	err = e.Evaluate("prod/key", &RequestContext{
+		EvalTime: now,
+	})
+	if err == nil {
+		t.Fatal("missing token timestamp should fail")
+	}
+}
+
+func TestCredentialFreshnessDefaultTTL(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"prod/*": {
+				"require_fresh_attestation": true
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	now := time.Now()
+
+	// Within default 15m TTL
+	fresh := now.Add(-10 * time.Minute)
+	err = e.Evaluate("prod/key", &RequestContext{
+		TokenIssuedAt: &fresh,
+		EvalTime:      now,
+	})
+	if err != nil {
+		t.Fatalf("within default TTL should pass: %v", err)
+	}
+
+	// Outside default 15m TTL
+	old := now.Add(-20 * time.Minute)
+	err = e.Evaluate("prod/key", &RequestContext{
+		TokenIssuedAt: &old,
+		EvalTime:      now,
+	})
+	if err == nil {
+		t.Fatal("outside default TTL should fail")
+	}
+}
+
+// --- Wave 2: Combined attestation level tests ---
+
+func TestCombinedAttestationLevels(t *testing.T) {
+	uid := 1001
+	cfg := `{
+		"attestation": {
+			"production/*": {
+				"require_mtls": true,
+				"source_ip": ["192.168.0.110"],
+				"cert_fingerprint": "sha256:CERT123",
+				"allowed_tools": ["api-call"],
+				"process": {
+					"uid": 1001,
+					"binary_hash": "sha256:BIN456"
+				},
+				"time_window": "06:00-23:00",
+				"require_nonce": true,
+				"credential_ttl": "15m",
+				"require_fresh_attestation": true
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	now := time.Date(2026, 2, 27, 14, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute)
+
+	// Full attestation passes
+	err = e.Evaluate("production/db-password", &RequestContext{
+		UsedMTLS:        true,
+		SourceIP:        "192.168.0.110",
+		CertFingerprint: "sha256:cert123",
+		Tool:            "api-call",
+		Process: &ProcessContext{
+			UID:        uid,
+			BinaryHash: "sha256:bin456",
+		},
+		NonceValidated: true,
+		TokenIssuedAt:  &fresh,
+		EvalTime:       now,
+	})
+	if err != nil {
+		t.Fatalf("full attestation should pass: %v", err)
+	}
+}
+
+func TestLoadPolicyWithNewFields(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"app/*": {
+				"require_mtls": true,
+				"allowed_tools": ["resolve", "get"],
+				"deny_tools": ["shell"],
+				"time_window": "09:00-17:00",
+				"time_zone": "UTC",
+				"process": {
+					"uid": 1000,
+					"binary_hash": "sha256:abc"
+				},
+				"require_nonce": true,
+				"nonce_max_age": "30s",
+				"credential_ttl": "10m",
+				"require_fresh_attestation": true
+			}
+		}
+	}`
+
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	rule, _ := e.RuleFor("app/key")
+	if rule == nil {
+		t.Fatal("expected rule")
+	}
+	if !rule.RequireMTLS {
+		t.Fatal("expected RequireMTLS")
+	}
+	if len(rule.AllowedTools) != 2 {
+		t.Fatalf("expected 2 allowed_tools, got %d", len(rule.AllowedTools))
+	}
+	if len(rule.DenyTools) != 1 {
+		t.Fatalf("expected 1 deny_tools, got %d", len(rule.DenyTools))
+	}
+	if rule.TimeWindow != "09:00-17:00" {
+		t.Fatalf("TimeWindow = %q", rule.TimeWindow)
+	}
+	if rule.Process == nil {
+		t.Fatal("expected Process rule")
+	}
+	if rule.Process.UID == nil || *rule.Process.UID != 1000 {
+		t.Fatalf("Process.UID = %v", rule.Process.UID)
+	}
+	if !rule.RequireNonce {
+		t.Fatal("expected RequireNonce")
+	}
+	if rule.NonceMaxAge != "30s" {
+		t.Fatalf("NonceMaxAge = %q", rule.NonceMaxAge)
+	}
+	if rule.CredentialTTL != "10m" {
+		t.Fatalf("CredentialTTL = %q", rule.CredentialTTL)
+	}
+	if !rule.RequireFreshAttestation {
+		t.Fatal("expected RequireFreshAttestation")
 	}
 }
