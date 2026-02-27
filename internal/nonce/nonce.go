@@ -103,6 +103,8 @@ func (s *Store) Validate(nonce string) error {
 	}
 
 	entry.Used = true
+	// Remove from map immediately — it can never be used again
+	delete(s.nonces, nonce)
 	return nil
 }
 

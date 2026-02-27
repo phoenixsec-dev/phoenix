@@ -37,9 +37,9 @@ func TestSingleUse(t *testing.T) {
 		t.Fatalf("first Validate: %v", err)
 	}
 
-	// Second validation fails (replay)
+	// Second validation fails (nonce consumed after first use)
 	if err := s.Validate(entry.Nonce); err == nil {
-		t.Fatal("expected replay detection on second Validate")
+		t.Fatal("expected error on second Validate (nonce consumed)")
 	}
 }
 
@@ -78,6 +78,23 @@ func TestPendingCount(t *testing.T) {
 	s.Generate()
 	if s.Pending() != 2 {
 		t.Fatalf("expected 2 pending, got %d", s.Pending())
+	}
+}
+
+func TestPendingExcludesUsed(t *testing.T) {
+	s := NewStore(5 * time.Second)
+	defer s.Stop()
+
+	e1, _ := s.Generate()
+	s.Generate()
+	if s.Pending() != 2 {
+		t.Fatalf("expected 2 pending, got %d", s.Pending())
+	}
+
+	// Validate one — should reduce pending count
+	s.Validate(e1.Nonce)
+	if s.Pending() != 1 {
+		t.Fatalf("expected 1 pending after validation, got %d", s.Pending())
 	}
 }
 

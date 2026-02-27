@@ -123,6 +123,7 @@ type authInfo struct {
 	UsedMTLS        bool
 	UsedBearer      bool
 	CertFingerprint string // "sha256:<hex>" or empty
+	TokenIssuedAt   *time.Time // set when authenticated via short-lived token
 }
 
 // authenticate identifies the calling agent from the request.
@@ -156,15 +157,28 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
 	}
 
+	// Try short-lived token authentication
+	tok := extractToken(r)
+	if s.tokens != nil && tok != "" {
+		claims, err := s.tokens.Validate(tok)
+		if err == nil {
+			iat := claims.IssuedAt
+			return &authInfo{
+				Agent:         claims.Agent,
+				TokenIssuedAt: &iat,
+			}, nil
+		}
+		// Not a valid short-lived token — fall through to bearer
+	}
+
 	// Fall back to bearer token if enabled
 	if !s.bearerEnabled {
 		return nil, fmt.Errorf("no valid authentication credentials provided")
 	}
-	token := extractToken(r)
-	if token == "" {
+	if tok == "" {
 		return nil, fmt.Errorf("no authentication credentials provided")
 	}
-	agent, err := s.acl.Authenticate(token)
+	agent, err := s.acl.Authenticate(tok)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +196,8 @@ func certFingerprint(raw []byte) string {
 
 // attest checks attestation policy for the given secret path.
 // Returns nil if no policy is configured or if the request passes.
-func (s *Server) attest(r *http.Request, path string, info *authInfo) error {
+// nonceValidated indicates whether a nonce was submitted and validated for this request.
+func (s *Server) attest(r *http.Request, path string, info *authInfo, nonceValidated bool) error {
 	if s.policy == nil {
 		return nil
 	}
@@ -191,6 +206,9 @@ func (s *Server) attest(r *http.Request, path string, info *authInfo) error {
 		UsedBearer:      info.UsedBearer,
 		SourceIP:        clientIP(r),
 		CertFingerprint: info.CertFingerprint,
+		Tool:            r.Header.Get("X-Phoenix-Tool"),
+		NonceValidated:  nonceValidated,
+		TokenIssuedAt:   info.TokenIssuedAt,
 	}
 	return s.policy.Evaluate(path, ctx)
 }
@@ -261,7 +279,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
-			if s.attest(r, p, info) != nil {
+			if s.attest(r, p, info, false) != nil {
 				continue
 			}
 			visible = append(visible, p)
@@ -279,7 +297,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attestation policy check
-	if err := s.attest(r, path, info); err != nil {
+	if err := s.attest(r, path, info, false); err != nil {
 		s.audit.LogDenied(agentName, "read", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
@@ -613,7 +631,8 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 
 // resolveRequest is the JSON body for batch reference resolution.
 type resolveRequest struct {
-	Refs []string `json:"refs"`
+	Refs  []string `json:"refs"`
+	Nonce string   `json:"nonce,omitempty"` // optional nonce from /v1/challenge
 }
 
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
@@ -638,6 +657,20 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate nonce if provided
+	nonceValidated := false
+	if req.Nonce != "" {
+		if s.nonces == nil {
+			jsonError(w, "nonce challenge not enabled", http.StatusBadRequest)
+			return
+		}
+		if err := s.nonces.Validate(req.Nonce); err != nil {
+			jsonError(w, "nonce validation failed: "+err.Error(), http.StatusForbidden)
+			return
+		}
+		nonceValidated = true
+	}
+
 	values := make(map[string]string)
 	errors := make(map[string]string)
 
@@ -656,7 +689,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Attestation policy check (per-ref)
-		if err := s.attest(r, path, info); err != nil {
+		if err := s.attest(r, path, info, nonceValidated); err != nil {
 			s.audit.LogDenied(agentName, "resolve", path, ip, "attestation")
 			errors[refStr] = "attestation required"
 			continue

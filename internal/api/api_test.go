@@ -1748,3 +1748,231 @@ func TestAttestationToolScopedOnResolve(t *testing.T) {
 		t.Fatalf("expected attestation required, got: %v", resp)
 	}
 }
+
+func TestAttestationToolHeaderOnResolve(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "tool-bound"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/api/tool-key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure tool-scoped policy
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"api/*": {
+				"allowed_tools": ["phoenix_resolve"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Resolve WITH correct tool header — should succeed
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://api/tool-key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-Phoenix-Tool", "phoenix_resolve")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://api/tool-key"] != "tool-bound" {
+		t.Fatalf("expected tool-bound value, got: %v", resp)
+	}
+
+	// Resolve WITH wrong tool header — should fail
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://api/tool-key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-Phoenix-Tool", "wrong_tool")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ := resp["errors"].(map[string]interface{})
+	if errors["phoenix://api/tool-key"] != "attestation required" {
+		t.Fatalf("expected attestation required for wrong tool, got: %v", resp)
+	}
+}
+
+func TestNonceValidationOnResolve(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	ns := nonce.NewStore(30 * time.Second)
+	defer ns.Stop()
+	srv.SetNonceStore(ns)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "nonce-guarded"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/secure/nonce-key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure nonce-required policy
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"secure/*": {
+				"require_nonce": true
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Resolve WITHOUT nonce — should fail attestation
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://secure/nonce-key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ := resp["errors"].(map[string]interface{})
+	if errors["phoenix://secure/nonce-key"] != "attestation required" {
+		t.Fatalf("expected attestation required without nonce, got: %v", resp)
+	}
+
+	// Get a nonce via /v1/challenge
+	req = httptest.NewRequest("POST", "/v1/challenge", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	var challengeResp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&challengeResp)
+	nonceVal := challengeResp["nonce"].(string)
+
+	// Resolve WITH valid nonce — should succeed
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs":  []string{"phoenix://secure/nonce-key"},
+		"nonce": nonceVal,
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://secure/nonce-key"] != "nonce-guarded" {
+		t.Fatalf("expected nonce-guarded value, got: %v", resp)
+	}
+
+	// Replay same nonce — should fail
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs":  []string{"phoenix://secure/nonce-key"},
+		"nonce": nonceVal,
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for replayed nonce, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestShortLivedTokenAuth(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	ti, _ := token.NewIssuer(5 * time.Minute)
+	srv.SetTokenIssuer(ti)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "token-accessible"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/token-key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Mint a short-lived token for "reader"
+	tok, _, err := ti.Mint("reader", nil, "")
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	// Use the short-lived token to read a secret
+	req = httptest.NewRequest("GET", "/v1/secrets/test/token-key", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("short-lived token GET: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var secret store.Secret
+	json.NewDecoder(w.Body).Decode(&secret)
+	if secret.Value != "token-accessible" {
+		t.Fatalf("expected 'token-accessible', got %q", secret.Value)
+	}
+}
+
+func TestShortLivedTokenFreshAttestationOnResolve(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	ti, _ := token.NewIssuer(5 * time.Minute)
+	srv.SetTokenIssuer(ti)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "fresh-only"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/critical/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure fresh attestation policy
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"critical/*": {
+				"require_fresh_attestation": true,
+				"credential_ttl": "10m"
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Mint a token for "admin" and resolve — should succeed (token is fresh)
+	tok, _, _ := ti.Mint("admin", nil, "")
+
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://critical/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://critical/key"] != "fresh-only" {
+		t.Fatalf("expected fresh-only value, got: %v", resp)
+	}
+
+	// Resolve with bearer (no TokenIssuedAt) — should fail attestation
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://critical/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ := resp["errors"].(map[string]interface{})
+	if errors["phoenix://critical/key"] != "attestation required" {
+		t.Fatalf("expected attestation required for bearer without timestamp, got: %v", resp)
+	}
+}
