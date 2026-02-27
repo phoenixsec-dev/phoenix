@@ -11,6 +11,7 @@
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
 //	phoenix agent create <name> --token <token> --acl <path:actions,...>
 //	phoenix agent list
+//	phoenix resolve <ref> [ref...]
 //	phoenix init <dir>
 package main
 
@@ -129,6 +130,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "resolve":
+		err = cmdResolve(args)
 	case "rotate-master":
 		err = cmdRotateMaster()
 	case "cert":
@@ -172,6 +175,7 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
+  phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix init <dir>                          Initialize data directory
@@ -654,6 +658,61 @@ func cmdAgentList() error {
 
 	for _, name := range result.Agents {
 		fmt.Println(name)
+	}
+	return nil
+}
+
+func cmdResolve(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix resolve <phoenix://ns/secret> [ref...]")
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": args,
+	})
+
+	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Values map[string]string `json:"values"`
+		Errors map[string]string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	// Single ref: output raw value for piping
+	if len(args) == 1 {
+		if errMsg, ok := result.Errors[args[0]]; ok {
+			return fmt.Errorf("%s: %s", args[0], errMsg)
+		}
+		fmt.Print(result.Values[args[0]])
+		return nil
+	}
+
+	// Multiple refs: output ref → value pairs
+	var hasErr bool
+	for _, ref := range args {
+		if errMsg, ok := result.Errors[ref]; ok {
+			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
+			hasErr = true
+			continue
+		}
+		fmt.Printf("%s\t%s\n", ref, result.Values[ref])
+	}
+	if hasErr {
+		return fmt.Errorf("some references failed to resolve")
 	}
 	return nil
 }

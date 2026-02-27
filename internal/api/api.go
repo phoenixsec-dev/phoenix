@@ -15,6 +15,7 @@ import (
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/ref"
 	"git.home/vector/phoenix/internal/store"
 )
 
@@ -81,6 +82,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
+	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
 }
 
 // authenticate identifies the calling agent from the request.
@@ -511,4 +513,72 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		"rotated": rotated,
 		"backup":  prevPath,
 	})
+}
+
+// resolveRequest is the JSON body for batch reference resolution.
+type resolveRequest struct {
+	Refs []string `json:"refs"`
+}
+
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	ip := clientIP(r)
+
+	var req resolveRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Refs) == 0 {
+		jsonError(w, "refs is required and must not be empty", http.StatusBadRequest)
+		return
+	}
+
+	values := make(map[string]string)
+	errors := make(map[string]string)
+
+	for _, refStr := range req.Refs {
+		path, err := ref.Parse(refStr)
+		if err != nil {
+			errors[refStr] = err.Error()
+			continue
+		}
+
+		if err := s.acl.Authorize(agentName, path, acl.ActionRead); err != nil {
+			s.audit.LogDenied(agentName, "resolve", path, ip, "acl")
+			errors[refStr] = "access denied"
+			continue
+		}
+
+		secret, err := s.store.Get(path)
+		if err != nil {
+			if err == store.ErrSecretNotFound {
+				errors[refStr] = "secret not found"
+			} else if err == store.ErrInvalidPath {
+				errors[refStr] = "invalid path"
+			} else {
+				log.Printf("error resolving %q for %s: %v", path, agentName, err)
+				errors[refStr] = "internal error"
+			}
+			continue
+		}
+
+		s.audit.LogAllowed(agentName, "resolve", path, ip)
+		values[refStr] = secret.Value
+	}
+
+	resp := map[string]interface{}{
+		"values": values,
+	}
+	if len(errors) > 0 {
+		resp["errors"] = errors
+	}
+	jsonOK(w, resp)
 }

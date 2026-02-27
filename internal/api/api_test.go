@@ -815,3 +815,183 @@ func TestRotateMasterKeyPersistenceWithNewKey(t *testing.T) {
 		t.Fatal("pending key still set after successful rotation")
 	}
 }
+
+func TestResolveEndpoint(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets
+	for _, s := range []struct{ path, value string }{
+		{"test/key1", "value1"},
+		{"test/key2", "value2"},
+		{"other/key3", "value3"},
+	} {
+		body, _ := json.Marshal(setSecretRequest{Value: s.value})
+		req := httptest.NewRequest("PUT", "/v1/secrets/"+s.path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("setup SET %s: expected 200, got %d", s.path, w.Code)
+		}
+	}
+
+	// Resolve multiple refs as admin
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/key1",
+			"phoenix://test/key2",
+			"phoenix://other/key3",
+		},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://test/key1"] != "value1" {
+		t.Fatalf("key1 = %v, want 'value1'", values["phoenix://test/key1"])
+	}
+	if values["phoenix://test/key2"] != "value2" {
+		t.Fatalf("key2 = %v, want 'value2'", values["phoenix://test/key2"])
+	}
+	if values["phoenix://other/key3"] != "value3" {
+		t.Fatalf("key3 = %v, want 'value3'", values["phoenix://other/key3"])
+	}
+
+	// No errors field when all succeed
+	if resp["errors"] != nil {
+		t.Fatalf("expected no errors, got %v", resp["errors"])
+	}
+}
+
+func TestResolvePartialFailure(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed one secret
+	body, _ := json.Marshal(setSecretRequest{Value: "exists"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/exists", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Resolve mix of valid, not-found, and invalid refs
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/exists",       // exists
+			"phoenix://test/missing",      // not found
+			"not-a-ref",                   // invalid scheme
+			"phoenix://noslash",           // invalid path
+		},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://test/exists"] != "exists" {
+		t.Fatalf("exists = %v, want 'exists'", values["phoenix://test/exists"])
+	}
+	if len(values) != 1 {
+		t.Fatalf("expected 1 value, got %d", len(values))
+	}
+
+	errors := resp["errors"].(map[string]interface{})
+	if len(errors) != 3 {
+		t.Fatalf("expected 3 errors, got %d: %v", len(errors), errors)
+	}
+	if errors["phoenix://test/missing"] != "secret not found" {
+		t.Fatalf("missing error = %v", errors["phoenix://test/missing"])
+	}
+}
+
+func TestResolveACLEnforcement(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets in test/ and other/ namespaces
+	for _, s := range []struct{ path, value string }{
+		{"test/readable", "reader-can-see"},
+		{"other/hidden", "reader-cannot-see"},
+	} {
+		body, _ := json.Marshal(setSecretRequest{Value: s.value})
+		req := httptest.NewRequest("PUT", "/v1/secrets/"+s.path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+	}
+
+	// Resolve as reader (has test/* read, NOT other/*)
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/readable",
+			"phoenix://other/hidden",
+		},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://test/readable"] != "reader-can-see" {
+		t.Fatalf("readable = %v", values["phoenix://test/readable"])
+	}
+
+	errors := resp["errors"].(map[string]interface{})
+	if errors["phoenix://other/hidden"] != "access denied" {
+		t.Fatalf("hidden error = %v, want 'access denied'", errors["phoenix://other/hidden"])
+	}
+}
+
+func TestResolveRequiresAuth(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://test/key"},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("unauthenticated resolve: expected 401, got %d", w.Code)
+	}
+}
+
+func TestResolveEmptyRefs(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("empty refs: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
