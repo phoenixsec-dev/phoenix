@@ -980,6 +980,90 @@ func TestResolveRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestResolveAuditsAllPaths(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed one secret
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/audited", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup: expected 200, got %d", w.Code)
+	}
+
+	// Resolve: 1 success, 1 not-found, 1 malformed ref
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/audited",  // success
+			"phoenix://test/missing",  // not found
+			"not-a-ref",               // malformed
+		},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Query audit log for resolve entries
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit query: expected 200, got %d", w.Code)
+	}
+
+	var auditResp struct {
+		Entries []struct {
+			Agent  string `json:"agent"`
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	// Filter to resolve entries only (ignore set audit entries from setup)
+	type resolveEntry struct {
+		path, status, reason string
+	}
+	var resolves []resolveEntry
+	for _, e := range auditResp.Entries {
+		if e.Action == "resolve" {
+			resolves = append(resolves, resolveEntry{e.Path, e.Status, e.Reason})
+		}
+	}
+
+	if len(resolves) != 3 {
+		t.Fatalf("expected 3 resolve audit entries, got %d: %+v", len(resolves), resolves)
+	}
+
+	// Check each expected audit entry exists
+	found := map[string]bool{"allowed": false, "not_found": false, "malformed_ref": false}
+	for _, e := range resolves {
+		switch {
+		case e.status == "allowed" && e.path == "test/audited":
+			found["allowed"] = true
+		case e.status == "denied" && e.reason == "not_found" && e.path == "test/missing":
+			found["not_found"] = true
+		case e.status == "denied" && e.reason == "malformed_ref" && e.path == "not-a-ref":
+			found["malformed_ref"] = true
+		}
+	}
+
+	for kind, ok := range found {
+		if !ok {
+			t.Errorf("missing audit entry for %s; got entries: %+v", kind, resolves)
+		}
+	}
+}
+
 func TestResolveEmptyRefs(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 

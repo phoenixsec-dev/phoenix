@@ -547,6 +547,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	for _, refStr := range req.Refs {
 		path, err := ref.Parse(refStr)
 		if err != nil {
+			s.audit.LogDenied(agentName, "resolve", refStr, ip, "malformed_ref")
 			errors[refStr] = err.Error()
 			continue
 		}
@@ -560,10 +561,13 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		secret, err := s.store.Get(path)
 		if err != nil {
 			if err == store.ErrSecretNotFound {
+				s.audit.LogDenied(agentName, "resolve", path, ip, "not_found")
 				errors[refStr] = "secret not found"
 			} else if err == store.ErrInvalidPath {
+				s.audit.LogDenied(agentName, "resolve", path, ip, "invalid_path")
 				errors[refStr] = "invalid path"
 			} else {
+				s.audit.LogDenied(agentName, "resolve", path, ip, "internal_error")
 				log.Printf("error resolving %q for %s: %v", path, agentName, err)
 				errors[refStr] = "internal error"
 			}
