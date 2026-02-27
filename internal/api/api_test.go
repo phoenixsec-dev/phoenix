@@ -17,6 +17,7 @@ import (
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
 )
 
@@ -1077,5 +1078,217 @@ func TestResolveEmptyRefs(t *testing.T) {
 
 	if w.Code != 400 {
 		t.Fatalf("empty refs: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Attestation policy tests ---
+
+func TestAttestationDenyBearerOnGet(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-value"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/secure/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup: expected 200, got %d", w.Code)
+	}
+
+	// Configure policy: secure/* denies bearer
+	p, err := policy.Load([]byte(`{
+		"attestation": {
+			"secure/*": {
+				"deny_bearer": true,
+				"require_mtls": true
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	srv.SetPolicy(p)
+
+	// Try to GET with bearer — should be denied
+	req = httptest.NewRequest("GET", "/v1/secrets/secure/key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for bearer-denied policy, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var errResp map[string]string
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp["error"], "attestation") {
+		t.Fatalf("expected attestation error, got: %s", errResp["error"])
+	}
+}
+
+func TestAttestationSourceIPOnResolve(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "ip-bound"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/infra/db-pass", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure policy: infra/* requires specific source IP
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"infra/*": {
+				"source_ip": ["10.0.0.5"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Resolve from default test IP (127.0.0.1) — should fail attestation
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://infra/db-pass"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.50:12345"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ := resp["errors"].(map[string]interface{})
+	if errors["phoenix://infra/db-pass"] != "attestation required" {
+		t.Fatalf("expected attestation required error, got: %v", resp)
+	}
+
+	// Resolve from allowed IP — should succeed
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://infra/db-pass"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "10.0.0.5:12345"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://infra/db-pass"] != "ip-bound" {
+		t.Fatalf("expected 'ip-bound', got: %v", values)
+	}
+}
+
+func TestAttestationNoPolicyAllowsAll(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// No policy configured — any request should pass attestation
+	body, _ := json.Marshal(setSecretRequest{Value: "open"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/open", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/test/open", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("no policy should allow: expected 200, got %d", w.Code)
+	}
+}
+
+func TestAttestationUnmatchedPathPasses(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Policy only covers secure/* — other paths unaffected
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"secure/*": {
+				"deny_bearer": true
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "unprotected"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/free", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/test/free", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("unmatched path should allow: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttestationAuditsDenial(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "guarded"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/locked/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure policy that will deny
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"locked/*": {
+				"source_ip": ["10.10.10.10"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Resolve from wrong IP
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://locked/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.1:9999"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Query audit log for the attestation denial
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var auditResp struct {
+		Entries []struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	found := false
+	for _, e := range auditResp.Entries {
+		if e.Action == "resolve" && e.Path == "locked/key" && e.Status == "denied" && e.Reason == "attestation" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected audit entry with reason=attestation for locked/key, got: %+v", auditResp.Entries)
 	}
 }
