@@ -327,11 +327,19 @@ func (s *Store) Count() int {
 }
 
 // RotateMasterKey re-wraps all namespace DEKs under a new master key.
-// The caller is responsible for persisting the new master key to disk
-// (via FileKeyProvider.MasterKey()) and backing up the old key.
+//
+// The afterSave callback, if non-nil, runs after the store is persisted
+// but before the store lock is released. This lets the caller atomically
+// write the key file while no concurrent reads can observe partial state.
+// If afterSave returns an error, the store reverts to the old namespace
+// entries and re-saves, and the provider's pending key is rolled back.
+//
+// When afterSave is nil (e.g. in unit tests), the provider's rotation is
+// auto-committed after a successful save.
+//
 // This operation is O(namespaces), not O(secrets), because only the
 // DEK wrappers change — secret ciphertext remains untouched.
-func (s *Store) RotateMasterKey() (int, error) {
+func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -346,13 +354,17 @@ func (s *Store) RotateMasterKey() (int, error) {
 		return 0, nil
 	}
 
+	// Snapshot old namespace entries for rollback
+	oldEntries := make([]namespaceDEK, len(nsNames))
 	wrappedDEKs := make([]*crypto.WrappedDEK, len(nsNames))
 	for i, name := range nsNames {
+		oldEntries[i] = s.data.Namespaces[name]
 		w := s.data.Namespaces[name].Wrapped
 		wrappedDEKs[i] = &w
 	}
 
-	// Rotate: unwrap all with old key, generate new key, re-wrap all
+	// Rotate: unwrap all with old key, generate new key, re-wrap all.
+	// The provider stages the new key (does not swap yet).
 	newWrapped, err := s.provider.RotateMaster(wrappedDEKs)
 	if err != nil {
 		return 0, fmt.Errorf("rotating master key: %w", err)
@@ -365,9 +377,35 @@ func (s *Store) RotateMasterKey() (int, error) {
 
 	// Persist the updated store atomically
 	if err := s.save(); err != nil {
+		// Rollback: restore old namespace entries + discard staged key
+		for i, name := range nsNames {
+			s.data.Namespaces[name] = oldEntries[i]
+		}
+		s.provider.RollbackRotation()
 		return 0, fmt.Errorf("saving store after rotation: %w", err)
 	}
 
+	// Run post-save callback (e.g. write key file) while still under lock.
+	// No concurrent reads can see the new DEKs until we release the lock.
+	if afterSave != nil {
+		if err := afterSave(); err != nil {
+			// Rollback: restore old namespace entries and re-save
+			for i, name := range nsNames {
+				s.data.Namespaces[name] = oldEntries[i]
+			}
+			if saveErr := s.save(); saveErr != nil {
+				// Both the callback and rollback save failed — critical state.
+				// Log both errors so an operator can recover from .prev backup.
+				s.provider.RollbackRotation()
+				return 0, fmt.Errorf("post-save callback failed: %w; rollback save also failed: %v (restore from .prev backup)", err, saveErr)
+			}
+			s.provider.RollbackRotation()
+			return 0, fmt.Errorf("post-save callback: %w", err)
+		}
+	}
+
+	// Both writes succeeded — commit the provider key swap
+	s.provider.CommitRotation()
 	return len(nsNames), nil
 }
 

@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -217,7 +219,7 @@ func TestRotateMasterKeySecretsReadable(t *testing.T) {
 	s.Set("ns3/deep/path", "deep-value", "vector", "", nil)
 
 	// Rotate master key
-	rotated, err := s.RotateMasterKey()
+	rotated, err := s.RotateMasterKey(nil)
 	if err != nil {
 		t.Fatalf("RotateMasterKey: %v", err)
 	}
@@ -254,7 +256,7 @@ func TestRotateMasterKeySecretsReadable(t *testing.T) {
 func TestRotateMasterKeyEmptyStore(t *testing.T) {
 	s := newTestStore(t)
 
-	rotated, err := s.RotateMasterKey()
+	rotated, err := s.RotateMasterKey(nil)
 	if err != nil {
 		t.Fatalf("RotateMasterKey on empty store: %v", err)
 	}
@@ -274,7 +276,7 @@ func TestRotateMasterKeyPersistence(t *testing.T) {
 	s1.Set("test/secret", "original-value", "vector", "", nil)
 
 	// Rotate
-	_, err := s1.RotateMasterKey()
+	_, err := s1.RotateMasterKey(nil)
 	if err != nil {
 		t.Fatalf("RotateMasterKey: %v", err)
 	}
@@ -314,7 +316,7 @@ func TestRotateMasterKeyRollback(t *testing.T) {
 	os.WriteFile(storeBackup, data, 0600)
 
 	// Rotate
-	s1.RotateMasterKey()
+	s1.RotateMasterKey(nil)
 
 	// Restore old store from backup
 	data, _ = os.ReadFile(storeBackup)
@@ -340,7 +342,7 @@ func TestRotateMasterKeyNewSecretsWork(t *testing.T) {
 
 	// Seed and rotate
 	s.Set("ns1/key", "before", "vector", "", nil)
-	s.RotateMasterKey()
+	s.RotateMasterKey(nil)
 
 	// Write new secrets after rotation
 	if err := s.Set("ns1/key2", "after", "vector", "", nil); err != nil {
@@ -362,5 +364,183 @@ func TestRotateMasterKeyNewSecretsWork(t *testing.T) {
 	sec3, _ := s.Get("ns2/new")
 	if sec3.Value != "new-ns" {
 		t.Fatalf("new namespace secret = %q, want 'new-ns'", sec3.Value)
+	}
+}
+
+func TestRotateMasterKeyCallbackFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "master.key")
+	masterKey, _ := crypto.GenerateAndSaveMasterKey(keyPath)
+	storePath := filepath.Join(dir, "store.json")
+
+	s, _ := New(storePath, masterKey)
+	s.Set("ns1/key1", "value1", "vector", "", nil)
+	s.Set("ns2/key2", "value2", "vector", "", nil)
+
+	// Capture old key
+	provider := s.Provider().(*crypto.FileKeyProvider)
+	oldKey := make([]byte, len(provider.MasterKey()))
+	copy(oldKey, provider.MasterKey())
+
+	// Rotate with a callback that always fails
+	callbackErr := fmt.Errorf("simulated key file write failure")
+	_, err := s.RotateMasterKey(func() error {
+		return callbackErr
+	})
+	if err == nil {
+		t.Fatal("expected error from failing callback")
+	}
+
+	// Provider key should NOT have changed (rollback)
+	if !bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("provider key changed despite callback failure")
+	}
+
+	// Pending key should be cleared
+	if provider.PendingMasterKey() != nil {
+		t.Fatal("pending key not cleared after callback failure rollback")
+	}
+
+	// Secrets should still be readable with old key
+	sec1, err := s.Get("ns1/key1")
+	if err != nil {
+		t.Fatalf("Get ns1/key1 after rollback: %v", err)
+	}
+	if sec1.Value != "value1" {
+		t.Fatalf("ns1/key1 = %q, want 'value1'", sec1.Value)
+	}
+	sec2, err := s.Get("ns2/key2")
+	if err != nil {
+		t.Fatalf("Get ns2/key2 after rollback: %v", err)
+	}
+	if sec2.Value != "value2" {
+		t.Fatalf("ns2/key2 = %q, want 'value2'", sec2.Value)
+	}
+
+	// Store file should also be rolled back (old DEKs re-saved)
+	// Verify by opening a new store with the old key
+	s2, err := New(storePath, oldKey)
+	if err != nil {
+		t.Fatalf("reopen store with old key after rollback: %v", err)
+	}
+	sec, err := s2.Get("ns1/key1")
+	if err != nil {
+		t.Fatalf("new store Get after rollback: %v", err)
+	}
+	if sec.Value != "value1" {
+		t.Fatalf("persisted value = %q, want 'value1'", sec.Value)
+	}
+}
+
+func TestRotateMasterKeySaveFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "master.key")
+	masterKey, _ := crypto.GenerateAndSaveMasterKey(keyPath)
+
+	// Point the store at a read-only directory to force save() to fail
+	readOnlyDir := filepath.Join(dir, "readonly")
+	os.MkdirAll(readOnlyDir, 0700)
+	storePath := filepath.Join(readOnlyDir, "store.json")
+
+	// Create store and seed data (save works while dir is writable)
+	s, _ := New(storePath, masterKey)
+	s.Set("ns1/key1", "value1", "vector", "", nil)
+
+	// Make the directory read-only to force save failure
+	os.Chmod(readOnlyDir, 0500)
+	defer os.Chmod(readOnlyDir, 0700) // cleanup
+
+	provider := s.Provider().(*crypto.FileKeyProvider)
+	oldKey := make([]byte, len(provider.MasterKey()))
+	copy(oldKey, provider.MasterKey())
+
+	// Rotate should fail on save
+	_, err := s.RotateMasterKey(nil)
+	if err == nil {
+		t.Fatal("expected error from failed save")
+	}
+
+	// Provider key should NOT have changed
+	if !bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("provider key changed despite save failure")
+	}
+
+	// Pending key should be cleared
+	if provider.PendingMasterKey() != nil {
+		t.Fatal("pending key not cleared after save failure rollback")
+	}
+
+	// Secrets should still be readable in memory
+	sec, err := s.Get("ns1/key1")
+	if err != nil {
+		t.Fatalf("Get after save failure: %v", err)
+	}
+	if sec.Value != "value1" {
+		t.Fatalf("value = %q, want 'value1'", sec.Value)
+	}
+}
+
+func TestRotateMasterKeyCallbackSuccessCommits(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "master.key")
+	masterKey, _ := crypto.GenerateAndSaveMasterKey(keyPath)
+	storePath := filepath.Join(dir, "store.json")
+
+	s, _ := New(storePath, masterKey)
+	s.Set("ns1/key1", "value1", "vector", "", nil)
+
+	provider := s.Provider().(*crypto.FileKeyProvider)
+	oldKey := make([]byte, len(provider.MasterKey()))
+	copy(oldKey, provider.MasterKey())
+
+	var savedKey []byte
+
+	// Rotate with a callback that captures the pending key (simulates key file write)
+	rotated, err := s.RotateMasterKey(func() error {
+		pending := provider.PendingMasterKey()
+		if pending == nil {
+			return fmt.Errorf("no pending key")
+		}
+		savedKey = make([]byte, len(pending))
+		copy(savedKey, pending)
+		return crypto.SaveMasterKeyAtomic(keyPath, pending)
+	})
+	if err != nil {
+		t.Fatalf("RotateMasterKey: %v", err)
+	}
+	if rotated != 1 {
+		t.Fatalf("expected 1 namespace rotated, got %d", rotated)
+	}
+
+	// Provider key should have changed (committed)
+	if bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("provider key did not change after successful rotation")
+	}
+
+	// The new key should match what we captured
+	if !bytes.Equal(savedKey, provider.MasterKey()) {
+		t.Fatal("committed key does not match the pending key we saved")
+	}
+
+	// Secrets should be readable
+	sec, err := s.Get("ns1/key1")
+	if err != nil {
+		t.Fatalf("Get after rotation: %v", err)
+	}
+	if sec.Value != "value1" {
+		t.Fatalf("value = %q, want 'value1'", sec.Value)
+	}
+
+	// Verify persistence: reopen store with the new key
+	s2, err := New(storePath, provider.MasterKey())
+	if err != nil {
+		t.Fatalf("reopen store with new key: %v", err)
+	}
+	sec2, err := s2.Get("ns1/key1")
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if sec2.Value != "value1" {
+		t.Fatalf("persisted value = %q, want 'value1'", sec2.Value)
 	}
 }

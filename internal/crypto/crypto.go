@@ -175,6 +175,21 @@ func GenerateAndSaveMasterKey(path string) ([]byte, error) {
 	return key, nil
 }
 
+// SaveMasterKeyAtomic writes a master key to disk using write-tmp + rename
+// for crash safety. This matches the atomic write pattern used by store.save().
+func SaveMasterKeyAtomic(path string, key []byte) error {
+	encoded := base64.StdEncoding.EncodeToString(key)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(encoded), 0600); err != nil {
+		return fmt.Errorf("writing temp key file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("renaming temp key file: %w", err)
+	}
+	return nil
+}
+
 // HashToken produces a SHA-256 hash of a bearer token for storage in ACL files.
 func HashToken(token string) string {
 	h := sha256.Sum256([]byte(token))

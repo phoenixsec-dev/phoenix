@@ -721,3 +721,97 @@ func TestRotateMasterKeyEmptyStore(t *testing.T) {
 		t.Fatalf("expected 0 namespaces rotated on empty store, got %d", rotated)
 	}
 }
+
+func TestRotateMasterKeyFileWriteFailureRollsBack(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "precious"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup SET: expected 200, got %d", w.Code)
+	}
+
+	// Make the master key file's directory unwritable to force key file write failure
+	keyDir := filepath.Dir(srv.masterKeyPath)
+	os.Chmod(keyDir, 0500)
+	defer os.Chmod(keyDir, 0700)
+
+	// Attempt rotation — should fail and roll back
+	req = httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 500 {
+		t.Fatalf("expected 500 on key write failure, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Restore write permissions
+	os.Chmod(keyDir, 0700)
+
+	// Secret should still be readable (rollback preserved old state)
+	req = httptest.NewRequest("GET", "/v1/secrets/test/key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("GET after failed rotation: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var secret store.Secret
+	json.NewDecoder(w.Body).Decode(&secret)
+	if secret.Value != "precious" {
+		t.Fatalf("secret value after rollback = %q, want 'precious'", secret.Value)
+	}
+
+	// A subsequent rotation should succeed (state is clean)
+	req = httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("retry rotation: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRotateMasterKeyPersistenceWithNewKey(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets
+	body, _ := json.Marshal(setSecretRequest{Value: "persist-test"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/persist", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Rotate
+	req = httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("rotate: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Load the new key from disk and verify it matches the provider
+	newKey, err := crypto.LoadMasterKey(srv.masterKeyPath)
+	if err != nil {
+		t.Fatalf("loading new master key from disk: %v", err)
+	}
+
+	provider := srv.store.Provider().(*crypto.FileKeyProvider)
+	if !bytes.Equal(newKey, provider.MasterKey()) {
+		t.Fatal("key on disk does not match in-memory provider key after rotation")
+	}
+
+	// Pending key should be nil (committed)
+	if provider.PendingMasterKey() != nil {
+		t.Fatal("pending key still set after successful rotation")
+	}
+}

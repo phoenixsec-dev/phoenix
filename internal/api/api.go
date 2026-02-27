@@ -2,7 +2,6 @@
 package api
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -466,6 +465,14 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify provider is FileKeyProvider before we start
+	provider, ok := s.store.Provider().(*crypto.FileKeyProvider)
+	if !ok {
+		log.Printf("rotation not supported: provider is %T, not FileKeyProvider", s.store.Provider())
+		jsonError(w, "rotation not supported for this provider type", http.StatusInternalServerError)
+		return
+	}
+
 	// Backup the old master key as .prev
 	oldKey, err := os.ReadFile(s.masterKeyPath)
 	if err != nil {
@@ -480,26 +487,19 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rotate: re-wrap all DEKs under a new master key
-	rotated, err := s.store.RotateMasterKey()
+	// Rotate with afterSave callback: the callback writes the new key file
+	// atomically while the store lock is held, preventing any window where
+	// the store has new DEKs but the key file still has the old key.
+	rotated, err := s.store.RotateMasterKey(func() error {
+		pendingKey := provider.PendingMasterKey()
+		if pendingKey == nil {
+			return fmt.Errorf("no pending key after rotation")
+		}
+		return crypto.SaveMasterKeyAtomic(s.masterKeyPath, pendingKey)
+	})
 	if err != nil {
 		log.Printf("error rotating master key: %v", err)
 		jsonError(w, "rotation failed", http.StatusInternalServerError)
-		return
-	}
-
-	// Persist the new master key to disk
-	provider, ok := s.store.Provider().(*crypto.FileKeyProvider)
-	if !ok {
-		log.Printf("rotation succeeded but cannot persist key: provider is %T, not FileKeyProvider", s.store.Provider())
-		jsonError(w, "rotation succeeded but key persistence not supported for this provider", http.StatusInternalServerError)
-		return
-	}
-
-	encoded := base64.StdEncoding.EncodeToString(provider.MasterKey())
-	if err := os.WriteFile(s.masterKeyPath, []byte(encoded), 0600); err != nil {
-		log.Printf("error writing new master key: %v", err)
-		jsonError(w, "rotation succeeded but key write failed — restore from .prev", http.StatusInternalServerError)
 		return
 	}
 
@@ -507,8 +507,8 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	log.Printf("master key rotated by %s: %d namespaces re-wrapped", agentName, rotated)
 
 	jsonOK(w, map[string]interface{}{
-		"status":     "ok",
-		"rotated":    rotated,
-		"backup":     prevPath,
+		"status":  "ok",
+		"rotated": rotated,
+		"backup":  prevPath,
 	})
 }
