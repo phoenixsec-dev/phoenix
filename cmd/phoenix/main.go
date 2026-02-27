@@ -822,8 +822,18 @@ func cmdExec(args []string) error {
 		return fmt.Errorf("failed to resolve %d reference(s)", len(result.Errors))
 	}
 
-	// Build env: inherit current env + add resolved secrets
-	env := os.Environ()
+	// Build env: inherit current env but strip Phoenix credentials
+	// to prevent the child from escalating access beyond mapped refs.
+	var env []string
+	for _, e := range os.Environ() {
+		key := e[:strings.IndexByte(e, '=')]
+		switch key {
+		case "PHOENIX_TOKEN", "PHOENIX_CLIENT_CERT", "PHOENIX_CLIENT_KEY",
+			"PHOENIX_CA_CERT", "PHOENIX_SERVER", "PHOENIX_POLICY":
+			continue // strip broker credentials
+		}
+		env = append(env, e)
+	}
 	for _, m := range mappings {
 		val, ok := result.Values[m.ref]
 		if !ok {

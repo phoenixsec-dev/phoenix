@@ -156,6 +156,8 @@ func (e *Engine) Rules() map[string]Rule {
 
 // matchRule finds the most specific rule matching the secret path.
 // More specific = longer pattern prefix before wildcard.
+// Ties are broken lexicographically by pattern to ensure deterministic
+// evaluation regardless of map iteration order.
 func (e *Engine) matchRule(secretPath string) (*Rule, string) {
 	var bestRule *Rule
 	var bestPattern string
@@ -164,7 +166,7 @@ func (e *Engine) matchRule(secretPath string) (*Rule, string) {
 	for pattern, rule := range e.rules {
 		if matchPath(pattern, secretPath) {
 			spec := specificity(pattern)
-			if spec > bestSpecificity {
+			if spec > bestSpecificity || (spec == bestSpecificity && pattern < bestPattern) {
 				r := rule // copy
 				bestRule = &r
 				bestPattern = pattern

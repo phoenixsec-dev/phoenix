@@ -236,9 +236,14 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		allPaths := s.store.List(path)
 		var visible []string
 		for _, p := range allPaths {
-			if s.acl.Authorize(agentName, p, acl.ActionRead) == nil {
-				visible = append(visible, p)
+			if s.acl.Authorize(agentName, p, acl.ActionRead) != nil {
+				continue
 			}
+			// Attestation check: hide paths the caller can't attest for
+			if s.attest(r, p, info) != nil {
+				continue
+			}
+			visible = append(visible, p)
 		}
 		s.audit.LogAllowed(agentName, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"paths": visible})

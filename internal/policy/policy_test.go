@@ -308,6 +308,34 @@ func TestNewEngineAllowsAll(t *testing.T) {
 	}
 }
 
+func TestEqualSpecificityDeterministic(t *testing.T) {
+	// secure/* and secure/** have equal specificity (len("secure/") == 7).
+	// The lexicographically smaller pattern ("secure/*") must always win
+	// regardless of map iteration order.
+	cfg := `{
+		"attestation": {
+			"secure/**": {
+				"deny_bearer": false
+			},
+			"secure/*": {
+				"deny_bearer": true
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Run many times to catch map iteration nondeterminism
+	for i := 0; i < 100; i++ {
+		err := e.Evaluate("secure/key", &RequestContext{UsedBearer: true})
+		if err == nil {
+			t.Fatalf("iteration %d: expected deny (secure/* should always win), but got allow", i)
+		}
+	}
+}
+
 func TestRulesReturnsCopy(t *testing.T) {
 	cfg := `{
 		"attestation": {

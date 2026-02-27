@@ -1292,3 +1292,64 @@ func TestAttestationAuditsDenial(t *testing.T) {
 		t.Fatalf("expected audit entry with reason=attestation for locked/key, got: %+v", auditResp.Entries)
 	}
 }
+
+func TestAttestationListModeHidesProtectedPaths(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets in two namespaces
+	for _, s := range []struct{ path, value string }{
+		{"open/key1", "v1"},
+		{"locked/key2", "v2"},
+	} {
+		body, _ := json.Marshal(setSecretRequest{Value: s.value})
+		req := httptest.NewRequest("PUT", "/v1/secrets/"+s.path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("setup SET %s: expected 200, got %d", s.path, w.Code)
+		}
+	}
+
+	// Configure policy: locked/* requires specific IP (bearer caller won't match)
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"locked/*": {
+				"source_ip": ["10.10.10.10"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// List all secrets as admin (bearer, from default IP)
+	req := httptest.NewRequest("GET", "/v1/secrets/", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.1:9999"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("list: expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Paths []string `json:"paths"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	// open/key1 should be visible, locked/key2 should be hidden by attestation
+	for _, p := range resp.Paths {
+		if strings.HasPrefix(p, "locked/") {
+			t.Fatalf("locked/ paths should be hidden by attestation, but found %q in list: %v", p, resp.Paths)
+		}
+	}
+	foundOpen := false
+	for _, p := range resp.Paths {
+		if p == "open/key1" {
+			foundOpen = true
+		}
+	}
+	if !foundOpen {
+		t.Fatalf("expected open/key1 in list, got: %v", resp.Paths)
+	}
+}
