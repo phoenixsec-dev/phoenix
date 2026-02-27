@@ -11,6 +11,10 @@
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
 //	phoenix agent create <name> --token <token> --acl <path:actions,...>
 //	phoenix agent list
+//	phoenix resolve <ref> [ref...]
+//	phoenix exec --env KEY=phoenix://ns/secret -- <command> [args...]
+//	phoenix policy show <path>
+//	phoenix policy test --agent <name> --ip <ip> <path>
 //	phoenix init <dir>
 package main
 
@@ -23,8 +27,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 var (
@@ -129,6 +135,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "resolve":
+		err = cmdResolve(args)
+	case "exec":
+		err = cmdExec(args)
+	case "policy":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix policy <show|test>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "show":
+			err = cmdPolicyShow(args[1:])
+		case "test":
+			err = cmdPolicyTest(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown policy subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "rotate-master":
 		err = cmdRotateMaster()
 	case "cert":
@@ -172,6 +196,10 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
+  phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
+  phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
+  phoenix policy show <path>                  Show attestation requirements for path
+  phoenix policy test -a <agent> -i <ip> <p>  Dry-run attestation check
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix init <dir>                          Initialize data directory
@@ -181,7 +209,8 @@ Environment:
   PHOENIX_TOKEN        Bearer token for authentication
   PHOENIX_CA_CERT      CA certificate for TLS verification
   PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
-  PHOENIX_CLIENT_KEY   Client key for mTLS authentication`)
+  PHOENIX_CLIENT_KEY   Client key for mTLS authentication
+  PHOENIX_POLICY       Path to attestation policy file (JSON)`)
 }
 
 // requireAuth checks that at least one auth method is configured
@@ -658,6 +687,169 @@ func cmdAgentList() error {
 	return nil
 }
 
+func cmdResolve(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix resolve <phoenix://ns/secret> [ref...]")
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": args,
+	})
+
+	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Values map[string]string `json:"values"`
+		Errors map[string]string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	// Single ref: output raw value for piping
+	if len(args) == 1 {
+		if errMsg, ok := result.Errors[args[0]]; ok {
+			return fmt.Errorf("%s: %s", args[0], errMsg)
+		}
+		fmt.Print(result.Values[args[0]])
+		return nil
+	}
+
+	// Multiple refs: output ref → value pairs
+	var hasErr bool
+	for _, ref := range args {
+		if errMsg, ok := result.Errors[ref]; ok {
+			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
+			hasErr = true
+			continue
+		}
+		fmt.Printf("%s\t%s\n", ref, result.Values[ref])
+	}
+	if hasErr {
+		return fmt.Errorf("some references failed to resolve")
+	}
+	return nil
+}
+
+func cmdExec(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	// Parse --env flags before "--", command after "--"
+	var envMappings []string
+	var cmdArgs []string
+	seenSep := false
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			cmdArgs = args[i+1:]
+			seenSep = true
+			break
+		}
+		switch args[i] {
+		case "--env", "-e":
+			i++
+			if i < len(args) {
+				envMappings = append(envMappings, args[i])
+			}
+		}
+	}
+
+	if !seenSep || len(cmdArgs) == 0 {
+		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret -- <command> [args...]")
+	}
+	if len(envMappings) == 0 {
+		return fmt.Errorf("at least one --env mapping is required")
+	}
+
+	// Parse env mappings: KEY=phoenix://ns/secret
+	type envMapping struct {
+		envVar string
+		ref    string
+	}
+	var mappings []envMapping
+	var refs []string
+
+	for _, m := range envMappings {
+		parts := strings.SplitN(m, "=", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("invalid env mapping %q: expected KEY=phoenix://ns/secret", m)
+		}
+		if !strings.HasPrefix(parts[1], "phoenix://") {
+			return fmt.Errorf("invalid env mapping %q: value must be a phoenix:// reference", m)
+		}
+		mappings = append(mappings, envMapping{envVar: parts[0], ref: parts[1]})
+		refs = append(refs, parts[1])
+	}
+
+	// Resolve all refs in one batch
+	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
+	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("resolve request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Values map[string]string `json:"values"`
+		Errors map[string]string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding resolve response: %w", err)
+	}
+
+	// Check for resolution errors
+	if len(result.Errors) > 0 {
+		for ref, errMsg := range result.Errors {
+			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", ref, errMsg)
+		}
+		return fmt.Errorf("failed to resolve %d reference(s)", len(result.Errors))
+	}
+
+	// Build env: inherit current env but strip Phoenix credentials
+	// to prevent the child from escalating access beyond mapped refs.
+	var env []string
+	for _, e := range os.Environ() {
+		key := e[:strings.IndexByte(e, '=')]
+		switch key {
+		case "PHOENIX_TOKEN", "PHOENIX_CLIENT_CERT", "PHOENIX_CLIENT_KEY",
+			"PHOENIX_CA_CERT", "PHOENIX_SERVER", "PHOENIX_POLICY":
+			continue // strip broker credentials
+		}
+		env = append(env, e)
+	}
+	for _, m := range mappings {
+		val, ok := result.Values[m.ref]
+		if !ok {
+			return fmt.Errorf("no value returned for %s", m.ref)
+		}
+		env = append(env, m.envVar+"="+val)
+	}
+
+	// Exec into the child process (replaces current process)
+	binary, err := exec.LookPath(cmdArgs[0])
+	if err != nil {
+		return fmt.Errorf("command not found: %s", cmdArgs[0])
+	}
+	return syscall.Exec(binary, cmdArgs, env)
+}
+
 func cmdRotateMaster() error {
 	if err := requireAuth(); err != nil {
 		return err
@@ -753,6 +945,185 @@ func cmdCertIssue(args []string) error {
 	fmt.Printf("  cert: %s\n", certPath)
 	fmt.Printf("  key:  %s\n", keyPath)
 	fmt.Printf("  CA:   %s\n", caPath)
+	return nil
+}
+
+func cmdPolicyShow(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix policy show <secret-path>")
+	}
+	path := args[0]
+
+	policyPath := os.Getenv("PHOENIX_POLICY")
+	if policyPath == "" {
+		return fmt.Errorf("PHOENIX_POLICY environment variable not set")
+	}
+
+	data, err := os.ReadFile(policyPath)
+	if err != nil {
+		return fmt.Errorf("reading policy file: %w", err)
+	}
+
+	// Parse the policy to find matching rule
+	var pf struct {
+		Attestation map[string]json.RawMessage `json:"attestation"`
+	}
+	if err := json.Unmarshal(data, &pf); err != nil {
+		return fmt.Errorf("parsing policy: %w", err)
+	}
+
+	if len(pf.Attestation) == 0 {
+		fmt.Printf("No attestation policies configured.\n")
+		return nil
+	}
+
+	// Find matching patterns (simple display)
+	found := false
+	for pattern, raw := range pf.Attestation {
+		if matchesPattern(pattern, path) {
+			fmt.Printf("Pattern: %s\n", pattern)
+			var rule map[string]interface{}
+			json.Unmarshal(raw, &rule)
+			for k, v := range rule {
+				formatted, _ := json.Marshal(v)
+				fmt.Printf("  %s: %s\n", k, string(formatted))
+			}
+			found = true
+		}
+	}
+
+	if !found {
+		fmt.Printf("No attestation policy matches path %q\n", path)
+	}
+	return nil
+}
+
+// matchesPattern does simple glob matching for CLI display.
+func matchesPattern(pattern, path string) bool {
+	if pattern == "*" || pattern == "**" {
+		return true
+	}
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := strings.TrimSuffix(pattern, "/**")
+		return strings.HasPrefix(path, prefix+"/") || path == prefix
+	}
+	if strings.HasSuffix(pattern, "/*") {
+		prefix := strings.TrimSuffix(pattern, "/*")
+		if !strings.HasPrefix(path, prefix+"/") {
+			return false
+		}
+		rest := strings.TrimPrefix(path, prefix+"/")
+		return !strings.Contains(rest, "/")
+	}
+	return pattern == path
+}
+
+func cmdPolicyTest(args []string) error {
+	var agent, ip, path string
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "-a", "--agent":
+			i++
+			if i < len(args) {
+				agent = args[i]
+			}
+		case "-i", "--ip":
+			i++
+			if i < len(args) {
+				ip = args[i]
+			}
+		default:
+			if path == "" {
+				path = args[i]
+			}
+		}
+		i++
+	}
+
+	if path == "" {
+		return fmt.Errorf("usage: phoenix policy test --agent <name> --ip <ip> <secret-path>")
+	}
+
+	policyPath := os.Getenv("PHOENIX_POLICY")
+	if policyPath == "" {
+		return fmt.Errorf("PHOENIX_POLICY environment variable not set")
+	}
+
+	data, err := os.ReadFile(policyPath)
+	if err != nil {
+		return fmt.Errorf("reading policy file: %w", err)
+	}
+
+	// Use a simple evaluation (no full policy.Engine import in CLI binary)
+	var pf struct {
+		Attestation map[string]struct {
+			RequireMTLS     bool     `json:"require_mtls"`
+			AllowedIPs      []string `json:"source_ip"`
+			CertFingerprint string   `json:"cert_fingerprint"`
+			DenyBearer      bool     `json:"deny_bearer"`
+		} `json:"attestation"`
+	}
+	if err := json.Unmarshal(data, &pf); err != nil {
+		return fmt.Errorf("parsing policy: %w", err)
+	}
+
+	fmt.Printf("Testing attestation for path %q\n", path)
+	if agent != "" {
+		fmt.Printf("  Agent: %s\n", agent)
+	}
+	if ip != "" {
+		fmt.Printf("  Source IP: %s\n", ip)
+	}
+	fmt.Println()
+
+	matched := false
+	for pattern, rule := range pf.Attestation {
+		if !matchesPattern(pattern, path) {
+			continue
+		}
+		matched = true
+		fmt.Printf("Matched policy: %s\n", pattern)
+
+		allPass := true
+		if rule.DenyBearer {
+			fmt.Printf("  [INFO] deny_bearer: bearer tokens are blocked\n")
+		}
+		if rule.RequireMTLS {
+			fmt.Printf("  [WARN] require_mtls: mTLS client cert required (not testable from CLI)\n")
+		}
+		if len(rule.AllowedIPs) > 0 {
+			if ip == "" {
+				fmt.Printf("  [SKIP] source_ip: %v (no --ip provided)\n", rule.AllowedIPs)
+			} else {
+				found := false
+				for _, allowed := range rule.AllowedIPs {
+					if allowed == ip {
+						found = true
+					}
+				}
+				if found {
+					fmt.Printf("  [PASS] source_ip: %s is in allowed list\n", ip)
+				} else {
+					fmt.Printf("  [FAIL] source_ip: %s is NOT in allowed list %v\n", ip, rule.AllowedIPs)
+					allPass = false
+				}
+			}
+		}
+		if rule.CertFingerprint != "" {
+			fmt.Printf("  [INFO] cert_fingerprint: %s (not testable from CLI)\n", rule.CertFingerprint)
+		}
+
+		if allPass {
+			fmt.Printf("  Result: PASS (testable checks passed)\n")
+		} else {
+			fmt.Printf("  Result: FAIL\n")
+		}
+	}
+
+	if !matched {
+		fmt.Printf("No attestation policy matches path %q — access allowed by default.\n", path)
+	}
 	return nil
 }
 

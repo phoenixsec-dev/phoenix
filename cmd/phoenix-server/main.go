@@ -23,6 +23,7 @@ import (
 	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/config"
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
 )
 
@@ -91,6 +92,16 @@ func main() {
 	srv := api.NewServer(s, a, al, cfg.Audit.Path)
 	srv.SetBearerEnabled(cfg.Auth.Bearer.Enabled)
 	srv.SetMasterKeyPath(cfg.Store.MasterKey)
+
+	// Load attestation policy if configured
+	if cfg.Policy.Path != "" {
+		pe, err := policy.LoadFile(cfg.Policy.Path)
+		if err != nil {
+			log.Fatalf("loading attestation policy: %v", err)
+		}
+		srv.SetPolicy(pe)
+		log.Printf("  Policy: %s (%d rules)", cfg.Policy.Path, len(pe.Rules()))
+	}
 
 	// Initialize CA for mTLS if enabled
 	var tlsCfg *tls.Config

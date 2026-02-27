@@ -17,6 +17,7 @@ import (
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
 )
 
@@ -813,5 +814,542 @@ func TestRotateMasterKeyPersistenceWithNewKey(t *testing.T) {
 	// Pending key should be nil (committed)
 	if provider.PendingMasterKey() != nil {
 		t.Fatal("pending key still set after successful rotation")
+	}
+}
+
+func TestResolveEndpoint(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets
+	for _, s := range []struct{ path, value string }{
+		{"test/key1", "value1"},
+		{"test/key2", "value2"},
+		{"other/key3", "value3"},
+	} {
+		body, _ := json.Marshal(setSecretRequest{Value: s.value})
+		req := httptest.NewRequest("PUT", "/v1/secrets/"+s.path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("setup SET %s: expected 200, got %d", s.path, w.Code)
+		}
+	}
+
+	// Resolve multiple refs as admin
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/key1",
+			"phoenix://test/key2",
+			"phoenix://other/key3",
+		},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://test/key1"] != "value1" {
+		t.Fatalf("key1 = %v, want 'value1'", values["phoenix://test/key1"])
+	}
+	if values["phoenix://test/key2"] != "value2" {
+		t.Fatalf("key2 = %v, want 'value2'", values["phoenix://test/key2"])
+	}
+	if values["phoenix://other/key3"] != "value3" {
+		t.Fatalf("key3 = %v, want 'value3'", values["phoenix://other/key3"])
+	}
+
+	// No errors field when all succeed
+	if resp["errors"] != nil {
+		t.Fatalf("expected no errors, got %v", resp["errors"])
+	}
+}
+
+func TestResolvePartialFailure(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed one secret
+	body, _ := json.Marshal(setSecretRequest{Value: "exists"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/exists", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Resolve mix of valid, not-found, and invalid refs
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/exists",       // exists
+			"phoenix://test/missing",      // not found
+			"not-a-ref",                   // invalid scheme
+			"phoenix://noslash",           // invalid path
+		},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://test/exists"] != "exists" {
+		t.Fatalf("exists = %v, want 'exists'", values["phoenix://test/exists"])
+	}
+	if len(values) != 1 {
+		t.Fatalf("expected 1 value, got %d", len(values))
+	}
+
+	errors := resp["errors"].(map[string]interface{})
+	if len(errors) != 3 {
+		t.Fatalf("expected 3 errors, got %d: %v", len(errors), errors)
+	}
+	if errors["phoenix://test/missing"] != "secret not found" {
+		t.Fatalf("missing error = %v", errors["phoenix://test/missing"])
+	}
+}
+
+func TestResolveACLEnforcement(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets in test/ and other/ namespaces
+	for _, s := range []struct{ path, value string }{
+		{"test/readable", "reader-can-see"},
+		{"other/hidden", "reader-cannot-see"},
+	} {
+		body, _ := json.Marshal(setSecretRequest{Value: s.value})
+		req := httptest.NewRequest("PUT", "/v1/secrets/"+s.path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+	}
+
+	// Resolve as reader (has test/* read, NOT other/*)
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/readable",
+			"phoenix://other/hidden",
+		},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://test/readable"] != "reader-can-see" {
+		t.Fatalf("readable = %v", values["phoenix://test/readable"])
+	}
+
+	errors := resp["errors"].(map[string]interface{})
+	if errors["phoenix://other/hidden"] != "access denied" {
+		t.Fatalf("hidden error = %v, want 'access denied'", errors["phoenix://other/hidden"])
+	}
+}
+
+func TestResolveRequiresAuth(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://test/key"},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("unauthenticated resolve: expected 401, got %d", w.Code)
+	}
+}
+
+func TestResolveAuditsAllPaths(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed one secret
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/audited", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup: expected 200, got %d", w.Code)
+	}
+
+	// Resolve: 1 success, 1 not-found, 1 malformed ref
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/audited",  // success
+			"phoenix://test/missing",  // not found
+			"not-a-ref",               // malformed
+		},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Query audit log for resolve entries
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit query: expected 200, got %d", w.Code)
+	}
+
+	var auditResp struct {
+		Entries []struct {
+			Agent  string `json:"agent"`
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	// Filter to resolve entries only (ignore set audit entries from setup)
+	type resolveEntry struct {
+		path, status, reason string
+	}
+	var resolves []resolveEntry
+	for _, e := range auditResp.Entries {
+		if e.Action == "resolve" {
+			resolves = append(resolves, resolveEntry{e.Path, e.Status, e.Reason})
+		}
+	}
+
+	if len(resolves) != 3 {
+		t.Fatalf("expected 3 resolve audit entries, got %d: %+v", len(resolves), resolves)
+	}
+
+	// Check each expected audit entry exists
+	found := map[string]bool{"allowed": false, "not_found": false, "malformed_ref": false}
+	for _, e := range resolves {
+		switch {
+		case e.status == "allowed" && e.path == "test/audited":
+			found["allowed"] = true
+		case e.status == "denied" && e.reason == "not_found" && e.path == "test/missing":
+			found["not_found"] = true
+		case e.status == "denied" && e.reason == "malformed_ref" && e.path == "not-a-ref":
+			found["malformed_ref"] = true
+		}
+	}
+
+	for kind, ok := range found {
+		if !ok {
+			t.Errorf("missing audit entry for %s; got entries: %+v", kind, resolves)
+		}
+	}
+}
+
+func TestResolveEmptyRefs(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("empty refs: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Attestation policy tests ---
+
+func TestAttestationDenyBearerOnGet(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-value"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/secure/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup: expected 200, got %d", w.Code)
+	}
+
+	// Configure policy: secure/* denies bearer
+	p, err := policy.Load([]byte(`{
+		"attestation": {
+			"secure/*": {
+				"deny_bearer": true,
+				"require_mtls": true
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	srv.SetPolicy(p)
+
+	// Try to GET with bearer — should be denied
+	req = httptest.NewRequest("GET", "/v1/secrets/secure/key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for bearer-denied policy, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var errResp map[string]string
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp["error"], "attestation") {
+		t.Fatalf("expected attestation error, got: %s", errResp["error"])
+	}
+}
+
+func TestAttestationSourceIPOnResolve(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "ip-bound"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/infra/db-pass", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure policy: infra/* requires specific source IP
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"infra/*": {
+				"source_ip": ["10.0.0.5"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Resolve from default test IP (127.0.0.1) — should fail attestation
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://infra/db-pass"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.50:12345"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors, _ := resp["errors"].(map[string]interface{})
+	if errors["phoenix://infra/db-pass"] != "attestation required" {
+		t.Fatalf("expected attestation required error, got: %v", resp)
+	}
+
+	// Resolve from allowed IP — should succeed
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://infra/db-pass"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "10.0.0.5:12345"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	resp = map[string]interface{}{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://infra/db-pass"] != "ip-bound" {
+		t.Fatalf("expected 'ip-bound', got: %v", values)
+	}
+}
+
+func TestAttestationNoPolicyAllowsAll(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// No policy configured — any request should pass attestation
+	body, _ := json.Marshal(setSecretRequest{Value: "open"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/open", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/test/open", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("no policy should allow: expected 200, got %d", w.Code)
+	}
+}
+
+func TestAttestationUnmatchedPathPasses(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Policy only covers secure/* — other paths unaffected
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"secure/*": {
+				"deny_bearer": true
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "unprotected"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/free", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/test/free", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("unmatched path should allow: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttestationAuditsDenial(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "guarded"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/locked/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure policy that will deny
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"locked/*": {
+				"source_ip": ["10.10.10.10"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Resolve from wrong IP
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://locked/key"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.1:9999"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Query audit log for the attestation denial
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var auditResp struct {
+		Entries []struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	found := false
+	for _, e := range auditResp.Entries {
+		if e.Action == "resolve" && e.Path == "locked/key" && e.Status == "denied" && e.Reason == "attestation" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected audit entry with reason=attestation for locked/key, got: %+v", auditResp.Entries)
+	}
+}
+
+func TestAttestationListModeHidesProtectedPaths(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed secrets in two namespaces
+	for _, s := range []struct{ path, value string }{
+		{"open/key1", "v1"},
+		{"locked/key2", "v2"},
+	} {
+		body, _ := json.Marshal(setSecretRequest{Value: s.value})
+		req := httptest.NewRequest("PUT", "/v1/secrets/"+s.path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("setup SET %s: expected 200, got %d", s.path, w.Code)
+		}
+	}
+
+	// Configure policy: locked/* requires specific IP (bearer caller won't match)
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"locked/*": {
+				"source_ip": ["10.10.10.10"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// List all secrets as admin (bearer, from default IP)
+	req := httptest.NewRequest("GET", "/v1/secrets/", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.1:9999"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("list: expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Paths []string `json:"paths"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	// open/key1 should be visible, locked/key2 should be hidden by attestation
+	for _, p := range resp.Paths {
+		if strings.HasPrefix(p, "locked/") {
+			t.Fatalf("locked/ paths should be hidden by attestation, but found %q in list: %v", p, resp.Paths)
+		}
+	}
+	foundOpen := false
+	for _, p := range resp.Paths {
+		if p == "open/key1" {
+			foundOpen = true
+		}
+	}
+	if !foundOpen {
+		t.Fatalf("expected open/key1 in list, got: %v", resp.Paths)
 	}
 }

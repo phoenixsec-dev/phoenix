@@ -2,6 +2,7 @@
 package api
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,6 +16,8 @@ import (
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/policy"
+	"git.home/vector/phoenix/internal/ref"
 	"git.home/vector/phoenix/internal/store"
 )
 
@@ -28,8 +31,9 @@ type Server struct {
 	audit         *audit.Logger
 	auditPath     string
 	masterKeyPath string // path to master.key file (needed for KEK rotation)
-	ca            *ca.CA // nil when mTLS is disabled
-	bearerEnabled bool   // whether bearer token auth is allowed
+	ca            *ca.CA            // nil when mTLS is disabled
+	policy        *policy.Engine    // nil when no attestation policy configured
+	bearerEnabled bool              // whether bearer token auth is allowed
 	mux           *http.ServeMux
 }
 
@@ -66,6 +70,14 @@ func (s *Server) SetMasterKeyPath(path string) {
 	s.masterKeyPath = path
 }
 
+// SetPolicy configures the attestation policy engine.
+// When set, secret access is subject to attestation requirements
+// (source IP binding, cert fingerprint pinning, mTLS enforcement)
+// in addition to ACL checks.
+func (s *Server) SetPolicy(p *policy.Engine) {
+	s.policy = p
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -81,6 +93,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
+	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
+}
+
+// authInfo contains authentication result and attestation evidence.
+type authInfo struct {
+	Agent           string
+	UsedMTLS        bool
+	UsedBearer      bool
+	CertFingerprint string // "sha256:<hex>" or empty
 }
 
 // authenticate identifies the calling agent from the request.
@@ -89,11 +110,26 @@ func (s *Server) routes() {
 // Both paths are gated by their respective feature flags.
 // Returns the agent name or an error.
 func (s *Server) authenticate(r *http.Request) (string, error) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		return "", err
+	}
+	return info.Agent, nil
+}
+
+// authenticateInfo identifies the calling agent and collects attestation
+// evidence from the request (auth method, cert fingerprint, etc.).
+func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	// Try mTLS first: check for verified client certificate
 	if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		agentName, err := s.ca.VerifyClientCert(r.TLS.PeerCertificates)
 		if err == nil {
-			return agentName, nil
+			fp := certFingerprint(r.TLS.PeerCertificates[0].Raw)
+			return &authInfo{
+				Agent:           agentName,
+				UsedMTLS:        true,
+				CertFingerprint: fp,
+			}, nil
 		}
 		// mTLS verification failed — log but fall through to bearer
 		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
@@ -101,13 +137,41 @@ func (s *Server) authenticate(r *http.Request) (string, error) {
 
 	// Fall back to bearer token if enabled
 	if !s.bearerEnabled {
-		return "", fmt.Errorf("no valid authentication credentials provided")
+		return nil, fmt.Errorf("no valid authentication credentials provided")
 	}
 	token := extractToken(r)
 	if token == "" {
-		return "", fmt.Errorf("no authentication credentials provided")
+		return nil, fmt.Errorf("no authentication credentials provided")
 	}
-	return s.acl.Authenticate(token)
+	agent, err := s.acl.Authenticate(token)
+	if err != nil {
+		return nil, err
+	}
+	return &authInfo{
+		Agent:      agent,
+		UsedBearer: true,
+	}, nil
+}
+
+// certFingerprint computes "sha256:<hex>" from raw DER certificate bytes.
+func certFingerprint(raw []byte) string {
+	hash := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%X", hash[:])
+}
+
+// attest checks attestation policy for the given secret path.
+// Returns nil if no policy is configured or if the request passes.
+func (s *Server) attest(r *http.Request, path string, info *authInfo) error {
+	if s.policy == nil {
+		return nil
+	}
+	ctx := &policy.RequestContext{
+		UsedMTLS:        info.UsedMTLS,
+		UsedBearer:      info.UsedBearer,
+		SourceIP:        clientIP(r),
+		CertFingerprint: info.CertFingerprint,
+	}
+	return s.policy.Evaluate(path, ctx)
 }
 
 // extractToken gets the bearer token from the Authorization header.
@@ -157,11 +221,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticateInfo(r)
 	if err != nil {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	agentName := info.Agent
 
 	path := secretPath(r)
 	ip := clientIP(r)
@@ -171,9 +236,14 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		allPaths := s.store.List(path)
 		var visible []string
 		for _, p := range allPaths {
-			if s.acl.Authorize(agentName, p, acl.ActionRead) == nil {
-				visible = append(visible, p)
+			if s.acl.Authorize(agentName, p, acl.ActionRead) != nil {
+				continue
 			}
+			// Attestation check: hide paths the caller can't attest for
+			if s.attest(r, p, info) != nil {
+				continue
+			}
+			visible = append(visible, p)
 		}
 		s.audit.LogAllowed(agentName, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"paths": visible})
@@ -184,6 +254,13 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	if err := s.acl.Authorize(agentName, path, acl.ActionRead); err != nil {
 		s.audit.LogDenied(agentName, "read", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
+		return
+	}
+
+	// Attestation policy check
+	if err := s.attest(r, path, info); err != nil {
+		s.audit.LogDenied(agentName, "read", path, ip, "attestation")
+		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
 
@@ -511,4 +588,84 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		"rotated": rotated,
 		"backup":  prevPath,
 	})
+}
+
+// resolveRequest is the JSON body for batch reference resolution.
+type resolveRequest struct {
+	Refs []string `json:"refs"`
+}
+
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	agentName := info.Agent
+
+	ip := clientIP(r)
+
+	var req resolveRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Refs) == 0 {
+		jsonError(w, "refs is required and must not be empty", http.StatusBadRequest)
+		return
+	}
+
+	values := make(map[string]string)
+	errors := make(map[string]string)
+
+	for _, refStr := range req.Refs {
+		path, err := ref.Parse(refStr)
+		if err != nil {
+			s.audit.LogDenied(agentName, "resolve", refStr, ip, "malformed_ref")
+			errors[refStr] = err.Error()
+			continue
+		}
+
+		if err := s.acl.Authorize(agentName, path, acl.ActionRead); err != nil {
+			s.audit.LogDenied(agentName, "resolve", path, ip, "acl")
+			errors[refStr] = "access denied"
+			continue
+		}
+
+		// Attestation policy check (per-ref)
+		if err := s.attest(r, path, info); err != nil {
+			s.audit.LogDenied(agentName, "resolve", path, ip, "attestation")
+			errors[refStr] = "attestation required"
+			continue
+		}
+
+		secret, err := s.store.Get(path)
+		if err != nil {
+			if err == store.ErrSecretNotFound {
+				s.audit.LogDenied(agentName, "resolve", path, ip, "not_found")
+				errors[refStr] = "secret not found"
+			} else if err == store.ErrInvalidPath {
+				s.audit.LogDenied(agentName, "resolve", path, ip, "invalid_path")
+				errors[refStr] = "invalid path"
+			} else {
+				s.audit.LogDenied(agentName, "resolve", path, ip, "internal_error")
+				log.Printf("error resolving %q for %s: %v", path, agentName, err)
+				errors[refStr] = "internal error"
+			}
+			continue
+		}
+
+		s.audit.LogAllowed(agentName, "resolve", path, ip)
+		values[refStr] = secret.Value
+	}
+
+	resp := map[string]interface{}{
+		"values": values,
+	}
+	if len(errors) > 0 {
+		resp["errors"] = errors
+	}
+	jsonOK(w, resp)
 }

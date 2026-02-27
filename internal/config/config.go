@@ -16,6 +16,7 @@ type Config struct {
 	Auth        AuthConfig    `json:"auth"`
 	ACL         ACLFileConfig `json:"acl"`
 	Audit       AuditConfig   `json:"audit"`
+	Policy      PolicyConfig  `json:"policy,omitempty"`
 	OnePassword OPConfig      `json:"onepassword,omitempty"`
 }
 
@@ -65,6 +66,11 @@ type ACLFileConfig struct {
 // AuditConfig controls audit logging.
 type AuditConfig struct {
 	Path string `json:"path"` // Path to audit log file
+}
+
+// PolicyConfig controls the optional attestation policy engine.
+type PolicyConfig struct {
+	Path string `json:"path,omitempty"` // Path to attestation policy JSON file
 }
 
 // OPConfig controls the optional 1Password backend.
