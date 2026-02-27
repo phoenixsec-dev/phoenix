@@ -90,15 +90,36 @@ func TestFileKeyProviderRotateMaster(t *testing.T) {
 	oldKey := make([]byte, len(provider.MasterKey()))
 	copy(oldKey, provider.MasterKey())
 
-	// Rotate
+	// Rotate — stages new key, does NOT swap yet
 	newWrapped, err := provider.RotateMaster(wrappedDEKs)
 	if err != nil {
 		t.Fatalf("RotateMaster: %v", err)
 	}
 
-	// Master key should have changed
+	// Active master key should NOT have changed yet (two-phase commit)
+	if !bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("master key changed before CommitRotation — two-phase commit violated")
+	}
+
+	// Pending key should be set and different from old key
+	if provider.PendingMasterKey() == nil {
+		t.Fatal("pending key is nil after RotateMaster")
+	}
+	if bytes.Equal(oldKey, provider.PendingMasterKey()) {
+		t.Fatal("pending key equals old key")
+	}
+
+	// Commit the rotation
+	provider.CommitRotation()
+
+	// Now the active key should have changed
 	if bytes.Equal(oldKey, provider.MasterKey()) {
-		t.Fatal("master key did not change after rotation")
+		t.Fatal("master key did not change after CommitRotation")
+	}
+
+	// Pending key should be cleared
+	if provider.PendingMasterKey() != nil {
+		t.Fatal("pending key not cleared after CommitRotation")
 	}
 
 	// All DEKs should unwrap to the same values under the new master key
@@ -118,6 +139,65 @@ func TestFileKeyProviderRotateMaster(t *testing.T) {
 		if err == nil {
 			t.Fatalf("old wrapped DEK %d should not unwrap with new master key", i)
 		}
+	}
+}
+
+func TestFileKeyProviderRollbackRotation(t *testing.T) {
+	masterKey, _ := GenerateKey()
+	provider, _ := NewFileKeyProvider(masterKey)
+
+	dek, _ := GenerateKey()
+	wrapped, _ := provider.WrapKey(dek)
+
+	oldKey := make([]byte, len(provider.MasterKey()))
+	copy(oldKey, provider.MasterKey())
+
+	// Rotate (stages new key)
+	_, err := provider.RotateMaster([]*WrappedDEK{wrapped})
+	if err != nil {
+		t.Fatalf("RotateMaster: %v", err)
+	}
+
+	// Rollback instead of commit
+	provider.RollbackRotation()
+
+	// Active key should still be the old key
+	if !bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("master key changed after RollbackRotation")
+	}
+
+	// Pending key should be cleared
+	if provider.PendingMasterKey() != nil {
+		t.Fatal("pending key not cleared after RollbackRotation")
+	}
+
+	// Original DEK should still unwrap with old key
+	unwrapped, err := provider.UnwrapKey(wrapped)
+	if err != nil {
+		t.Fatalf("UnwrapKey after rollback: %v", err)
+	}
+	if !bytes.Equal(dek, unwrapped) {
+		t.Fatal("DEK mismatch after rollback")
+	}
+}
+
+func TestFileKeyProviderCommitNoOp(t *testing.T) {
+	masterKey, _ := GenerateKey()
+	provider, _ := NewFileKeyProvider(masterKey)
+
+	oldKey := make([]byte, len(provider.MasterKey()))
+	copy(oldKey, provider.MasterKey())
+
+	// CommitRotation with no pending rotation should be a no-op
+	provider.CommitRotation()
+	if !bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("CommitRotation with no pending rotation changed the key")
+	}
+
+	// RollbackRotation with no pending rotation should be a no-op
+	provider.RollbackRotation()
+	if !bytes.Equal(oldKey, provider.MasterKey()) {
+		t.Fatal("RollbackRotation with no pending rotation changed the key")
 	}
 }
 

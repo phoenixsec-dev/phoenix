@@ -90,6 +90,7 @@ func main() {
 	// Create API server
 	srv := api.NewServer(s, a, al, cfg.Audit.Path)
 	srv.SetBearerEnabled(cfg.Auth.Bearer.Enabled)
+	srv.SetMasterKeyPath(cfg.Store.MasterKey)
 
 	// Initialize CA for mTLS if enabled
 	var tlsCfg *tls.Config
