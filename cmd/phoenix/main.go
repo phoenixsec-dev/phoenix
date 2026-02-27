@@ -16,6 +16,7 @@
 //	phoenix policy show <path>
 //	phoenix policy test --agent <name> --ip <ip> <path>
 //	phoenix init <dir>
+//	phoenix mcp-server
 package main
 
 import (
@@ -167,6 +168,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown cert subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "mcp-server":
+		err = cmdMCP(args)
 	case "init":
 		err = cmdInit(args)
 	case "help", "--help", "-h":
@@ -202,6 +205,7 @@ Usage:
   phoenix policy test -a <agent> -i <ip> <p>  Dry-run attestation check
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
+  phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix init <dir>                          Initialize data directory
 
 Environment:
