@@ -1,22 +1,43 @@
 # Phoenix
 
-**Secrets management for homelabs and AI agents.**
+**Secrets management for AI agents. They see references, never values.**
 
-Phoenix is a single-binary secrets manager built for small infrastructure: homelabs, self-hosted services, and AI agent workflows. It provides encrypted-at-rest storage, mutual TLS authentication, fine-grained access control, and an attestation policy engine — without the operational overhead of HashiCorp Vault or the limitations of dotenv files.
+Phoenix is a single-binary secrets manager purpose-built for AI agent workflows. LLM agents are powerful but fundamentally untrusted — they can leak secrets through output, store them in context or memory, or be tricked into passing them to attacker-controlled tools. Phoenix solves this by ensuring agents only ever handle opaque `phoenix://` references, resolved through authenticated, attested, policy-checked API calls. Every access is audited.
 
-Agents and tools never see raw secrets. They work with `phoenix://` references that are resolved only through authenticated, policy-checked API calls. Every access is audited.
+Phoenix is designed to be set up and operated by your AI agent. The security is real — AES-256-GCM envelope encryption, mutual TLS, attestation policies — but the complexity is absorbed by the agent, not by you. Tell your agent to set up Phoenix, point it at your secrets, and verify the result.
 
 ```
 # Store a secret
-phoenix set openclaw/api-key -v "sk-abc123" -d "OpenAI API key"
+phoenix set myapp/api-key -v "sk-abc123" -d "OpenAI API key"
 
 # Agents use references, not values
-phoenix resolve phoenix://openclaw/api-key
+phoenix resolve phoenix://myapp/api-key
 sk-abc123
 
-# Run a command with secrets injected as environment variables
-phoenix exec --env OPENAI_KEY=phoenix://openclaw/api-key -- python app.py
+# Run a command with secrets injected — agent never sees the value
+phoenix exec --env OPENAI_KEY=phoenix://myapp/api-key -- python app.py
 ```
+
+---
+
+## Why Phoenix?
+
+Existing secrets managers (Vault, Infisical, Doppler, SOPS) assume the consumer is a trusted process. The app fetches a secret, holds it in memory, and the developer is trusted not to leak it. That model breaks with AI agents.
+
+Secret *reference* features in agent frameworks (like OpenClaw's `SecretRef`) are a step forward — they move plaintext out of config files. But they're config hygiene tools, not security infrastructure. They have no encryption at rest, no access control between agents, no attestation, and no audit trail of who accessed what at runtime.
+
+Phoenix is the layer underneath. It provides the actual vault, the identity verification, the policy engine, and the audit trail. Agent frameworks can use Phoenix as their secret backend through the exec provider pattern, MCP, or direct API calls.
+
+| | Config ref tools | Phoenix |
+|---|---|---|
+| Plaintext out of configs | Yes | Yes |
+| Encrypted at rest | No | AES-256-GCM envelope encryption |
+| Per-agent access control | No | Glob-pattern ACL per agent |
+| Identity attestation | No | mTLS + source IP + cert fingerprint |
+| Runtime audit trail | No | Every access logged with identity |
+| Credential stripping | No | `phoenix exec` strips broker creds |
+| Key rotation | No | Two-phase commit KEK rotation |
+| Certificate infrastructure | No | Built-in CA with CRL revocation |
 
 ---
 
@@ -26,21 +47,28 @@ phoenix exec --env OPENAI_KEY=phoenix://openclaw/api-key -- python app.py
 
 **Mutual TLS** — Built-in certificate authority issues 90-day agent certificates. Agents authenticate with client certs instead of (or in addition to) bearer tokens. CRL-based revocation supported.
 
-**Access Control** — Per-agent permissions with glob-pattern path matching. Agents only see what they're allowed to see. Admin escalation grants all actions.
+**Access Control** — Per-agent permissions with glob-pattern path matching. Agents only see what they're allowed to see.
 
-**Attestation Policies** — Bind secrets to specific network locations and identities:
-- Deny bearer token access for sensitive paths (force mTLS)
-- Source IP binding with CIDR support
-- Certificate fingerprint pinning
-- Per-path policy evaluation on every access
+**Configurable Attestation** — Each secret path can have its own attestation requirements, from no attestation to full lockdown. You choose the security level that fits each secret:
+
+| Level | What it proves | Config |
+|---|---|---|
+| None | Agent has valid credentials | *(default)* |
+| Network-bound | Request comes from expected host | `source_ip` |
+| Identity-pinned | Specific certificate required | `cert_fingerprint` |
+| mTLS-only | Cryptographic identity, no tokens | `require_mtls` + `deny_bearer` |
+
+Levels compose — a production database password can require mTLS from a specific IP with a pinned cert, while a staging API key just needs a valid token.
 
 **Reference Resolution** — `phoenix://namespace/secret` references are opaque tokens safe to store in configs, prompts, and logs. Resolved only through the authenticated API.
 
 **Exec Wrapper** — `phoenix exec` resolves references and injects them as environment variables, then replaces itself with your command. Broker credentials are stripped from the child process — the child can only use the secrets you explicitly map.
 
-**Crash-Safe Key Rotation** — Master key rotation uses two-phase commit with pre-rotation backups. If anything fails mid-rotation, the system recovers automatically. Emergency key persistence handles even double-failure scenarios.
+**Crash-Safe Key Rotation** — Master key rotation uses two-phase commit with pre-rotation backups. If anything fails mid-rotation, the system recovers automatically.
 
-**Full Audit Trail** — Every secret access, denial, and resolution attempt is logged with agent identity, action, path, IP, and reason. Audit logs are append-only JSON Lines.
+**Full Audit Trail** — Every secret access, denial, and resolution attempt is logged with agent identity, action, path, IP, and reason. Audit logs are append-only JSON Lines. Secret values are never logged.
+
+**Agent-Native Integration** — MCP server mode for Claude Code/Desktop. Works as an OpenClaw exec backend. SDK clients for Go, Python, and TypeScript. Your agent framework talks to Phoenix natively.
 
 **Zero Dependencies** — Pure Go standard library. Single binary. No external services required.
 
@@ -56,7 +84,7 @@ phoenix exec --env OPENAI_KEY=phoenix://openclaw/api-key -- python app.py
 ### Build
 
 ```bash
-git clone https://github.com/youruser/phoenix.git
+git clone https://github.com/phoenixsec/phoenix.git
 cd phoenix
 go build -o bin/ ./cmd/...
 ```
@@ -83,10 +111,7 @@ This generates:
 > then re-issue a server cert that includes it:
 >
 > ```bash
-> # From your Phoenix data directory
 > phoenix cert issue phoenix-server -o .
-> # Or regenerate manually with your CA tooling, adding SANs like:
-> #   192.168.0.110, phoenix.home, etc.
 > ```
 >
 > Alternatively, put Phoenix behind a reverse proxy that terminates TLS.
@@ -231,24 +256,34 @@ This enforces least-privilege: the child only gets the specific secrets you map.
 
 ## Attestation Policies
 
-Attestation policies add security requirements beyond ACL checks. Create a policy file:
+Attestation policies let you configure security requirements per secret path. Every path can have different requirements — from completely open to fully locked down.
+
+### Example: Graduated Security
 
 ```json
 {
   "attestation": {
+    "dev/*": {
+      "require_mtls": false,
+      "deny_bearer": false
+    },
+    "staging/*": {
+      "require_mtls": true,
+      "source_ip": ["192.168.0.0/24"]
+    },
     "production/*": {
       "require_mtls": true,
       "deny_bearer": true,
       "source_ip": ["192.168.0.110", "192.168.0.115"],
       "cert_fingerprint": "sha256:A1B2C3..."
-    },
-    "staging/*": {
-      "require_mtls": true,
-      "source_ip": ["192.168.0.0/24"]
     }
   }
 }
 ```
+
+- `dev/*` — any valid credential works
+- `staging/*` — must use mTLS, must be on the local network
+- `production/*` — must use a specific certificate, from a specific IP, no bearer tokens
 
 Add to your server config:
 
@@ -259,11 +294,6 @@ Add to your server config:
   }
 }
 ```
-
-Now `production/*` secrets:
-- Require mTLS (bearer tokens rejected)
-- Only resolve from two specific IPs
-- Only resolve for a specific certificate fingerprint
 
 Attestation is enforced on secret reads, reference resolution, and path listing.
 
@@ -277,6 +307,66 @@ phoenix policy show production/db-password
 
 # Dry-run an attestation check
 phoenix policy test --agent deployer --ip 192.168.0.110 production/db-password
+```
+
+---
+
+## Agent Framework Integration
+
+### MCP Server (Claude Code / Claude Desktop)
+
+Phoenix includes a built-in MCP server. Agents resolve secrets through tool calls — the agent's context window never contains the secret value.
+
+```json
+{
+  "mcpServers": {
+    "phoenix": {
+      "command": "phoenix",
+      "args": ["mcp-server"],
+      "env": {
+        "PHOENIX_SERVER": "https://phoenix:9090",
+        "PHOENIX_TOKEN": "..."
+      }
+    }
+  }
+}
+```
+
+The agent can list available secrets, resolve references, and read values — all through the authenticated, policy-checked API.
+
+### OpenClaw Exec Backend
+
+Phoenix works as an OpenClaw external secrets provider. Configure an `exec` provider in your OpenClaw config that calls `phoenix resolve`:
+
+```json
+{
+  "secrets": {
+    "providers": {
+      "phoenix": {
+        "type": "exec",
+        "command": "phoenix",
+        "args": ["resolve"]
+      }
+    }
+  }
+}
+```
+
+OpenClaw handles reference mapping in configs. Phoenix handles encryption, access control, attestation, and audit. Each layer does what it's good at.
+
+### Direct API
+
+For any agent framework, the HTTP API is straightforward:
+
+```bash
+# Resolve references
+curl -X POST https://phoenix:9090/v1/resolve \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"refs": ["phoenix://myapp/api-key"]}'
+
+# Read a secret
+curl https://phoenix:9090/v1/secrets/myapp/api-key \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
@@ -379,7 +469,7 @@ API_KEY=sk-live-abc123
 
 ```
 cmd/
-  phoenix/           CLI client
+  phoenix/           CLI client (includes MCP server mode)
   phoenix-server/    API server
 
 internal/
@@ -474,27 +564,28 @@ docker compose up -d
 ## Security Model
 
 **What Phoenix protects against:**
-- Secret exfiltration via agent output (agents never see raw values)
-- Unauthorized access (ACL + attestation policy)
+- Secret exfiltration via agent output (agents work with references, never raw values)
+- Unauthorized access (ACL + configurable attestation policy per path)
 - Credential replay from wrong network location (source IP binding)
 - Stolen bearer tokens accessing sensitive paths (deny_bearer + mTLS)
 - Data at rest exposure (AES-256-GCM envelope encryption)
-- Audit trail tampering (append-only log, values never logged)
+- Audit trail gaps (append-only log, values never logged, every access recorded)
 - Crash corruption during key rotation (two-phase commit + emergency recovery)
+- Lateral movement between agents (per-agent ACL with namespace isolation)
 
 **What Phoenix does NOT protect against:**
 - Root/kernel compromise on the Phoenix host
 - Side-channel or hardware attacks
 - Malicious admin with direct file system access to the key file
 
-Phoenix is designed for trusted-network, small-infrastructure deployments where the operator controls the machines. It is not a replacement for HSMs or cloud KMS in high-security enterprise environments.
+Phoenix provides real security infrastructure — encryption, identity, access control, attestation, audit — in a package simple enough for an AI agent to deploy and manage. It is not a replacement for HSMs or cloud KMS in high-security enterprise environments.
 
 ---
 
 ## Development
 
 ```bash
-# Run all tests (126 tests across 9 packages)
+# Run all tests
 go test ./... -count=1
 
 # Run tests with verbose output
@@ -511,7 +602,3 @@ The project has zero external dependencies — only the Go standard library.
 ## License
 
 MIT
-
----
-
-*Built for the [OpenClaw](https://github.com/openclaw) homelab.*
