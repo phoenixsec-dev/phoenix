@@ -48,6 +48,11 @@ phoenix exec --env OPENAI_KEY=phoenix://openclaw/api-key -- python app.py
 
 ## Quick Start
 
+### Requirements
+
+- Go 1.25+ (no external dependencies)
+- Linux, macOS, or Windows
+
 ### Build
 
 ```bash
@@ -67,11 +72,30 @@ This produces two binaries:
 ```
 
 This generates:
-- Master encryption key
-- Admin bearer token (save this!)
+- Master encryption key (`master.key`, mode `0600`)
+- Admin bearer token — **save this, it is only shown once**
 - Internal CA certificate and key
-- Server TLS certificate
+- Server TLS certificate (SANs: `localhost`, `127.0.0.1`)
 - Default configuration file
+
+> **Deploying on a LAN?** The default server cert only covers localhost.
+> After init, edit `config.json` to set `server.listen` to your host IP,
+> then re-issue a server cert that includes it:
+>
+> ```bash
+> # From your Phoenix data directory
+> phoenix cert issue phoenix-server -o .
+> # Or regenerate manually with your CA tooling, adding SANs like:
+> #   192.168.0.110, phoenix.home, etc.
+> ```
+>
+> Alternatively, put Phoenix behind a reverse proxy that terminates TLS.
+
+**File permissions:** The init command creates files with secure defaults, but verify:
+```bash
+chmod 700 /data/phoenix
+chmod 600 /data/phoenix/master.key /data/phoenix/ca.key /data/phoenix/server.key
+```
 
 ### Start the Server
 
@@ -407,7 +431,18 @@ Key settings:
 
 ```bash
 docker build -t phoenix .
-docker run -v phoenix-data:/data -p 9090:9090 phoenix
+
+# First run: initialize the data directory
+docker run --rm -v phoenix-data:/data phoenix --init /data
+
+# Note the admin token printed to stdout — save it!
+
+# Start the server
+docker run -d --name phoenix \
+  -v phoenix-data:/data \
+  -p 9090:9090 \
+  --restart unless-stopped \
+  phoenix
 ```
 
 Or with Docker Compose:
@@ -421,6 +456,17 @@ services:
     volumes:
       - phoenix-data:/data
     restart: unless-stopped
+
+volumes:
+  phoenix-data:
+```
+
+```bash
+# First-time setup
+docker compose run --rm phoenix --init /data
+
+# Then start normally
+docker compose up -d
 ```
 
 ---
