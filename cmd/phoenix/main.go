@@ -38,6 +38,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"git.home/vector/phoenix/internal/version"
 )
 
 var (
@@ -194,6 +196,8 @@ func main() {
 		err = cmdMCP(args)
 	case "init":
 		err = cmdInit(args)
+	case "version", "--version", "-V":
+		fmt.Printf("phoenix %s\n", version.Version)
 	case "help", "--help", "-h":
 		usage()
 	default:

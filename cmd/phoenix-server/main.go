@@ -27,12 +27,19 @@ import (
 	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
 	"git.home/vector/phoenix/internal/token"
+	"git.home/vector/phoenix/internal/version"
 )
 
 func main() {
 	configPath := flag.String("config", "", "Path to config file (default: /data/config.json)")
 	initDir := flag.String("init", "", "Initialize a new Phoenix data directory")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("phoenix-server %s\n", version.Version)
+		return
+	}
 
 	if *initDir != "" {
 		if err := runInit(*initDir); err != nil {
