@@ -9,6 +9,9 @@ import (
 )
 
 func cmdStatus(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("usage: phoenix status (no arguments expected)")
+	}
 	if err := requireAuth(); err != nil {
 		return err
 	}

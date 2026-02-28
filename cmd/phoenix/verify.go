@@ -72,6 +72,9 @@ func cmdVerify(args []string) error {
 	if dryRun {
 		// Dry-run: check that each ref's path exists and is accessible
 		// via the list endpoint, without resolving any secret values.
+		// TODO: When the server supports a dry_run parameter on POST /v1/resolve,
+		// switch to that so we can also verify attestation policies without
+		// returning plaintext values.
 		fmt.Printf("Dry-run: checking path accessibility for %d references in %s\n", len(refList), filePath)
 		fmt.Printf("(Note: list-based check — attestation policies are only enforced on resolve)\n\n")
 
