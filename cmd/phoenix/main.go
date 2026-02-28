@@ -12,7 +12,9 @@
 //	phoenix agent create <name> --token <token> --acl <path:actions,...>
 //	phoenix agent list
 //	phoenix resolve <ref> [ref...]
-//	phoenix exec --env KEY=phoenix://ns/secret -- <command> [args...]
+//	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] -- <command> [args...]
+//	phoenix verify <file> [--dry-run]
+//	phoenix status
 //	phoenix policy show <path>
 //	phoenix policy test --agent <name> --ip <ip> <path>
 //	phoenix init <dir>
@@ -140,6 +142,10 @@ func main() {
 		err = cmdResolve(args)
 	case "exec":
 		err = cmdExec(args)
+	case "verify":
+		err = cmdVerify(args)
+	case "status":
+		err = cmdStatus(args)
 	case "policy":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: phoenix policy <show|test>")
@@ -201,6 +207,9 @@ Usage:
   phoenix agent list                          List agents
   phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
+  phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
+  phoenix verify <file> [--dry-run]           Check phoenix:// refs in file are resolvable
+  phoenix status                              Show server health, secrets, agents, policy
   phoenix policy show <path>                  Show attestation requirements for path
   phoenix policy test -a <agent> -i <ip> <p>  Dry-run attestation check
   phoenix rotate-master                       Rotate master encryption key
@@ -751,9 +760,10 @@ func cmdExec(args []string) error {
 		return err
 	}
 
-	// Parse --env flags before "--", command after "--"
+	// Parse --env flags and --output-env before "--", command after "--"
 	var envMappings []string
 	var cmdArgs []string
+	var outputEnvPath string
 	seenSep := false
 
 	for i := 0; i < len(args); i++ {
@@ -768,11 +778,16 @@ func cmdExec(args []string) error {
 			if i < len(args) {
 				envMappings = append(envMappings, args[i])
 			}
+		case "--output-env":
+			i++
+			if i < len(args) {
+				outputEnvPath = args[i]
+			}
 		}
 	}
 
-	if !seenSep || len(cmdArgs) == 0 {
-		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret -- <command> [args...]")
+	if outputEnvPath == "" && (!seenSep || len(cmdArgs) == 0) {
+		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] -- <command> [args...]")
 	}
 	if len(envMappings) == 0 {
 		return fmt.Errorf("at least one --env mapping is required")
@@ -824,6 +839,24 @@ func cmdExec(args []string) error {
 			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", ref, errMsg)
 		}
 		return fmt.Errorf("failed to resolve %d reference(s)", len(result.Errors))
+	}
+
+	// If --output-env is set, write resolved env to file and exit
+	if outputEnvPath != "" {
+		var lines []string
+		for _, m := range mappings {
+			val, ok := result.Values[m.ref]
+			if !ok {
+				return fmt.Errorf("no value returned for %s", m.ref)
+			}
+			lines = append(lines, m.envVar+"="+val)
+		}
+		content := strings.Join(lines, "\n") + "\n"
+		if err := os.WriteFile(outputEnvPath, []byte(content), 0600); err != nil {
+			return fmt.Errorf("writing env file: %w", err)
+		}
+		fmt.Printf("wrote %d env vars to %s\n", len(mappings), outputEnvPath)
+		return nil
 	}
 
 	// Build env: inherit current env but strip Phoenix credentials

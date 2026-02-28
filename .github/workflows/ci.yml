@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ["1.25"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1 -race -timeout 120s
+
+      - name: Build
+        run: |
+          go build -o bin/phoenix ./cmd/phoenix/
+          go build -o bin/phoenix-server ./cmd/phoenix-server/
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Check formatting
+        run: |
+          gofmt_output=$(gofmt -l .)
+          if [ -n "$gofmt_output" ]; then
+            echo "Files not formatted:"
+            echo "$gofmt_output"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
