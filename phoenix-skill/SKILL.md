@@ -71,10 +71,14 @@ phoenix exec --env KEY=phoenix://namespace/secret --output-env /path/to/envfile 
 phoenix verify <file>
 ```
 
-Scans a file for `phoenix://` references and checks whether each is resolvable
-with the current credentials and attestation context. Exits with code 1 on failure.
+Scans a file for `phoenix://` references and verifies each is resolvable
+with the current credentials. Checks ACL and attestation. Exits with code 1
+on any failure.
 
-Use `--dry-run` to check ACL/attestation without resolving values.
+Use `--dry-run` to check that paths exist and are accessible without resolving
+secret values. Note: dry-run uses the list endpoint, so it verifies path
+existence and ACL access but does not exercise attestation policies (those are
+only enforced on actual resolve).
 
 ### Check system status
 
