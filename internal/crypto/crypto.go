@@ -28,9 +28,10 @@ const (
 )
 
 var (
-	ErrInvalidKey       = errors.New("invalid key size: must be 32 bytes")
-	ErrDecryptionFailed = errors.New("decryption failed: ciphertext tampered or wrong key")
-	ErrKeyFileNotFound  = errors.New("master key file not found")
+	ErrInvalidKey          = errors.New("invalid key size: must be 32 bytes")
+	ErrDecryptionFailed    = errors.New("decryption failed: ciphertext tampered or wrong key")
+	ErrKeyFileNotFound     = errors.New("master key file not found")
+	ErrPassphraseRequired  = errors.New("master key is passphrase-protected")
 )
 
 // EncryptedBlob holds an encrypted value with its nonce.
@@ -138,6 +139,7 @@ func UnwrapDEK(masterKey []byte, wrapped *WrappedDEK) ([]byte, error) {
 }
 
 // LoadMasterKey reads the master key from a file.
+// Returns ErrPassphraseRequired if the file is passphrase-protected.
 func LoadMasterKey(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -145,6 +147,10 @@ func LoadMasterKey(path string) ([]byte, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading master key: %w", err)
+	}
+
+	if IsProtectedKeyFile(data) {
+		return nil, ErrPassphraseRequired
 	}
 
 	key, err := base64.StdEncoding.DecodeString(string(data))
@@ -156,6 +162,37 @@ func LoadMasterKey(path string) ([]byte, error) {
 		return nil, ErrInvalidKey
 	}
 
+	return key, nil
+}
+
+// LoadMasterKeyWithPassphrase reads the master key from a file, decrypting
+// it with the given passphrase if the file is protected.
+// For unprotected files, the passphrase is ignored.
+func LoadMasterKeyWithPassphrase(path, passphrase string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrKeyFileNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading master key: %w", err)
+	}
+
+	if IsProtectedKeyFile(data) {
+		var pf ProtectedKeyFile
+		if err := json.Unmarshal(data, &pf); err != nil {
+			return nil, fmt.Errorf("parsing protected key file: %w", err)
+		}
+		return DecryptMasterKey(&pf, passphrase)
+	}
+
+	// Unprotected: plain base64
+	key, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("decoding master key: %w", err)
+	}
+	if len(key) != KeySize {
+		return nil, ErrInvalidKey
+	}
 	return key, nil
 }
 

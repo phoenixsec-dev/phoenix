@@ -46,6 +46,7 @@ type KeyProvider interface {
 type FileKeyProvider struct {
 	masterKey  []byte
 	pendingKey []byte // non-nil during two-phase rotation
+	passphrase string // set if master key is passphrase-protected
 }
 
 // NewFileKeyProvider creates a provider from a raw master key (already loaded).
@@ -138,4 +139,15 @@ func (p *FileKeyProvider) MasterKey() []byte {
 // Returns nil if no rotation is pending.
 func (p *FileKeyProvider) PendingMasterKey() []byte {
 	return p.pendingKey
+}
+
+// SetPassphrase stores the passphrase used to protect the master key on disk.
+// This is used during rotation to re-encrypt the new key file.
+func (p *FileKeyProvider) SetPassphrase(pp string) {
+	p.passphrase = pp
+}
+
+// Passphrase returns the passphrase, or "" if the key is unprotected.
+func (p *FileKeyProvider) Passphrase() string {
+	return p.passphrase
 }

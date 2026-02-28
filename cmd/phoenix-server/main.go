@@ -34,6 +34,9 @@ func main() {
 	configPath := flag.String("config", "", "Path to config file (default: /data/config.json)")
 	initDir := flag.String("init", "", "Initialize a new Phoenix data directory")
 	showVersion := flag.Bool("version", false, "Print version and exit")
+	passphraseStdin := flag.Bool("passphrase-stdin", false, "Read master key passphrase from stdin")
+	initPassphrase := flag.String("passphrase", "", "Passphrase to protect master key (--init only)")
+	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
 	flag.Parse()
 
 	if *showVersion {
@@ -42,8 +45,26 @@ func main() {
 	}
 
 	if *initDir != "" {
-		if err := runInit(*initDir); err != nil {
+		if err := runInit(*initDir, *initPassphrase); err != nil {
 			log.Fatalf("init failed: %v", err)
+		}
+		return
+	}
+
+	if *protectKey {
+		cfgPath := *configPath
+		if cfgPath == "" {
+			cfgPath = os.Getenv("PHOENIX_CONFIG")
+		}
+		if cfgPath == "" {
+			cfgPath = "/data/config.json"
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			log.Fatalf("loading config: %v", err)
+		}
+		if err := runProtectKey(cfg.Store.MasterKey); err != nil {
+			log.Fatalf("protect-key failed: %v", err)
 		}
 		return
 	}
@@ -69,11 +90,31 @@ func main() {
 	var keyProvider crypto.KeyProvider
 	switch cfg.Crypto.Provider {
 	case "file", "":
-		p, err := crypto.NewFileKeyProviderFromPath(cfg.Store.MasterKey)
-		if err != nil {
-			log.Fatalf("loading file key provider: %v", err)
+		key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
+		if err == crypto.ErrPassphraseRequired {
+			passphrase, ppErr := crypto.ReadPassphrase(*passphraseStdin)
+			if ppErr != nil {
+				log.Fatalf("master key is passphrase-protected: %v", ppErr)
+			}
+			key, err = crypto.LoadMasterKeyWithPassphrase(cfg.Store.MasterKey, passphrase)
+			if err != nil {
+				log.Fatalf("decrypting master key: %v", err)
+			}
+			p, provErr := crypto.NewFileKeyProvider(key)
+			if provErr != nil {
+				log.Fatalf("creating key provider: %v", provErr)
+			}
+			p.SetPassphrase(passphrase)
+			keyProvider = p
+		} else if err != nil {
+			log.Fatalf("loading master key: %v", err)
+		} else {
+			p, provErr := crypto.NewFileKeyProvider(key)
+			if provErr != nil {
+				log.Fatalf("creating key provider: %v", provErr)
+			}
+			keyProvider = p
 		}
-		keyProvider = p
 	default:
 		log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
 	}
@@ -197,7 +238,7 @@ func main() {
 	}
 }
 
-func runInit(dir string) error {
+func runInit(dir, passphrase string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
@@ -207,11 +248,22 @@ func runInit(dir string) error {
 	if _, err := os.Stat(keyPath); err == nil {
 		return fmt.Errorf("master key already exists at %s — refusing to overwrite", keyPath)
 	}
-	_, err := crypto.GenerateAndSaveMasterKey(keyPath)
-	if err != nil {
-		return fmt.Errorf("generating master key: %w", err)
+	if passphrase != "" {
+		key, err := crypto.GenerateKey()
+		if err != nil {
+			return fmt.Errorf("generating master key: %w", err)
+		}
+		if err := crypto.SaveProtectedMasterKey(keyPath, key, passphrase); err != nil {
+			return fmt.Errorf("saving protected master key: %w", err)
+		}
+		fmt.Printf("Generated passphrase-protected master key: %s\n", keyPath)
+	} else {
+		_, err := crypto.GenerateAndSaveMasterKey(keyPath)
+		if err != nil {
+			return fmt.Errorf("generating master key: %w", err)
+		}
+		fmt.Printf("Generated master key: %s\n", keyPath)
 	}
-	fmt.Printf("Generated master key: %s\n", keyPath)
 
 	// Generate admin token
 	tokenBytes, err := crypto.GenerateKey()
@@ -287,6 +339,55 @@ func runInit(dir string) error {
 
 	fmt.Println("\nPhoenix initialized. Start the server with:")
 	fmt.Printf("  phoenix-server --config %s\n", cfgPath)
+
+	return nil
+}
+
+// runProtectKey adds, changes, or removes the passphrase on an existing master key.
+// Requires an interactive TTY — passphrase removal is too dangerous for piped input.
+func runProtectKey(keyPath string) error {
+	if !crypto.IsTerminal() {
+		return fmt.Errorf("--protect-key requires an interactive terminal (TTY)")
+	}
+
+	// Load current key (with old passphrase if needed)
+	key, err := crypto.LoadMasterKey(keyPath)
+	if err == crypto.ErrPassphraseRequired {
+		fmt.Fprintln(os.Stderr, "Current master key is passphrase-protected.")
+		oldPass, ppErr := crypto.PromptPassphrase("Enter current passphrase: ")
+		if ppErr != nil {
+			return fmt.Errorf("reading current passphrase: %w", ppErr)
+		}
+		key, err = crypto.LoadMasterKeyWithPassphrase(keyPath, oldPass)
+		if err != nil {
+			return fmt.Errorf("decrypting with current passphrase: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("loading master key: %w", err)
+	}
+
+	// Prompt for new passphrase — empty means remove protection
+	newPass, ppErr := crypto.PromptPassphraseAllowEmpty("Enter new passphrase (empty to remove protection): ")
+	if ppErr != nil {
+		return fmt.Errorf("reading new passphrase: %w", ppErr)
+	}
+
+	if newPass == "" {
+		// Confirm removal
+		confirm, cErr := crypto.PromptPassphraseAllowEmpty("Confirm passphrase removal — type REMOVE: ")
+		if cErr != nil || confirm != "REMOVE" {
+			return fmt.Errorf("aborted — passphrase not changed")
+		}
+		if err := crypto.SaveMasterKeyAtomic(keyPath, key); err != nil {
+			return fmt.Errorf("saving unprotected key: %w", err)
+		}
+		fmt.Println("Master key passphrase removed.")
+	} else {
+		if err := crypto.SaveProtectedMasterKey(keyPath, key, newPass); err != nil {
+			return fmt.Errorf("saving protected key: %w", err)
+		}
+		fmt.Println("Master key passphrase updated.")
+	}
 
 	return nil
 }

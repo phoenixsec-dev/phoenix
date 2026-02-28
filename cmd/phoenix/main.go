@@ -39,6 +39,8 @@ import (
 	"syscall"
 	"time"
 
+	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/store"
 	"git.home/vector/phoenix/internal/version"
 )
 
@@ -192,6 +194,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown cert subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "emergency":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix emergency get <path> --data-dir <dir>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "get":
+			err = cmdEmergencyGet(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown emergency subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "mcp-server":
 		err = cmdMCP(args)
 	case "init":
@@ -238,6 +252,7 @@ Usage:
   phoenix token mint <agent>                   Mint a short-lived token for an agent
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
+  phoenix emergency get <path> --data-dir <d> [--confirm]  Break-glass offline secret retrieval
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix init <dir>                          Initialize data directory
 
@@ -1309,6 +1324,128 @@ func cmdInit(args []string) error {
 	}
 	// Delegate to server's init
 	fmt.Println("Use phoenix-server --init", args[0])
+	return nil
+}
+
+// emergencyAuditEntry is the structured audit log entry for emergency access.
+type emergencyAuditEntry struct {
+	Timestamp string `json:"ts"`
+	Agent     string `json:"agent"`
+	Action    string `json:"action"`
+	Path      string `json:"path"`
+	Status    string `json:"status"`
+	IP        string `json:"ip"`
+}
+
+func cmdEmergencyGet(args []string) error {
+	var dataDir, secretPath string
+	var passphraseStdin, confirmed bool
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--data-dir":
+			i++
+			if i < len(args) {
+				dataDir = args[i]
+			}
+		case "--passphrase-stdin":
+			passphraseStdin = true
+		case "--confirm":
+			confirmed = true
+		default:
+			if secretPath == "" {
+				secretPath = args[i]
+			}
+		}
+		i++
+	}
+
+	if secretPath == "" || dataDir == "" {
+		return fmt.Errorf("usage: phoenix emergency get <path> --data-dir <dir> [--confirm] [--passphrase-stdin]")
+	}
+
+	// Reject wildcards / batch patterns
+	if strings.Contains(secretPath, "*") || strings.HasSuffix(secretPath, "/") {
+		return fmt.Errorf("emergency access is single-secret only — no wildcards or prefixes")
+	}
+
+	// Confirmation is always required — either via TTY prompt or --confirm flag
+	fmt.Fprintf(os.Stderr, "\n*** EMERGENCY ACCESS ***\n")
+	fmt.Fprintf(os.Stderr, "Secret:   %s\n", secretPath)
+	fmt.Fprintf(os.Stderr, "Data dir: %s\n", dataDir)
+	fmt.Fprintf(os.Stderr, "This bypasses the server and will be logged to the audit trail.\n")
+
+	if !confirmed {
+		fmt.Fprintf(os.Stderr, "Continue? [y/N] ")
+		reader := bufio.NewReader(os.Stdin)
+		confirmStr, _ := reader.ReadString('\n')
+		confirmStr = strings.TrimSpace(strings.ToLower(confirmStr))
+		if confirmStr != "y" && confirmStr != "yes" {
+			return fmt.Errorf("aborted")
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Confirmed via --confirm flag.")
+	}
+
+	keyPath := filepath.Join(dataDir, "master.key")
+	storePath := filepath.Join(dataDir, "store.json")
+	auditPath := filepath.Join(dataDir, "audit.log")
+
+	// Load master key
+	key, err := crypto.LoadMasterKey(keyPath)
+	if err == crypto.ErrPassphraseRequired {
+		passphrase, ppErr := crypto.ReadPassphrase(passphraseStdin)
+		if ppErr != nil {
+			return fmt.Errorf("master key is passphrase-protected: %w", ppErr)
+		}
+		key, err = crypto.LoadMasterKeyWithPassphrase(keyPath, passphrase)
+		if err != nil {
+			return fmt.Errorf("decrypting master key: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("loading master key: %w", err)
+	}
+
+	// Open store directly
+	provider, err := crypto.NewFileKeyProvider(key)
+	if err != nil {
+		return fmt.Errorf("creating key provider: %w", err)
+	}
+
+	s, err := store.NewWithProvider(storePath, provider)
+	if err != nil {
+		return fmt.Errorf("opening store: %w", err)
+	}
+
+	secret, err := s.Get(secretPath)
+	if err != nil {
+		return fmt.Errorf("reading secret: %w", err)
+	}
+
+	// Append structured audit entry
+	entry := emergencyAuditEntry{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Agent:     "emergency-local",
+		Action:    "read",
+		Path:      secretPath,
+		Status:    "allowed",
+		IP:        "local",
+	}
+	auditJSON, _ := json.Marshal(entry)
+	f, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write audit log: %v\n", err)
+	} else {
+		f.Write(auditJSON)
+		f.Write([]byte("\n"))
+		f.Close()
+	}
+
+	fmt.Fprintf(os.Stderr, "\n*** Access logged to %s ***\n", auditPath)
+
+	// Print secret value to stdout
+	fmt.Print(secret.Value)
 	return nil
 }
 

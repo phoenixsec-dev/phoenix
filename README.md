@@ -70,7 +70,7 @@ Levels compose — a production database password can require mTLS from a specif
 
 **Agent-Native Integration** — MCP server mode for Claude Code/Desktop. Works as an OpenClaw exec backend. SDK clients for Go, Python, and TypeScript. Your agent framework talks to Phoenix natively.
 
-**Zero Dependencies** — Pure Go standard library. Single binary. No external services required.
+**Minimal Dependencies** — Single binary, no external services. Only `golang.org/x/crypto` (Argon2id) and `golang.org/x/term` (TTY passphrase input) — Go team semi-stdlib.
 
 ---
 
@@ -475,6 +475,86 @@ This generates a new master key, re-wraps all namespace DEKs, and persists every
 
 ---
 
+## Master Key Protection
+
+The master key can be protected with a passphrase, similar to SSH key passphrases. This encrypts the key file at rest using Argon2id key derivation and AES-256-GCM. Existing unprotected deployments are completely unaffected — this feature is opt-in.
+
+### Initialize with a passphrase
+
+```bash
+phoenix-server --init /data/phoenix --passphrase "my-strong-passphrase"
+```
+
+The generated `master.key` file will be JSON (passphrase-protected) instead of raw base64.
+
+### Providing the passphrase at boot
+
+When the master key is protected, the server needs the passphrase to start. Three methods, in priority order:
+
+```bash
+# 1. Pipe from stdin (automation, agents, systemd)
+echo "my-passphrase" | phoenix-server --config /data/config.json --passphrase-stdin
+
+# 2. Environment variable (containers, systemd EnvironmentFile)
+PHOENIX_MASTER_PASSPHRASE="my-passphrase" phoenix-server --config /data/config.json
+
+# 3. Interactive TTY prompt (human at terminal)
+phoenix-server --config /data/config.json
+# → Enter master key passphrase: ****
+```
+
+### Add or change passphrase on existing deployment
+
+```bash
+phoenix-server --protect-key --config /data/config.json
+```
+
+This prompts for the current passphrase (if protected), then the new passphrase. Enter an empty new passphrase to remove protection.
+
+### Key rotation
+
+Key rotation automatically preserves passphrase protection. If the current key is passphrase-protected, the rotated key file will be too, using the same passphrase.
+
+> **Warning:** If you lose the passphrase, you lose your secrets. There is no recovery mechanism. Back up both the passphrase and the key file.
+
+---
+
+## Emergency Access
+
+Break-glass offline secret retrieval when the server is down:
+
+```bash
+phoenix emergency get myapp/db-password --data-dir /data/phoenix
+```
+
+```
+*** EMERGENCY ACCESS ***
+Secret:   myapp/db-password
+Data dir: /data/phoenix
+This bypasses the server and will be logged to the audit trail.
+Continue? [y/N] y
+
+*** Access logged to /data/phoenix/audit.log ***
+hunter2
+```
+
+For automation, use `--confirm` to skip the interactive prompt:
+
+```bash
+phoenix emergency get myapp/db-password --data-dir /data/phoenix --confirm
+```
+
+Emergency mode:
+- Reads `store.json` and `master.key` directly from disk — no server needed
+- Single secret only — no wildcards, no batch export, no listing
+- Requires explicit confirmation — interactive `[y/N]` prompt or `--confirm` flag
+- Prompts for passphrase if the master key is protected (via `--passphrase-stdin` or env/TTY)
+- Logs the access to `audit.log` with agent `emergency-local`
+
+This is a last resort for when the server is unavailable. It inherently requires filesystem access to the data directory, which limits it to the machine owner.
+
+---
+
 ## Audit Log
 
 Every operation is logged:
@@ -681,7 +761,7 @@ go test ./... -count=1 -v
 go build -o bin/ ./cmd/...
 ```
 
-The project has zero external dependencies — only the Go standard library.
+External dependencies: `golang.org/x/crypto` (Argon2id for passphrase KDF) and `golang.org/x/term` (TTY passphrase input).
 
 ---
 

@@ -444,7 +444,13 @@ func (s *Store) emergencyPersistPendingKey() {
 		return
 	}
 	emergencyPath := s.filePath + ".emergency-key"
-	if err := crypto.SaveMasterKeyAtomic(emergencyPath, fkp.PendingMasterKey()); err != nil {
+	var err error
+	if fkp.Passphrase() != "" {
+		err = crypto.SaveProtectedMasterKey(emergencyPath, fkp.PendingMasterKey(), fkp.Passphrase())
+	} else {
+		err = crypto.SaveMasterKeyAtomic(emergencyPath, fkp.PendingMasterKey())
+	}
+	if err != nil {
 		log.Printf("CRITICAL: failed to save emergency key to %s: %v", emergencyPath, err)
 		return
 	}

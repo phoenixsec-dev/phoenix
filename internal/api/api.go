@@ -624,6 +624,9 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		if pendingKey == nil {
 			return fmt.Errorf("no pending key after rotation")
 		}
+		if provider.Passphrase() != "" {
+			return crypto.SaveProtectedMasterKey(s.masterKeyPath, pendingKey, provider.Passphrase())
+		}
 		return crypto.SaveMasterKeyAtomic(s.masterKeyPath, pendingKey)
 	})
 	if err != nil {
