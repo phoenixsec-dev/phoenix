@@ -67,43 +67,75 @@ func cmdVerify(args []string) error {
 		refList = append(refList, ref)
 	}
 
-	// Resolve all refs in one batch
 	var okCount, failCount int
 
 	if dryRun {
-		// In dry-run mode, we still call resolve to check ACL/attestation
-		// but the server doesn't actually need to return values — we only
-		// care about whether the request succeeds or fails per ref.
-		fmt.Printf("Dry-run: checking ACL/attestation for %d references in %s\n\n", len(refList), filePath)
-	}
+		// Dry-run: check that each ref's path exists and is accessible
+		// via the list endpoint, without resolving any secret values.
+		fmt.Printf("Dry-run: checking path accessibility for %d references in %s\n", len(refList), filePath)
+		fmt.Printf("(Note: list-based check — attestation policies are only enforced on resolve)\n\n")
 
-	body, _ := json.Marshal(map[string]interface{}{"refs": refList})
-	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("resolve request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := apiRequest("GET", "/v1/secrets/", nil)
+		if err != nil {
+			return fmt.Errorf("list request failed: %w", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		return handleError(resp)
-	}
+		if resp.StatusCode != 200 {
+			return handleError(resp)
+		}
 
-	var result struct {
-		Values map[string]string `json:"values"`
-		Errors map[string]string `json:"errors"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
-	}
+		var listResult struct {
+			Paths []string `json:"paths"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
+			return fmt.Errorf("decoding list response: %w", err)
+		}
 
-	// Report results
-	for _, ref := range refList {
-		if errMsg, ok := result.Errors[ref]; ok {
-			fmt.Printf("%-50s FAIL (%s)\n", ref, errMsg)
-			failCount++
-		} else {
-			fmt.Printf("%-50s OK\n", ref)
-			okCount++
+		accessible := make(map[string]bool, len(listResult.Paths))
+		for _, p := range listResult.Paths {
+			accessible[p] = true
+		}
+
+		for _, ref := range refList {
+			path := strings.TrimPrefix(ref, "phoenix://")
+			if accessible[path] {
+				fmt.Printf("%-50s OK\n", ref)
+				okCount++
+			} else {
+				fmt.Printf("%-50s FAIL (path not found or not accessible)\n", ref)
+				failCount++
+			}
+		}
+	} else {
+		// Full verify: resolves each ref, checking ACL + attestation.
+		body, _ := json.Marshal(map[string]interface{}{"refs": refList})
+		resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+		if err != nil {
+			return fmt.Errorf("resolve request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			return handleError(resp)
+		}
+
+		var result struct {
+			Values map[string]string `json:"values"`
+			Errors map[string]string `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+
+		for _, ref := range refList {
+			if errMsg, ok := result.Errors[ref]; ok {
+				fmt.Printf("%-50s FAIL (%s)\n", ref, errMsg)
+				failCount++
+			} else {
+				fmt.Printf("%-50s OK\n", ref)
+				okCount++
+			}
 		}
 	}
 

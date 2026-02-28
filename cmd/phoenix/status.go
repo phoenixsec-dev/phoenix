@@ -68,7 +68,10 @@ func printSecretSummary() {
 	var result struct {
 		Paths []string `json:"paths"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("  Store: error reading response (%v)\n", err)
+		return
+	}
 
 	namespaces := make(map[string]int)
 	for _, p := range result.Paths {
@@ -100,7 +103,10 @@ func printAgentSummary() {
 	var result struct {
 		Agents []string `json:"agents"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("  Agents: error reading response (%v)\n", err)
+		return
+	}
 
 	fmt.Printf("  Agents: %d registered\n", len(result.Agents))
 	for _, name := range result.Agents {
@@ -179,7 +185,10 @@ func printAuditSummary() {
 			Reason    string `json:"reason"`
 		} `json:"entries"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Printf("  Audit: error reading response (%v)\n", err)
+		return
+	}
 
 	if len(result.Entries) == 0 {
 		fmt.Printf("  Audit: no events recorded\n")
