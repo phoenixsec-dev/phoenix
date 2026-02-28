@@ -70,17 +70,15 @@ func cmdVerify(args []string) error {
 	var okCount, failCount int
 
 	if dryRun {
-		// Dry-run: check that each ref's path exists and is accessible
-		// via the list endpoint, without resolving any secret values.
-		// TODO: When the server supports a dry_run parameter on POST /v1/resolve,
-		// switch to that so we can also verify attestation policies without
-		// returning plaintext values.
-		fmt.Printf("Dry-run: checking path accessibility for %d references in %s\n", len(refList), filePath)
-		fmt.Printf("(Note: list-based check — attestation policies are only enforced on resolve)\n\n")
+		// Dry-run: use server-side dry_run on POST /v1/resolve to verify
+		// ref format, ACL, attestation, and path existence without returning
+		// plaintext secret values.
+		fmt.Printf("Dry-run: verifying %d references in %s (no secret values returned)\n\n", len(refList), filePath)
 
-		resp, err := apiRequest("GET", "/v1/secrets/", nil)
+		body, _ := json.Marshal(map[string]interface{}{"refs": refList})
+		resp, err := apiRequest("POST", "/v1/resolve?dry_run=true", strings.NewReader(string(body)))
 		if err != nil {
-			return fmt.Errorf("list request failed: %w", err)
+			return fmt.Errorf("dry-run resolve request failed: %w", err)
 		}
 		defer resp.Body.Close()
 
@@ -88,26 +86,21 @@ func cmdVerify(args []string) error {
 			return handleError(resp)
 		}
 
-		var listResult struct {
-			Paths []string `json:"paths"`
+		var result struct {
+			Values map[string]string `json:"values"`
+			Errors map[string]string `json:"errors"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
-			return fmt.Errorf("decoding list response: %w", err)
-		}
-
-		accessible := make(map[string]bool, len(listResult.Paths))
-		for _, p := range listResult.Paths {
-			accessible[p] = true
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
 		}
 
 		for _, ref := range refList {
-			path := strings.TrimPrefix(ref, "phoenix://")
-			if accessible[path] {
+			if errMsg, ok := result.Errors[ref]; ok {
+				fmt.Printf("%-50s FAIL (%s)\n", ref, errMsg)
+				failCount++
+			} else {
 				fmt.Printf("%-50s OK\n", ref)
 				okCount++
-			} else {
-				fmt.Printf("%-50s FAIL (path not found or not accessible)\n", ref)
-				failCount++
 			}
 		}
 	} else {

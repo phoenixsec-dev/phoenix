@@ -4,6 +4,7 @@
 //
 //	phoenix get <path>
 //	phoenix set <path> --value <value> [--description <desc>] [--tags <t1,t2>]
+//	phoenix set <path> --value-stdin [--description <desc>] [--tags <t1,t2>]
 //	phoenix delete <path>
 //	phoenix list [prefix]
 //	phoenix export <prefix> --format env
@@ -12,7 +13,7 @@
 //	phoenix agent create <name> --token <token> --acl <path:actions,...>
 //	phoenix agent list
 //	phoenix resolve <ref> [ref...]
-//	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] -- <command> [args...]
+//	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <dur>] [--mask-env] -- <command> [args...]
 //	phoenix verify <file> [--dry-run]
 //	phoenix status
 //	phoenix token mint <agent>
@@ -24,6 +25,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -35,6 +37,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var (
@@ -211,6 +214,7 @@ func usage() {
 Usage:
   phoenix get <path>                          Read a secret
   phoenix set <path> -v <value> [-d desc]     Create/update a secret
+  phoenix set <path> --value-stdin            Read secret value from stdin
   phoenix delete <path>                       Delete a secret
   phoenix list [prefix]                       List secret paths
   phoenix export <prefix> -f env              Export as .env format
@@ -221,6 +225,8 @@ Usage:
   phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
+  phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
+  phoenix exec --mask-env --env ...           Strip phoenix:// refs from child env
   phoenix verify <file> [--dry-run]           Check phoenix:// refs in file are resolvable
   phoenix status                              Show server health, secrets, agents, policy
   phoenix policy show <path>                  Show attestation requirements for path
@@ -308,6 +314,7 @@ func cmdSet(args []string) error {
 
 	var path, value, desc string
 	var tags []string
+	var valueStdin bool
 
 	i := 0
 	if i < len(args) && !strings.HasPrefix(args[i], "-") {
@@ -322,6 +329,8 @@ func cmdSet(args []string) error {
 			if i < len(args) {
 				value = args[i]
 			}
+		case "--value-stdin":
+			valueStdin = true
 		case "-d", "--description":
 			i++
 			if i < len(args) {
@@ -336,8 +345,23 @@ func cmdSet(args []string) error {
 		i++
 	}
 
+	if value != "" && valueStdin {
+		return fmt.Errorf("cannot combine -v/--value with --value-stdin")
+	}
+
+	if valueStdin {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("reading stdin: %w", err)
+		}
+		value = strings.TrimSuffix(string(data), "\n")
+		if value == "" {
+			return fmt.Errorf("stdin was empty — no secret value provided")
+		}
+	}
+
 	if path == "" || value == "" {
-		return fmt.Errorf("usage: phoenix set <path> -v <value> [-d description] [--tags t1,t2]")
+		return fmt.Errorf("usage: phoenix set <path> -v <value> [-d description] [--tags t1,t2]\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]")
 	}
 
 	body := map[string]interface{}{
@@ -785,6 +809,8 @@ func cmdExec(args []string) error {
 	var envMappings []string
 	var cmdArgs []string
 	var outputEnvPath string
+	var timeoutStr string
+	var maskEnv bool
 	seenSep := false
 
 	for i := 0; i < len(args); i++ {
@@ -804,11 +830,19 @@ func cmdExec(args []string) error {
 			if i < len(args) {
 				outputEnvPath = args[i]
 			}
+		case "--timeout":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--timeout requires a duration value (e.g. 5s, 30s)")
+			}
+			timeoutStr = args[i]
+		case "--mask-env":
+			maskEnv = true
 		}
 	}
 
 	if outputEnvPath == "" && (!seenSep || len(cmdArgs) == 0) {
-		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] -- <command> [args...]")
+		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <duration>] [--mask-env] -- <command> [args...]")
 	}
 	if len(envMappings) == 0 {
 		return fmt.Errorf("at least one --env mapping is required")
@@ -835,8 +869,37 @@ func cmdExec(args []string) error {
 	}
 
 	// Resolve all refs in one batch
+	var timeout time.Duration
+	if timeoutStr != "" {
+		var parseErr error
+		timeout, parseErr = time.ParseDuration(timeoutStr)
+		if parseErr != nil {
+			return fmt.Errorf("invalid --timeout value %q: %w", timeoutStr, parseErr)
+		}
+		if timeout <= 0 {
+			return fmt.Errorf("--timeout must be a positive duration (e.g. 5s), got %s", timeout)
+		}
+	}
+
 	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
-	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+	var resp *http.Response
+	var err error
+	if timeout > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		url := serverURL + "/v1/resolve"
+		req, reqErr := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
+		if reqErr != nil {
+			return fmt.Errorf("building request: %w", reqErr)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = httpClient.Do(req)
+	} else {
+		resp, err = apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+	}
 	if err != nil {
 		return fmt.Errorf("resolve request failed: %w", err)
 	}
@@ -889,6 +952,12 @@ func cmdExec(args []string) error {
 		case "PHOENIX_TOKEN", "PHOENIX_CLIENT_CERT", "PHOENIX_CLIENT_KEY",
 			"PHOENIX_CA_CERT", "PHOENIX_SERVER", "PHOENIX_POLICY":
 			continue // strip broker credentials
+		}
+		if maskEnv {
+			val := e[strings.IndexByte(e, '=')+1:]
+			if strings.Contains(val, "phoenix://") {
+				continue // strip env vars containing phoenix:// refs
+			}
 		}
 		env = append(env, e)
 	}

@@ -658,6 +658,8 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 	ip := clientIP(r)
 
+	dryRun := r.URL.Query().Get("dry_run") == "true"
+
 	var req resolveRequest
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -705,6 +707,27 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		if err := s.attest(r, path, info, nonceValidated); err != nil {
 			s.audit.LogDenied(agentName, "resolve", path, ip, "attestation")
 			errors[refStr] = "attestation required"
+			continue
+		}
+
+		if dryRun {
+			// Dry-run: verify path exists without returning the secret value.
+			if _, err := s.store.Get(path); err != nil {
+				if err == store.ErrSecretNotFound {
+					s.audit.LogDenied(agentName, "dry-resolve", path, ip, "not_found")
+					errors[refStr] = "secret not found"
+				} else if err == store.ErrInvalidPath {
+					s.audit.LogDenied(agentName, "dry-resolve", path, ip, "invalid_path")
+					errors[refStr] = "invalid path"
+				} else {
+					s.audit.LogDenied(agentName, "dry-resolve", path, ip, "internal_error")
+					log.Printf("error dry-resolving %q for %s: %v", path, agentName, err)
+					errors[refStr] = "internal error"
+				}
+				continue
+			}
+			s.audit.LogAllowed(agentName, "dry-resolve", path, ip)
+			values[refStr] = "ok"
 			continue
 		}
 

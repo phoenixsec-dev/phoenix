@@ -1084,6 +1084,146 @@ func TestResolveEmptyRefs(t *testing.T) {
 	}
 }
 
+func TestResolveDryRun(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "super-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/drykey", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup: expected 200, got %d", w.Code)
+	}
+
+	// Dry-run resolve — should return "ok" not the actual value
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://test/drykey"},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve?dry_run=true", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("dry_run resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+
+	val := values["phoenix://test/drykey"]
+	if val != "ok" {
+		t.Fatalf("dry_run should return 'ok', got %q", val)
+	}
+	if val == "super-secret" {
+		t.Fatal("dry_run must NOT return the actual secret value")
+	}
+}
+
+func TestResolveDryRunNotFound(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://test/nonexistent"},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve?dry_run=true", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	errors := resp["errors"].(map[string]interface{})
+
+	if errors["phoenix://test/nonexistent"] != "secret not found" {
+		t.Fatalf("expected 'secret not found', got %v", errors["phoenix://test/nonexistent"])
+	}
+}
+
+func TestResolveDryRunAuditsAllPaths(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/dryaudit", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup: expected 200, got %d", w.Code)
+	}
+
+	// Dry-run resolve: 1 success, 1 not-found
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs": []string{
+			"phoenix://test/dryaudit",
+			"phoenix://test/missing",
+		},
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve?dry_run=true", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("dry-run resolve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Query audit log
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit query: expected 200, got %d", w.Code)
+	}
+
+	var auditResp struct {
+		Entries []struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	// Filter to dry-resolve entries
+	var dryResolves []struct{ path, status, reason string }
+	for _, e := range auditResp.Entries {
+		if e.Action == "dry-resolve" {
+			dryResolves = append(dryResolves, struct{ path, status, reason string }{e.Path, e.Status, e.Reason})
+		}
+	}
+
+	if len(dryResolves) != 2 {
+		t.Fatalf("expected 2 dry-resolve audit entries, got %d: %+v", len(dryResolves), dryResolves)
+	}
+
+	foundAllowed := false
+	foundDenied := false
+	for _, e := range dryResolves {
+		if e.status == "allowed" && e.path == "test/dryaudit" {
+			foundAllowed = true
+		}
+		if e.status == "denied" && e.reason == "not_found" && e.path == "test/missing" {
+			foundDenied = true
+		}
+	}
+	if !foundAllowed {
+		t.Error("missing dry-resolve allowed audit entry for test/dryaudit")
+	}
+	if !foundDenied {
+		t.Error("missing dry-resolve denied audit entry for test/missing")
+	}
+}
+
 // --- Attestation policy tests ---
 
 func TestAttestationDenyBearerOnGet(t *testing.T) {

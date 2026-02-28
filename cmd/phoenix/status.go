@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
@@ -16,213 +15,100 @@ func cmdStatus(args []string) error {
 		return err
 	}
 
-	// Gather data from existing endpoints in sequence.
-	// A future /v1/status endpoint will consolidate this server-side.
+	// Use consolidated /v1/status endpoint.
+	resp, err := apiRequest("GET", "/v1/status", nil)
+	if err != nil {
+		return fmt.Errorf("status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var status struct {
+		Status       string                       `json:"status"`
+		Uptime       string                       `json:"uptime"`
+		Secrets      int                          `json:"secrets"`
+		Agents       int                          `json:"agents"`
+		Time         string                       `json:"time"`
+		MTLS         string                       `json:"mtls"`
+		PolicyRules  int                          `json:"policy_rules"`
+		Policy       map[string]string            `json:"policy"`
+		NoncePending int                          `json:"nonce_pending"`
+		RecentAudit  []map[string]json.RawMessage `json:"recent_audit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return fmt.Errorf("decoding status: %w", err)
+	}
 
 	fmt.Println("Phoenix Status")
 	fmt.Println(strings.Repeat("─", 60))
 
-	// Server health
-	printServerHealth()
+	// Server
+	fmt.Printf("  Server: %s (%s)\n", status.Status, serverURL)
+	if status.Uptime != "" {
+		fmt.Printf("  Uptime: %s\n", status.Uptime)
+	}
+	if status.Time != "" {
+		fmt.Printf("  Time:   %s\n", status.Time)
+	}
 
-	// Secret summary
-	printSecretSummary()
+	// Store
+	fmt.Printf("  Secrets: %d\n", status.Secrets)
 
-	// Agent summary
-	printAgentSummary()
+	// Agents
+	fmt.Printf("  Agents: %d registered\n", status.Agents)
 
-	// Policy summary
-	printPolicySummary()
+	// mTLS
+	fmt.Printf("  mTLS: %s\n", status.MTLS)
+
+	// Policy
+	if status.PolicyRules > 0 {
+		fmt.Printf("  Policy: %d attestation rules\n", status.PolicyRules)
+		for pattern, checks := range status.Policy {
+			if checks == "" {
+				checks = "open"
+			}
+			fmt.Printf("    %-30s → %s\n", pattern, checks)
+		}
+	} else {
+		fmt.Printf("  Policy: no attestation rules\n")
+	}
+
+	// Nonce store
+	if status.NoncePending > 0 {
+		fmt.Printf("  Nonce challenges pending: %d\n", status.NoncePending)
+	}
 
 	// Recent audit
-	printAuditSummary()
+	if len(status.RecentAudit) > 0 {
+		fmt.Printf("  Audit: recent activity\n")
+		for _, entry := range status.RecentAudit {
+			ts := rawString(entry["ts"])
+			agent := rawString(entry["agent"])
+			action := rawString(entry["action"])
+			path := rawString(entry["path"])
+			entryStatus := rawString(entry["status"])
+			ago := formatTimeAgo(ts)
+			fmt.Printf("    %s  %-10s %-8s %-30s %s\n", ago, agent, action, path, entryStatus)
+		}
+	}
 
 	return nil
 }
 
-func printServerHealth() {
-	resp, err := apiRequest("GET", "/v1/health", nil)
-	if err != nil {
-		fmt.Printf("  Server: unreachable (%v)\n", err)
-		return
+func rawString(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 200 {
-		fmt.Printf("  Server: running (%s)\n", serverURL)
-	} else {
-		fmt.Printf("  Server: unhealthy (HTTP %d)\n", resp.StatusCode)
-	}
-}
-
-func printSecretSummary() {
-	resp, err := apiRequest("GET", "/v1/secrets/", nil)
-	if err != nil {
-		fmt.Printf("  Store: unavailable\n")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		fmt.Printf("  Store: access denied (HTTP %d)\n", resp.StatusCode)
-		return
-	}
-
-	var result struct {
-		Paths []string `json:"paths"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		fmt.Printf("  Store: error reading response (%v)\n", err)
-		return
-	}
-
-	namespaces := make(map[string]int)
-	for _, p := range result.Paths {
-		parts := strings.SplitN(p, "/", 2)
-		if len(parts) > 0 {
-			namespaces[parts[0]]++
-		}
-	}
-
-	fmt.Printf("  Store: %d secrets across %d namespaces\n", len(result.Paths), len(namespaces))
-	for ns, count := range namespaces {
-		fmt.Printf("    %s: %d secrets\n", ns, count)
-	}
-}
-
-func printAgentSummary() {
-	resp, err := apiRequest("GET", "/v1/agents", nil)
-	if err != nil {
-		fmt.Printf("  Agents: unavailable\n")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		fmt.Printf("  Agents: access denied (HTTP %d)\n", resp.StatusCode)
-		return
-	}
-
-	var result struct {
-		Agents []string `json:"agents"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		fmt.Printf("  Agents: error reading response (%v)\n", err)
-		return
-	}
-
-	fmt.Printf("  Agents: %d registered\n", len(result.Agents))
-	for _, name := range result.Agents {
-		fmt.Printf("    - %s\n", name)
-	}
-}
-
-func printPolicySummary() {
-	policyPath := os.Getenv("PHOENIX_POLICY")
-	if policyPath == "" {
-		fmt.Printf("  Policy: not configured (PHOENIX_POLICY not set)\n")
-		return
-	}
-
-	data, err := os.ReadFile(policyPath)
-	if err != nil {
-		fmt.Printf("  Policy: cannot read %s\n", policyPath)
-		return
-	}
-
-	var pf struct {
-		Attestation map[string]json.RawMessage `json:"attestation"`
-	}
-	if err := json.Unmarshal(data, &pf); err != nil {
-		fmt.Printf("  Policy: invalid JSON\n")
-		return
-	}
-
-	fmt.Printf("  Policy: %d attestation rules active\n", len(pf.Attestation))
-	for pattern, raw := range pf.Attestation {
-		var rule map[string]interface{}
-		json.Unmarshal(raw, &rule)
-
-		var checks []string
-		if v, ok := rule["require_mtls"]; ok && v == true {
-			checks = append(checks, "mTLS")
-		}
-		if v, ok := rule["deny_bearer"]; ok && v == true {
-			checks = append(checks, "deny-bearer")
-		}
-		if _, ok := rule["source_ip"]; ok {
-			checks = append(checks, "IP-bound")
-		}
-		if _, ok := rule["cert_fingerprint"]; ok {
-			checks = append(checks, "cert-pinned")
-		}
-
-		desc := "open"
-		if len(checks) > 0 {
-			desc = strings.Join(checks, " + ")
-		}
-		fmt.Printf("    %-30s → %s\n", pattern, desc)
-	}
-}
-
-func printAuditSummary() {
-	resp, err := apiRequest("GET", "/v1/audit?limit=5", nil)
-	if err != nil {
-		fmt.Printf("  Audit: unavailable\n")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		fmt.Printf("  Audit: access denied (HTTP %d)\n", resp.StatusCode)
-		return
-	}
-
-	var result struct {
-		Entries []struct {
-			Timestamp string `json:"ts"`
-			Agent     string `json:"agent"`
-			Action    string `json:"action"`
-			Path      string `json:"path"`
-			Status    string `json:"status"`
-			Reason    string `json:"reason"`
-		} `json:"entries"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		fmt.Printf("  Audit: error reading response (%v)\n", err)
-		return
-	}
-
-	if len(result.Entries) == 0 {
-		fmt.Printf("  Audit: no events recorded\n")
-		return
-	}
-
-	// Find last denial
-	var lastDenial string
-	for _, e := range result.Entries {
-		if e.Status == "denied" {
-			lastDenial = e.Timestamp
-			break
-		}
-	}
-
-	fmt.Printf("  Audit: recent activity\n")
-	if len(result.Entries) > 0 {
-		latest := result.Entries[0]
-		ago := formatTimeAgo(latest.Timestamp)
-		fmt.Printf("    Last event: %s (%s %s %s — %s)\n",
-			ago, latest.Agent, latest.Action, latest.Path, latest.Status)
-	}
-	if lastDenial != "" {
-		fmt.Printf("    Last denial: %s\n", formatTimeAgo(lastDenial))
-	}
+	return strings.Trim(string(raw), `"`)
 }
 
 func formatTimeAgo(ts string) string {
 	t, err := time.Parse(time.RFC3339, ts)
 	if err != nil {
-		// Try other common formats
 		t, err = time.Parse(time.RFC3339Nano, ts)
 		if err != nil {
 			return ts

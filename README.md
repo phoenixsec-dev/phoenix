@@ -252,6 +252,17 @@ Phoenix resolves all references, strips its own credentials (`PHOENIX_TOKEN`, `P
 
 This enforces least-privilege: the child only gets the specific secrets you map.
 
+Additional exec flags:
+- `--timeout 5s` — fail if secret resolution exceeds the given duration
+- `--mask-env` — also strip any inherited env vars whose values contain `phoenix://` references
+- `--output-env <path>` — write resolved env to a file instead of exec'ing (for Docker init-container patterns)
+
+**Secure secret input** — avoid pasting secrets in command arguments:
+
+```bash
+echo "my-secret" | phoenix set myapp/api-key --value-stdin
+```
+
 ---
 
 ## Attestation Policies
