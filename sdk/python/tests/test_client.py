@@ -7,8 +7,9 @@ PHOENIX_TOKEN environment variables, or skip with:
 
 To run against a local dev server:
 
-    phoenix-server --init /tmp/phoenix-test && phoenix-server --data /tmp/phoenix-test &
-    PHOENIX_SERVER=http://127.0.0.1:9090 PHOENIX_TOKEN=admin-token pytest
+    phoenix-server --init /tmp/phoenix-test
+    phoenix-server --config /tmp/phoenix-test/config.json &
+    PHOENIX_SERVER=http://127.0.0.1:9090 PHOENIX_TOKEN=admin-token python3 -m unittest discover
 """
 
 import os
@@ -60,6 +61,14 @@ class TestClientUnit(unittest.TestCase):
         with self.assertRaises(PhoenixError) as ctx:
             client.verify([])
         self.assertIn("empty", str(ctx.exception))
+
+    def test_unreachable_server_raises_phoenix_error(self):
+        # Port 1 is almost certainly not running a Phoenix server
+        client = PhoenixClient(server="http://127.0.0.1:1", timeout=1)
+        with self.assertRaises(PhoenixError) as ctx:
+            client.health()
+        self.assertIn("unreachable", str(ctx.exception))
+        self.assertEqual(ctx.exception.status, 0)
 
     def test_phoenix_error_has_status(self):
         err = PhoenixError("not found", status=404)

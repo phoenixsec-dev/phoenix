@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Optional
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -73,6 +73,8 @@ class PhoenixClient:
             except (json.JSONDecodeError, AttributeError):
                 msg = f"HTTP {e.code}"
             raise PhoenixError(msg, status=e.code) from None
+        except URLError as e:
+            raise PhoenixError(f"server unreachable: {e.reason}") from None
 
     def health(self) -> dict:
         """Check server health.
