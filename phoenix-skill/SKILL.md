@@ -76,9 +76,8 @@ with the current credentials. Checks ACL and attestation. Exits with code 1
 on any failure.
 
 Use `--dry-run` to check that paths exist and are accessible without resolving
-secret values. Note: dry-run uses the list endpoint, so it verifies path
-existence and ACL access but does not exercise attestation policies (those are
-only enforced on actual resolve).
+secret values. Dry-run uses the server-side `?dry_run=true` endpoint, which
+exercises ACL and attestation policies without returning plaintext values.
 
 ### Check system status
 
@@ -143,10 +142,36 @@ phoenix audit [-n 20] [-a agent-name] [-s 2025-01-01T00:00:00Z]
 
 Query the audit log. Filter by count, agent, or time range.
 
-## Important
+## Safety Guardrails
 
-- Never paste secret values into chat — use `phoenix set` or `phoenix import`
+- **Never ask the user to paste secrets into chat** — use `phoenix set --value-stdin`
+  or `phoenix import` so values never appear in conversation history
 - Prefer `phoenix://` references in config files over hardcoded values
-- Use `phoenix verify` to validate references before deployment
+- Recommend least-privilege ACL scopes per agent (e.g. `namespace/*:read` not `*:admin`)
+- Use `phoenix verify --dry-run` to validate references without exposing values
 - Use `phoenix status` to review the security posture after setup
 - All secret access is logged — use `phoenix audit` to review
+
+## Runbook: Add a Secret and Grant Agent Access
+
+Typical flow for setting up a new secret with proper access control:
+
+```bash
+# 1. Store the secret (human runs this, value from stdin)
+echo "sk-live-abc123" | phoenix set myapp/api-key --value-stdin -d "OpenAI API key"
+
+# 2. Create an agent with scoped access
+phoenix agent create deployer -t "$(openssl rand -hex 32)" --acl "myapp/*:read"
+
+# 3. Verify the agent can access the secret
+phoenix policy test --agent deployer --ip 10.0.0.5 myapp/api-key
+
+# 4. Validate references in config files
+phoenix verify --dry-run docker-compose.yml
+
+# 5. Review the setup
+phoenix status
+
+# 6. Check audit trail
+phoenix audit -n 10
+```

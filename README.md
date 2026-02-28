@@ -349,7 +349,9 @@ The agent can list available secrets, resolve references, and read values — al
 
 ### OpenClaw Exec Backend
 
-Phoenix works as an OpenClaw external secrets provider. Configure an `exec` provider in your OpenClaw config that calls `phoenix resolve`:
+Phoenix works as an OpenClaw external secrets provider through the `exec` backend. OpenClaw's `SecretRef` system handles config-level reference mapping. Phoenix handles encryption, access control, attestation, and audit. Each layer does what it's good at.
+
+**1. Configure the exec provider** in your OpenClaw config:
 
 ```json
 {
@@ -365,7 +367,74 @@ Phoenix works as an OpenClaw external secrets provider. Configure an `exec` prov
 }
 ```
 
-OpenClaw handles reference mapping in configs. Phoenix handles encryption, access control, attestation, and audit. Each layer does what it's good at.
+**2. Use SecretRefs backed by Phoenix** in your gateway config:
+
+```yaml
+api_keys:
+  openai: ${{ secrets.phoenix.phoenix://myapp/openai-key }}
+  anthropic: ${{ secrets.phoenix.phoenix://myapp/anthropic-key }}
+```
+
+**3. Set Phoenix credentials** for the OpenClaw process:
+
+```bash
+export PHOENIX_SERVER=https://phoenix:9090
+export PHOENIX_TOKEN=openclaw-agent-token
+# Or use mTLS:
+export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
+export PHOENIX_CLIENT_CERT=/etc/phoenix/openclaw.crt
+export PHOENIX_CLIENT_KEY=/etc/phoenix/openclaw.key
+```
+
+**4. Validate** before deploying:
+
+```bash
+# Dry-run: verify all refs are accessible without exposing values
+phoenix verify --dry-run gateway-config.yaml
+
+# Check that the OpenClaw agent has the right permissions
+phoenix policy test --agent openclaw --ip 10.0.0.5 myapp/openai-key
+```
+
+**What each layer does:**
+
+| Concern | OpenClaw | Phoenix |
+|---------|----------|---------|
+| Config reference mapping | SecretRef extraction and resolution | - |
+| Encryption at rest | - | AES-256-GCM envelope encryption |
+| Access control | - | Per-agent ACLs with glob matching |
+| Runtime attestation | - | mTLS, IP-binding, process identity |
+| Audit trail | - | Append-only JSON Lines audit log |
+| Credential rotation | - | `phoenix rotate-master`, cert reissue |
+
+### Python SDK
+
+```bash
+pip install phoenix-secrets  # or: pip install sdk/python
+```
+
+```python
+from phoenix_secrets import PhoenixClient
+
+client = PhoenixClient()  # reads PHOENIX_SERVER + PHOENIX_TOKEN from env
+
+# Resolve a single secret
+api_key = client.resolve("phoenix://myapp/api-key")
+
+# Batch resolve
+result = client.resolve_batch([
+    "phoenix://myapp/openai-key",
+    "phoenix://myapp/db-password",
+])
+for ref, value in result["values"].items():
+    print(f"{ref} = {value[:4]}...")
+
+# Dry-run verify (no plaintext returned)
+check = client.verify(["phoenix://myapp/api-key"])
+
+# Health check
+client.health()  # {"status": "ok"}
+```
 
 ### Direct API
 

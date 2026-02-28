@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "phoenix-secrets"
+version = "0.1.0"
+description = "Python client for the Phoenix secrets management API"
+requires-python = ">=3.9"
+license = "MIT"
+
+[project.urls]
+Repository = "https://github.com/claudecode/phoenix"
+
+[tool.setuptools.packages.find]
+include = ["phoenix_secrets*"]
