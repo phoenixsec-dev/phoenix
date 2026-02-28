@@ -332,7 +332,9 @@ Phoenix includes a built-in MCP server. Agents resolve secrets through tool call
 }
 ```
 
-The agent can list available secrets, resolve references, and read values — all through the authenticated, policy-checked API.
+The agent can list available secrets, resolve references, and read values — all through the authenticated, policy-checked API. MCP tool calls include tool identity headers (`X-Phoenix-Tool`), enabling `allowed_tools`/`deny_tools` attestation policies to control which MCP tools can access which secrets.
+
+> **Security note:** `phoenix_get` and `phoenix_resolve` return plaintext secret values in the MCP tool response. While this keeps values out of the agent's prompt context, the tool output is still visible to the MCP client process. Scope production tokens and ACLs tightly — grant agents only the minimum paths they need.
 
 ### OpenClaw Exec Backend
 
@@ -503,6 +505,10 @@ Key settings:
 | `auth.mtls.enabled` | Enable mTLS | `false` |
 | `auth.mtls.require` | Reject connections without client cert | `false` |
 | `policy.path` | Attestation policy file (optional) | — |
+| `attestation.nonce.enabled` | Enable nonce challenge-response | `false` |
+| `attestation.nonce.max_age` | Nonce TTL (e.g. `"30s"`) | `30s` |
+| `attestation.token.enabled` | Enable short-lived token minting | `false` |
+| `attestation.token.ttl` | Token lifetime (e.g. `"15m"`) | `15m` |
 
 ### Environment Variables (CLI)
 

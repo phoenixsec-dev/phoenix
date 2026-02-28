@@ -6,18 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 )
 
 // Config is the top-level server configuration.
 type Config struct {
-	Server      ServerConfig  `json:"server"`
-	Store       StoreConfig   `json:"store"`
-	Crypto      CryptoConfig  `json:"crypto"`
-	Auth        AuthConfig    `json:"auth"`
-	ACL         ACLFileConfig `json:"acl"`
-	Audit       AuditConfig   `json:"audit"`
-	Policy      PolicyConfig  `json:"policy,omitempty"`
-	OnePassword OPConfig      `json:"onepassword,omitempty"`
+	Server      ServerConfig      `json:"server"`
+	Store       StoreConfig       `json:"store"`
+	Crypto      CryptoConfig      `json:"crypto"`
+	Auth        AuthConfig        `json:"auth"`
+	ACL         ACLFileConfig     `json:"acl"`
+	Audit       AuditConfig       `json:"audit"`
+	Policy      PolicyConfig      `json:"policy,omitempty"`
+	Attestation AttestationConfig `json:"attestation,omitempty"`
+	OnePassword OPConfig          `json:"onepassword,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -71,6 +73,26 @@ type AuditConfig struct {
 // PolicyConfig controls the optional attestation policy engine.
 type PolicyConfig struct {
 	Path string `json:"path,omitempty"` // Path to attestation policy JSON file
+}
+
+// AttestationConfig controls optional attestation components
+// (nonce challenge-response and short-lived tokens).
+// Both are disabled by default and enabled explicitly.
+type AttestationConfig struct {
+	Nonce NonceConfig `json:"nonce,omitempty"`
+	Token TokenConfig `json:"token,omitempty"`
+}
+
+// NonceConfig controls the nonce challenge-response store.
+type NonceConfig struct {
+	Enabled bool   `json:"enabled"`
+	MaxAge  string `json:"max_age,omitempty"` // duration string, e.g. "30s" (default)
+}
+
+// TokenConfig controls short-lived token minting.
+type TokenConfig struct {
+	Enabled bool   `json:"enabled"`
+	TTL     string `json:"ttl,omitempty"` // duration string, e.g. "15m" (default)
 }
 
 // OPConfig controls the optional 1Password backend.
@@ -158,6 +180,18 @@ func (c *Config) Validate() error {
 			return errors.New("auth.mtls.enabled requires server_cert and server_key paths")
 		}
 	}
+	// Validate attestation duration strings
+	if c.Attestation.Nonce.Enabled && c.Attestation.Nonce.MaxAge != "" {
+		if _, err := time.ParseDuration(c.Attestation.Nonce.MaxAge); err != nil {
+			return fmt.Errorf("attestation.nonce.max_age: invalid duration %q: %w", c.Attestation.Nonce.MaxAge, err)
+		}
+	}
+	if c.Attestation.Token.Enabled && c.Attestation.Token.TTL != "" {
+		if _, err := time.ParseDuration(c.Attestation.Token.TTL); err != nil {
+			return fmt.Errorf("attestation.token.ttl: invalid duration %q: %w", c.Attestation.Token.TTL, err)
+		}
+	}
+
 	return nil
 }
 

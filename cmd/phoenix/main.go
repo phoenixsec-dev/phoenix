@@ -15,6 +15,7 @@
 //	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] -- <command> [args...]
 //	phoenix verify <file> [--dry-run]
 //	phoenix status
+//	phoenix token mint <agent>
 //	phoenix policy show <path>
 //	phoenix policy test --agent <name> --ip <ip> <path>
 //	phoenix init <dir>
@@ -162,6 +163,18 @@ func main() {
 		}
 	case "rotate-master":
 		err = cmdRotateMaster()
+	case "token":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix token <mint>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "mint":
+			err = cmdTokenMint(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown token subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "cert":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: phoenix cert <issue>")
@@ -212,6 +225,7 @@ Usage:
   phoenix status                              Show server health, secrets, agents, policy
   phoenix policy show <path>                  Show attestation requirements for path
   phoenix policy test -a <agent> -i <ip> <p>  Dry-run attestation check
+  phoenix token mint <agent>                   Mint a short-lived token for an agent
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
@@ -240,6 +254,10 @@ func requireAuth() error {
 }
 
 func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
+	return apiRequestWithHeaders(method, path, body, nil)
+}
+
+func apiRequestWithHeaders(method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
 	url := serverURL + path
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
@@ -250,6 +268,9 @@ func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	return httpClient.Do(req)
 }
@@ -1161,6 +1182,51 @@ func cmdPolicyTest(args []string) error {
 	if !matched {
 		fmt.Printf("No attestation policy matches path %q — access allowed by default.\n", path)
 	}
+	return nil
+}
+
+func cmdTokenMint(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	var agent string
+	i := 0
+	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+		agent = args[i]
+	}
+
+	if agent == "" {
+		return fmt.Errorf("usage: phoenix token mint <agent-name>")
+	}
+
+	body, _ := json.Marshal(map[string]string{"agent": agent})
+	resp, err := apiRequest("POST", "/v1/token/mint", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Token     string `json:"token"`
+		Agent     string `json:"agent"`
+		IssuedAt  string `json:"issued_at"`
+		ExpiresAt string `json:"expires_at"`
+		TTL       string `json:"ttl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	fmt.Printf("Token minted for agent %q\n", result.Agent)
+	fmt.Printf("  Token:      %s\n", result.Token)
+	fmt.Printf("  Issued at:  %s\n", result.IssuedAt)
+	fmt.Printf("  Expires at: %s\n", result.ExpiresAt)
+	fmt.Printf("  TTL:        %s\n", result.TTL)
 	return nil
 }
 

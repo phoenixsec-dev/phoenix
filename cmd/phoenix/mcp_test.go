@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -520,5 +521,243 @@ func TestMCPMultipleRequests(t *testing.T) {
 		if id != expectedID {
 			t.Errorf("response %d: id = %d, want %d", i, id, expectedID)
 		}
+	}
+}
+
+func TestMCPParseErrorReturnsNullID(t *testing.T) {
+	// JSON-RPC 2.0 spec: parse errors must return "id": null.
+	// We test the serialization directly because json.Decoder does not
+	// reliably recover after a parse error on a stream, which means
+	// the mcpExchange loop-simulation can't test recovery.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	mcpSendError(enc, nil, -32700, "Parse error")
+
+	var resp struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   *mcpError       `json:"error"`
+	}
+	if err := json.NewDecoder(&buf).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Error == nil {
+		t.Fatal("expected error in response")
+	}
+	if resp.Error.Code != -32700 {
+		t.Errorf("error code = %d, want -32700", resp.Error.Code)
+	}
+	// ID must be present as JSON null, not omitted
+	if string(resp.ID) != "null" {
+		t.Errorf("id = %s, want null", string(resp.ID))
+	}
+
+	// Verify raw JSON contains "id":null explicitly
+	var buf2 bytes.Buffer
+	enc2 := json.NewEncoder(&buf2)
+	mcpSendError(enc2, nil, -32700, "Parse error")
+	raw := buf2.String()
+	if !strings.Contains(raw, `"id":null`) {
+		t.Errorf("raw JSON should contain \"id\":null, got: %s", raw)
+	}
+}
+
+func TestMCPToolResolveSendsToolHeader(t *testing.T) {
+	var capturedHeader string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeader = r.Header.Get("X-Phoenix-Tool")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"values": map[string]string{"phoenix://test/key": "val"},
+		})
+	})
+
+	mcpExchange(t, handler,
+		jsonMsg(1, "tools/call", map[string]interface{}{
+			"name": "phoenix_resolve",
+			"arguments": map[string]interface{}{
+				"refs": []string{"phoenix://test/key"},
+			},
+		}),
+	)
+
+	if capturedHeader != "phoenix_resolve" {
+		t.Errorf("X-Phoenix-Tool = %q, want %q", capturedHeader, "phoenix_resolve")
+	}
+}
+
+func TestMCPToolGetSendsToolHeader(t *testing.T) {
+	var capturedHeader string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeader = r.Header.Get("X-Phoenix-Tool")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"path": "test/key", "value": "val",
+		})
+	})
+
+	mcpExchange(t, handler,
+		jsonMsg(1, "tools/call", map[string]interface{}{
+			"name":      "phoenix_get",
+			"arguments": map[string]interface{}{"path": "test/key"},
+		}),
+	)
+
+	if capturedHeader != "phoenix_get" {
+		t.Errorf("X-Phoenix-Tool = %q, want %q", capturedHeader, "phoenix_get")
+	}
+}
+
+func TestMCPToolListSendsToolHeader(t *testing.T) {
+	var capturedHeader string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeader = r.Header.Get("X-Phoenix-Tool")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"paths": []string{"test/key"},
+		})
+	})
+
+	mcpExchange(t, handler,
+		jsonMsg(1, "tools/call", map[string]interface{}{
+			"name":      "phoenix_list",
+			"arguments": map[string]interface{}{},
+		}),
+	)
+
+	if capturedHeader != "phoenix_list" {
+		t.Errorf("X-Phoenix-Tool = %q, want %q", capturedHeader, "phoenix_list")
+	}
+}
+
+// TestMCPE2ERealStdinStdout exercises cmdMCP with actual stdin/stdout replacement,
+// verifying the full server lifecycle: startup, protocol exchange, and clean shutdown.
+func TestMCPE2ERealStdinStdout(t *testing.T) {
+	// Set up mock Phoenix server
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/secrets/":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"paths": []string{"e2e/secret1"},
+			})
+		default:
+			http.Error(w, "not found", 404)
+		}
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	oldURL := serverURL
+	oldToken := token
+	oldClient := httpClient
+	serverURL = ts.URL
+	token = "e2e-test-token"
+	httpClient = ts.Client()
+	defer func() {
+		serverURL = oldURL
+		token = oldToken
+		httpClient = oldClient
+	}()
+
+	// Build input: initialize, notification, tools/list, tool call, then EOF
+	messages := []string{
+		jsonMsg(1, "initialize", map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo":      map[string]interface{}{"name": "e2e-test", "version": "1.0"},
+		}),
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		jsonMsg(2, "tools/list", nil),
+		jsonMsg(3, "tools/call", map[string]interface{}{
+			"name":      "phoenix_list",
+			"arguments": map[string]interface{}{},
+		}),
+	}
+	input := strings.Join(messages, "\n") + "\n"
+
+	// Replace stdin/stdout
+	origStdin := os.Stdin
+	origStdout := os.Stdout
+	defer func() {
+		os.Stdin = origStdin
+		os.Stdout = origStdout
+	}()
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("creating stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("creating stdout pipe: %v", err)
+	}
+
+	os.Stdin = inR
+	os.Stdout = outW
+
+	// Write input and close to signal EOF
+	go func() {
+		inW.Write([]byte(input))
+		inW.Close()
+	}()
+
+	// Run cmdMCP in a goroutine
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmdMCP(nil)
+		outW.Close()
+	}()
+
+	// Read all output
+	var outBuf bytes.Buffer
+	io.Copy(&outBuf, outR)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("cmdMCP returned error: %v", err)
+	}
+
+	// Parse responses
+	var responses []mcpResponse
+	dec := json.NewDecoder(&outBuf)
+	for {
+		var resp mcpResponse
+		if err := dec.Decode(&resp); err != nil {
+			break
+		}
+		responses = append(responses, resp)
+	}
+
+	// Expect 3 responses: initialize, tools/list, tools/call (notification has no response)
+	if len(responses) != 3 {
+		t.Fatalf("expected 3 responses, got %d", len(responses))
+	}
+
+	// Verify initialize response
+	var id int
+	json.Unmarshal(responses[0].ID, &id)
+	if id != 1 {
+		t.Errorf("first response id = %d, want 1", id)
+	}
+	if responses[0].Error != nil {
+		t.Errorf("initialize should not error: %v", responses[0].Error)
+	}
+
+	// Verify tools/list response
+	json.Unmarshal(responses[1].ID, &id)
+	if id != 2 {
+		t.Errorf("second response id = %d, want 2", id)
+	}
+
+	// Verify tool call response contains our secret path
+	json.Unmarshal(responses[2].ID, &id)
+	if id != 3 {
+		t.Errorf("third response id = %d, want 3", id)
+	}
+	b, _ := json.Marshal(responses[2].Result)
+	var toolResult mcpCallToolResult
+	json.Unmarshal(b, &toolResult)
+	if toolResult.IsError {
+		t.Errorf("tool call should succeed, got error: %s", toolResult.Content[0].Text)
+	}
+	if !strings.Contains(toolResult.Content[0].Text, "e2e/secret1") {
+		t.Errorf("expected 'e2e/secret1' in output, got: %s", toolResult.Content[0].Text)
 	}
 }

@@ -23,8 +23,10 @@ import (
 	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/config"
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/nonce"
 	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
+	"git.home/vector/phoenix/internal/token"
 )
 
 func main() {
@@ -101,6 +103,36 @@ func main() {
 		}
 		srv.SetPolicy(pe)
 		log.Printf("  Policy: %s (%d rules)", cfg.Policy.Path, len(pe.Rules()))
+	}
+
+	// Initialize nonce store if enabled
+	if cfg.Attestation.Nonce.Enabled {
+		maxAge := nonce.DefaultMaxAge
+		if cfg.Attestation.Nonce.MaxAge != "" {
+			maxAge, _ = time.ParseDuration(cfg.Attestation.Nonce.MaxAge) // validated above
+		}
+		ns := nonce.NewStore(maxAge)
+		srv.SetNonceStore(ns)
+		defer ns.Stop()
+		log.Printf("  Nonce challenge: enabled (max_age=%s)", maxAge)
+	} else {
+		log.Printf("  Nonce challenge: disabled")
+	}
+
+	// Initialize short-lived token issuer if enabled
+	if cfg.Attestation.Token.Enabled {
+		ttl := token.DefaultTTL
+		if cfg.Attestation.Token.TTL != "" {
+			ttl, _ = time.ParseDuration(cfg.Attestation.Token.TTL) // validated above
+		}
+		ti, err := token.NewIssuer(ttl)
+		if err != nil {
+			log.Fatalf("initializing token issuer: %v", err)
+		}
+		srv.SetTokenIssuer(ti)
+		log.Printf("  Short-lived tokens: enabled (ttl=%s)", ttl)
+	} else {
+		log.Printf("  Short-lived tokens: disabled")
 	}
 
 	// Initialize CA for mTLS if enabled

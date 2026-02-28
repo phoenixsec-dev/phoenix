@@ -44,7 +44,7 @@ type mcpRequest struct {
 
 type mcpResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
+	ID      json.RawMessage `json:"id"`
 	Result  interface{}     `json:"result,omitempty"`
 	Error   *mcpError       `json:"error,omitempty"`
 }
@@ -232,7 +232,8 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Internal error: %v", err), true
 	}
 
-	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+	resp, err := apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)),
+		map[string]string{"X-Phoenix-Tool": "phoenix_resolve"})
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -287,7 +288,8 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return "Path is required", true
 	}
 
-	resp, err := apiRequest("GET", "/v1/secrets/"+params.Path, nil)
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+params.Path, nil,
+		map[string]string{"X-Phoenix-Tool": "phoenix_get"})
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -334,7 +336,8 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		path = "/v1/secrets/" + p
 	}
 
-	resp, err := apiRequest("GET", path, nil)
+	resp, err := apiRequestWithHeaders("GET", path, nil,
+		map[string]string{"X-Phoenix-Tool": "phoenix_list"})
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
