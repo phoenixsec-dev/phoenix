@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -16,9 +17,11 @@ import (
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/ca"
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/nonce"
 	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/ref"
 	"git.home/vector/phoenix/internal/store"
+	"git.home/vector/phoenix/internal/token"
 )
 
 // MaxRequestBodyBytes limits the size of request bodies to prevent DoS.
@@ -34,6 +37,9 @@ type Server struct {
 	ca            *ca.CA            // nil when mTLS is disabled
 	policy        *policy.Engine    // nil when no attestation policy configured
 	bearerEnabled bool              // whether bearer token auth is allowed
+	nonces        *nonce.Store      // nil when nonce challenge is not configured
+	tokens        *token.Issuer     // nil when short-lived tokens are not configured
+	startTime     time.Time         // server start time for uptime reporting
 	mux           *http.ServeMux
 }
 
@@ -46,6 +52,7 @@ func NewServer(s *store.Store, a *acl.ACL, al *audit.Logger, auditPath string) *
 		audit:         al,
 		auditPath:     auditPath,
 		bearerEnabled: true,
+		startTime:     time.Now(),
 		mux:           http.NewServeMux(),
 	}
 	srv.routes()
@@ -78,6 +85,16 @@ func (s *Server) SetPolicy(p *policy.Engine) {
 	s.policy = p
 }
 
+// SetNonceStore configures the nonce store for challenge-response flows.
+func (s *Server) SetNonceStore(ns *nonce.Store) {
+	s.nonces = ns
+}
+
+// SetTokenIssuer configures the short-lived token issuer.
+func (s *Server) SetTokenIssuer(ti *token.Issuer) {
+	s.tokens = ti
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -92,8 +109,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/agents", s.handleCreateAgent)
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
+	s.mux.HandleFunc("POST /v1/certs/revoke", s.handleRevokeCert)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
+	s.mux.HandleFunc("POST /v1/challenge", s.handleChallenge)
+	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
+	s.mux.HandleFunc("POST /v1/token/mint", s.handleMintToken)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -102,6 +123,8 @@ type authInfo struct {
 	UsedMTLS        bool
 	UsedBearer      bool
 	CertFingerprint string // "sha256:<hex>" or empty
+	TokenIssuedAt   *time.Time              // set when authenticated via short-lived token
+	Process         *policy.ProcessContext   // set when token carries process attestation claims
 }
 
 // authenticate identifies the calling agent from the request.
@@ -135,15 +158,39 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
 	}
 
+	// Try short-lived token authentication
+	tok := extractToken(r)
+	if s.tokens != nil && tok != "" {
+		claims, err := s.tokens.Validate(tok)
+		if err == nil {
+			iat := claims.IssuedAt
+			info := &authInfo{
+				Agent:         claims.Agent,
+				TokenIssuedAt: &iat,
+			}
+			// Propagate process attestation claims from the token
+			if claims.ProcessUID != nil || claims.BinaryHash != "" {
+				pc := &policy.ProcessContext{
+					BinaryHash: claims.BinaryHash,
+				}
+				if claims.ProcessUID != nil {
+					pc.UID = *claims.ProcessUID
+				}
+				info.Process = pc
+			}
+			return info, nil
+		}
+		// Not a valid short-lived token — fall through to bearer
+	}
+
 	// Fall back to bearer token if enabled
 	if !s.bearerEnabled {
 		return nil, fmt.Errorf("no valid authentication credentials provided")
 	}
-	token := extractToken(r)
-	if token == "" {
+	if tok == "" {
 		return nil, fmt.Errorf("no authentication credentials provided")
 	}
-	agent, err := s.acl.Authenticate(token)
+	agent, err := s.acl.Authenticate(tok)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +208,8 @@ func certFingerprint(raw []byte) string {
 
 // attest checks attestation policy for the given secret path.
 // Returns nil if no policy is configured or if the request passes.
-func (s *Server) attest(r *http.Request, path string, info *authInfo) error {
+// nonceValidated indicates whether a nonce was submitted and validated for this request.
+func (s *Server) attest(r *http.Request, path string, info *authInfo, nonceValidated bool) error {
 	if s.policy == nil {
 		return nil
 	}
@@ -170,6 +218,10 @@ func (s *Server) attest(r *http.Request, path string, info *authInfo) error {
 		UsedBearer:      info.UsedBearer,
 		SourceIP:        clientIP(r),
 		CertFingerprint: info.CertFingerprint,
+		Tool:            r.Header.Get("X-Phoenix-Tool"),
+		Process:         info.Process,
+		NonceValidated:  nonceValidated,
+		TokenIssuedAt:   info.TokenIssuedAt,
 	}
 	return s.policy.Evaluate(path, ctx)
 }
@@ -240,7 +292,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
-			if s.attest(r, p, info) != nil {
+			if s.attest(r, p, info, false) != nil {
 				continue
 			}
 			visible = append(visible, p)
@@ -258,7 +310,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attestation policy check
-	if err := s.attest(r, path, info); err != nil {
+	if err := s.attest(r, path, info, false); err != nil {
 		s.audit.LogDenied(agentName, "read", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
@@ -592,7 +644,8 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 
 // resolveRequest is the JSON body for batch reference resolution.
 type resolveRequest struct {
-	Refs []string `json:"refs"`
+	Refs  []string `json:"refs"`
+	Nonce string   `json:"nonce,omitempty"` // optional nonce from /v1/challenge
 }
 
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
@@ -617,6 +670,20 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate nonce if provided
+	nonceValidated := false
+	if req.Nonce != "" {
+		if s.nonces == nil {
+			jsonError(w, "nonce challenge not enabled", http.StatusBadRequest)
+			return
+		}
+		if err := s.nonces.Validate(req.Nonce); err != nil {
+			jsonError(w, "nonce validation failed: "+err.Error(), http.StatusForbidden)
+			return
+		}
+		nonceValidated = true
+	}
+
 	values := make(map[string]string)
 	errors := make(map[string]string)
 
@@ -635,7 +702,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Attestation policy check (per-ref)
-		if err := s.attest(r, path, info); err != nil {
+		if err := s.attest(r, path, info, nonceValidated); err != nil {
 			s.audit.LogDenied(agentName, "resolve", path, ip, "attestation")
 			errors[refStr] = "attestation required"
 			continue
@@ -668,4 +735,230 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		resp["errors"] = errors
 	}
 	jsonOK(w, resp)
+}
+
+// handleChallenge issues a one-time nonce for challenge-response attestation.
+func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
+	if s.nonces == nil {
+		jsonError(w, "nonce challenge not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	// Authentication required to get a challenge
+	_, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	entry, err := s.nonces.Generate()
+	if err != nil {
+		log.Printf("error generating nonce: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"nonce":   entry.Nonce,
+		"expires": entry.Expires.UTC().Format(time.RFC3339),
+	})
+}
+
+// revokeCertRequest is the JSON body for certificate revocation.
+type revokeCertRequest struct {
+	SerialNumber string `json:"serial_number"`
+	AgentName    string `json:"agent_name"`
+}
+
+// handleRevokeCert revokes a certificate by serial number.
+func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
+	if s.ca == nil {
+		jsonError(w, "mTLS is not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Only admin agents can revoke certificates
+	if err := s.acl.Authorize(agentName, "certs", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	var req revokeCertRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.SerialNumber == "" {
+		jsonError(w, "serial_number is required", http.StatusBadRequest)
+		return
+	}
+
+	serial := new(big.Int)
+	if _, ok := serial.SetString(req.SerialNumber, 10); !ok {
+		jsonError(w, "invalid serial_number format", http.StatusBadRequest)
+		return
+	}
+
+	revokeAgent := req.AgentName
+	if revokeAgent == "" {
+		revokeAgent = "unknown"
+	}
+
+	if err := s.ca.RevokeCert(serial, revokeAgent); err != nil {
+		log.Printf("error revoking cert serial %s: %v", req.SerialNumber, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.audit.LogAllowed(agentName, "revoke-cert", req.SerialNumber, clientIP(r))
+	jsonOK(w, map[string]string{
+		"status":        "ok",
+		"serial_number": req.SerialNumber,
+		"agent_name":    revokeAgent,
+	})
+}
+
+// handleStatus returns a comprehensive server status overview.
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Only admin agents can view full status
+	if err := s.acl.Authorize(agentName, "status", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	uptime := time.Since(s.startTime).Round(time.Second)
+
+	status := map[string]interface{}{
+		"status":  "ok",
+		"uptime":  uptime.String(),
+		"secrets": s.store.Count(),
+		"agents":  len(s.acl.ListAgents()),
+		"time":    time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Policy summary
+	if s.policy != nil {
+		rules := s.policy.Rules()
+		policySummary := make(map[string]interface{}, len(rules))
+		for pattern, rule := range rules {
+			var checks []string
+			if rule.RequireMTLS {
+				checks = append(checks, "mTLS")
+			}
+			if rule.DenyBearer {
+				checks = append(checks, "deny-bearer")
+			}
+			if len(rule.AllowedIPs) > 0 {
+				checks = append(checks, "IP-bound")
+			}
+			if rule.CertFingerprint != "" {
+				checks = append(checks, "cert-pinned")
+			}
+			if len(rule.AllowedTools) > 0 {
+				checks = append(checks, "tool-scoped")
+			}
+			if rule.TimeWindow != "" {
+				checks = append(checks, "time-window")
+			}
+			if rule.Process != nil {
+				checks = append(checks, "process-attested")
+			}
+			if rule.RequireNonce {
+				checks = append(checks, "nonce-required")
+			}
+			if rule.RequireFreshAttestation {
+				checks = append(checks, "fresh-credential")
+			}
+			policySummary[pattern] = strings.Join(checks, " + ")
+		}
+		status["policy_rules"] = len(rules)
+		status["policy"] = policySummary
+	}
+
+	// CA status
+	if s.ca != nil {
+		status["mtls"] = "enabled"
+	} else {
+		status["mtls"] = "disabled"
+	}
+
+	// Nonce store status
+	if s.nonces != nil {
+		status["nonce_pending"] = s.nonces.Pending()
+	}
+
+	// Recent audit
+	entries, err := audit.Query(s.auditPath, audit.QueryOptions{Limit: 5})
+	if err == nil && len(entries) > 0 {
+		status["recent_audit"] = entries
+	}
+
+	jsonOK(w, status)
+}
+
+// mintTokenRequest is the JSON body for token minting.
+type mintTokenRequest struct {
+	Agent string `json:"agent"`
+}
+
+// handleMintToken creates a short-lived token for an agent.
+func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
+	if s.tokens == nil {
+		jsonError(w, "short-lived tokens not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Only admin agents can mint tokens for other agents
+	if err := s.acl.Authorize(agentName, "tokens", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	var req mintTokenRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Agent == "" {
+		jsonError(w, "agent is required", http.StatusBadRequest)
+		return
+	}
+
+	tok, claims, err := s.tokens.Mint(req.Agent, nil, "")
+	if err != nil {
+		log.Printf("error minting token for %q: %v", req.Agent, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.audit.LogAllowed(agentName, "mint-token", req.Agent, clientIP(r))
+	jsonOK(w, map[string]interface{}{
+		"token":      tok,
+		"agent":      claims.Agent,
+		"issued_at":  claims.IssuedAt.Format(time.RFC3339),
+		"expires_at": claims.ExpiresAt.Format(time.RFC3339),
+		"ttl":        s.tokens.TTL().String(),
+	})
 }
