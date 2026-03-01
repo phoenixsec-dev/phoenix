@@ -766,10 +766,10 @@ Troubleshooting:
 ## Docker
 
 ```bash
-docker build -t phoenix .
+docker pull phoenixsec/phoenix:latest
 
 # First run: initialize the data directory
-docker run --rm -v phoenix-data:/data phoenix --init /data
+docker run --rm -v phoenix-data:/data phoenixsec/phoenix:latest --init /data
 
 # Note the admin token printed to stdout — save it!
 
@@ -778,15 +778,20 @@ docker run -d --name phoenix \
   -v phoenix-data:/data \
   -p 9090:9090 \
   --restart unless-stopped \
-  phoenix
+  phoenixsec/phoenix:latest
 ```
+
+Tag strategy:
+- `latest` (most recent release)
+- `vX.Y.Z` (exact release tag)
+- `vX.Y` (minor line)
 
 Or with Docker Compose:
 
 ```yaml
 services:
   phoenix:
-    build: .
+    image: phoenixsec/phoenix:latest
     ports:
       - "9090:9090"
     volumes:
