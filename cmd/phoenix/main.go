@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -206,6 +207,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown emergency subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "agent-sock":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix agent-sock <attest>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "attest":
+			err = cmdAgentSockAttest(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown agent-sock subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "mcp-server":
 		err = cmdMCP(args)
 	case "init":
@@ -254,6 +267,7 @@ Usage:
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix emergency get <path> --data-dir <d> [--confirm]  Break-glass offline secret retrieval
+  phoenix agent-sock attest [--socket <path>]  Attest via local Unix socket agent
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix init <dir>                          Initialize data directory
 
@@ -1352,6 +1366,85 @@ func cmdTokenMint(args []string) error {
 	fmt.Printf("  Issued at:  %s\n", result.IssuedAt)
 	fmt.Printf("  Expires at: %s\n", result.ExpiresAt)
 	fmt.Printf("  TTL:        %s\n", result.TTL)
+	return nil
+}
+
+const defaultAgentSocket = "/tmp/phoenix-agent.sock"
+
+func cmdAgentSockAttest(args []string) error {
+	socketPath := defaultAgentSocket
+	agentName := ""
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "-s", "--socket":
+			i++
+			if i < len(args) {
+				socketPath = args[i]
+			}
+		case "-a", "--agent":
+			i++
+			if i < len(args) {
+				agentName = args[i]
+			}
+		default:
+			if agentName == "" {
+				agentName = args[i]
+			}
+		}
+		i++
+	}
+
+	// Connect to the Unix socket
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("connecting to agent socket %s: %w", socketPath, err)
+	}
+	defer conn.Close()
+
+	// Send attestation request
+	req := struct {
+		Agent string `json:"agent"`
+	}{Agent: agentName}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("sending attest request: %w", err)
+	}
+
+	// Read response
+	var resp struct {
+		OK   bool `json:"ok"`
+		Peer *struct {
+			PID        int32  `json:"pid"`
+			UID        int32  `json:"uid"`
+			GID        int32  `json:"gid"`
+			BinaryPath string `json:"binary_path,omitempty"`
+			BinaryHash string `json:"binary_hash,omitempty"`
+		} `json:"peer,omitempty"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("reading attest response: %w", err)
+	}
+
+	if !resp.OK {
+		return fmt.Errorf("attestation failed: %s", resp.Error)
+	}
+
+	if resp.Peer == nil {
+		return fmt.Errorf("attestation returned no peer info")
+	}
+
+	fmt.Printf("Attestation OK\n")
+	fmt.Printf("  PID:         %d\n", resp.Peer.PID)
+	fmt.Printf("  UID:         %d\n", resp.Peer.UID)
+	fmt.Printf("  GID:         %d\n", resp.Peer.GID)
+	if resp.Peer.BinaryPath != "" {
+		fmt.Printf("  Binary:      %s\n", resp.Peer.BinaryPath)
+	}
+	if resp.Peer.BinaryHash != "" {
+		fmt.Printf("  Binary hash: %s\n", resp.Peer.BinaryHash)
+	}
 	return nil
 }
 

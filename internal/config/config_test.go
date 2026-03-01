@@ -218,6 +218,63 @@ func TestValidate1PasswordCacheTTLValid(t *testing.T) {
 	}
 }
 
+func TestValidateLocalAgentEnabledRequiresSocket(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Attestation.LocalAgent.Enabled = true
+	cfg.Attestation.LocalAgent.SocketPath = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("local_agent enabled without socket_path should fail validation")
+	}
+}
+
+func TestValidateLocalAgentEnabledWithSocket(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Attestation.LocalAgent.Enabled = true
+	cfg.Attestation.LocalAgent.SocketPath = "/tmp/phoenix-agent.sock"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid local_agent config should pass: %v", err)
+	}
+}
+
+func TestValidateLocalAgentDisabledIgnoresMissingSocket(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Attestation.LocalAgent.Enabled = false
+	cfg.Attestation.LocalAgent.SocketPath = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disabled local_agent should not require socket_path: %v", err)
+	}
+}
+
+func TestLocalAgentConfigJSON(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Attestation.LocalAgent.Enabled = true
+	cfg.Attestation.LocalAgent.SocketPath = "/run/phoenix/agent.sock"
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var parsed Config
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !parsed.Attestation.LocalAgent.Enabled {
+		t.Error("local_agent.enabled should be true after round-trip")
+	}
+	if parsed.Attestation.LocalAgent.SocketPath != "/run/phoenix/agent.sock" {
+		t.Errorf("local_agent.socket_path = %q, want %q", parsed.Attestation.LocalAgent.SocketPath, "/run/phoenix/agent.sock")
+	}
+}
+
+func TestDefaultConfigNoLocalAgent(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Attestation.LocalAgent.Enabled {
+		t.Error("local_agent should be disabled by default")
+	}
+}
+
 func TestOPConfigJSON(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Store.Backend = "1password"

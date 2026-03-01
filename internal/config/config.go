@@ -77,11 +77,18 @@ type PolicyConfig struct {
 }
 
 // AttestationConfig controls optional attestation components
-// (nonce challenge-response and short-lived tokens).
-// Both are disabled by default and enabled explicitly.
+// (nonce challenge-response, short-lived tokens, and local agent).
+// All are disabled by default and enabled explicitly.
 type AttestationConfig struct {
-	Nonce NonceConfig `json:"nonce,omitempty"`
-	Token TokenConfig `json:"token,omitempty"`
+	Nonce      NonceConfig      `json:"nonce,omitempty"`
+	Token      TokenConfig      `json:"token,omitempty"`
+	LocalAgent LocalAgentConfig `json:"local_agent,omitempty"`
+}
+
+// LocalAgentConfig controls the local Unix socket attestation agent.
+type LocalAgentConfig struct {
+	Enabled    bool   `json:"enabled"`
+	SocketPath string `json:"socket_path,omitempty"` // default: /tmp/phoenix-agent.sock
 }
 
 // NonceConfig controls the nonce challenge-response store.
@@ -218,6 +225,9 @@ func (c *Config) Validate() error {
 		if _, err := time.ParseDuration(c.Attestation.Token.TTL); err != nil {
 			return fmt.Errorf("attestation.token.ttl: invalid duration %q: %w", c.Attestation.Token.TTL, err)
 		}
+	}
+	if c.Attestation.LocalAgent.Enabled && c.Attestation.LocalAgent.SocketPath == "" {
+		return errors.New("attestation.local_agent.socket_path is required when local_agent is enabled")
 	}
 
 	return nil

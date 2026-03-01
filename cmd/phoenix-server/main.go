@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"git.home/vector/phoenix/internal/acl"
+	"git.home/vector/phoenix/internal/agent"
 	"git.home/vector/phoenix/internal/api"
 	"git.home/vector/phoenix/internal/audit"
 	"git.home/vector/phoenix/internal/ca"
@@ -205,6 +206,18 @@ func main() {
 		log.Printf("  Short-lived tokens: enabled (ttl=%s)", ttl)
 	} else {
 		log.Printf("  Short-lived tokens: disabled")
+	}
+
+	// Start local attestation agent if enabled
+	if cfg.Attestation.LocalAgent.Enabled {
+		localAgent := agent.New(cfg.Attestation.LocalAgent.SocketPath)
+		if err := localAgent.Start(); err != nil {
+			log.Fatalf("starting local attestation agent: %v", err)
+		}
+		defer localAgent.Stop()
+		log.Printf("  Local agent: %s", localAgent.SocketPath())
+	} else {
+		log.Printf("  Local agent: disabled")
 	}
 
 	// Initialize CA for mTLS if enabled
