@@ -237,6 +237,7 @@ Usage:
   phoenix list [prefix]                       List secret paths
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
+  phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
@@ -532,8 +533,11 @@ func cmdImport(args []string) error {
 		return err
 	}
 
-	var filePath, prefix string
+	var filePath, prefix, from, vault, item string
+	var dryRun, skipExisting bool
+
 	i := 0
+	// First positional arg is file path (for env import)
 	if i < len(args) && !strings.HasPrefix(args[i], "-") {
 		filePath = args[i]
 		i++
@@ -545,10 +549,43 @@ func cmdImport(args []string) error {
 			if i < len(args) {
 				prefix = args[i]
 			}
+		case "--from":
+			i++
+			if i < len(args) {
+				from = args[i]
+			}
+		case "--vault":
+			i++
+			if i < len(args) {
+				vault = args[i]
+			}
+		case "--item":
+			i++
+			if i < len(args) {
+				item = args[i]
+			}
+		case "--dry-run":
+			dryRun = true
+		case "--skip-existing":
+			skipExisting = true
 		}
 		i++
 	}
 
+	switch from {
+	case "1password":
+		if vault == "" || prefix == "" {
+			return fmt.Errorf("usage: phoenix import --from 1password --vault <vault> --prefix <prefix> [--item <name>] [--dry-run] [--skip-existing]")
+		}
+		return import1Password(vault, item, prefix, dryRun, skipExisting)
+	case "", "env":
+		return importEnvFile(filePath, prefix)
+	default:
+		return fmt.Errorf("unknown import source %q (supported: 1password, env)", from)
+	}
+}
+
+func importEnvFile(filePath, prefix string) error {
 	if filePath == "" || prefix == "" {
 		return fmt.Errorf("usage: phoenix import <file> -p <prefix>")
 	}

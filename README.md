@@ -595,6 +595,21 @@ imported: API_KEY -> myapp/api-key
 imported 2 secrets
 ```
 
+### Import from 1Password (one-time migration into Phoenix store)
+
+```bash
+export OP_SERVICE_ACCOUNT_TOKEN="ops_..."
+phoenix import --from 1password --vault Engineering --prefix myapp/
+```
+
+Options:
+- `--item <name>` import a single 1Password item
+- `--dry-run` preview mappings without writing
+- `--skip-existing` skip paths that already exist in Phoenix
+
+Token env override for import:
+- `PHOENIX_OP_TOKEN_ENV` — env var name containing the 1Password service account token (default: `OP_SERVICE_ACCOUNT_TOKEN`)
+
 ### Export as .env format
 
 ```bash
@@ -659,6 +674,7 @@ Key settings:
 | `server.listen` | Bind address | `0.0.0.0:9090` |
 | `store.path` | Encrypted store file | `/data/store.json` |
 | `store.master_key` | Master key file | `/data/master.key` |
+| `store.backend` | Secret backend (`file` or `1password`) | `file` |
 | `acl.path` | ACL definition file | `/data/acl.json` |
 | `audit.path` | Audit log file | `/data/audit.log` |
 | `auth.bearer.enabled` | Allow bearer token auth | `true` |
@@ -669,6 +685,39 @@ Key settings:
 | `attestation.nonce.max_age` | Nonce TTL (e.g. `"30s"`) | `30s` |
 | `attestation.token.enabled` | Enable short-lived token minting | `false` |
 | `attestation.token.ttl` | Token lifetime (e.g. `"15m"`) | `15m` |
+| `onepassword.vault` | 1Password vault name (required when `store.backend=1password`) | — |
+| `onepassword.service_account_token_env` | Token env var name for server runtime backend | `OP_SERVICE_ACCOUNT_TOKEN` |
+| `onepassword.cache_ttl` | Runtime read/list cache duration | `60s` |
+
+### 1Password Runtime Backend (Broker Mode, Read-Only)
+
+Phoenix can broker access to secrets stored in 1Password:
+
+```json
+{
+  "store": {
+    "backend": "1password"
+  },
+  "onepassword": {
+    "vault": "Engineering",
+    "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN",
+    "cache_ttl": "60s"
+  }
+}
+```
+
+Behavior:
+- `GET/resolve/list` go through Phoenix ACL + attestation + audit, then read from 1Password
+- `set/delete` are blocked (`read-only backend`)
+- path mapping: `phoenix://myapp/api-key` -> `op://Engineering/myapp/api-key`
+
+Rollback to managed mode:
+1. set `store.backend` back to `"file"`
+2. restart `phoenix-server`
+
+Troubleshooting:
+- missing `op` binary or token: server fails fast at startup with a clear error
+- runtime list/read failures: request fails, audit still records access attempt
 
 ### Environment Variables (CLI)
 
@@ -680,6 +729,7 @@ Key settings:
 | `PHOENIX_CLIENT_CERT` | Client certificate for mTLS |
 | `PHOENIX_CLIENT_KEY` | Client key for mTLS |
 | `PHOENIX_POLICY` | Policy file path (for `phoenix policy` commands) |
+| `PHOENIX_OP_TOKEN_ENV` | (Import only) env var name holding 1Password token |
 
 ---
 
