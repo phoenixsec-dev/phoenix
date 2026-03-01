@@ -18,7 +18,7 @@
 //	phoenix status
 //	phoenix token mint <agent>
 //	phoenix policy show <path>
-//	phoenix policy test --agent <name> --ip <ip> <path>
+//	phoenix policy test --agent <name> --ip <ip> [--time <RFC3339>] <path>
 //	phoenix init <dir>
 //	phoenix mcp-server
 package main
@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"git.home/vector/phoenix/internal/crypto"
+	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
 	"git.home/vector/phoenix/internal/version"
 )
@@ -272,7 +273,7 @@ Usage:
   phoenix verify <file> [--dry-run]           Check phoenix:// refs in file are resolvable
   phoenix status                              Show server health, secrets, agents, policy
   phoenix policy show <path>                  Show attestation requirements for path
-  phoenix policy test -a <agent> -i <ip> <p>  Dry-run attestation check
+  phoenix policy test -a <agent> -i <ip> [-t time] <p>  Dry-run attestation check
   phoenix token mint <agent>                   Mint a short-lived token for an agent
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
@@ -289,7 +290,8 @@ Environment:
   PHOENIX_CA_CERT      CA certificate for TLS verification
   PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
   PHOENIX_CLIENT_KEY   Client key for mTLS authentication
-  PHOENIX_POLICY       Path to attestation policy file (JSON)`)
+  PHOENIX_POLICY       Path to attestation policy file (JSON)
+  PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)`)
 }
 
 // requireAuth checks that at least one auth method is configured
@@ -323,6 +325,10 @@ func apiRequestWithHeaders(method, path string, body io.Reader, headers map[stri
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	// Pass tool/skill attestation claim if set
+	if tool := os.Getenv("PHOENIX_TOOL"); tool != "" {
+		req.Header.Set("X-Phoenix-Tool", tool)
 	}
 	return httpClient.Do(req)
 }
@@ -1339,7 +1345,7 @@ func matchesPattern(pattern, path string) bool {
 }
 
 func cmdPolicyTest(args []string) error {
-	var agent, ip, path string
+	var agent, ip, path, timeStr string
 	i := 0
 	for i < len(args) {
 		switch args[i] {
@@ -1353,6 +1359,11 @@ func cmdPolicyTest(args []string) error {
 			if i < len(args) {
 				ip = args[i]
 			}
+		case "-t", "--time":
+			i++
+			if i < len(args) {
+				timeStr = args[i]
+			}
 		default:
 			if path == "" {
 				path = args[i]
@@ -1362,7 +1373,7 @@ func cmdPolicyTest(args []string) error {
 	}
 
 	if path == "" {
-		return fmt.Errorf("usage: phoenix policy test --agent <name> --ip <ip> <secret-path>")
+		return fmt.Errorf("usage: phoenix policy test --agent <name> --ip <ip> [--time <RFC3339>] <secret-path>")
 	}
 
 	policyPath := os.Getenv("PHOENIX_POLICY")
@@ -1370,23 +1381,29 @@ func cmdPolicyTest(args []string) error {
 		return fmt.Errorf("PHOENIX_POLICY environment variable not set")
 	}
 
-	data, err := os.ReadFile(policyPath)
+	// Load policy using the real engine for full evaluation
+	pe, err := policy.LoadFile(policyPath)
 	if err != nil {
-		return fmt.Errorf("reading policy file: %w", err)
+		return fmt.Errorf("loading policy: %w", err)
 	}
 
-	// Use a simple evaluation (no full policy.Engine import in CLI binary)
-	var pf struct {
-		Attestation map[string]struct {
-			RequireMTLS     bool     `json:"require_mtls"`
-			AllowedIPs      []string `json:"source_ip"`
-			CertFingerprint string   `json:"cert_fingerprint"`
-			DenyBearer      bool     `json:"deny_bearer"`
-		} `json:"attestation"`
+	// Build request context from CLI flags
+	ctx := &policy.RequestContext{
+		SourceIP:   ip,
+		UsedBearer: true, // CLI test assumes bearer unless overridden
 	}
-	if err := json.Unmarshal(data, &pf); err != nil {
-		return fmt.Errorf("parsing policy: %w", err)
+
+	// Parse --time for time-window evaluation
+	if timeStr != "" {
+		evalTime, parseErr := time.Parse(time.RFC3339, timeStr)
+		if parseErr != nil {
+			return fmt.Errorf("invalid --time value %q (expected RFC3339): %w", timeStr, parseErr)
+		}
+		ctx.EvalTime = evalTime
 	}
+
+	// Show matching rule info
+	rule, pattern := pe.RuleFor(path)
 
 	fmt.Printf("Testing attestation for path %q\n", path)
 	if agent != "" {
@@ -1395,55 +1412,69 @@ func cmdPolicyTest(args []string) error {
 	if ip != "" {
 		fmt.Printf("  Source IP: %s\n", ip)
 	}
+	if timeStr != "" {
+		fmt.Printf("  Eval time: %s\n", timeStr)
+	} else {
+		fmt.Printf("  Eval time: %s (now)\n", time.Now().Format(time.RFC3339))
+	}
 	fmt.Println()
 
-	matched := false
-	for pattern, rule := range pf.Attestation {
-		if !matchesPattern(pattern, path) {
-			continue
-		}
-		matched = true
-		fmt.Printf("Matched policy: %s\n", pattern)
-
-		allPass := true
-		if rule.DenyBearer {
-			fmt.Printf("  [INFO] deny_bearer: bearer tokens are blocked\n")
-		}
-		if rule.RequireMTLS {
-			fmt.Printf("  [WARN] require_mtls: mTLS client cert required (not testable from CLI)\n")
-		}
-		if len(rule.AllowedIPs) > 0 {
-			if ip == "" {
-				fmt.Printf("  [SKIP] source_ip: %v (no --ip provided)\n", rule.AllowedIPs)
-			} else {
-				found := false
-				for _, allowed := range rule.AllowedIPs {
-					if allowed == ip {
-						found = true
-					}
-				}
-				if found {
-					fmt.Printf("  [PASS] source_ip: %s is in allowed list\n", ip)
-				} else {
-					fmt.Printf("  [FAIL] source_ip: %s is NOT in allowed list %v\n", ip, rule.AllowedIPs)
-					allPass = false
-				}
-			}
-		}
-		if rule.CertFingerprint != "" {
-			fmt.Printf("  [INFO] cert_fingerprint: %s (not testable from CLI)\n", rule.CertFingerprint)
-		}
-
-		if allPass {
-			fmt.Printf("  Result: PASS (testable checks passed)\n")
-		} else {
-			fmt.Printf("  Result: FAIL\n")
-		}
-	}
-
-	if !matched {
+	if rule == nil {
 		fmt.Printf("No attestation policy matches path %q — access allowed by default.\n", path)
+		return nil
 	}
+
+	fmt.Printf("Matched policy: %s\n", pattern)
+
+	// Show rule details
+	if rule.DenyBearer {
+		fmt.Printf("  [INFO] deny_bearer: bearer tokens are blocked\n")
+	}
+	if rule.RequireMTLS {
+		fmt.Printf("  [WARN] require_mtls: mTLS client cert required (not testable from CLI)\n")
+	}
+	if len(rule.AllowedIPs) > 0 {
+		if ip == "" {
+			fmt.Printf("  [SKIP] source_ip: %v (no --ip provided)\n", rule.AllowedIPs)
+		} else {
+			fmt.Printf("  [INFO] source_ip: %v (evaluated by engine)\n", rule.AllowedIPs)
+		}
+	}
+	if rule.CertFingerprint != "" {
+		fmt.Printf("  [INFO] cert_fingerprint: %s (not testable from CLI)\n", rule.CertFingerprint)
+	}
+	if rule.TimeWindow != "" {
+		tz := rule.TimeZone
+		if tz == "" {
+			tz = "UTC"
+		}
+		fmt.Printf("  [TEST] time_window: %s (%s)\n", rule.TimeWindow, tz)
+	}
+	if rule.RequireNonce {
+		fmt.Printf("  [INFO] require_nonce: nonce challenge required\n")
+	}
+	if rule.RequireSigned {
+		fmt.Printf("  [INFO] require_signed: signed resolve required\n")
+	}
+
+	// Run engine evaluation (skip checks we can't test: mTLS, nonce, signature, cert)
+	// We override the context to mark untestable items as passed to isolate testable checks
+	testCtx := &policy.RequestContext{
+		UsedMTLS:          true, // assume mTLS for testing purposes
+		UsedBearer:        false,
+		SourceIP:          ip,
+		NonceValidated:    true, // assume nonce passed
+		SignatureVerified: true, // assume signed
+		EvalTime:          ctx.EvalTime,
+	}
+
+	err = pe.Evaluate(path, testCtx)
+	if err != nil {
+		fmt.Printf("  Result: FAIL — %v\n", err)
+		return nil
+	}
+
+	fmt.Printf("  Result: PASS (testable checks passed)\n")
 	return nil
 }
 

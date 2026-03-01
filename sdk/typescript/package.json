@@ -1,0 +1,12 @@
+{
+  "name": "phoenix-secrets",
+  "version": "0.1.0",
+  "description": "Thin HTTP client for the Phoenix secrets management API",
+  "main": "src/client.js",
+  "types": "src/client.d.ts",
+  "scripts": {
+    "test": "node --test src/client.test.js"
+  },
+  "license": "MIT",
+  "keywords": ["secrets", "phoenix", "ai-agents", "security"]
+}
