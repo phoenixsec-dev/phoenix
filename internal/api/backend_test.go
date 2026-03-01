@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"git.home/vector/phoenix/internal/acl"
-	"git.home/vector/phoenix/internal/audit"
-	"git.home/vector/phoenix/internal/crypto"
-	"git.home/vector/phoenix/internal/store"
+	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/audit"
+	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/store"
 )
 
 // stubBackend is a read-only SecretBackend for testing non-file backend paths.

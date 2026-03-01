@@ -47,11 +47,11 @@ import (
 	"syscall"
 	"time"
 
-	"git.home/vector/phoenix/internal/acl"
-	"git.home/vector/phoenix/internal/crypto"
-	"git.home/vector/phoenix/internal/policy"
-	"git.home/vector/phoenix/internal/store"
-	"git.home/vector/phoenix/internal/version"
+	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/policy"
+	"github.com/phoenixsec/phoenix/internal/store"
+	"github.com/phoenixsec/phoenix/internal/version"
 )
 
 var (

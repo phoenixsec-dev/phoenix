@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"strings"
 
-	"git.home/vector/phoenix/internal/store"
+	"github.com/phoenixsec/phoenix/internal/store"
 )
 
 // Scheme is the prefix for all Phoenix secret references.

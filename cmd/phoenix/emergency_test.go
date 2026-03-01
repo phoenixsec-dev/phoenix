@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.home/vector/phoenix/internal/crypto"
-	"git.home/vector/phoenix/internal/store"
+	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/store"
 )
 
 // setupEmergencyDir creates a minimal Phoenix data dir with one secret.

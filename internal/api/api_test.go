@@ -19,14 +19,14 @@ import (
 	"testing"
 	"time"
 
-	"git.home/vector/phoenix/internal/acl"
-	"git.home/vector/phoenix/internal/audit"
-	"git.home/vector/phoenix/internal/ca"
-	"git.home/vector/phoenix/internal/crypto"
-	"git.home/vector/phoenix/internal/nonce"
-	"git.home/vector/phoenix/internal/policy"
-	"git.home/vector/phoenix/internal/store"
-	"git.home/vector/phoenix/internal/token"
+	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/audit"
+	"github.com/phoenixsec/phoenix/internal/ca"
+	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/nonce"
+	"github.com/phoenixsec/phoenix/internal/policy"
+	"github.com/phoenixsec/phoenix/internal/store"
+	"github.com/phoenixsec/phoenix/internal/token"
 )
 
 func setupTestServer(t *testing.T) (*Server, string) {

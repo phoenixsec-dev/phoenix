@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.home/vector/phoenix/internal/op"
+	"github.com/phoenixsec/phoenix/internal/op"
 )
 
 func TestSlugify(t *testing.T) {

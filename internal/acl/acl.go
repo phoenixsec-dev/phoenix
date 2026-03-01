@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"git.home/vector/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/crypto"
 )
 
 // Action represents a permitted operation on a secret.

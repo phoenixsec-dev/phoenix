@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"git.home/vector/phoenix/internal/op"
+	"github.com/phoenixsec/phoenix/internal/op"
 )
 
 // import1Password imports secrets from a 1Password vault into Phoenix.

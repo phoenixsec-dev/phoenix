@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"git.home/vector/phoenix/internal/op"
+	"github.com/phoenixsec/phoenix/internal/op"
 )
 
 // writeFakeOP creates a shell script that mimics the op CLI.

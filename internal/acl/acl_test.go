@@ -3,7 +3,7 @@ package acl
 import (
 	"testing"
 
-	"git.home/vector/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/crypto"
 )
 
 func testACL() *ACL {

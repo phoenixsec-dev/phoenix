@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"git.home/vector/phoenix/internal/agent"
+	"github.com/phoenixsec/phoenix/internal/agent"
 )
 
 func TestCmdAgentSockAttestHappyPath(t *testing.T) {

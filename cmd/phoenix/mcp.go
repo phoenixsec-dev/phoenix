@@ -32,7 +32,7 @@ import (
 	"os"
 	"strings"
 
-	"git.home/vector/phoenix/internal/version"
+	"github.com/phoenixsec/phoenix/internal/version"
 )
 
 // JSON-RPC wire types.

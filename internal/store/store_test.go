@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.home/vector/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/crypto"
 )
 
 func newTestStore(t *testing.T) *Store {

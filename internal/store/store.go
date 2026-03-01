@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"git.home/vector/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/crypto"
 )
 
 var (

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.home/vector/phoenix/internal/version"
+	"github.com/phoenixsec/phoenix/internal/version"
 )
 
 // mcpExchange sends JSON-RPC messages to the MCP server loop and collects responses.

@@ -1,6 +1,6 @@
 package store
 
-import "git.home/vector/phoenix/internal/crypto"
+import "github.com/phoenixsec/phoenix/internal/crypto"
 
 // FileBackend wraps the existing *Store to satisfy SecretBackend.
 // This is a mechanical adapter — zero behavior change from direct Store use.

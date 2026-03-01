@@ -1,4 +1,4 @@
-module git.home/vector/phoenix
+module github.com/phoenixsec/phoenix
 
 go 1.25.0
 

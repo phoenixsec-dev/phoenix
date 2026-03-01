@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"git.home/vector/phoenix/internal/op"
+	"github.com/phoenixsec/phoenix/internal/op"
 )
 
 // OPBackend reads secrets from 1Password via the op CLI.
