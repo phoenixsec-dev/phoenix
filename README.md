@@ -76,6 +76,15 @@ Levels compose — a production database password can require mTLS from a specif
 
 ---
 
+## Additional Docs
+
+- [Threat Model](docs/threat-model.md)
+- [Migration Guide: `.env` to Phoenix](docs/migration-env-to-phoenix.md)
+- [API Reference Index](docs/api-reference-index.md)
+- [Runnable Examples](examples/README.md)
+
+---
+
 ## Quick Start
 
 ### Requirements
