@@ -4,4 +4,4 @@
 //	go build -ldflags "-X git.home/vector/phoenix/internal/version.Version=1.0.0"
 package version
 
-var Version = "0.10.1"
+var Version = "0.10.2"

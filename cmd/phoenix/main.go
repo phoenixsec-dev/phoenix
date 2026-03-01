@@ -1290,58 +1290,77 @@ func cmdPolicyShow(args []string) error {
 		return fmt.Errorf("reading policy file: %w", err)
 	}
 
-	// Parse the policy to find matching rule
-	var pf struct {
-		Attestation map[string]json.RawMessage `json:"attestation"`
+	pe, err := policy.Load(data)
+	if err != nil {
+		return fmt.Errorf("loading policy: %w", err)
 	}
-	if err := json.Unmarshal(data, &pf); err != nil {
-		return fmt.Errorf("parsing policy: %w", err)
-	}
-
-	if len(pf.Attestation) == 0 {
+	if len(pe.Rules()) == 0 {
 		fmt.Printf("No attestation policies configured.\n")
 		return nil
 	}
 
-	// Find matching patterns (simple display)
-	found := false
-	for pattern, raw := range pf.Attestation {
-		if matchesPattern(pattern, path) {
-			fmt.Printf("Pattern: %s\n", pattern)
-			var rule map[string]interface{}
-			json.Unmarshal(raw, &rule)
-			for k, v := range rule {
-				formatted, _ := json.Marshal(v)
-				fmt.Printf("  %s: %s\n", k, string(formatted))
-			}
-			found = true
-		}
-	}
-
-	if !found {
+	rule, pattern := pe.RuleFor(path)
+	if rule == nil {
 		fmt.Printf("No attestation policy matches path %q\n", path)
+		return nil
 	}
+	fmt.Printf("Pattern: %s\n", pattern)
+	printPolicyRule(rule)
 	return nil
 }
 
-// matchesPattern does simple glob matching for CLI display.
-func matchesPattern(pattern, path string) bool {
-	if pattern == "*" || pattern == "**" {
-		return true
+func printPolicyRule(rule *policy.Rule) {
+	if rule.RequireMTLS {
+		fmt.Printf("  require_mtls: true\n")
 	}
-	if strings.HasSuffix(pattern, "/**") {
-		prefix := strings.TrimSuffix(pattern, "/**")
-		return strings.HasPrefix(path, prefix+"/") || path == prefix
+	if len(rule.AllowedIPs) > 0 {
+		b, _ := json.Marshal(rule.AllowedIPs)
+		fmt.Printf("  source_ip: %s\n", string(b))
 	}
-	if strings.HasSuffix(pattern, "/*") {
-		prefix := strings.TrimSuffix(pattern, "/*")
-		if !strings.HasPrefix(path, prefix+"/") {
-			return false
-		}
-		rest := strings.TrimPrefix(path, prefix+"/")
-		return !strings.Contains(rest, "/")
+	if rule.CertFingerprint != "" {
+		b, _ := json.Marshal(rule.CertFingerprint)
+		fmt.Printf("  cert_fingerprint: %s\n", string(b))
 	}
-	return pattern == path
+	if rule.DenyBearer {
+		fmt.Printf("  deny_bearer: true\n")
+	}
+	if len(rule.AllowedTools) > 0 {
+		b, _ := json.Marshal(rule.AllowedTools)
+		fmt.Printf("  allowed_tools: %s\n", string(b))
+	}
+	if len(rule.DenyTools) > 0 {
+		b, _ := json.Marshal(rule.DenyTools)
+		fmt.Printf("  deny_tools: %s\n", string(b))
+	}
+	if rule.Process != nil {
+		b, _ := json.Marshal(rule.Process)
+		fmt.Printf("  process: %s\n", string(b))
+	}
+	if rule.TimeWindow != "" {
+		b, _ := json.Marshal(rule.TimeWindow)
+		fmt.Printf("  time_window: %s\n", string(b))
+	}
+	if rule.TimeZone != "" {
+		b, _ := json.Marshal(rule.TimeZone)
+		fmt.Printf("  time_zone: %s\n", string(b))
+	}
+	if rule.CredentialTTL != "" {
+		b, _ := json.Marshal(rule.CredentialTTL)
+		fmt.Printf("  credential_ttl: %s\n", string(b))
+	}
+	if rule.RequireFreshAttestation {
+		fmt.Printf("  require_fresh_attestation: true\n")
+	}
+	if rule.RequireNonce {
+		fmt.Printf("  require_nonce: true\n")
+	}
+	if rule.NonceMaxAge != "" {
+		b, _ := json.Marshal(rule.NonceMaxAge)
+		fmt.Printf("  nonce_max_age: %s\n", string(b))
+	}
+	if rule.RequireSigned {
+		fmt.Printf("  require_signed: true\n")
+	}
 }
 
 func cmdPolicyTest(args []string) error {

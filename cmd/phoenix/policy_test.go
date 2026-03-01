@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -117,4 +120,63 @@ func TestCmdPolicyTestIPCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("should not return error: %v", err)
 	}
+}
+
+func TestCmdPolicyShowLegacyRulesFormat(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.json")
+	policyData := `{
+		"rules": [
+			{
+				"path": "secure/*",
+				"require_mtls": true,
+				"allowed_ips": ["192.168.0.0/24"]
+			}
+		]
+	}`
+	if err := os.WriteFile(policyPath, []byte(policyData), 0644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+
+	origPolicy := os.Getenv("PHOENIX_POLICY")
+	os.Setenv("PHOENIX_POLICY", policyPath)
+	defer os.Setenv("PHOENIX_POLICY", origPolicy)
+
+	out := captureStdout(t, func() {
+		if err := cmdPolicyShow([]string{"secure/db"}); err != nil {
+			t.Fatalf("cmdPolicyShow: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Pattern: secure/*") {
+		t.Fatalf("expected matched pattern in output, got: %s", out)
+	}
+	if !strings.Contains(out, `source_ip: ["192.168.0.0/24"]`) {
+		t.Fatalf("expected source_ip in output, got: %s", out)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close read pipe: %v", err)
+	}
+	return buf.String()
 }

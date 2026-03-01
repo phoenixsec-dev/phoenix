@@ -87,9 +87,9 @@ func TestLoadAndEvaluate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "unmatched path passes (no policy)",
-			path: "other/secret",
-			ctx:  RequestContext{},
+			name:    "unmatched path passes (no policy)",
+			path:    "other/secret",
+			ctx:     RequestContext{},
 			wantErr: false,
 		},
 	}
@@ -300,6 +300,48 @@ func TestLoadInvalidJSON(t *testing.T) {
 	_, err := Load([]byte("{invalid json"))
 	if err == nil {
 		t.Fatal("Load should fail for invalid JSON")
+	}
+}
+
+func TestLoadLegacyRulesFormat(t *testing.T) {
+	cfg := `{
+		"rules": [
+			{
+				"path": "secure/*",
+				"require_mtls": true,
+				"allowed_ips": ["192.168.0.0/24"]
+			}
+		]
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load legacy format: %v", err)
+	}
+	rule, pattern := e.RuleFor("secure/db")
+	if rule == nil || pattern != "secure/*" {
+		t.Fatalf("expected secure/* match, got rule=%v pattern=%q", rule, pattern)
+	}
+	if !rule.RequireMTLS {
+		t.Fatal("expected require_mtls=true")
+	}
+	if len(rule.AllowedIPs) != 1 || rule.AllowedIPs[0] != "192.168.0.0/24" {
+		t.Fatalf("expected allowed IP copied from allowed_ips, got %v", rule.AllowedIPs)
+	}
+}
+
+func TestLoadRejectsUnknownRuleField(t *testing.T) {
+	// Typo: "allowed_ips" is not valid inside canonical "attestation" format.
+	cfg := `{
+		"attestation": {
+			"secure/*": {
+				"require_mtls": true,
+				"allowed_ips": ["192.168.0.0/24"]
+			}
+		}
+	}`
+	_, err := Load([]byte(cfg))
+	if err == nil {
+		t.Fatal("Load should fail for unknown field")
 	}
 }
 
@@ -864,8 +906,8 @@ func TestRequireSignedDenied(t *testing.T) {
 
 	// Nonce validated but no signature — should be denied
 	ctx := &RequestContext{
-		UsedMTLS:       true,
-		NonceValidated: true,
+		UsedMTLS:          true,
+		NonceValidated:    true,
 		SignatureVerified: false,
 	}
 	err = e.Evaluate("signed/key", ctx)

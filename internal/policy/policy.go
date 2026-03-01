@@ -35,8 +35,10 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -69,7 +71,7 @@ type Rule struct {
 	TimeZone   string `json:"time_zone,omitempty"`   // IANA timezone (e.g. "America/New_York")
 
 	// L7: short-lived credential requirements
-	CredentialTTL           string `json:"credential_ttl,omitempty"`            // e.g. "15m"
+	CredentialTTL           string `json:"credential_ttl,omitempty"` // e.g. "15m"
 	RequireFreshAttestation bool   `json:"require_fresh_attestation,omitempty"`
 
 	// L8: nonce challenge-response
@@ -124,6 +126,33 @@ type policyFile struct {
 	Attestation map[string]Rule `json:"attestation"`
 }
 
+// legacyPolicyFile preserves compatibility with early list-style policy files:
+// {"rules":[{"path":"secure/*","require_mtls":true,"allowed_ips":["10.0.0.0/24"]}]}
+type legacyPolicyFile struct {
+	Rules []legacyRule `json:"rules"`
+}
+
+type legacyRule struct {
+	Path string `json:"path"`
+
+	RequireMTLS     bool         `json:"require_mtls"`
+	AllowedIPs      []string     `json:"allowed_ips,omitempty"` // legacy name
+	SourceIP        []string     `json:"source_ip,omitempty"`   // canonical name
+	CertFingerprint string       `json:"cert_fingerprint,omitempty"`
+	DenyBearer      bool         `json:"deny_bearer"`
+	AllowedTools    []string     `json:"allowed_tools,omitempty"`
+	DenyTools       []string     `json:"deny_tools,omitempty"`
+	Process         *ProcessRule `json:"process,omitempty"`
+	TimeWindow      string       `json:"time_window,omitempty"`
+	TimeZone        string       `json:"time_zone,omitempty"`
+
+	CredentialTTL           string `json:"credential_ttl,omitempty"`
+	RequireFreshAttestation bool   `json:"require_fresh_attestation,omitempty"`
+	RequireNonce            bool   `json:"require_nonce"`
+	NonceMaxAge             string `json:"nonce_max_age,omitempty"`
+	RequireSigned           bool   `json:"require_signed,omitempty"`
+}
+
 // NewEngine creates a policy engine with no rules (all requests pass).
 func NewEngine() *Engine {
 	return &Engine{rules: make(map[string]Rule)}
@@ -144,14 +173,81 @@ func Load(data []byte) (*Engine, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return NewEngine(), nil
 	}
-	var pf policyFile
-	if err := json.Unmarshal(data, &pf); err != nil {
+
+	// Parse top-level once so we can support both canonical and legacy formats.
+	var top map[string]json.RawMessage
+	if err := strictUnmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("parsing policy JSON: %w", err)
 	}
-	if pf.Attestation == nil {
-		pf.Attestation = make(map[string]Rule)
+
+	if _, ok := top["attestation"]; ok {
+		var pf policyFile
+		if err := strictUnmarshal(data, &pf); err != nil {
+			return nil, fmt.Errorf("parsing policy JSON: %w", err)
+		}
+		if pf.Attestation == nil {
+			pf.Attestation = make(map[string]Rule)
+		}
+		return &Engine{rules: pf.Attestation}, nil
 	}
-	return &Engine{rules: pf.Attestation}, nil
+
+	if _, ok := top["rules"]; ok {
+		var legacy legacyPolicyFile
+		if err := strictUnmarshal(data, &legacy); err != nil {
+			return nil, fmt.Errorf("parsing policy JSON: %w", err)
+		}
+		rules := make(map[string]Rule, len(legacy.Rules))
+		for i, r := range legacy.Rules {
+			pattern := strings.TrimSpace(r.Path)
+			if pattern == "" {
+				return nil, fmt.Errorf("parsing policy JSON: rules[%d].path is required", i)
+			}
+			if _, exists := rules[pattern]; exists {
+				return nil, fmt.Errorf("parsing policy JSON: duplicate rule path %q", pattern)
+			}
+
+			ips := r.SourceIP
+			if len(ips) == 0 {
+				ips = r.AllowedIPs
+			}
+			rules[pattern] = Rule{
+				RequireMTLS:             r.RequireMTLS,
+				AllowedIPs:              ips,
+				CertFingerprint:         r.CertFingerprint,
+				DenyBearer:              r.DenyBearer,
+				AllowedTools:            r.AllowedTools,
+				DenyTools:               r.DenyTools,
+				Process:                 r.Process,
+				TimeWindow:              r.TimeWindow,
+				TimeZone:                r.TimeZone,
+				CredentialTTL:           r.CredentialTTL,
+				RequireFreshAttestation: r.RequireFreshAttestation,
+				RequireNonce:            r.RequireNonce,
+				NonceMaxAge:             r.NonceMaxAge,
+				RequireSigned:           r.RequireSigned,
+			}
+		}
+		return &Engine{rules: rules}, nil
+	}
+
+	// "{}" is valid and means no rules.
+	if len(top) == 0 {
+		return NewEngine(), nil
+	}
+
+	return nil, fmt.Errorf(`parsing policy JSON: expected top-level "attestation" object (or legacy "rules" array)`)
+}
+
+func strictUnmarshal(data []byte, v interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON content")
+	}
+	return nil
 }
 
 // Evaluate checks whether the request context satisfies attestation
