@@ -29,7 +29,8 @@ const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
 // Server is the Phoenix HTTP API server.
 type Server struct {
-	store         *store.Store
+	backend       store.SecretBackend
+	fileBackend   *store.FileBackend // non-nil only for file backend (rotation needs it)
 	acl           *acl.ACL
 	audit         *audit.Logger
 	auditPath     string
@@ -45,15 +46,19 @@ type Server struct {
 
 // NewServer creates a new API server with all dependencies.
 // Bearer auth is enabled by default.
-func NewServer(s *store.Store, a *acl.ACL, al *audit.Logger, auditPath string) *Server {
+func NewServer(b store.SecretBackend, a *acl.ACL, al *audit.Logger, auditPath string) *Server {
 	srv := &Server{
-		store:         s,
+		backend:       b,
 		acl:           a,
 		audit:         al,
 		auditPath:     auditPath,
 		bearerEnabled: true,
 		startTime:     time.Now(),
 		mux:           http.NewServeMux(),
+	}
+	// Keep a reference to FileBackend for file-specific operations (rotation).
+	if fb, ok := b.(*store.FileBackend); ok {
+		srv.fileBackend = fb
 	}
 	srv.routes()
 	return srv
@@ -267,7 +272,7 @@ func jsonOK(w http.ResponseWriter, data interface{}) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"status":  "ok",
-		"secrets": s.store.Count(),
+		"secrets": s.backend.Count(),
 		"time":    time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -285,7 +290,12 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// List mode: path is empty or ends with /
 	if path == "" || strings.HasSuffix(path, "/") {
-		allPaths := s.store.List(path)
+		allPaths, err := s.backend.List(path)
+		if err != nil {
+			log.Printf("error listing secrets with prefix %q: %v", path, err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		var visible []string
 		for _, p := range allPaths {
 			if s.acl.Authorize(agentName, p, acl.ActionRead) != nil {
@@ -316,7 +326,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret, err := s.store.Get(path)
+	secret, err := s.backend.Get(path)
 	if err == store.ErrInvalidPath {
 		jsonError(w, "invalid secret path", http.StatusBadRequest)
 		return
@@ -370,7 +380,12 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.Set(path, req.Value, agentName, req.Description, req.Tags); err != nil {
+	if s.backend.ReadOnly() {
+		jsonError(w, "backend is read-only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := s.backend.Set(path, req.Value, agentName, req.Description, req.Tags); err != nil {
 		if err == store.ErrInvalidPath {
 			jsonError(w, "invalid secret path", http.StatusBadRequest)
 			return
@@ -400,7 +415,12 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.Delete(path); err != nil {
+	if s.backend.ReadOnly() {
+		jsonError(w, "backend is read-only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := s.backend.Delete(path); err != nil {
 		if err == store.ErrInvalidPath {
 			jsonError(w, "invalid secret path", http.StatusBadRequest)
 			return
@@ -589,15 +609,20 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 
 	ip := clientIP(r)
 
+	if s.fileBackend == nil {
+		jsonError(w, "master key rotation is not supported for this backend", http.StatusNotImplemented)
+		return
+	}
+
 	if s.masterKeyPath == "" {
 		jsonError(w, "master key path not configured", http.StatusInternalServerError)
 		return
 	}
 
 	// Verify provider is FileKeyProvider before we start
-	provider, ok := s.store.Provider().(*crypto.FileKeyProvider)
+	provider, ok := s.fileBackend.Provider().(*crypto.FileKeyProvider)
 	if !ok {
-		log.Printf("rotation not supported: provider is %T, not FileKeyProvider", s.store.Provider())
+		log.Printf("rotation not supported: provider is %T, not FileKeyProvider", s.fileBackend.Provider())
 		jsonError(w, "rotation not supported for this provider type", http.StatusInternalServerError)
 		return
 	}
@@ -619,7 +644,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	// Rotate with afterSave callback: the callback writes the new key file
 	// atomically while the store lock is held, preventing any window where
 	// the store has new DEKs but the key file still has the old key.
-	rotated, err := s.store.RotateMasterKey(func() error {
+	rotated, err := s.fileBackend.Store().RotateMasterKey(func() error {
 		pendingKey := provider.PendingMasterKey()
 		if pendingKey == nil {
 			return fmt.Errorf("no pending key after rotation")
@@ -715,7 +740,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 		if dryRun {
 			// Dry-run: verify path exists without returning the secret value.
-			if _, err := s.store.Get(path); err != nil {
+			if _, err := s.backend.Get(path); err != nil {
 				if err == store.ErrSecretNotFound {
 					s.audit.LogDenied(agentName, "dry-resolve", path, ip, "not_found")
 					errors[refStr] = "secret not found"
@@ -734,7 +759,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		secret, err := s.store.Get(path)
+		secret, err := s.backend.Get(path)
 		if err != nil {
 			if err == store.ErrSecretNotFound {
 				s.audit.LogDenied(agentName, "resolve", path, ip, "not_found")
@@ -871,7 +896,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"status":  "ok",
 		"uptime":  uptime.String(),
-		"secrets": s.store.Count(),
+		"secrets": s.backend.Count(),
 		"agents":  len(s.acl.ListAgents()),
 		"time":    time.Now().UTC().Format(time.RFC3339),
 	}

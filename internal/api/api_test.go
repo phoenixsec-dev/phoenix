@@ -63,7 +63,8 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	auditPath := filepath.Join(dir, "audit.log")
 	al, _ := audit.NewLogger(auditPath)
 
-	srv := NewServer(s, a, al, auditPath)
+	fb := store.NewFileBackend(s)
+	srv := NewServer(fb, a, al, auditPath)
 	srv.SetMasterKeyPath(keyPath)
 	return srv, "admin-token"
 }
@@ -809,7 +810,7 @@ func TestRotateMasterKeyPersistenceWithNewKey(t *testing.T) {
 		t.Fatalf("loading new master key from disk: %v", err)
 	}
 
-	provider := srv.store.Provider().(*crypto.FileKeyProvider)
+	provider := srv.fileBackend.Provider().(*crypto.FileKeyProvider)
 	if !bytes.Equal(newKey, provider.MasterKey()) {
 		t.Fatal("key on disk does not match in-memory provider key after rotation")
 	}

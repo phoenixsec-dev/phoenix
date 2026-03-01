@@ -119,11 +119,12 @@ func main() {
 		log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
 	}
 
-	// Initialize store
+	// Initialize store and backend
 	s, err := store.NewWithProvider(cfg.Store.Path, keyProvider)
 	if err != nil {
 		log.Fatalf("initializing store: %v", err)
 	}
+	backend := store.NewFileBackend(s)
 
 	// Initialize ACL
 	a, err := acl.New(cfg.ACL.Path)
@@ -139,7 +140,7 @@ func main() {
 	defer al.Close()
 
 	// Create API server
-	srv := api.NewServer(s, a, al, cfg.Audit.Path)
+	srv := api.NewServer(backend, a, al, cfg.Audit.Path)
 	srv.SetBearerEnabled(cfg.Auth.Bearer.Enabled)
 	srv.SetMasterKeyPath(cfg.Store.MasterKey)
 
@@ -210,7 +211,7 @@ func main() {
 	}
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
-	log.Printf("  Store: %s (%d secrets)", cfg.Store.Path, s.Count())
+	log.Printf("  Store: %s (%d secrets)", cfg.Store.Path, backend.Count())
 	log.Printf("  Key provider: %s", keyProvider.Name())
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
 	log.Printf("  Audit: %s", cfg.Audit.Path)
