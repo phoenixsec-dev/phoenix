@@ -31,6 +31,8 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"git.home/vector/phoenix/internal/version"
 )
 
 // JSON-RPC wire types.
@@ -173,7 +175,7 @@ func cmdMCP(args []string) error {
 			mcpSendResult(enc, req.ID, mcpInitializeResult{
 				ProtocolVersion: "2024-11-05",
 				Capabilities:    map[string]interface{}{"tools": map[string]interface{}{}},
-				ServerInfo:      mcpServerInfo{Name: "phoenix", Version: "0.1.0"},
+				ServerInfo:      mcpServerInfo{Name: "phoenix", Version: version.Version},
 			})
 
 		case "tools/list":

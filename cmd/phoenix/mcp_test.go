@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"git.home/vector/phoenix/internal/version"
 )
 
 // mcpExchange sends JSON-RPC messages to the MCP server loop and collects responses.
@@ -65,7 +67,7 @@ func mcpExchange(t *testing.T, handler http.HandlerFunc, messages ...string) []m
 			mcpSendResult(enc, req.ID, mcpInitializeResult{
 				ProtocolVersion: "2024-11-05",
 				Capabilities:    map[string]interface{}{"tools": map[string]interface{}{}},
-				ServerInfo:      mcpServerInfo{Name: "phoenix", Version: "0.1.0"},
+				ServerInfo:      mcpServerInfo{Name: "phoenix", Version: version.Version},
 			})
 		case "tools/list":
 			mcpSendResult(enc, req.ID, mcpListToolsResult{Tools: mcpTools})
@@ -143,6 +145,9 @@ func TestMCPInitialize(t *testing.T) {
 	}
 	if result.ServerInfo.Name != "phoenix" {
 		t.Errorf("server name = %q, want %q", result.ServerInfo.Name, "phoenix")
+	}
+	if result.ServerInfo.Version != version.Version {
+		t.Errorf("server version = %q, want %q", result.ServerInfo.Version, version.Version)
 	}
 }
 

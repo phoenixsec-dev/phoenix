@@ -38,6 +38,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -519,24 +520,37 @@ func cmdExport(args []string) error {
 	// Get list of paths
 	resp, err := apiRequest("GET", "/v1/secrets/"+prefix, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
 
 	var listResult struct {
 		Paths []string `json:"paths"`
 	}
-	json.NewDecoder(resp.Body).Decode(&listResult)
+	if err := json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
+		return fmt.Errorf("decoding list response: %w", err)
+	}
 
 	for _, path := range listResult.Paths {
 		resp, err := apiRequest("GET", "/v1/secrets/"+path, nil)
 		if err != nil {
-			continue
+			return fmt.Errorf("request failed for %q: %w", path, err)
+		}
+		if resp.StatusCode != 200 {
+			err := handleError(resp)
+			resp.Body.Close()
+			return fmt.Errorf("exporting %q: %w", path, err)
 		}
 		var secret struct {
 			Value string `json:"value"`
 		}
-		json.NewDecoder(resp.Body).Decode(&secret)
+		if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("decoding secret %q: %w", path, err)
+		}
 		resp.Body.Close()
 
 		// Convert path to env var name: openclaw/api-key → API_KEY
@@ -677,32 +691,32 @@ func cmdAudit(args []string) error {
 		return err
 	}
 
-	var params []string
+	params := url.Values{}
 	i := 0
 	for i < len(args) {
 		switch args[i] {
 		case "-n", "--last":
 			i++
 			if i < len(args) {
-				params = append(params, "limit="+args[i])
+				params.Set("limit", args[i])
 			}
 		case "-a", "--agent":
 			i++
 			if i < len(args) {
-				params = append(params, "agent="+args[i])
+				params.Set("agent", args[i])
 			}
 		case "-s", "--since":
 			i++
 			if i < len(args) {
-				params = append(params, "since="+args[i])
+				params.Set("since", args[i])
 			}
 		}
 		i++
 	}
 
 	path := "/v1/audit"
-	if len(params) > 0 {
-		path += "?" + strings.Join(params, "&")
+	if qs := params.Encode(); qs != "" {
+		path += "?" + qs
 	}
 
 	resp, err := apiRequest("GET", path, nil)
