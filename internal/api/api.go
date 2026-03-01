@@ -540,6 +540,11 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := acl.ValidatePermissions(req.Permissions); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if err := s.acl.AddAgent(req.Name, req.Token, req.Permissions); err != nil {
 		log.Printf("error creating agent %q: %v", req.Name, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)

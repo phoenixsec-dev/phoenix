@@ -203,6 +203,29 @@ func TestAddAndRemoveAgent(t *testing.T) {
 	}
 }
 
+func TestValidatePermissions(t *testing.T) {
+	tests := []struct {
+		name    string
+		perms   []Permission
+		wantErr bool
+	}{
+		{"valid", []Permission{{Path: "ns/*", Actions: []Action{ActionRead, ActionWrite}}}, false},
+		{"empty path", []Permission{{Path: "", Actions: []Action{ActionRead}}}, true},
+		{"no actions", []Permission{{Path: "ns/*", Actions: []Action{}}}, true},
+		{"invalid action", []Permission{{Path: "ns/*", Actions: []Action{"rread"}}}, true},
+		{"mixed valid and invalid", []Permission{{Path: "ns/*", Actions: []Action{ActionRead, "bogus"}}}, true},
+		{"nil perms", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePermissions(tt.perms)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidatePermissions() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestRemoveAgentNotFound(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
 	err := a.RemoveAgent("nonexistent")

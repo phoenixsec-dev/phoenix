@@ -31,7 +31,33 @@ var (
 	ErrUnauthorized  = errors.New("unauthorized: invalid or missing token")
 	ErrAccessDenied  = errors.New("access denied: insufficient permissions")
 	ErrAgentNotFound = errors.New("agent not found")
+
+	// ValidActions is the set of recognized action strings.
+	ValidActions = map[Action]bool{
+		ActionRead:   true,
+		ActionWrite:  true,
+		ActionDelete: true,
+		ActionAdmin:  true,
+	}
 )
+
+// ValidatePermissions checks that all permissions have non-empty paths and valid actions.
+func ValidatePermissions(perms []Permission) error {
+	for _, p := range perms {
+		if strings.TrimSpace(p.Path) == "" {
+			return fmt.Errorf("empty path in ACL rule")
+		}
+		if len(p.Actions) == 0 {
+			return fmt.Errorf("no actions specified for path %q", p.Path)
+		}
+		for _, a := range p.Actions {
+			if !ValidActions[a] {
+				return fmt.Errorf("invalid action %q for path %q (valid: read, write, delete, admin)", a, p.Path)
+			}
+		}
+	}
+	return nil
+}
 
 // Permission is a single ACL rule.
 type Permission struct {

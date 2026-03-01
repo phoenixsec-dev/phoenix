@@ -47,6 +47,7 @@ import (
 	"syscall"
 	"time"
 
+	"git.home/vector/phoenix/internal/acl"
 	"git.home/vector/phoenix/internal/crypto"
 	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
@@ -789,13 +790,25 @@ func cmdAgentCreate(args []string) error {
 	var permissions []map[string]interface{}
 	if aclStr != "" {
 		for _, rule := range strings.Split(aclStr, ";") {
-			parts := strings.SplitN(rule, ":", 2)
-			if len(parts) != 2 {
-				continue
+			rule = strings.TrimSpace(rule)
+			if rule == "" {
+				continue // allow trailing semicolons
 			}
-			actions := strings.Split(parts[1], ",")
+			parts := strings.SplitN(rule, ":", 2)
+			if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+				return fmt.Errorf("malformed ACL rule %q: expected format path:action[,action]", rule)
+			}
+			rawActions := strings.Split(parts[1], ",")
+			actions := make([]string, 0, len(rawActions))
+			for _, a := range rawActions {
+				a = strings.TrimSpace(a)
+				if !acl.ValidActions[acl.Action(a)] {
+					return fmt.Errorf("invalid action %q in ACL rule %q (valid: read, write, delete, admin)", a, rule)
+				}
+				actions = append(actions, a)
+			}
 			permissions = append(permissions, map[string]interface{}{
-				"path":    parts[0],
+				"path":    strings.TrimSpace(parts[0]),
 				"actions": actions,
 			})
 		}
