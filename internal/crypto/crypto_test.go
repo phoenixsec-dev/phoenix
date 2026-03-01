@@ -168,6 +168,101 @@ func TestHashToken(t *testing.T) {
 	}
 }
 
+func TestMarshalUnmarshalBlob(t *testing.T) {
+	key, _ := GenerateKey()
+	blob, _ := Encrypt(key, []byte("test-data"))
+
+	data, err := MarshalBlob(blob)
+	if err != nil {
+		t.Fatalf("MarshalBlob: %v", err)
+	}
+
+	restored, err := UnmarshalBlob(data)
+	if err != nil {
+		t.Fatalf("UnmarshalBlob: %v", err)
+	}
+
+	plaintext, err := Decrypt(key, restored)
+	if err != nil {
+		t.Fatalf("Decrypt after unmarshal: %v", err)
+	}
+	if string(plaintext) != "test-data" {
+		t.Fatalf("expected 'test-data', got %q", plaintext)
+	}
+}
+
+func TestUnmarshalBlobCorrupted(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"empty", []byte{}},
+		{"garbage", []byte("not json at all")},
+		{"truncated json", []byte(`{"nonce": "abc"`)},
+		{"wrong type", []byte(`{"nonce": 123, "ciphertext": 456}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := UnmarshalBlob(tt.data)
+			if err == nil {
+				t.Fatalf("expected error for corrupted data %q", tt.data)
+			}
+		})
+	}
+}
+
+func TestDecryptCorruptedBlob(t *testing.T) {
+	key, _ := GenerateKey()
+
+	// Valid nonce but corrupted ciphertext
+	_, err := Decrypt(key, &EncryptedBlob{
+		Nonce:      "AAAAAAAAAAAAAAAA", // 12 bytes base64
+		Ciphertext: "dGhpcyBpcyBub3QgYSB2YWxpZCBjaXBoZXJ0ZXh0", // garbage
+	})
+	if err != ErrDecryptionFailed {
+		t.Fatalf("expected ErrDecryptionFailed, got %v", err)
+	}
+}
+
+func TestSaveMasterKeyAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "atomic.key")
+
+	key, _ := GenerateKey()
+	if err := SaveMasterKeyAtomic(path, key); err != nil {
+		t.Fatalf("SaveMasterKeyAtomic: %v", err)
+	}
+
+	loaded, err := LoadMasterKey(path)
+	if err != nil {
+		t.Fatalf("LoadMasterKey after atomic save: %v", err)
+	}
+	if string(loaded) != string(key) {
+		t.Fatal("loaded key doesn't match saved key")
+	}
+
+	// Temp file should be cleaned up
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("temp file should not exist after successful save")
+	}
+}
+
+func TestEncryptWrongKeyLength(t *testing.T) {
+	// 16-byte key (AES-128 sized, but we require AES-256)
+	shortKey := make([]byte, 16)
+	_, err := Encrypt(shortKey, []byte("data"))
+	if err != ErrInvalidKey {
+		t.Fatalf("expected ErrInvalidKey for 16-byte key, got %v", err)
+	}
+
+	// 64-byte key (too long)
+	longKey := make([]byte, 64)
+	_, err = Encrypt(longKey, []byte("data"))
+	if err != ErrInvalidKey {
+		t.Fatalf("expected ErrInvalidKey for 64-byte key, got %v", err)
+	}
+}
+
 func TestUniqueNonces(t *testing.T) {
 	key, _ := GenerateKey()
 	plaintext := []byte("same data")

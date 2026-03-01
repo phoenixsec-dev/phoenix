@@ -635,3 +635,73 @@ func TestRotateMasterKeyCallbackSuccessCommits(t *testing.T) {
 		t.Fatalf("persisted value = %q, want 'value1'", sec2.Value)
 	}
 }
+
+func TestGetMetadata(t *testing.T) {
+	s := newTestStore(t)
+
+	s.Set("test/key", "value", "vector", "my description", []string{"tag1", "tag2"})
+
+	meta, err := s.GetMetadata("test/key")
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if meta.CreatedBy != "vector" {
+		t.Fatalf("expected creator 'vector', got %q", meta.CreatedBy)
+	}
+	if meta.Description != "my description" {
+		t.Fatalf("expected description 'my description', got %q", meta.Description)
+	}
+	if len(meta.Tags) != 2 || meta.Tags[0] != "tag1" {
+		t.Fatalf("unexpected tags: %v", meta.Tags)
+	}
+	if meta.Created.IsZero() {
+		t.Fatal("Created timestamp should not be zero")
+	}
+}
+
+func TestGetMetadataNotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.GetMetadata("nonexistent/path")
+	if err != ErrSecretNotFound {
+		t.Fatalf("expected ErrSecretNotFound, got %v", err)
+	}
+}
+
+func TestSetPreservesCreatedTimestamp(t *testing.T) {
+	s := newTestStore(t)
+
+	s.Set("test/key", "v1", "original-author", "desc1", []string{"tag1"})
+
+	meta1, _ := s.GetMetadata("test/key")
+	created := meta1.Created
+
+	// Update the secret
+	s.Set("test/key", "v2", "new-author", "", nil)
+
+	meta2, _ := s.GetMetadata("test/key")
+
+	// Created timestamp should be preserved
+	if !meta2.Created.Equal(created) {
+		t.Fatalf("Created changed: %v -> %v", created, meta2.Created)
+	}
+	// Description should be preserved when empty
+	if meta2.Description != "desc1" {
+		t.Fatalf("expected preserved description 'desc1', got %q", meta2.Description)
+	}
+	// Tags should be preserved when nil
+	if len(meta2.Tags) != 1 || meta2.Tags[0] != "tag1" {
+		t.Fatalf("expected preserved tags, got %v", meta2.Tags)
+	}
+	// Updated should change
+	if meta2.Updated.Equal(meta1.Updated) || meta2.Updated.Before(meta1.Updated) {
+		t.Fatal("Updated timestamp should advance on update")
+	}
+}
+
+func TestProvider(t *testing.T) {
+	s := newTestStore(t)
+	if s.Provider() == nil {
+		t.Fatal("Provider() should not return nil")
+	}
+}

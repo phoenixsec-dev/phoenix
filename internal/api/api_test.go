@@ -2600,3 +2600,54 @@ func TestSignedResolveWithoutMTLS(t *testing.T) {
 		t.Fatalf("expected 403 without mTLS cert, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestCreateAgentInvalidPermissions(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	tests := []struct {
+		name string
+		perms []acl.Permission
+	}{
+		{"empty path", []acl.Permission{{Path: "", Actions: []acl.Action{acl.ActionRead}}}},
+		{"no actions", []acl.Permission{{Path: "ns/*", Actions: []acl.Action{}}}},
+		{"invalid action", []acl.Permission{{Path: "ns/*", Actions: []acl.Action{"bogus"}}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, _ := json.Marshal(createAgentRequest{
+				Name:        "badagent",
+				Token:       "badtoken",
+				Permissions: tt.perms,
+			})
+			req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+adminToken)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+
+			if w.Code != 400 {
+				t.Fatalf("expected 400 for %s, got %d: %s", tt.name, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateAgentValidPermissions(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(createAgentRequest{
+		Name:  "goodagent",
+		Token: "goodtoken",
+		Permissions: []acl.Permission{
+			{Path: "ns/*", Actions: []acl.Action{acl.ActionRead, acl.ActionWrite}},
+		},
+	})
+	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}

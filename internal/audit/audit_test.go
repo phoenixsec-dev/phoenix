@@ -77,6 +77,65 @@ func TestLogFormat(t *testing.T) {
 	}
 }
 
+func TestQueryByPath(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+
+	logger, _ := NewLogger(logPath)
+	logger.LogAllowed("vector", "read", "openclaw/api-key", "1.2.3.4")
+	logger.LogAllowed("vector", "read", "monitoring/grafana", "1.2.3.4")
+	logger.LogDenied("openclaw", "read", "proxmox/admin", "1.2.3.4", "acl")
+	logger.Close()
+
+	entries, err := Query(logPath, QueryOptions{Path: "openclaw/api-key"})
+	if err != nil {
+		t.Fatalf("Query by path: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry for path, got %d", len(entries))
+	}
+	if entries[0].Agent != "vector" {
+		t.Fatalf("expected agent 'vector', got %q", entries[0].Agent)
+	}
+}
+
+func TestQueryCombinedFilters(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+
+	logger, _ := NewLogger(logPath)
+	logger.LogAllowed("vector", "read", "ns/key", "1.1.1.1")
+	logger.LogAllowed("admin", "write", "ns/key", "1.1.1.1")
+	logger.LogAllowed("vector", "read", "ns/other", "1.1.1.1")
+	logger.Close()
+
+	// Filter by agent AND path
+	entries, err := Query(logPath, QueryOptions{Agent: "vector", Path: "ns/key"})
+	if err != nil {
+		t.Fatalf("Query combined: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+}
+
+func TestLogDeniedReason(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewWriterLogger(&buf)
+
+	logger.LogDenied("badagent", "read", "secret/key", "10.0.0.1", "acl denied")
+
+	var entry Entry
+	json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &entry)
+
+	if entry.Status != "denied" {
+		t.Fatalf("expected 'denied', got %q", entry.Status)
+	}
+	if entry.Reason != "acl denied" {
+		t.Fatalf("expected reason 'acl denied', got %q", entry.Reason)
+	}
+}
+
 func TestQuerySince(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")

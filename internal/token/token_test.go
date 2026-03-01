@@ -132,6 +132,32 @@ func TestNewIssuerWithKeyTooShort(t *testing.T) {
 	}
 }
 
+func TestTokenCrossIssuerAgent(t *testing.T) {
+	// Tokens are HMAC-signed, so validation is scoped to the issuer's key.
+	// Verify that a token minted for agent "A" can be validated (returns claims)
+	// and the caller is responsible for checking the agent name.
+	iss, _ := NewIssuer(5 * time.Minute)
+
+	tok, _, _ := iss.Mint("agent-a", nil, "")
+
+	claims, err := iss.Validate(tok)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	// The issuer doesn't enforce agent identity — caller must check.
+	if claims.Agent != "agent-a" {
+		t.Fatalf("expected agent 'agent-a', got %q", claims.Agent)
+	}
+}
+
+func TestTokenTTL(t *testing.T) {
+	ttl := 30 * time.Second
+	iss, _ := NewIssuer(ttl)
+	if iss.TTL() != ttl {
+		t.Fatalf("expected TTL %v, got %v", ttl, iss.TTL())
+	}
+}
+
 func TestNewIssuerWithKey(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {

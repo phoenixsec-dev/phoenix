@@ -1,8 +1,12 @@
 package ca
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -409,6 +413,73 @@ func TestCRLPersistenceNoPath(t *testing.T) {
 	}
 	if !crl.IsRevoked(big.NewInt(1)) {
 		t.Fatal("should be revoked in memory")
+	}
+}
+
+func TestVerifyExpiredCert(t *testing.T) {
+	authority, _ := GenerateCA("TestOrg")
+
+	// Issue a cert, then manually create an expired one
+	agentKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	serial, _ := randomSerial()
+
+	// Cert that expired yesterday
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "expired-agent"},
+		NotBefore:    now.AddDate(0, 0, -30),
+		NotAfter:     now.AddDate(0, 0, -1), // expired yesterday
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, authority.cert, &agentKey.PublicKey, authority.key)
+	if err != nil {
+		t.Fatalf("create expired cert: %v", err)
+	}
+
+	expiredCert, _ := x509.ParseCertificate(certDER)
+
+	_, err = authority.VerifyClientCert([]*x509.Certificate{expiredCert})
+	if err == nil {
+		t.Fatal("expected error for expired certificate")
+	}
+	if !strings.Contains(err.Error(), "certificate chain verification failed") {
+		t.Fatalf("expected chain verification error, got: %v", err)
+	}
+}
+
+func TestVerifyNotYetValidCert(t *testing.T) {
+	authority, _ := GenerateCA("TestOrg")
+
+	agentKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	serial, _ := randomSerial()
+
+	// Cert valid starting tomorrow
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "future-agent"},
+		NotBefore:    now.AddDate(0, 0, 1), // not yet valid
+		NotAfter:     now.AddDate(0, 0, 91),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	certDER, _ := x509.CreateCertificate(rand.Reader, template, authority.cert, &agentKey.PublicKey, authority.key)
+	futureCert, _ := x509.ParseCertificate(certDER)
+
+	_, err := authority.VerifyClientCert([]*x509.Certificate{futureCert})
+	if err == nil {
+		t.Fatal("expected error for not-yet-valid certificate")
+	}
+}
+
+func TestLoadCAFromPEMInvalidPEM(t *testing.T) {
+	_, err := LoadCAFromPEM([]byte("not a pem"), []byte("not a pem"))
+	if err == nil {
+		t.Fatal("expected error for invalid PEM")
 	}
 }
 

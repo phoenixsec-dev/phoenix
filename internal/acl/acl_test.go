@@ -226,6 +226,84 @@ func TestValidatePermissions(t *testing.T) {
 	}
 }
 
+func TestGetAgent(t *testing.T) {
+	a := testACL()
+
+	agent, err := a.GetAgent("vector")
+	if err != nil {
+		t.Fatalf("GetAgent: %v", err)
+	}
+	if agent.Name != "vector" {
+		t.Fatalf("expected name 'vector', got %q", agent.Name)
+	}
+	if len(agent.Permissions) != 3 {
+		t.Fatalf("expected 3 permissions, got %d", len(agent.Permissions))
+	}
+}
+
+func TestGetAgentNotFound(t *testing.T) {
+	a := testACL()
+
+	_, err := a.GetAgent("nonexistent")
+	if err != ErrAgentNotFound {
+		t.Fatalf("expected ErrAgentNotFound, got %v", err)
+	}
+}
+
+func TestAddAgentOverwrite(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+
+	a.AddAgent("agent", "token1", []Permission{
+		{Path: "ns1/*", Actions: []Action{ActionRead}},
+	})
+
+	// Overwrite with different token and permissions
+	a.AddAgent("agent", "token2", []Permission{
+		{Path: "ns2/*", Actions: []Action{ActionWrite}},
+	})
+
+	// Old token should fail
+	_, err := a.Authenticate("token1")
+	if err != ErrUnauthorized {
+		t.Fatalf("expected old token to fail, got %v", err)
+	}
+
+	// New token should work
+	name, err := a.Authenticate("token2")
+	if err != nil {
+		t.Fatalf("new token should work: %v", err)
+	}
+	if name != "agent" {
+		t.Fatalf("expected 'agent', got %q", name)
+	}
+
+	// Permissions should be the new ones
+	agent, _ := a.GetAgent("agent")
+	if agent.Permissions[0].Path != "ns2/*" {
+		t.Fatalf("expected 'ns2/*', got %q", agent.Permissions[0].Path)
+	}
+}
+
+func TestListAgents(t *testing.T) {
+	a := testACL()
+	names := a.ListAgents()
+
+	if len(names) != 3 {
+		t.Fatalf("expected 3 agents, got %d", len(names))
+	}
+
+	// Check all expected agents are present (order not guaranteed)
+	found := map[string]bool{}
+	for _, n := range names {
+		found[n] = true
+	}
+	for _, expected := range []string{"admin", "vector", "openclaw"} {
+		if !found[expected] {
+			t.Fatalf("missing agent %q in list", expected)
+		}
+	}
+}
+
 func TestRemoveAgentNotFound(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
 	err := a.RemoveAgent("nonexistent")
