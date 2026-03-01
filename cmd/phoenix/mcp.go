@@ -141,6 +141,46 @@ var mcpTools = []mcpTool{
 	},
 }
 
+// mcpHandleRequest processes a single JSON-RPC request and writes the
+// response to enc. Notifications (no id) are silently ignored.
+func mcpHandleRequest(req mcpRequest, enc *json.Encoder, logger *log.Logger) {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+
+	// Notifications have no id — do not respond.
+	if req.ID == nil {
+		return
+	}
+
+	switch req.Method {
+	case "initialize":
+		mcpSendResult(enc, req.ID, mcpInitializeResult{
+			ProtocolVersion: "2024-11-05",
+			Capabilities:    map[string]interface{}{"tools": map[string]interface{}{}},
+			ServerInfo:      mcpServerInfo{Name: "phoenix", Version: version.Version},
+		})
+
+	case "tools/list":
+		mcpSendResult(enc, req.ID, mcpListToolsResult{Tools: mcpTools})
+
+	case "tools/call":
+		var params mcpCallToolParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			mcpSendError(enc, req.ID, -32602, "Invalid params")
+			return
+		}
+		text, isErr := mcpDispatchTool(params.Name, params.Arguments, logger)
+		mcpSendResult(enc, req.ID, mcpCallToolResult{
+			Content: []mcpContentItem{{Type: "text", Text: text}},
+			IsError: isErr,
+		})
+
+	default:
+		mcpSendError(enc, req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
+	}
+}
+
 // cmdMCP runs the MCP stdio server.
 func cmdMCP(args []string) error {
 	if err := requireAuth(); err != nil {
@@ -149,7 +189,7 @@ func cmdMCP(args []string) error {
 
 	// All logging goes to stderr — stdout is the MCP protocol channel.
 	logger := log.New(os.Stderr, "phoenix-mcp: ", 0)
-	logger.Println("server starting")
+	logger.Println("server starting (stdio)")
 
 	dec := json.NewDecoder(os.Stdin)
 	enc := json.NewEncoder(os.Stdout)
@@ -164,38 +204,7 @@ func cmdMCP(args []string) error {
 			mcpSendError(enc, nil, -32700, "Parse error")
 			continue
 		}
-
-		// Notifications have no id — do not respond.
-		if req.ID == nil {
-			continue
-		}
-
-		switch req.Method {
-		case "initialize":
-			mcpSendResult(enc, req.ID, mcpInitializeResult{
-				ProtocolVersion: "2024-11-05",
-				Capabilities:    map[string]interface{}{"tools": map[string]interface{}{}},
-				ServerInfo:      mcpServerInfo{Name: "phoenix", Version: version.Version},
-			})
-
-		case "tools/list":
-			mcpSendResult(enc, req.ID, mcpListToolsResult{Tools: mcpTools})
-
-		case "tools/call":
-			var params mcpCallToolParams
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				mcpSendError(enc, req.ID, -32602, "Invalid params")
-				continue
-			}
-			text, isErr := mcpDispatchTool(params.Name, params.Arguments, logger)
-			mcpSendResult(enc, req.ID, mcpCallToolResult{
-				Content: []mcpContentItem{{Type: "text", Text: text}},
-				IsError: isErr,
-			})
-
-		default:
-			mcpSendError(enc, req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
-		}
+		mcpHandleRequest(req, enc, logger)
 	}
 }
 

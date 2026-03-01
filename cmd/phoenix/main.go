@@ -233,7 +233,27 @@ func main() {
 			os.Exit(1)
 		}
 	case "mcp-server":
-		err = cmdMCP(args)
+		httpAddr := ""
+		mcpToken := os.Getenv("PHOENIX_MCP_TOKEN")
+		for i := 0; i < len(args); i++ {
+			switch {
+			case args[i] == "--http" && i+1 < len(args):
+				httpAddr = args[i+1]
+				i++
+			case strings.HasPrefix(args[i], "--http="):
+				httpAddr = strings.TrimPrefix(args[i], "--http=")
+			case args[i] == "--mcp-token" && i+1 < len(args):
+				mcpToken = args[i+1]
+				i++
+			case strings.HasPrefix(args[i], "--mcp-token="):
+				mcpToken = strings.TrimPrefix(args[i], "--mcp-token=")
+			}
+		}
+		if httpAddr != "" {
+			err = cmdMCPHTTP(httpAddr, mcpToken)
+		} else {
+			err = cmdMCP(args)
+		}
 	case "init":
 		err = cmdInit(args)
 	case "version", "--version", "-V":
@@ -284,6 +304,7 @@ Usage:
   phoenix agent-sock token --agent <name>      Mint/cache short-lived token via socket
   phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
+  phoenix mcp-server --http :8080             Run MCP server (Streamable HTTP)
   phoenix init <dir>                          Initialize data directory
 
 Environment:
@@ -293,7 +314,8 @@ Environment:
   PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
   PHOENIX_CLIENT_KEY   Client key for mTLS authentication
   PHOENIX_POLICY       Path to attestation policy file (JSON)
-  PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)`)
+  PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)
+  PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)`)
 }
 
 // requireAuth checks that at least one auth method is configured

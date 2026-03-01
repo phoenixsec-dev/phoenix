@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/version"
+	"time"
 )
 
 // mcpExchange sends JSON-RPC messages to the MCP server loop and collects responses.
@@ -46,8 +47,7 @@ func mcpExchange(t *testing.T, handler http.HandlerFunc, messages ...string) []m
 	dec := json.NewDecoder(inReader)
 	enc := json.NewEncoder(&outBuf)
 
-	// Simulate the server loop inline (we can't call cmdMCP because it
-	// reads os.Stdin, so we replicate the loop logic with our own reader).
+	// Run the server dispatch loop using the shared handler.
 	for {
 		var req mcpRequest
 		if err := dec.Decode(&req); err != nil {
@@ -57,34 +57,7 @@ func mcpExchange(t *testing.T, handler http.HandlerFunc, messages ...string) []m
 			mcpSendError(enc, nil, -32700, "Parse error")
 			continue
 		}
-
-		if req.ID == nil {
-			continue
-		}
-
-		switch req.Method {
-		case "initialize":
-			mcpSendResult(enc, req.ID, mcpInitializeResult{
-				ProtocolVersion: "2024-11-05",
-				Capabilities:    map[string]interface{}{"tools": map[string]interface{}{}},
-				ServerInfo:      mcpServerInfo{Name: "phoenix", Version: version.Version},
-			})
-		case "tools/list":
-			mcpSendResult(enc, req.ID, mcpListToolsResult{Tools: mcpTools})
-		case "tools/call":
-			var params mcpCallToolParams
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				mcpSendError(enc, req.ID, -32602, "Invalid params")
-				continue
-			}
-			text, isErr := mcpDispatchTool(params.Name, params.Arguments, nil)
-			mcpSendResult(enc, req.ID, mcpCallToolResult{
-				Content: []mcpContentItem{{Type: "text", Text: text}},
-				IsError: isErr,
-			})
-		default:
-			mcpSendError(enc, req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
-		}
+		mcpHandleRequest(req, enc, nil)
 	}
 
 	// Parse responses.
@@ -764,5 +737,319 @@ func TestMCPE2ERealStdinStdout(t *testing.T) {
 	}
 	if !strings.Contains(toolResult.Content[0].Text, "e2e/secret1") {
 		t.Errorf("expected 'e2e/secret1' in output, got: %s", toolResult.Content[0].Text)
+	}
+}
+
+// --- HTTP transport tests ---
+
+// setupMCPHTTPTest creates an mcpHTTPServer backed by a mock Phoenix API,
+// and returns the httptest server plus a cleanup function.
+func setupMCPHTTPTest(t *testing.T, phoenixHandler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+
+	if phoenixHandler != nil {
+		ts := httptest.NewServer(phoenixHandler)
+		t.Cleanup(ts.Close)
+
+		oldURL := serverURL
+		oldToken := token
+		oldClient := httpClient
+		serverURL = ts.URL
+		token = "test-token"
+		httpClient = ts.Client()
+		t.Cleanup(func() {
+			serverURL = oldURL
+			token = oldToken
+			httpClient = oldClient
+		})
+	}
+
+	srv := &mcpHTTPServer{
+		sessions: make(map[string]*mcpSession),
+		token:    "test-mcp-token",
+		logger:   log.New(io.Discard, "", 0),
+		maxAge:   time.Hour,
+	}
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// mcpHTTPPost sends a JSON-RPC request to the MCP HTTP server.
+func mcpHTTPPost(t *testing.T, url, bearerToken, sessionID, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("POST", url+"/mcp", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	if sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	return resp
+}
+
+func TestMCPHTTPInitialize(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "",
+		jsonMsg(1, "initialize", map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo":      map[string]interface{}{"name": "test", "version": "1.0"},
+		}))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("expected Mcp-Session-Id header")
+	}
+	if len(sessionID) != 32 { // 16 bytes = 32 hex chars
+		t.Errorf("session ID length = %d, want 32", len(sessionID))
+	}
+
+	var rpcResp mcpResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected error: %v", rpcResp.Error)
+	}
+}
+
+func TestMCPHTTPToolCallFlow(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"paths": []string{"test/key1", "test/key2"},
+		})
+	})
+	ts := setupMCPHTTPTest(t, handler)
+
+	// Step 1: Initialize to get session.
+	resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "",
+		jsonMsg(1, "initialize", map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{},
+		}))
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+
+	if sessionID == "" {
+		t.Fatal("no session ID from initialize")
+	}
+
+	// Step 2: Call tools/list with session.
+	resp = mcpHTTPPost(t, ts.URL, "test-mcp-token", sessionID,
+		jsonMsg(2, "tools/call", map[string]interface{}{
+			"name":      "phoenix_list",
+			"arguments": map[string]interface{}{},
+		}))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var rpcResp mcpResponse
+	json.NewDecoder(resp.Body).Decode(&rpcResp)
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected error: %v", rpcResp.Error)
+	}
+
+	b, _ := json.Marshal(rpcResp.Result)
+	var result mcpCallToolResult
+	json.Unmarshal(b, &result)
+	if result.IsError {
+		t.Errorf("unexpected tool error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, "test/key1") {
+		t.Errorf("expected 'test/key1' in output, got: %s", result.Content[0].Text)
+	}
+}
+
+func TestMCPHTTPAuthRequired(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	resp := mcpHTTPPost(t, ts.URL, "", "", // no bearer token
+		jsonMsg(1, "initialize", nil))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestMCPHTTPAuthWrongToken(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	resp := mcpHTTPPost(t, ts.URL, "wrong-token", "",
+		jsonMsg(1, "initialize", nil))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestMCPHTTPInvalidSession(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "bogus-session-id",
+		jsonMsg(1, "tools/list", nil))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestMCPHTTPMissingSession(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	// Non-initialize request without session ID.
+	resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "",
+		jsonMsg(1, "tools/list", nil))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestMCPHTTPDeleteSession(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	// Initialize to get session.
+	resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "",
+		jsonMsg(1, "initialize", map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+		}))
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+
+	// DELETE the session.
+	req, _ := http.NewRequest("DELETE", ts.URL+"/mcp", nil)
+	req.Header.Set("Authorization", "Bearer test-mcp-token")
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	delResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE failed: %v", err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != 200 {
+		t.Errorf("DELETE status = %d, want 200", delResp.StatusCode)
+	}
+
+	// Now try to use the deleted session — should get 404.
+	resp = mcpHTTPPost(t, ts.URL, "test-mcp-token", sessionID,
+		jsonMsg(2, "tools/list", nil))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Errorf("post-delete status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestMCPHTTPNotificationNoContent(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	// Send a notification (no id field) — should get 204.
+	resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "",
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 204 {
+		t.Errorf("status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestMCPHTTPBadContentType(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/mcp", strings.NewReader("hello"))
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Authorization", "Bearer test-mcp-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 415 {
+		t.Errorf("status = %d, want 415", resp.StatusCode)
+	}
+}
+
+func TestMCPHTTPParseError(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "",
+		`{invalid json!!!}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 (JSON-RPC error in body)", resp.StatusCode)
+	}
+
+	var rpcResp mcpResponse
+	json.NewDecoder(resp.Body).Decode(&rpcResp)
+	if rpcResp.Error == nil {
+		t.Fatal("expected JSON-RPC error")
+	}
+	if rpcResp.Error.Code != -32700 {
+		t.Errorf("error code = %d, want -32700", rpcResp.Error.Code)
+	}
+}
+
+func TestMCPHTTPMultipleSessions(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	ids := make(map[string]bool)
+	for i := 0; i < 3; i++ {
+		resp := mcpHTTPPost(t, ts.URL, "test-mcp-token", "",
+			jsonMsg(i+1, "initialize", map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+			}))
+		sid := resp.Header.Get("Mcp-Session-Id")
+		resp.Body.Close()
+
+		if sid == "" {
+			t.Fatalf("iteration %d: no session ID", i)
+		}
+		if ids[sid] {
+			t.Errorf("duplicate session ID: %s", sid)
+		}
+		ids[sid] = true
+	}
+
+	if len(ids) != 3 {
+		t.Errorf("expected 3 unique session IDs, got %d", len(ids))
+	}
+}
+
+func TestMCPHTTPGetNotAllowed(t *testing.T) {
+	ts := setupMCPHTTPTest(t, nil)
+
+	req, _ := http.NewRequest("GET", ts.URL+"/mcp", nil)
+	req.Header.Set("Authorization", "Bearer test-mcp-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 405 {
+		t.Errorf("status = %d, want 405", resp.StatusCode)
 	}
 }
