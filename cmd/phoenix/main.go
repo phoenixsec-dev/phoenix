@@ -209,12 +209,16 @@ func main() {
 		}
 	case "agent-sock":
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix agent-sock <attest>")
+			fmt.Fprintln(os.Stderr, "usage: phoenix agent-sock <attest|token|resolve>")
 			os.Exit(1)
 		}
 		switch args[0] {
 		case "attest":
 			err = cmdAgentSockAttest(args[1:])
+		case "token":
+			err = cmdAgentSockToken(args[1:])
+		case "resolve":
+			err = cmdAgentSockResolve(args[1:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown agent-sock subcommand: %s\n", args[0])
 			os.Exit(1)
@@ -268,6 +272,8 @@ Usage:
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix emergency get <path> --data-dir <d> [--confirm]  Break-glass offline secret retrieval
   phoenix agent-sock attest [--socket <path>]  Attest via local Unix socket agent
+  phoenix agent-sock token --agent <name>      Mint/cache short-lived token via socket
+  phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix init <dir>                          Initialize data directory
 
@@ -1444,6 +1450,342 @@ func cmdAgentSockAttest(args []string) error {
 	}
 	if resp.Peer.BinaryHash != "" {
 		fmt.Printf("  Binary hash: %s\n", resp.Peer.BinaryHash)
+	}
+	return nil
+}
+
+// tokenCacheEntry represents a cached short-lived token.
+type tokenCacheEntry struct {
+	Token     string    `json:"token"`
+	Agent     string    `json:"agent"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// tokenCachePath returns the path to the token cache file.
+func tokenCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".phoenix", "token-cache.json")
+}
+
+// loadTokenCache reads cached tokens from disk.
+func loadTokenCache() (map[string]*tokenCacheEntry, error) {
+	path := tokenCachePath()
+	if path == "" {
+		return make(map[string]*tokenCacheEntry), nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return make(map[string]*tokenCacheEntry), nil
+	}
+	var cache map[string]*tokenCacheEntry
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return make(map[string]*tokenCacheEntry), nil
+	}
+	return cache, nil
+}
+
+// saveTokenCache writes cached tokens to disk.
+func saveTokenCache(cache map[string]*tokenCacheEntry) error {
+	path := tokenCachePath()
+	if path == "" {
+		return fmt.Errorf("cannot determine home directory for token cache")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+// getCachedToken returns a valid cached token for the agent, or empty string if expired/missing.
+func getCachedToken(agentName string, ttlBuffer time.Duration) string {
+	cache, _ := loadTokenCache()
+	entry, ok := cache[agentName]
+	if !ok {
+		return ""
+	}
+	// Check if token is still valid with buffer
+	if time.Now().Add(ttlBuffer).After(entry.ExpiresAt) {
+		return ""
+	}
+	return entry.Token
+}
+
+// attestViaSocket connects to the agent socket and returns peer info.
+func attestViaSocket(socketPath string, agentName string) (peerUID int, binaryHash string, err error) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return 0, "", fmt.Errorf("connecting to agent socket %s: %w", socketPath, err)
+	}
+	defer conn.Close()
+
+	req := struct {
+		Agent string `json:"agent"`
+	}{Agent: agentName}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return 0, "", fmt.Errorf("sending attest request: %w", err)
+	}
+
+	var resp struct {
+		OK   bool `json:"ok"`
+		Peer *struct {
+			PID        int32  `json:"pid"`
+			UID        int32  `json:"uid"`
+			GID        int32  `json:"gid"`
+			BinaryPath string `json:"binary_path,omitempty"`
+			BinaryHash string `json:"binary_hash,omitempty"`
+		} `json:"peer,omitempty"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return 0, "", fmt.Errorf("reading attest response: %w", err)
+	}
+
+	if !resp.OK {
+		return 0, "", fmt.Errorf("attestation failed: %s", resp.Error)
+	}
+	if resp.Peer == nil {
+		return 0, "", fmt.Errorf("attestation returned no peer info")
+	}
+
+	return int(resp.Peer.UID), resp.Peer.BinaryHash, nil
+}
+
+// mintTokenViaAPI mints a short-lived token via the Phoenix API.
+func mintTokenViaAPI(agentName string, procUID *int, binaryHash string) (string, time.Time, error) {
+	body := map[string]interface{}{"agent": agentName}
+	if procUID != nil {
+		body["process_uid"] = *procUID
+	}
+	if binaryHash != "" {
+		body["binary_hash"] = binaryHash
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	resp, err := apiRequest("POST", "/v1/token/mint", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("mint request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", time.Time{}, handleError(resp)
+	}
+
+	var result struct {
+		Token     string `json:"token"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", time.Time{}, fmt.Errorf("decoding mint response: %w", err)
+	}
+
+	expiresAt, _ := time.Parse(time.RFC3339, result.ExpiresAt)
+	return result.Token, expiresAt, nil
+}
+
+func cmdAgentSockToken(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	socketPath := defaultAgentSocket
+	agentName := ""
+	ttlBuffer := 30 * time.Second
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "-s", "--socket":
+			i++
+			if i < len(args) {
+				socketPath = args[i]
+			}
+		case "-a", "--agent":
+			i++
+			if i < len(args) {
+				agentName = args[i]
+			}
+		case "--ttl-buffer":
+			i++
+			if i < len(args) {
+				var parseErr error
+				ttlBuffer, parseErr = time.ParseDuration(args[i])
+				if parseErr != nil {
+					return fmt.Errorf("invalid --ttl-buffer %q: %w", args[i], parseErr)
+				}
+			}
+		default:
+			if agentName == "" {
+				agentName = args[i]
+			}
+		}
+		i++
+	}
+
+	if agentName == "" {
+		return fmt.Errorf("usage: phoenix agent-sock token --agent <name> [--socket <path>] [--ttl-buffer <dur>]")
+	}
+
+	// Check cache first
+	if cached := getCachedToken(agentName, ttlBuffer); cached != "" {
+		fmt.Printf("Token (cached): %s\n", cached)
+		return nil
+	}
+
+	// Attest via socket
+	peerUID, binaryHash, err := attestViaSocket(socketPath, agentName)
+	if err != nil {
+		return err
+	}
+
+	// Mint via API with process claims
+	tok, expiresAt, err := mintTokenViaAPI(agentName, &peerUID, binaryHash)
+	if err != nil {
+		return err
+	}
+
+	// Cache the token
+	cache, _ := loadTokenCache()
+	cache[agentName] = &tokenCacheEntry{
+		Token:     tok,
+		Agent:     agentName,
+		ExpiresAt: expiresAt,
+	}
+	if err := saveTokenCache(cache); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not cache token: %v\n", err)
+	}
+
+	fmt.Printf("Token minted for agent %q\n", agentName)
+	fmt.Printf("  Token:      %s\n", tok)
+	fmt.Printf("  Expires at: %s\n", expiresAt.Format(time.RFC3339))
+	return nil
+}
+
+func cmdAgentSockResolve(args []string) error {
+	socketPath := defaultAgentSocket
+	agentName := ""
+	ttlBuffer := 30 * time.Second
+	var refs []string
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "-s", "--socket":
+			i++
+			if i < len(args) {
+				socketPath = args[i]
+			}
+		case "-a", "--agent":
+			i++
+			if i < len(args) {
+				agentName = args[i]
+			}
+		case "--ttl-buffer":
+			i++
+			if i < len(args) {
+				var parseErr error
+				ttlBuffer, parseErr = time.ParseDuration(args[i])
+				if parseErr != nil {
+					return fmt.Errorf("invalid --ttl-buffer %q: %w", args[i], parseErr)
+				}
+			}
+		default:
+			refs = append(refs, args[i])
+		}
+		i++
+	}
+
+	if len(refs) == 0 || agentName == "" {
+		return fmt.Errorf("usage: phoenix agent-sock resolve --agent <name> <ref...> [--socket <path>]")
+	}
+
+	// Get or mint token
+	tok := getCachedToken(agentName, ttlBuffer)
+	if tok == "" {
+		// Attest and mint
+		peerUID, binaryHash, err := attestViaSocket(socketPath, agentName)
+		if err != nil {
+			return err
+		}
+
+		// Need admin auth to mint — use existing PHOENIX_TOKEN
+		if token == "" {
+			return fmt.Errorf("PHOENIX_TOKEN required to mint initial token via agent-sock resolve")
+		}
+
+		var expiresAt time.Time
+		var mintErr error
+		tok, expiresAt, mintErr = mintTokenViaAPI(agentName, &peerUID, binaryHash)
+		if mintErr != nil {
+			return fmt.Errorf("auto-minting token: %w", mintErr)
+		}
+
+		// Cache it
+		cache, _ := loadTokenCache()
+		cache[agentName] = &tokenCacheEntry{
+			Token:     tok,
+			Agent:     agentName,
+			ExpiresAt: expiresAt,
+		}
+		saveTokenCache(cache)
+	}
+
+	// Resolve using the short-lived token
+	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
+	url := serverURL + "/v1/resolve"
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("building request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("resolve request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Values map[string]string `json:"values"`
+		Errors map[string]string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	// Single ref: output raw value
+	if len(refs) == 1 {
+		if errMsg, ok := result.Errors[refs[0]]; ok {
+			return fmt.Errorf("%s: %s", refs[0], errMsg)
+		}
+		fmt.Print(result.Values[refs[0]])
+		return nil
+	}
+
+	// Multiple refs
+	var hasErr bool
+	for _, ref := range refs {
+		if errMsg, ok := result.Errors[ref]; ok {
+			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
+			hasErr = true
+			continue
+		}
+		fmt.Printf("%s\t%s\n", ref, result.Values[ref])
+	}
+	if hasErr {
+		return fmt.Errorf("some references failed to resolve")
 	}
 	return nil
 }

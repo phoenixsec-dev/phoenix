@@ -963,7 +963,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // mintTokenRequest is the JSON body for token minting.
 type mintTokenRequest struct {
-	Agent string `json:"agent"`
+	Agent      string `json:"agent"`
+	ProcessUID *int   `json:"process_uid,omitempty"`
+	BinaryHash string `json:"binary_hash,omitempty"`
 }
 
 // handleMintToken creates a short-lived token for an agent.
@@ -997,7 +999,7 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok, claims, err := s.tokens.Mint(req.Agent, nil, "")
+	tok, claims, err := s.tokens.Mint(req.Agent, req.ProcessUID, req.BinaryHash)
 	if err != nil {
 		log.Printf("error minting token for %q: %v", req.Agent, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)

@@ -1851,6 +1851,76 @@ func TestMintTokenMissingAgent(t *testing.T) {
 	}
 }
 
+func TestMintTokenWithProcessClaims(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	ti, _ := token.NewIssuer(5 * time.Minute)
+	srv.SetTokenIssuer(ti)
+
+	uid := 1001
+	body, _ := json.Marshal(mintTokenRequest{
+		Agent:      "deployer",
+		ProcessUID: &uid,
+		BinaryHash: "sha256:DEADBEEF",
+	})
+	req := httptest.NewRequest("POST", "/v1/token/mint", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	tok := resp["token"].(string)
+	claims, err := ti.Validate(tok)
+	if err != nil {
+		t.Fatalf("token should be valid: %v", err)
+	}
+	if claims.Agent != "deployer" {
+		t.Fatalf("claims.Agent = %q, want deployer", claims.Agent)
+	}
+	if claims.ProcessUID == nil || *claims.ProcessUID != 1001 {
+		t.Fatalf("claims.ProcessUID = %v, want 1001", claims.ProcessUID)
+	}
+	if claims.BinaryHash != "sha256:DEADBEEF" {
+		t.Fatalf("claims.BinaryHash = %q, want sha256:DEADBEEF", claims.BinaryHash)
+	}
+}
+
+func TestMintTokenWithoutProcessClaims(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	ti, _ := token.NewIssuer(5 * time.Minute)
+	srv.SetTokenIssuer(ti)
+
+	body, _ := json.Marshal(mintTokenRequest{Agent: "basic"})
+	req := httptest.NewRequest("POST", "/v1/token/mint", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	tok := resp["token"].(string)
+	claims, err := ti.Validate(tok)
+	if err != nil {
+		t.Fatalf("token should be valid: %v", err)
+	}
+	if claims.ProcessUID != nil {
+		t.Fatalf("claims.ProcessUID should be nil, got %v", claims.ProcessUID)
+	}
+	if claims.BinaryHash != "" {
+		t.Fatalf("claims.BinaryHash should be empty, got %q", claims.BinaryHash)
+	}
+}
+
 // --- Wave 2: Tool-scoped attestation on API ---
 
 func TestAttestationToolScopedOnResolve(t *testing.T) {

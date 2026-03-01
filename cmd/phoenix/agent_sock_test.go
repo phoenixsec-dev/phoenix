@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"git.home/vector/phoenix/internal/agent"
 )
@@ -106,5 +107,128 @@ func TestCmdAgentSockAttestProtocol(t *testing.T) {
 	uid := int32(os.Getuid())
 	if resp.Peer.UID != uid {
 		t.Errorf("UID = %d, want %d (current user)", resp.Peer.UID, uid)
+	}
+}
+
+// --- Token cache tests ---
+
+func TestTokenCacheRoundTrip(t *testing.T) {
+	// Override HOME to use temp dir for cache
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Initially empty
+	tok := getCachedToken("myagent", 0)
+	if tok != "" {
+		t.Fatalf("expected empty cache, got %q", tok)
+	}
+
+	// Save a token
+	cache := map[string]*tokenCacheEntry{
+		"myagent": {
+			Token:     "test-token-123",
+			Agent:     "myagent",
+			ExpiresAt: time.Now().Add(10 * time.Minute),
+		},
+	}
+	if err := saveTokenCache(cache); err != nil {
+		t.Fatalf("saveTokenCache: %v", err)
+	}
+
+	// Should be retrievable
+	tok = getCachedToken("myagent", 0)
+	if tok != "test-token-123" {
+		t.Fatalf("cached token = %q, want test-token-123", tok)
+	}
+}
+
+func TestTokenCacheExpired(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	cache := map[string]*tokenCacheEntry{
+		"expired-agent": {
+			Token:     "old-token",
+			Agent:     "expired-agent",
+			ExpiresAt: time.Now().Add(-1 * time.Minute), // already expired
+		},
+	}
+	saveTokenCache(cache)
+
+	tok := getCachedToken("expired-agent", 0)
+	if tok != "" {
+		t.Fatalf("expected empty for expired token, got %q", tok)
+	}
+}
+
+func TestTokenCacheTTLBuffer(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// Token expires in 20 seconds
+	cache := map[string]*tokenCacheEntry{
+		"buffered": {
+			Token:     "near-expiry-token",
+			Agent:     "buffered",
+			ExpiresAt: time.Now().Add(20 * time.Second),
+		},
+	}
+	saveTokenCache(cache)
+
+	// Without buffer, still valid
+	tok := getCachedToken("buffered", 0)
+	if tok == "" {
+		t.Fatal("expected valid token without buffer")
+	}
+
+	// With 30s buffer, considered expired
+	tok = getCachedToken("buffered", 30*time.Second)
+	if tok != "" {
+		t.Fatalf("expected empty with 30s buffer, got %q", tok)
+	}
+}
+
+func TestTokenCacheMissingAgent(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpHome := t.TempDir()
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	tok := getCachedToken("nonexistent", 0)
+	if tok != "" {
+		t.Fatalf("expected empty for missing agent, got %q", tok)
+	}
+}
+
+func TestAttestViaSocket(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "attest-test.sock")
+	ag := agent.New(sockPath)
+	if err := ag.Start(); err != nil {
+		t.Fatalf("starting agent: %v", err)
+	}
+	defer ag.Stop()
+
+	uid, hash, err := attestViaSocket(sockPath, "test")
+	if err != nil {
+		t.Fatalf("attestViaSocket: %v", err)
+	}
+
+	if uid != os.Getuid() {
+		t.Errorf("UID = %d, want %d", uid, os.Getuid())
+	}
+	// Binary hash may or may not be available depending on /proc
+	_ = hash
+}
+
+func TestAttestViaSocketNoAgent(t *testing.T) {
+	_, _, err := attestViaSocket("/tmp/phoenix-nonexistent-test.sock", "test")
+	if err == nil {
+		t.Fatal("expected error for non-existent socket")
 	}
 }
