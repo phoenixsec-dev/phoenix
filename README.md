@@ -81,6 +81,7 @@ Levels compose — a production database password can require mTLS from a specif
 - [Threat Model](docs/threat-model.md)
 - [Migration Guide: `.env` to Phoenix](docs/migration-env-to-phoenix.md)
 - [API Reference Index](docs/api-reference-index.md)
+- [Release Runbook](docs/release-runbook.md)
 - [Runnable Examples](examples/README.md)
 
 ---
@@ -91,6 +92,16 @@ Levels compose — a production database password can require mTLS from a specif
 
 - Go 1.25+ (no external dependencies)
 - Linux, macOS, or Windows
+
+### Install from GitHub Releases
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/phoenixsec/phoenix/main/scripts/install.sh | sh
+```
+
+Options:
+- `PHOENIX_VERSION=vX.Y.Z` pin a specific release
+- `INSTALL_DIR=/custom/bin` choose install path
 
 ### Build
 
