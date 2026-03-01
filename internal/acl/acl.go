@@ -125,6 +125,11 @@ func (a *ACL) Save() error {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
+	return a.saveLocked()
+}
+
+// saveLocked writes the ACL config to disk. Caller must hold the mutex.
+func (a *ACL) saveLocked() error {
 	if a.path == "" {
 		return errors.New("no file path set for ACL")
 	}
@@ -196,10 +201,7 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	}
 
 	if a.path != "" {
-		a.mu.Unlock()
-		err := a.Save()
-		a.mu.Lock()
-		return err
+		return a.saveLocked()
 	}
 	return nil
 }
@@ -214,6 +216,10 @@ func (a *ACL) RemoveAgent(name string) error {
 	}
 
 	delete(a.config.Agents, name)
+
+	if a.path != "" {
+		return a.saveLocked()
+	}
 	return nil
 }
 

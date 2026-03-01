@@ -1,6 +1,8 @@
 package acl
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
@@ -333,5 +335,74 @@ func TestFilePersistence(t *testing.T) {
 	}
 	if name != "test" {
 		t.Fatalf("expected 'test', got %q", name)
+	}
+}
+
+func TestRemoveAgentPersists(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/acl.json"
+
+	a1, _ := New(path)
+	a1.AddAgent("ephemeral", "tok1", []Permission{
+		{Path: "ns/*", Actions: []Action{ActionRead}},
+	})
+	a1.AddAgent("keeper", "tok2", []Permission{
+		{Path: "ns/*", Actions: []Action{ActionRead}},
+	})
+
+	// Remove one agent
+	if err := a1.RemoveAgent("ephemeral"); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	// Reload from disk — removed agent must stay gone
+	a2, err := New(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	if _, err := a2.Authenticate("tok1"); err == nil {
+		t.Fatal("removed agent 'ephemeral' should not authenticate after reload")
+	}
+	if _, err := a2.Authenticate("tok2"); err != nil {
+		t.Fatalf("surviving agent 'keeper' should still authenticate: %v", err)
+	}
+}
+
+func TestAddAgentConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/acl.json"
+
+	a, _ := New(path)
+
+	// Concurrently add 20 agents
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := fmt.Sprintf("agent-%d", i)
+			token := fmt.Sprintf("token-%d", i)
+			a.AddAgent(name, token, []Permission{
+				{Path: "ns/*", Actions: []Action{ActionRead}},
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	// All 20 must be present in memory
+	agents := a.ListAgents()
+	if len(agents) != 20 {
+		t.Fatalf("expected 20 agents, got %d", len(agents))
+	}
+
+	// Reload from disk — all 20 must survive
+	a2, err := New(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	agents2 := a2.ListAgents()
+	if len(agents2) != 20 {
+		t.Fatalf("expected 20 agents after reload, got %d", len(agents2))
 	}
 }
