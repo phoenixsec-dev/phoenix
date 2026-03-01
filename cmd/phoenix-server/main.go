@@ -24,6 +24,7 @@ import (
 	"git.home/vector/phoenix/internal/config"
 	"git.home/vector/phoenix/internal/crypto"
 	"git.home/vector/phoenix/internal/nonce"
+	"git.home/vector/phoenix/internal/op"
 	"git.home/vector/phoenix/internal/policy"
 	"git.home/vector/phoenix/internal/store"
 	"git.home/vector/phoenix/internal/token"
@@ -86,45 +87,67 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
-	// Initialize key provider
-	var keyProvider crypto.KeyProvider
-	switch cfg.Crypto.Provider {
-	case "file", "":
-		key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
-		if err == crypto.ErrPassphraseRequired {
-			passphrase, ppErr := crypto.ReadPassphrase(*passphraseStdin)
-			if ppErr != nil {
-				log.Fatalf("master key is passphrase-protected: %v", ppErr)
-			}
-			key, err = crypto.LoadMasterKeyWithPassphrase(cfg.Store.MasterKey, passphrase)
-			if err != nil {
-				log.Fatalf("decrypting master key: %v", err)
-			}
-			p, provErr := crypto.NewFileKeyProvider(key)
-			if provErr != nil {
-				log.Fatalf("creating key provider: %v", provErr)
-			}
-			p.SetPassphrase(passphrase)
-			keyProvider = p
-		} else if err != nil {
-			log.Fatalf("loading master key: %v", err)
-		} else {
-			p, provErr := crypto.NewFileKeyProvider(key)
-			if provErr != nil {
-				log.Fatalf("creating key provider: %v", provErr)
-			}
-			keyProvider = p
-		}
-	default:
-		log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
-	}
+	// Initialize backend
+	var backend store.SecretBackend
 
-	// Initialize store and backend
-	s, err := store.NewWithProvider(cfg.Store.Path, keyProvider)
-	if err != nil {
-		log.Fatalf("initializing store: %v", err)
+	switch cfg.Backend() {
+	case "1password":
+		tokenEnv := cfg.OnePassword.ServiceAccountTokenEnv
+		if tokenEnv == "" {
+			tokenEnv = "OP_SERVICE_ACCOUNT_TOKEN"
+		}
+		opClient := op.New(tokenEnv)
+		if err := opClient.Available(); err != nil {
+			log.Fatalf("1Password backend: %v", err)
+		}
+		cacheTTL := 60 * time.Second // default
+		if cfg.OnePassword.CacheTTL != "" {
+			cacheTTL, _ = time.ParseDuration(cfg.OnePassword.CacheTTL) // validated above
+		}
+		backend = store.NewOPBackend(opClient, cfg.OnePassword.Vault, cacheTTL)
+		log.Printf("  Backend: 1password (vault=%s, cache=%s)", cfg.OnePassword.Vault, cacheTTL)
+
+	default: // "file"
+		// Initialize key provider
+		var keyProvider crypto.KeyProvider
+		switch cfg.Crypto.Provider {
+		case "file", "":
+			key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
+			if err == crypto.ErrPassphraseRequired {
+				passphrase, ppErr := crypto.ReadPassphrase(*passphraseStdin)
+				if ppErr != nil {
+					log.Fatalf("master key is passphrase-protected: %v", ppErr)
+				}
+				key, err = crypto.LoadMasterKeyWithPassphrase(cfg.Store.MasterKey, passphrase)
+				if err != nil {
+					log.Fatalf("decrypting master key: %v", err)
+				}
+				p, provErr := crypto.NewFileKeyProvider(key)
+				if provErr != nil {
+					log.Fatalf("creating key provider: %v", provErr)
+				}
+				p.SetPassphrase(passphrase)
+				keyProvider = p
+			} else if err != nil {
+				log.Fatalf("loading master key: %v", err)
+			} else {
+				p, provErr := crypto.NewFileKeyProvider(key)
+				if provErr != nil {
+					log.Fatalf("creating key provider: %v", provErr)
+				}
+				keyProvider = p
+			}
+		default:
+			log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
+		}
+
+		s, err := store.NewWithProvider(cfg.Store.Path, keyProvider)
+		if err != nil {
+			log.Fatalf("initializing store: %v", err)
+		}
+		backend = store.NewFileBackend(s)
+		log.Printf("  Backend: file (provider=%s)", keyProvider.Name())
 	}
-	backend := store.NewFileBackend(s)
 
 	// Initialize ACL
 	a, err := acl.New(cfg.ACL.Path)
@@ -211,8 +234,6 @@ func main() {
 	}
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
-	log.Printf("  Store: %s (%d secrets)", cfg.Store.Path, backend.Count())
-	log.Printf("  Key provider: %s", keyProvider.Name())
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
 	log.Printf("  Audit: %s", cfg.Audit.Path)
 

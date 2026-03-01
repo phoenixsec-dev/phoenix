@@ -156,3 +156,91 @@ func TestDefaultConfigNoAttestation(t *testing.T) {
 		t.Error("tokens should be disabled by default")
 	}
 }
+
+func TestBackendDefaultsToFile(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Backend() != "file" {
+		t.Fatalf("expected default backend 'file', got %q", cfg.Backend())
+	}
+	// Empty string should also default to file
+	cfg.Store.Backend = ""
+	if cfg.Backend() != "file" {
+		t.Fatalf("expected empty backend to default to 'file', got %q", cfg.Backend())
+	}
+}
+
+func TestValidateUnknownBackend(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Store.Backend = "redis"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown backend should fail validation")
+	}
+}
+
+func TestValidate1PasswordBackendRequiresVault(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Store.Backend = "1password"
+	cfg.OnePassword.Vault = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("1password backend without vault should fail validation")
+	}
+}
+
+func TestValidate1PasswordBackendValid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Store.Backend = "1password"
+	cfg.OnePassword.Vault = "Engineering"
+	// 1password backend doesn't require store.path or master_key
+	cfg.Store.Path = ""
+	cfg.Store.MasterKey = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid 1password config should pass: %v", err)
+	}
+}
+
+func TestValidate1PasswordCacheTTLInvalid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Store.Backend = "1password"
+	cfg.OnePassword.Vault = "Engineering"
+	cfg.OnePassword.CacheTTL = "not-a-duration"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("invalid cache_ttl should fail validation")
+	}
+}
+
+func TestValidate1PasswordCacheTTLValid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Store.Backend = "1password"
+	cfg.OnePassword.Vault = "Engineering"
+	cfg.OnePassword.CacheTTL = "30s"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid cache_ttl should pass: %v", err)
+	}
+}
+
+func TestOPConfigJSON(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Store.Backend = "1password"
+	cfg.OnePassword.Vault = "Engineering"
+	cfg.OnePassword.CacheTTL = "60s"
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var parsed Config
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if parsed.Store.Backend != "1password" {
+		t.Errorf("backend = %q, want %q", parsed.Store.Backend, "1password")
+	}
+	if parsed.OnePassword.Vault != "Engineering" {
+		t.Errorf("vault = %q, want %q", parsed.OnePassword.Vault, "Engineering")
+	}
+	if parsed.OnePassword.CacheTTL != "60s" {
+		t.Errorf("cache_ttl = %q, want %q", parsed.OnePassword.CacheTTL, "60s")
+	}
+}

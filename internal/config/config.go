@@ -56,8 +56,9 @@ type ServerConfig struct {
 
 // StoreConfig controls the secret store.
 type StoreConfig struct {
-	Path      string `json:"path"`       // Path to encrypted store file
-	MasterKey string `json:"master_key"` // Path to master key file
+	Backend   string `json:"backend,omitempty"` // "file" (default), "1password"
+	Path      string `json:"path"`              // Path to encrypted store file
+	MasterKey string `json:"master_key"`        // Path to master key file
 }
 
 // ACLFileConfig points to the ACL definition file.
@@ -97,8 +98,10 @@ type TokenConfig struct {
 
 // OPConfig controls the optional 1Password backend.
 type OPConfig struct {
-	Enabled              bool   `json:"enabled"`
-	ServiceAccountTokenEnv string `json:"service_account_token_env,omitempty"`
+	Enabled                bool   `json:"enabled"`
+	Vault                  string `json:"vault,omitempty"`                     // 1Password vault name
+	ServiceAccountTokenEnv string `json:"service_account_token_env,omitempty"` // env var name (default: OP_SERVICE_ACCOUNT_TOKEN)
+	CacheTTL               string `json:"cache_ttl,omitempty"`                 // duration string, e.g. "60s" (default)
 }
 
 // DefaultConfig returns a config with sensible defaults for /data volume mount.
@@ -150,17 +153,42 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// Backend returns the effective backend name, defaulting to "file".
+func (c *Config) Backend() string {
+	if c.Store.Backend == "" {
+		return "file"
+	}
+	return c.Store.Backend
+}
+
 // Validate checks that all required fields are set.
 func (c *Config) Validate() error {
 	if c.Server.Listen == "" {
 		return errors.New("server.listen is required")
 	}
-	if c.Store.Path == "" {
-		return errors.New("store.path is required")
+
+	// Validate backend selection
+	switch c.Backend() {
+	case "file":
+		if c.Store.Path == "" {
+			return errors.New("store.path is required for file backend")
+		}
+		if c.Store.MasterKey == "" {
+			return errors.New("store.master_key is required for file backend")
+		}
+	case "1password":
+		if c.OnePassword.Vault == "" {
+			return errors.New("onepassword.vault is required when store.backend is \"1password\"")
+		}
+		if c.OnePassword.CacheTTL != "" {
+			if _, err := time.ParseDuration(c.OnePassword.CacheTTL); err != nil {
+				return fmt.Errorf("onepassword.cache_ttl: invalid duration %q: %w", c.OnePassword.CacheTTL, err)
+			}
+		}
+	default:
+		return fmt.Errorf("store.backend: unknown backend %q (supported: file, 1password)", c.Store.Backend)
 	}
-	if c.Store.MasterKey == "" {
-		return errors.New("store.master_key is required")
-	}
+
 	if c.ACL.Path == "" {
 		return errors.New("acl.path is required")
 	}
