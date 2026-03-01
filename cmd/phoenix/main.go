@@ -26,9 +26,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	cryptorand "crypto/rand"
+	sha256pkg "crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -36,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -258,7 +264,7 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
   phoenix agent list                          List agents
-  phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
+  phoenix resolve [--signed] <ref> [ref...]     Resolve phoenix:// references to values
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
   phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
@@ -825,14 +831,79 @@ func cmdResolve(args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
-	if len(args) < 1 {
-		return fmt.Errorf("usage: phoenix resolve <phoenix://ns/secret> [ref...]")
+
+	var refs []string
+	signed := false
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--signed" {
+			signed = true
+		} else {
+			refs = append(refs, args[i])
+		}
 	}
 
-	body, _ := json.Marshal(map[string]interface{}{
-		"refs": args,
-	})
+	if len(refs) < 1 {
+		return fmt.Errorf("usage: phoenix resolve [--signed] <phoenix://ns/secret> [ref...]")
+	}
 
+	var bodyMap map[string]interface{}
+
+	if signed {
+		// Signed resolve flow:
+		// 1. Get nonce from /v1/challenge
+		// 2. Build canonical payload
+		// 3. Sign with client key
+		// 4. Send signed resolve request
+		challengeResp, err := apiRequest("POST", "/v1/challenge", nil)
+		if err != nil {
+			return fmt.Errorf("challenge request failed: %w", err)
+		}
+		defer challengeResp.Body.Close()
+		if challengeResp.StatusCode != 200 {
+			return fmt.Errorf("challenge failed: %w", handleError(challengeResp))
+		}
+
+		var challenge struct {
+			Nonce string `json:"nonce"`
+		}
+		json.NewDecoder(challengeResp.Body).Decode(&challenge)
+
+		timestamp := time.Now().UTC().Format(time.RFC3339)
+
+		// Build canonical payload (sorted keys, sorted refs)
+		sortedRefs := make([]string, len(refs))
+		copy(sortedRefs, refs)
+		sort.Strings(sortedRefs)
+		canonical, _ := json.Marshal(map[string]interface{}{
+			"nonce":     challenge.Nonce,
+			"refs":      sortedRefs,
+			"timestamp": timestamp,
+		})
+
+		// Sign with client key
+		clientKeyPath := os.Getenv("PHOENIX_CLIENT_KEY")
+		if clientKeyPath == "" {
+			return fmt.Errorf("--signed requires PHOENIX_CLIENT_KEY for signing")
+		}
+		sig, err := signPayload(clientKeyPath, canonical)
+		if err != nil {
+			return fmt.Errorf("signing payload: %w", err)
+		}
+
+		bodyMap = map[string]interface{}{
+			"refs":      refs,
+			"nonce":     challenge.Nonce,
+			"timestamp": timestamp,
+			"signature": base64.StdEncoding.EncodeToString(sig),
+		}
+	} else {
+		bodyMap = map[string]interface{}{
+			"refs": refs,
+		}
+	}
+
+	body, _ := json.Marshal(bodyMap)
 	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
@@ -852,17 +923,17 @@ func cmdResolve(args []string) error {
 	}
 
 	// Single ref: output raw value for piping
-	if len(args) == 1 {
-		if errMsg, ok := result.Errors[args[0]]; ok {
-			return fmt.Errorf("%s: %s", args[0], errMsg)
+	if len(refs) == 1 {
+		if errMsg, ok := result.Errors[refs[0]]; ok {
+			return fmt.Errorf("%s: %s", refs[0], errMsg)
 		}
-		fmt.Print(result.Values[args[0]])
+		fmt.Print(result.Values[refs[0]])
 		return nil
 	}
 
 	// Multiple refs: output ref → value pairs
 	var hasErr bool
-	for _, ref := range args {
+	for _, ref := range refs {
 		if errMsg, ok := result.Errors[ref]; ok {
 			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
 			hasErr = true
@@ -874,6 +945,52 @@ func cmdResolve(args []string) error {
 		return fmt.Errorf("some references failed to resolve")
 	}
 	return nil
+}
+
+// signPayload signs data with the ECDSA private key at the given PEM path.
+func signPayload(keyPath string, data []byte) ([]byte, error) {
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading key: %w", err)
+	}
+
+	key, err := parseECDSAPrivateKey(keyPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	hash := sha256Digest(data)
+	return ecdsa.SignASN1(cryptorand.Reader, key, hash)
+}
+
+// sha256Digest returns the SHA-256 hash of data.
+func sha256Digest(data []byte) []byte {
+	h := sha256pkg.Sum256(data)
+	return h[:]
+}
+
+// parseECDSAPrivateKey parses a PEM-encoded ECDSA private key.
+func parseECDSAPrivateKey(pemData []byte) (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode(pemData)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found in key file")
+	}
+
+	// Try PKCS8 first (newer format), then EC (older format)
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err == nil {
+		ecKey, ok := key.(*ecdsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("PKCS8 key is not ECDSA")
+		}
+		return ecKey, nil
+	}
+
+	ecKey, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing ECDSA private key: %w", err)
+	}
+	return ecKey, nil
 }
 
 func cmdExec(args []string) error {

@@ -2,14 +2,19 @@ package api
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -2279,5 +2284,319 @@ func TestProcessAttestationViaToken(t *testing.T) {
 	errors, _ = resp["errors"].(map[string]interface{})
 	if errors["phoenix://agent/key"] != "attestation required" {
 		t.Fatalf("expected attestation required for bearer, got: %v", resp)
+	}
+}
+
+// --- Signed resolve tests ---
+
+// signResolvePayload builds a canonical payload and signs it with the given key.
+func signResolvePayload(t *testing.T, key *ecdsa.PrivateKey, nonceVal, timestamp string, refs []string) string {
+	t.Helper()
+	sorted := make([]string, len(refs))
+	copy(sorted, refs)
+	sort.Strings(sorted)
+	canonical, _ := json.Marshal(map[string]interface{}{
+		"nonce":     nonceVal,
+		"refs":      sorted,
+		"timestamp": timestamp,
+	})
+	hash := sha256.Sum256(canonical)
+	sig, err := ecdsa.SignASN1(rand.Reader, key, hash[:])
+	if err != nil {
+		t.Fatalf("signing: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(sig)
+}
+
+func TestSignedResolveValid(t *testing.T) {
+	srv, authority, adminToken := setupTestServerWithCA(t)
+	ns := nonce.NewStore(30 * time.Second)
+	defer ns.Stop()
+	srv.SetNonceStore(ns)
+
+	// Configure require_signed policy
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"signed/*": {
+				"require_nonce": true,
+				"require_signed": true,
+				"require_mtls": true
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "signed-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/signed/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Issue admin cert
+	bundle, _ := authority.IssueAgentCert("admin")
+	block, _ := pem.Decode(bundle.CertPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+
+	// Parse private key
+	keyBlock, _ := pem.Decode(bundle.KeyPEM)
+	ecKey, _ := x509.ParseECPrivateKey(keyBlock.Bytes)
+
+	// Get nonce
+	entry, _ := ns.Generate()
+	nonceVal := entry.Nonce
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+
+	refs := []string{"phoenix://signed/key"}
+	sig := signResolvePayload(t, ecKey, nonceVal, timestamp, refs)
+
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs":      refs,
+		"nonce":     nonceVal,
+		"timestamp": timestamp,
+		"signature": sig,
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://signed/key"] != "signed-secret" {
+		t.Fatalf("expected signed-secret, got: %v", resp)
+	}
+}
+
+func TestSignedResolveInvalidSignature(t *testing.T) {
+	srv, authority, adminToken := setupTestServerWithCA(t)
+	ns := nonce.NewStore(30 * time.Second)
+	defer ns.Stop()
+	srv.SetNonceStore(ns)
+
+	// Seed secret
+	body, _ := json.Marshal(setSecretRequest{Value: "val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/signed/key2", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	bundle, _ := authority.IssueAgentCert("admin")
+	block, _ := pem.Decode(bundle.CertPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+
+	entry, _ := ns.Generate()
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+
+	// Send a garbage signature
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs":      []string{"phoenix://signed/key2"},
+		"nonce":     entry.Nonce,
+		"timestamp": timestamp,
+		"signature": base64.StdEncoding.EncodeToString([]byte("bad-sig")),
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for bad signature, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSignedResolveStaleTimestamp(t *testing.T) {
+	srv, authority, adminToken := setupTestServerWithCA(t)
+	ns := nonce.NewStore(30 * time.Second)
+	defer ns.Stop()
+	srv.SetNonceStore(ns)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/signed/key3", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	bundle, _ := authority.IssueAgentCert("admin")
+	block, _ := pem.Decode(bundle.CertPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+	keyBlock, _ := pem.Decode(bundle.KeyPEM)
+	ecKey, _ := x509.ParseECPrivateKey(keyBlock.Bytes)
+
+	entry, _ := ns.Generate()
+	// Timestamp 5 minutes in the past — outside 60s skew window
+	staleTS := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+
+	refs := []string{"phoenix://signed/key3"}
+	sig := signResolvePayload(t, ecKey, entry.Nonce, staleTS, refs)
+
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs":      refs,
+		"nonce":     entry.Nonce,
+		"timestamp": staleTS,
+		"signature": sig,
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for stale timestamp, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSignedResolveReplayFails(t *testing.T) {
+	srv, authority, adminToken := setupTestServerWithCA(t)
+	ns := nonce.NewStore(30 * time.Second)
+	defer ns.Stop()
+	srv.SetNonceStore(ns)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "replay-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/signed/replay", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	bundle, _ := authority.IssueAgentCert("admin")
+	block, _ := pem.Decode(bundle.CertPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+	keyBlock, _ := pem.Decode(bundle.KeyPEM)
+	ecKey, _ := x509.ParseECPrivateKey(keyBlock.Bytes)
+
+	entry, _ := ns.Generate()
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	refs := []string{"phoenix://signed/replay"}
+	sig := signResolvePayload(t, ecKey, entry.Nonce, timestamp, refs)
+
+	makeBody := func() []byte {
+		b, _ := json.Marshal(map[string]interface{}{
+			"refs":      refs,
+			"nonce":     entry.Nonce,
+			"timestamp": timestamp,
+			"signature": sig,
+		})
+		return b
+	}
+
+	// First request should fail because nonce was already consumed by Generate+Validate
+	// Let's generate a fresh nonce and use it properly
+	entry2, _ := ns.Generate()
+	sig2 := signResolvePayload(t, ecKey, entry2.Nonce, timestamp, refs)
+	body2, _ := json.Marshal(map[string]interface{}{
+		"refs":      refs,
+		"nonce":     entry2.Nonce,
+		"timestamp": timestamp,
+		"signature": sig2,
+	})
+
+	// First request succeeds (nonce is consumed)
+	_ = makeBody // suppress unused
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"signed/*": {
+				"require_nonce": true,
+				"require_signed": true,
+				"require_mtls": true
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body2))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("first signed resolve expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Replay same request — nonce already consumed
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body2))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("replay expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestNonceOnlyBackwardCompat(t *testing.T) {
+	// Existing nonce-only flow must still work when require_signed is NOT set
+	srv, adminToken := setupTestServer(t)
+	ns := nonce.NewStore(30 * time.Second)
+	defer ns.Stop()
+	srv.SetNonceStore(ns)
+
+	// Configure require_nonce WITHOUT require_signed
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"compat/*": {
+				"require_nonce": true
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Seed a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "compat-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/compat/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Get a nonce
+	entry, _ := ns.Generate()
+
+	// Resolve with nonce but NO signature — should succeed
+	body, _ = json.Marshal(map[string]interface{}{
+		"refs":  []string{"phoenix://compat/key"},
+		"nonce": entry.Nonce,
+	})
+	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("nonce-only compat: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	values := resp["values"].(map[string]interface{})
+	if values["phoenix://compat/key"] != "compat-val" {
+		t.Fatalf("expected compat-val, got: %v", resp)
+	}
+}
+
+func TestSignedResolveWithoutMTLS(t *testing.T) {
+	// Signature provided but no mTLS cert — should fail
+	srv, adminToken := setupTestServer(t)
+	ns := nonce.NewStore(30 * time.Second)
+	defer ns.Stop()
+	srv.SetNonceStore(ns)
+
+	entry, _ := ns.Generate()
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"refs":      []string{"phoenix://test/key"},
+		"nonce":     entry.Nonce,
+		"timestamp": timestamp,
+		"signature": base64.StdEncoding.EncodeToString([]byte("dummy")),
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 without mTLS cert, got %d: %s", w.Code, w.Body.String())
 	}
 }

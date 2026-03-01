@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -845,5 +846,82 @@ func TestLoadPolicyWithNewFields(t *testing.T) {
 	}
 	if !rule.RequireFreshAttestation {
 		t.Fatal("expected RequireFreshAttestation")
+	}
+}
+
+func TestRequireSignedDenied(t *testing.T) {
+	e, err := Load([]byte(`{
+		"attestation": {
+			"signed/*": {
+				"require_nonce": true,
+				"require_signed": true
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Nonce validated but no signature — should be denied
+	ctx := &RequestContext{
+		UsedMTLS:       true,
+		NonceValidated: true,
+		SignatureVerified: false,
+	}
+	err = e.Evaluate("signed/key", ctx)
+	if err == nil {
+		t.Fatal("expected denial when require_signed but no signature")
+	}
+	de, ok := err.(*DeniedError)
+	if !ok {
+		t.Fatalf("expected DeniedError, got %T: %v", err, err)
+	}
+	if !strings.Contains(de.Reason, "signed resolve payload required") {
+		t.Fatalf("unexpected reason: %s", de.Reason)
+	}
+}
+
+func TestRequireSignedAllowed(t *testing.T) {
+	e, err := Load([]byte(`{
+		"attestation": {
+			"signed/*": {
+				"require_nonce": true,
+				"require_signed": true
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ctx := &RequestContext{
+		UsedMTLS:          true,
+		NonceValidated:    true,
+		SignatureVerified: true,
+	}
+	if err := e.Evaluate("signed/key", ctx); err != nil {
+		t.Fatalf("expected allow when signed, got: %v", err)
+	}
+}
+
+func TestRequireSignedNotNeededWithoutPolicy(t *testing.T) {
+	// When require_signed is false, SignatureVerified doesn't matter
+	e, err := Load([]byte(`{
+		"attestation": {
+			"open/*": {
+				"require_nonce": true
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ctx := &RequestContext{
+		NonceValidated:    true,
+		SignatureVerified: false,
+	}
+	if err := e.Evaluate("open/key", ctx); err != nil {
+		t.Fatalf("expected allow when require_signed not set, got: %v", err)
 	}
 }

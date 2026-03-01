@@ -2,7 +2,9 @@
 package api
 
 import (
+	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -215,20 +218,41 @@ func certFingerprint(raw []byte) string {
 // Returns nil if no policy is configured or if the request passes.
 // nonceValidated indicates whether a nonce was submitted and validated for this request.
 func (s *Server) attest(r *http.Request, path string, info *authInfo, nonceValidated bool) error {
+	return s.attestSigned(r, path, info, nonceValidated, false)
+}
+
+func (s *Server) attestSigned(r *http.Request, path string, info *authInfo, nonceValidated, signatureVerified bool) error {
 	if s.policy == nil {
 		return nil
 	}
 	ctx := &policy.RequestContext{
-		UsedMTLS:        info.UsedMTLS,
-		UsedBearer:      info.UsedBearer,
-		SourceIP:        clientIP(r),
-		CertFingerprint: info.CertFingerprint,
-		Tool:            r.Header.Get("X-Phoenix-Tool"),
-		Process:         info.Process,
-		NonceValidated:  nonceValidated,
-		TokenIssuedAt:   info.TokenIssuedAt,
+		UsedMTLS:          info.UsedMTLS,
+		UsedBearer:        info.UsedBearer,
+		SourceIP:          clientIP(r),
+		CertFingerprint:   info.CertFingerprint,
+		Tool:              r.Header.Get("X-Phoenix-Tool"),
+		Process:           info.Process,
+		NonceValidated:    nonceValidated,
+		SignatureVerified: signatureVerified,
+		TokenIssuedAt:     info.TokenIssuedAt,
 	}
 	return s.policy.Evaluate(path, ctx)
+}
+
+// buildCanonicalPayload constructs the deterministic JSON payload used
+// for signed resolve verification. Fields are sorted alphabetically.
+func buildCanonicalPayload(nonce, timestamp string, refs []string) []byte {
+	sortedRefs := make([]string, len(refs))
+	copy(sortedRefs, refs)
+	sort.Strings(sortedRefs)
+
+	canonical := map[string]interface{}{
+		"nonce":     nonce,
+		"refs":      sortedRefs,
+		"timestamp": timestamp,
+	}
+	data, _ := json.Marshal(canonical)
+	return data
 }
 
 // extractToken gets the bearer token from the Authorization header.
@@ -672,9 +696,14 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 
 // resolveRequest is the JSON body for batch reference resolution.
 type resolveRequest struct {
-	Refs  []string `json:"refs"`
-	Nonce string   `json:"nonce,omitempty"` // optional nonce from /v1/challenge
+	Refs      []string `json:"refs"`
+	Nonce     string   `json:"nonce,omitempty"`     // optional nonce from /v1/challenge
+	Timestamp string   `json:"timestamp,omitempty"` // RFC3339 timestamp for signed resolve
+	Signature string   `json:"signature,omitempty"` // base64 detached ECDSA signature
 }
+
+// signedResolveMaxSkew is the maximum allowed clock skew for signed resolve timestamps.
+const signedResolveMaxSkew = 60 * time.Second
 
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
@@ -714,6 +743,55 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		nonceValidated = true
 	}
 
+	// Verify signed resolve payload if provided
+	signatureVerified := false
+	if req.Signature != "" {
+		// Require nonce and timestamp alongside signature
+		if req.Nonce == "" || req.Timestamp == "" {
+			jsonError(w, "signed resolve requires nonce and timestamp", http.StatusBadRequest)
+			return
+		}
+
+		// Parse and validate timestamp freshness
+		ts, tsErr := time.Parse(time.RFC3339, req.Timestamp)
+		if tsErr != nil {
+			jsonError(w, "invalid timestamp format (expected RFC3339)", http.StatusBadRequest)
+			return
+		}
+		if time.Since(ts).Abs() > signedResolveMaxSkew {
+			jsonError(w, "timestamp outside allowed skew window", http.StatusForbidden)
+			return
+		}
+
+		// Build canonical payload for verification
+		canonical := buildCanonicalPayload(req.Nonce, req.Timestamp, req.Refs)
+
+		// Decode signature
+		sigBytes, decErr := base64.StdEncoding.DecodeString(req.Signature)
+		if decErr != nil {
+			jsonError(w, "invalid signature encoding", http.StatusBadRequest)
+			return
+		}
+
+		// Verify against mTLS client cert public key
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			jsonError(w, "signed resolve requires mTLS client certificate", http.StatusForbidden)
+			return
+		}
+		pubKey, ok := r.TLS.PeerCertificates[0].PublicKey.(*ecdsa.PublicKey)
+		if !ok {
+			jsonError(w, "client certificate must use ECDSA key for signed resolve", http.StatusBadRequest)
+			return
+		}
+
+		hash := sha256.Sum256(canonical)
+		if !ecdsa.VerifyASN1(pubKey, hash[:], sigBytes) {
+			jsonError(w, "signature verification failed", http.StatusForbidden)
+			return
+		}
+		signatureVerified = true
+	}
+
 	values := make(map[string]string)
 	errors := make(map[string]string)
 
@@ -732,7 +810,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Attestation policy check (per-ref)
-		if err := s.attest(r, path, info, nonceValidated); err != nil {
+		if err := s.attestSigned(r, path, info, nonceValidated, signatureVerified); err != nil {
 			s.audit.LogDenied(agentName, "resolve", path, ip, "attestation")
 			errors[refStr] = "attestation required"
 			continue

@@ -75,6 +75,11 @@ type Rule struct {
 	// L8: nonce challenge-response
 	RequireNonce bool   `json:"require_nonce"`
 	NonceMaxAge  string `json:"nonce_max_age,omitempty"` // e.g. "30s"
+
+	// L8b: signed resolve (anti-replay completion)
+	// When true, require_nonce resolves must include a detached signature
+	// over the canonical payload, verified against the mTLS cert public key.
+	RequireSigned bool `json:"require_signed,omitempty"`
 }
 
 // ProcessContext contains process-level attestation evidence.
@@ -97,7 +102,8 @@ type RequestContext struct {
 	Process *ProcessContext
 
 	// Nonce validation (set by challenge-response flow)
-	NonceValidated bool
+	NonceValidated    bool
+	SignatureVerified bool // set when signed resolve payload is validated
 
 	// Token freshness (set by short-lived token validator)
 	TokenIssuedAt *time.Time
@@ -313,6 +319,14 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		return &DeniedError{
 			Pattern: pattern,
 			Reason:  "nonce challenge-response required but not completed",
+		}
+	}
+
+	// L8b: Check signed resolve requirement
+	if rule.RequireSigned && !ctx.SignatureVerified {
+		return &DeniedError{
+			Pattern: pattern,
+			Reason:  "signed resolve payload required but not provided or invalid",
 		}
 	}
 
