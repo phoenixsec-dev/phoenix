@@ -1503,6 +1503,97 @@ func TestAttestationListModeHidesProtectedPaths(t *testing.T) {
 	}
 }
 
+func TestAttestationEnforcedOnWrite(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Configure policy: attested/* requires specific source IP
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"attested/*": {
+				"source_ip": ["10.0.0.5"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Try to write from wrong IP — should be denied by attestation
+	body, _ := json.Marshal(setSecretRequest{Value: "should-fail"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/attested/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.50:12345"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for write from wrong IP, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp map[string]string
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp["error"], "attestation") {
+		t.Fatalf("expected attestation error on write, got: %s", errResp["error"])
+	}
+
+	// Write from allowed IP — should succeed
+	body, _ = json.Marshal(setSecretRequest{Value: "should-pass"})
+	req = httptest.NewRequest("PUT", "/v1/secrets/attested/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "10.0.0.5:12345"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200 for write from allowed IP, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAttestationEnforcedOnDelete(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Seed a secret before policy is set
+	body, _ := json.Marshal(setSecretRequest{Value: "delete-me"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/attested/delkey", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Configure policy: attested/* requires specific source IP
+	p, _ := policy.Load([]byte(`{
+		"attestation": {
+			"attested/*": {
+				"source_ip": ["10.0.0.5"]
+			}
+		}
+	}`))
+	srv.SetPolicy(p)
+
+	// Try to delete from wrong IP — should be denied by attestation
+	req = httptest.NewRequest("DELETE", "/v1/secrets/attested/delkey", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "192.168.0.50:12345"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for delete from wrong IP, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp map[string]string
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp["error"], "attestation") {
+		t.Fatalf("expected attestation error on delete, got: %s", errResp["error"])
+	}
+
+	// Delete from allowed IP — should succeed
+	req = httptest.NewRequest("DELETE", "/v1/secrets/attested/delkey", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "10.0.0.5:12345"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200 for delete from allowed IP, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // --- Wave 2: Challenge endpoint tests ---
 
 func TestChallengeEndpointNotEnabled(t *testing.T) {
@@ -2314,6 +2405,13 @@ func TestSignedResolveValid(t *testing.T) {
 	defer ns.Stop()
 	srv.SetNonceStore(ns)
 
+	// Seed a secret BEFORE setting policy (writes are now attested too)
+	body, _ := json.Marshal(setSecretRequest{Value: "signed-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/signed/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
 	// Configure require_signed policy
 	p, _ := policy.Load([]byte(`{
 		"attestation": {
@@ -2325,13 +2423,6 @@ func TestSignedResolveValid(t *testing.T) {
 		}
 	}`))
 	srv.SetPolicy(p)
-
-	// Seed a secret
-	body, _ := json.Marshal(setSecretRequest{Value: "signed-secret"})
-	req := httptest.NewRequest("PUT", "/v1/secrets/signed/key", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
 
 	// Issue admin cert
 	bundle, _ := authority.IssueAgentCert("admin")
@@ -2533,6 +2624,13 @@ func TestNonceOnlyBackwardCompat(t *testing.T) {
 	defer ns.Stop()
 	srv.SetNonceStore(ns)
 
+	// Seed a secret BEFORE setting policy (writes are now attested too)
+	body, _ := json.Marshal(setSecretRequest{Value: "compat-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/compat/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
 	// Configure require_nonce WITHOUT require_signed
 	p, _ := policy.Load([]byte(`{
 		"attestation": {
@@ -2542,13 +2640,6 @@ func TestNonceOnlyBackwardCompat(t *testing.T) {
 		}
 	}`))
 	srv.SetPolicy(p)
-
-	// Seed a secret
-	body, _ := json.Marshal(setSecretRequest{Value: "compat-val"})
-	req := httptest.NewRequest("PUT", "/v1/secrets/compat/key", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
 
 	// Get a nonce
 	entry, _ := ns.Generate()

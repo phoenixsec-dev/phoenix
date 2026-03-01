@@ -377,11 +377,12 @@ type setSecretRequest struct {
 }
 
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticateInfo(r)
 	if err != nil {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	agentName := info.Agent
 
 	path := secretPath(r)
 	ip := clientIP(r)
@@ -389,6 +390,13 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	if err := s.acl.Authorize(agentName, path, acl.ActionWrite); err != nil {
 		s.audit.LogDenied(agentName, "write", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
+		return
+	}
+
+	// Attestation policy check
+	if err := s.attest(r, path, info, false); err != nil {
+		s.audit.LogDenied(agentName, "write", path, ip, "attestation")
+		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
 
@@ -424,11 +432,12 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticateInfo(r)
 	if err != nil {
 		jsonError(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	agentName := info.Agent
 
 	path := secretPath(r)
 	ip := clientIP(r)
@@ -436,6 +445,13 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	if err := s.acl.Authorize(agentName, path, acl.ActionDelete); err != nil {
 		s.audit.LogDenied(agentName, "delete", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
+		return
+	}
+
+	// Attestation policy check
+	if err := s.attest(r, path, info, false); err != nil {
+		s.audit.LogDenied(agentName, "delete", path, ip, "attestation")
+		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
 
