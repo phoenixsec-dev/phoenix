@@ -26,6 +26,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
       - name: Test
         run: go test ./... -count=1 -race -timeout 120s
 

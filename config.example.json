@@ -3,8 +3,21 @@
     "listen": "0.0.0.0:9090"
   },
   "store": {
+    "backend": "file",
     "path": "/data/store.json",
     "master_key": "/data/master.key"
+  },
+  "crypto": {
+    "provider": "file"
+  },
+  "auth": {
+    "bearer": {
+      "enabled": true
+    },
+    "mtls": {
+      "enabled": false,
+      "require": false
+    }
   },
   "acl": {
     "path": "/data/acl.json"
@@ -12,8 +25,25 @@
   "audit": {
     "path": "/data/audit.log"
   },
+  "policy": {
+    "path": "/data/policy.json"
+  },
+  "attestation": {
+    "nonce": {
+      "enabled": false,
+      "max_age": "30s"
+    },
+    "token": {
+      "enabled": false,
+      "ttl": "15m"
+    },
+    "local_agent": {
+      "enabled": false,
+      "socket_path": "/tmp/phoenix-agent.sock"
+    }
+  },
   "onepassword": {
-    "enabled": false,
+    "vault": "Engineering",
     "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN"
   }
 }
