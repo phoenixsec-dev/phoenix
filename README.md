@@ -320,6 +320,10 @@ phoenix policy show production/db-password
 phoenix policy test --agent deployer --ip 192.168.0.110 production/db-password
 ```
 
+`phoenix policy test` is a local approximation helper. It is useful for
+policy sanity checks, but it does not fully simulate live cryptographic proof
+paths (mTLS handshakes, nonce freshness/replay state, signed payload validation).
+
 ---
 
 ## Agent Framework Integration
@@ -346,6 +350,16 @@ Phoenix includes a built-in MCP server. Agents resolve secrets through tool call
 The agent can list available secrets, resolve references, and read values — all through the authenticated, policy-checked API. MCP tool calls include tool identity headers (`X-Phoenix-Tool`), enabling `allowed_tools`/`deny_tools` attestation policies to control which MCP tools can access which secrets.
 
 > **Security note:** `phoenix_get` and `phoenix_resolve` return plaintext secret values in the MCP tool response. While this keeps values out of the agent's prompt context, the tool output is still visible to the MCP client process. Scope production tokens and ACLs tightly — grant agents only the minimum paths they need.
+
+### Claude Code Skill (SKILL.md)
+
+Phoenix also includes a reusable skill definition at `phoenix-skill/SKILL.md`.
+Use it when you want command-driven integration without running MCP server mode.
+
+The skill includes:
+- operational commands (`set/get/list/resolve/status/policy/audit`)
+- safety guardrails (avoid pasting secrets in chat, prefer `--value-stdin`)
+- a runbook for adding secrets and granting scoped agent access
 
 ### OpenClaw Exec Backend
 
@@ -665,7 +679,8 @@ internal/
 
 ## Configuration
 
-The server reads a JSON config file. See `config.example.json` for a full reference.
+The server reads a JSON config file. `config.example.json` is a starter template;
+use the table below as the authoritative field reference.
 
 Key settings:
 
@@ -685,6 +700,8 @@ Key settings:
 | `attestation.nonce.max_age` | Nonce TTL (e.g. `"30s"`) | `30s` |
 | `attestation.token.enabled` | Enable short-lived token minting | `false` |
 | `attestation.token.ttl` | Token lifetime (e.g. `"15m"`) | `15m` |
+| `attestation.local_agent.enabled` | Enable local Unix-socket attestation agent | `false` |
+| `attestation.local_agent.socket_path` | Unix socket path for local attestation agent (required when enabled) | — |
 | `onepassword.vault` | 1Password vault name (required when `store.backend=1password`) | — |
 | `onepassword.service_account_token_env` | Token env var name for server runtime backend | `OP_SERVICE_ACCOUNT_TOKEN` |
 | `onepassword.cache_ttl` | Runtime read/list cache duration | `60s` |
@@ -718,6 +735,8 @@ Rollback to managed mode:
 Troubleshooting:
 - missing `op` binary or token: server fails fast at startup with a clear error
 - runtime list/read failures: request fails, audit still records access attempt
+- `onepassword.cache_ttl` must be a duration string (for example `"60s"`). A
+  bare number like `60` is invalid.
 
 ### Environment Variables (CLI)
 
