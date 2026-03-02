@@ -10,7 +10,7 @@
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
-//	phoenix agent create <name> --token <token> --acl <path:actions,...>
+//	phoenix agent create <name> --token <token> --acl <path:actions,...> [--force]
 //	phoenix agent list
 //	phoenix resolve <ref> [ref...]
 //	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <dur>] [--mask-env] -- <command> [args...]
@@ -265,7 +265,7 @@ Usage:
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
-  phoenix agent create <name> -t <token> --acl <path:actions;path:actions>
+  phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]
   phoenix agent list                          List agents
   phoenix resolve [--signed] <ref> [ref...]     Resolve phoenix:// references to values
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
@@ -397,6 +397,10 @@ func cmdSet(args []string) error {
 			}
 		}
 		i++
+	}
+
+	if value != "" && !valueStdin {
+		fmt.Fprintln(os.Stderr, "WARNING: -v/--value is visible in process listings. Use --value-stdin instead.")
 	}
 
 	if value != "" && valueStdin {
@@ -760,6 +764,7 @@ func cmdAgentCreate(args []string) error {
 	}
 
 	var name, agentToken, aclStr string
+	var force bool
 	i := 0
 	if i < len(args) && !strings.HasPrefix(args[i], "-") {
 		name = args[i]
@@ -777,12 +782,14 @@ func cmdAgentCreate(args []string) error {
 			if i < len(args) {
 				aclStr = args[i]
 			}
+		case "--force":
+			force = true
 		}
 		i++
 	}
 
 	if name == "" || agentToken == "" {
-		return fmt.Errorf("usage: phoenix agent create <name> -t <token> [--acl <path:action,action;path:action>]")
+		return fmt.Errorf("usage: phoenix agent create <name> -t <token> [--acl <path:action,action;path:action>] [--force]")
 	}
 
 	// Parse ACL string: "openclaw/*:read,write;vector/*:read"
@@ -820,7 +827,12 @@ func cmdAgentCreate(args []string) error {
 		"permissions": permissions,
 	})
 
-	resp, err := apiRequest("POST", "/v1/agents", strings.NewReader(string(body)))
+	endpoint := "/v1/agents"
+	if force {
+		endpoint += "?force=true"
+	}
+
+	resp, err := apiRequest("POST", endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -830,7 +842,11 @@ func cmdAgentCreate(args []string) error {
 		return handleError(resp)
 	}
 
-	fmt.Printf("agent created: %s\n", name)
+	if force {
+		fmt.Printf("agent created/updated: %s\n", name)
+	} else {
+		fmt.Printf("agent created: %s\n", name)
+	}
 	return nil
 }
 

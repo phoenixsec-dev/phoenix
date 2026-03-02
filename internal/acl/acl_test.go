@@ -252,37 +252,36 @@ func TestGetAgentNotFound(t *testing.T) {
 	}
 }
 
-func TestAddAgentOverwrite(t *testing.T) {
+func TestAddAgentDuplicate(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
 
-	a.AddAgent("agent", "token1", []Permission{
+	err := a.AddAgent("agent", "token1", []Permission{
 		{Path: "ns1/*", Actions: []Action{ActionRead}},
 	})
-
-	// Overwrite with different token and permissions
-	a.AddAgent("agent", "token2", []Permission{
-		{Path: "ns2/*", Actions: []Action{ActionWrite}},
-	})
-
-	// Old token should fail
-	_, err := a.Authenticate("token1")
-	if err != ErrUnauthorized {
-		t.Fatalf("expected old token to fail, got %v", err)
+	if err != nil {
+		t.Fatalf("first AddAgent: %v", err)
 	}
 
-	// New token should work
-	name, err := a.Authenticate("token2")
+	// Second AddAgent with same name should return ErrAgentExists
+	err = a.AddAgent("agent", "token2", []Permission{
+		{Path: "ns2/*", Actions: []Action{ActionWrite}},
+	})
+	if err != ErrAgentExists {
+		t.Fatalf("expected ErrAgentExists, got %v", err)
+	}
+
+	// Original token and permissions should be preserved
+	name, err := a.Authenticate("token1")
 	if err != nil {
-		t.Fatalf("new token should work: %v", err)
+		t.Fatalf("original token should still work: %v", err)
 	}
 	if name != "agent" {
 		t.Fatalf("expected 'agent', got %q", name)
 	}
 
-	// Permissions should be the new ones
 	agent, _ := a.GetAgent("agent")
-	if agent.Permissions[0].Path != "ns2/*" {
-		t.Fatalf("expected 'ns2/*', got %q", agent.Permissions[0].Path)
+	if agent.Permissions[0].Path != "ns1/*" {
+		t.Fatalf("expected original 'ns1/*', got %q", agent.Permissions[0].Path)
 	}
 }
 

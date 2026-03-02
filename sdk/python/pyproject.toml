@@ -10,7 +10,7 @@ requires-python = ">=3.9"
 license = "MIT"
 
 [project.urls]
-Repository = "https://github.com/claudecode/phoenix"
+Repository = "https://github.com/phoenixsec/phoenix"
 
 [tool.setuptools.packages.find]
 include = ["phoenix_secrets*"]

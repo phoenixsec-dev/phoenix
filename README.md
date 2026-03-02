@@ -197,7 +197,7 @@ chmod 600 /data/phoenix/master.key /data/phoenix/ca.key /data/phoenix/server.key
 ```
 
 ```
-Phoenix server starting on 0.0.0.0:9090
+Phoenix server starting on 127.0.0.1:9090
   Store: /data/phoenix/store.json (0 secrets)
   Key provider: file
   ACL: /data/phoenix/acl.json (1 agents)
@@ -205,6 +205,10 @@ Phoenix server starting on 0.0.0.0:9090
   mTLS: enabled (require=false)
   Bearer: true
 ```
+
+> **Binding to all interfaces:** The default listen address is `127.0.0.1:9090` (loopback only).
+> To accept connections from other hosts, set `server.listen` to `0.0.0.0:9090` in your config file.
+> Only do this with mTLS enabled or behind a firewall — the server should not be exposed without authentication on a public network.
 
 ### Store and Retrieve Secrets
 
@@ -754,7 +758,7 @@ Key settings:
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `server.listen` | Bind address | `0.0.0.0:9090` |
+| `server.listen` | Bind address | `127.0.0.1:9090` |
 | `store.path` | Encrypted store file | `/data/store.json` |
 | `store.master_key` | Master key file | `/data/master.key` |
 | `store.backend` | Secret backend (`file` or `1password`) | `file` |
@@ -866,6 +870,10 @@ docker compose run --rm phoenix --init /data
 # Then start normally
 docker compose up -d
 ```
+
+> **Docker note:** The generated config inside the container defaults to `127.0.0.1:9090`.
+> For Docker port mapping (`-p 9090:9090`) to work, set `server.listen` to `0.0.0.0:9090`
+> in the container's config file, or use the provided `config.example.json` which already does this.
 
 ---
 

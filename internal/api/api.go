@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
@@ -30,6 +32,78 @@ import (
 // MaxRequestBodyBytes limits the size of request bodies to prevent DoS.
 const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
+// Rate limiting constants for authentication attempts.
+const (
+	rateLimitMaxFailures = 5
+	rateLimitBaseDelay   = 1 * time.Second
+	rateLimitMaxDelay    = 60 * time.Second
+	rateLimitCleanupAge  = 10 * time.Minute
+)
+
+type rateLimitEntry struct {
+	failures  int
+	blockedAt time.Time
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rateLimitEntry
+}
+
+func newRateLimiter() *rateLimiter {
+	return &rateLimiter{entries: make(map[string]*rateLimitEntry)}
+}
+
+func (rl *rateLimiter) check(ip string) error {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	e, ok := rl.entries[ip]
+	if !ok || e.failures < rateLimitMaxFailures {
+		return nil
+	}
+	exp := e.failures - rateLimitMaxFailures
+	if exp > 6 { // cap at 2^6 = 64s, prevents overflow
+		exp = 6
+	}
+	delay := rateLimitBaseDelay * (1 << exp)
+	if delay > rateLimitMaxDelay {
+		delay = rateLimitMaxDelay
+	}
+	if time.Since(e.blockedAt) < delay {
+		return fmt.Errorf("too many authentication failures, retry later")
+	}
+	return nil
+}
+
+func (rl *rateLimiter) recordFailure(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	e, ok := rl.entries[ip]
+	if !ok {
+		e = &rateLimitEntry{}
+		rl.entries[ip] = e
+	}
+	e.failures++
+	e.blockedAt = time.Now()
+}
+
+func (rl *rateLimiter) recordSuccess(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	delete(rl.entries, ip)
+}
+
+func (rl *rateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-rateLimitCleanupAge)
+	for ip, e := range rl.entries {
+		if e.blockedAt.Before(cutoff) {
+			delete(rl.entries, ip)
+		}
+	}
+}
+
 // Server is the Phoenix HTTP API server.
 type Server struct {
 	backend       store.SecretBackend
@@ -44,6 +118,7 @@ type Server struct {
 	nonces        *nonce.Store      // nil when nonce challenge is not configured
 	tokens        *token.Issuer     // nil when short-lived tokens are not configured
 	startTime     time.Time         // server start time for uptime reporting
+	authRL        *rateLimiter
 	mux           *http.ServeMux
 }
 
@@ -57,6 +132,7 @@ func NewServer(b store.SecretBackend, a *acl.ACL, al *audit.Logger, auditPath st
 		auditPath:     auditPath,
 		bearerEnabled: true,
 		startTime:     time.Now(),
+		authRL:        newRateLimiter(),
 		mux:           http.NewServeMux(),
 	}
 	// Keep a reference to FileBackend for file-specific operations (rotation).
@@ -64,6 +140,13 @@ func NewServer(b store.SecretBackend, a *acl.ACL, al *audit.Logger, auditPath st
 		srv.fileBackend = fb
 	}
 	srv.routes()
+	go func() {
+		ticker := time.NewTicker(rateLimitCleanupAge)
+		defer ticker.Stop()
+		for range ticker.C {
+			srv.authRL.cleanup()
+		}
+	}()
 	return srv
 }
 
@@ -151,10 +234,14 @@ func (s *Server) authenticate(r *http.Request) (string, error) {
 // authenticateInfo identifies the calling agent and collects attestation
 // evidence from the request (auth method, cert fingerprint, etc.).
 func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
+	ip := clientIP(r)
+
 	// Try mTLS first: check for verified client certificate
+	// Rate limiting is NOT applied to mTLS — it uses cryptographic auth, not secrets.
 	if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		agentName, err := s.ca.VerifyClientCert(r.TLS.PeerCertificates)
 		if err == nil {
+			s.authRL.recordSuccess(ip) // clear any prior bearer failures from this IP
 			fp := certFingerprint(r.TLS.PeerCertificates[0].Raw)
 			return &authInfo{
 				Agent:           agentName,
@@ -191,7 +278,10 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		// Not a valid short-lived token — fall through to bearer
 	}
 
-	// Fall back to bearer token if enabled
+	// Fall back to bearer token if enabled — rate limit applies here
+	if err := s.authRL.check(ip); err != nil {
+		return nil, err
+	}
 	if !s.bearerEnabled {
 		return nil, fmt.Errorf("no valid authentication credentials provided")
 	}
@@ -200,8 +290,10 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	}
 	agent, err := s.acl.Authenticate(tok)
 	if err != nil {
+		s.authRL.recordFailure(ip)
 		return nil, err
 	}
+	s.authRL.recordSuccess(ip)
 	return &authInfo{
 		Agent:      agent,
 		UsedBearer: true,
@@ -293,6 +385,13 @@ func jsonOK(w http.ResponseWriter, data interface{}) {
 	json.NewEncoder(w).Encode(data)
 }
 
+// logAudit logs audit write failures. Audit errors must not be silently lost.
+func (s *Server) logAudit(err error) {
+	if err != nil {
+		log.Printf("WARNING: audit log write failed: %v", err)
+	}
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"status":  "ok",
@@ -331,21 +430,21 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 			}
 			visible = append(visible, p)
 		}
-		s.audit.LogAllowed(agentName, "list", path, ip)
+		s.logAudit(s.audit.LogAllowed(agentName, "list", path, ip))
 		jsonOK(w, map[string]interface{}{"paths": visible})
 		return
 	}
 
 	// Single secret read
 	if err := s.acl.Authorize(agentName, path, acl.ActionRead); err != nil {
-		s.audit.LogDenied(agentName, "read", path, ip, "acl")
+		s.logAudit(s.audit.LogDenied(agentName, "read", path, ip, "acl"))
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.audit.LogDenied(agentName, "read", path, ip, "attestation")
+		s.logAudit(s.audit.LogDenied(agentName, "read", path, ip, "attestation"))
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -365,7 +464,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "read", path, ip)
+	s.logAudit(s.audit.LogAllowed(agentName, "read", path, ip))
 	jsonOK(w, secret)
 }
 
@@ -388,14 +487,14 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 
 	if err := s.acl.Authorize(agentName, path, acl.ActionWrite); err != nil {
-		s.audit.LogDenied(agentName, "write", path, ip, "acl")
+		s.logAudit(s.audit.LogDenied(agentName, "write", path, ip, "acl"))
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.audit.LogDenied(agentName, "write", path, ip, "attestation")
+		s.logAudit(s.audit.LogDenied(agentName, "write", path, ip, "attestation"))
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -427,7 +526,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "write", path, ip)
+	s.logAudit(s.audit.LogAllowed(agentName, "write", path, ip))
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
@@ -443,14 +542,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 
 	if err := s.acl.Authorize(agentName, path, acl.ActionDelete); err != nil {
-		s.audit.LogDenied(agentName, "delete", path, ip, "acl")
+		s.logAudit(s.audit.LogDenied(agentName, "delete", path, ip, "acl"))
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.audit.LogDenied(agentName, "delete", path, ip, "attestation")
+		s.logAudit(s.audit.LogDenied(agentName, "delete", path, ip, "attestation"))
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -474,7 +573,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "delete", path, ip)
+	s.logAudit(s.audit.LogAllowed(agentName, "delete", path, ip))
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
@@ -561,13 +660,35 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	force := r.URL.Query().Get("force") == "true"
+
+	if force {
+		// Try update first; if agent doesn't exist, fall through to add
+		err := s.acl.UpdateAgent(req.Name, req.Token, req.Permissions)
+		if err == nil {
+			s.logAudit(s.audit.LogAllowed(agentName, "update-agent", req.Name, clientIP(r)))
+			jsonOK(w, map[string]string{"status": "ok", "agent": req.Name, "action": "updated"})
+			return
+		}
+		if !errors.Is(err, acl.ErrAgentNotFound) {
+			log.Printf("error updating agent %q: %v", req.Name, err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		// Agent doesn't exist — fall through to AddAgent below
+	}
+
 	if err := s.acl.AddAgent(req.Name, req.Token, req.Permissions); err != nil {
+		if errors.Is(err, acl.ErrAgentExists) {
+			jsonError(w, "agent already exists (use ?force=true to overwrite)", http.StatusConflict)
+			return
+		}
 		log.Printf("error creating agent %q: %v", req.Name, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "create-agent", req.Name, clientIP(r))
+	s.logAudit(s.audit.LogAllowed(agentName, "create-agent", req.Name, clientIP(r)))
 	jsonOK(w, map[string]string{"status": "ok", "agent": req.Name})
 }
 
@@ -629,7 +750,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "issue-cert", req.AgentName, clientIP(r))
+	s.logAudit(s.audit.LogAllowed(agentName, "issue-cert", req.AgentName, clientIP(r)))
 	jsonOK(w, map[string]interface{}{
 		"status":  "ok",
 		"agent":   req.AgentName,
@@ -705,7 +826,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip)
+	s.logAudit(s.audit.LogAllowed(agentName, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip))
 	log.Printf("master key rotated by %s: %d namespaces re-wrapped", agentName, rotated)
 
 	jsonOK(w, map[string]interface{}{
@@ -819,20 +940,20 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	for _, refStr := range req.Refs {
 		path, err := ref.Parse(refStr)
 		if err != nil {
-			s.audit.LogDenied(agentName, "resolve", refStr, ip, "malformed_ref")
+			s.logAudit(s.audit.LogDenied(agentName, "resolve", refStr, ip, "malformed_ref"))
 			errors[refStr] = err.Error()
 			continue
 		}
 
 		if err := s.acl.Authorize(agentName, path, acl.ActionRead); err != nil {
-			s.audit.LogDenied(agentName, "resolve", path, ip, "acl")
+			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "acl"))
 			errors[refStr] = "access denied"
 			continue
 		}
 
 		// Attestation policy check (per-ref)
 		if err := s.attestSigned(r, path, info, nonceValidated, signatureVerified); err != nil {
-			s.audit.LogDenied(agentName, "resolve", path, ip, "attestation")
+			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "attestation"))
 			errors[refStr] = "attestation required"
 			continue
 		}
@@ -841,19 +962,19 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			// Dry-run: verify path exists without returning the secret value.
 			if _, err := s.backend.Get(path); err != nil {
 				if err == store.ErrSecretNotFound {
-					s.audit.LogDenied(agentName, "dry-resolve", path, ip, "not_found")
+					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "not_found"))
 					errors[refStr] = "secret not found"
 				} else if err == store.ErrInvalidPath {
-					s.audit.LogDenied(agentName, "dry-resolve", path, ip, "invalid_path")
+					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "invalid_path"))
 					errors[refStr] = "invalid path"
 				} else {
-					s.audit.LogDenied(agentName, "dry-resolve", path, ip, "internal_error")
+					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "internal_error"))
 					log.Printf("error dry-resolving %q for %s: %v", path, agentName, err)
 					errors[refStr] = "internal error"
 				}
 				continue
 			}
-			s.audit.LogAllowed(agentName, "dry-resolve", path, ip)
+			s.logAudit(s.audit.LogAllowed(agentName, "dry-resolve", path, ip))
 			values[refStr] = "ok"
 			continue
 		}
@@ -861,20 +982,20 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		secret, err := s.backend.Get(path)
 		if err != nil {
 			if err == store.ErrSecretNotFound {
-				s.audit.LogDenied(agentName, "resolve", path, ip, "not_found")
+				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "not_found"))
 				errors[refStr] = "secret not found"
 			} else if err == store.ErrInvalidPath {
-				s.audit.LogDenied(agentName, "resolve", path, ip, "invalid_path")
+				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "invalid_path"))
 				errors[refStr] = "invalid path"
 			} else {
-				s.audit.LogDenied(agentName, "resolve", path, ip, "internal_error")
+				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "internal_error"))
 				log.Printf("error resolving %q for %s: %v", path, agentName, err)
 				errors[refStr] = "internal error"
 			}
 			continue
 		}
 
-		s.audit.LogAllowed(agentName, "resolve", path, ip)
+		s.logAudit(s.audit.LogAllowed(agentName, "resolve", path, ip))
 		values[refStr] = secret.Value
 	}
 
@@ -968,7 +1089,7 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "revoke-cert", req.SerialNumber, clientIP(r))
+	s.logAudit(s.audit.LogAllowed(agentName, "revoke-cert", req.SerialNumber, clientIP(r)))
 	jsonOK(w, map[string]string{
 		"status":        "ok",
 		"serial_number": req.SerialNumber,
@@ -1105,7 +1226,7 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.LogAllowed(agentName, "mint-token", req.Agent, clientIP(r))
+	s.logAudit(s.audit.LogAllowed(agentName, "mint-token", req.Agent, clientIP(r)))
 	jsonOK(w, map[string]interface{}{
 		"token":      tok,
 		"agent":      claims.Agent,

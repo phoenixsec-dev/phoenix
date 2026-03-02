@@ -780,6 +780,43 @@ func TestCredentialFreshnessDefaultTTL(t *testing.T) {
 	}
 }
 
+func TestCredentialFreshnessFutureDated(t *testing.T) {
+	cfg := `{
+		"attestation": {
+			"prod/*": {
+				"require_fresh_attestation": true,
+				"credential_ttl": "15m"
+			}
+		}
+	}`
+	e, err := Load([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	now := time.Now()
+
+	// Token issued 5 minutes in the future should be rejected
+	future := now.Add(5 * time.Minute)
+	err = e.Evaluate("prod/key", &RequestContext{
+		TokenIssuedAt: &future,
+		EvalTime:      now,
+	})
+	if err == nil {
+		t.Fatal("future-dated token should be rejected")
+	}
+
+	// Token issued just 10 seconds in the future should be allowed (within 30s skew tolerance)
+	slightFuture := now.Add(10 * time.Second)
+	err = e.Evaluate("prod/key", &RequestContext{
+		TokenIssuedAt: &slightFuture,
+		EvalTime:      now,
+	})
+	if err != nil {
+		t.Fatalf("token within clock skew tolerance should pass: %v", err)
+	}
+}
+
 // --- Wave 2: Combined attestation level tests ---
 
 func TestCombinedAttestationLevels(t *testing.T) {

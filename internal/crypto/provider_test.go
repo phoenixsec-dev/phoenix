@@ -231,5 +231,27 @@ func TestFileKeyProviderCompatibility(t *testing.T) {
 	}
 }
 
+func TestFileKeyProviderConcurrentAccess(t *testing.T) {
+	masterKey, _ := GenerateKey()
+	provider, _ := NewFileKeyProvider(masterKey)
+	dek, _ := GenerateKey()
+	wrapped, _ := provider.WrapKey(dek)
+
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 100; j++ {
+				provider.WrapKey(dek)
+				provider.UnwrapKey(wrapped)
+				_ = provider.MasterKey()
+			}
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
 // Verify KeyProvider interface is satisfied at compile time
 var _ KeyProvider = (*FileKeyProvider)(nil)
