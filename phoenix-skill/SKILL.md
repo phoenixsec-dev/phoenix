@@ -2,7 +2,11 @@
 
 Manage secrets securely through the Phoenix secrets management system.
 Secrets are encrypted at rest (AES-256-GCM), access-controlled per agent,
-and audited. You work with `phoenix://` references — never raw secret values.
+and audited. Prefer `phoenix://` reference workflows to reduce raw secret exposure.
+
+Important: Phoenix does not currently enforce global "reference-only" usage.
+Agents with read-capable credentials can still retrieve plaintext via `phoenix get`,
+`phoenix resolve`, or direct API reads.
 
 ## Commands
 

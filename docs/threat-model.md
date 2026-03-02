@@ -37,7 +37,7 @@ This document describes the core threats Phoenix is designed to mitigate, the tr
 ## Threats Phoenix addresses
 
 - **Prompt-injection-induced secret exfiltration**  
-  Agents use `phoenix://` references and policy-gated resolution, not static plaintext config.
+  Reference-first workflows (`phoenix://` + policy-gated resolution) reduce plaintext exposure in config/prompt paths.
 - **Unauthorized cross-agent access**  
   Per-agent ACL path rules enforce least privilege.
 - **Credential replay / misuse**  
@@ -77,4 +77,3 @@ Per-path policy can require combinations of:
 - Enable nonce + short-lived tokens in higher-risk deployments.
 - Store data/key/audit files on restricted paths with strict permissions.
 - Monitor audit logs for denied access bursts and unusual path access.
-

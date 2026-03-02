@@ -1,10 +1,26 @@
-# Phoenix
+<p align="center">
+  <img src="docs/branding/phoenix-v0-w-name-H-E-unique.svg" alt="Phoenix logo" width="420"/>
+</p>
 
-**Secrets management for AI agents. They see references, never values.**
+<p align="center">
+  <strong>Phoenix: Attested secrets for agents. Reference-first by design.</strong><br/>
+  <em>Like a phoenix, access is short-lived by design—attested, scoped, and reborn only when needed.</em><br/>
+  <strong>Mission: use <code>references</code> first and minimize raw secret exposure.</strong>
+</p>
 
 [![CI](https://github.com/phoenixsec/phoenix/actions/workflows/ci.yml/badge.svg)](https://github.com/phoenixsec/phoenix/actions/workflows/ci.yml)
 
-Phoenix is a single-binary secrets manager purpose-built for AI agent workflows. LLM agents are powerful but fundamentally untrusted — they can leak secrets through output, store them in context or memory, or be tricked into passing them to attacker-controlled tools. Phoenix solves this by ensuring agents only ever handle opaque `phoenix://` references, resolved through authenticated, attested, policy-checked API calls. Every access is audited.
+### Branding assets
+
+- Full logo: `docs/branding/phoenix-v0-w-name-H-E-unique.svg`
+- Dark-mode monochrome: `docs/branding/phoenix-monochrome-icon.jpg`
+- Color icon only: `docs/branding/phoenix-v0-color-icon-only.svg`
+
+---
+
+# Phoenix
+
+Phoenix is a single-binary secrets manager purpose-built for AI agent workflows. LLM agents are powerful but fundamentally untrusted — they can leak secrets through output, store them in context or memory, or be tricked into passing them to attacker-controlled tools. Phoenix is designed for reference-first secret workflows (`phoenix://...`) resolved through authenticated, attested, policy-checked API calls. Every access is audited.
 
 Phoenix is designed to be set up and operated by your AI agent. The security is real — AES-256-GCM envelope encryption, mutual TLS, attestation policies — but the complexity is absorbed by the agent, not by you. Your agent configures policies, issues certificates, and manages access. You store the secrets and verify the result.
 
@@ -16,9 +32,31 @@ phoenix set myapp/api-key -v "sk-abc123" -d "OpenAI API key"
 phoenix resolve phoenix://myapp/api-key
 sk-abc123
 
-# Run a command with secrets injected — agent never sees the value
+# Run a command with secrets injected (reference-first workflow)
 phoenix exec --env OPENAI_KEY=phoenix://myapp/api-key -- python app.py
 ```
+
+---
+
+## Start Here
+
+- **New install / first setup:** continue with [Quick Start](#quick-start)
+- **Migrating from `.env` files:** follow [Migration Guide: `.env` to Phoenix](docs/migration-env-to-phoenix.md)
+- **Runnable integration examples:** see [examples/README.md](examples/README.md)
+
+---
+
+## Reality check (current behavior)
+
+Phoenix supports reference-first secret handling, but it does **not** currently enforce
+"reference-only" usage for all clients. Any identity with read-capable access can still
+retrieve plaintext via:
+
+- `phoenix get`
+- `phoenix resolve`
+- direct API calls (`GET /v1/secrets/*`, `POST /v1/resolve`)
+
+Use scoped ACLs, mTLS/attestation, and operational guardrails to minimize plaintext exposure.
 
 ---
 
@@ -80,7 +118,9 @@ Levels compose — a production database password can require mTLS from a specif
 
 - [Threat Model](docs/threat-model.md)
 - [Migration Guide: `.env` to Phoenix](docs/migration-env-to-phoenix.md)
+- [Admin Token Lifecycle](docs/admin-token-lifecycle.md)
 - [API Reference Index](docs/api-reference-index.md)
+- [Reference-Only Enforcement Design (WIP)](docs/reference-only-enforcement-design.md)
 - [Release Runbook](docs/release-runbook.md)
 - [Runnable Examples](examples/README.md)
 
@@ -127,6 +167,12 @@ This generates:
 - Internal CA certificate and key
 - Server TLS certificate (SANs: `localhost`, `127.0.0.1`)
 - Default configuration file
+
+> **Admin token handling (important):**
+> 1. Store it immediately in a password manager or secure vault (not shell history, chat logs, or committed files).
+> 2. Use it as a bootstrap credential only: create scoped agent identities/tokens and mTLS certs for regular workloads.
+> 3. Remove it from your shell env after bootstrap (`unset PHOENIX_TOKEN`).
+> 4. Review the full lifecycle guide: [docs/admin-token-lifecycle.md](docs/admin-token-lifecycle.md).
 
 > **Deploying on a LAN?** The default server cert only covers localhost.
 > After init, edit `config.json` to set `server.listen` to your host IP,
@@ -222,7 +268,7 @@ No bearer token needed — the certificate CN identifies the agent.
 
 ## Reference Resolution
 
-Agents should never handle raw secrets in their context. Instead, they work with `phoenix://` references:
+To minimize secret exposure in agent context, use `phoenix://` references instead of plaintext in configs/prompts:
 
 ```bash
 # Resolve a single reference (outputs raw value, pipeable)
@@ -352,7 +398,7 @@ paths (mTLS handshakes, nonce freshness/replay state, signed payload validation)
 
 ### MCP Server (Claude Code / Claude Desktop)
 
-Phoenix includes a built-in MCP server. Agents resolve secrets through tool calls — the agent's context window never contains the secret value.
+Phoenix includes a built-in MCP server. Agents resolve secrets through tool calls, which can keep values out of prompt text in many workflows.
 
 ```json
 {
@@ -371,7 +417,7 @@ Phoenix includes a built-in MCP server. Agents resolve secrets through tool call
 
 The agent can list available secrets, resolve references, and read values — all through the authenticated, policy-checked API. MCP tool calls include tool identity headers (`X-Phoenix-Tool`), enabling `allowed_tools`/`deny_tools` attestation policies to control which MCP tools can access which secrets.
 
-> **Security note:** `phoenix_get` and `phoenix_resolve` return plaintext secret values in the MCP tool response. While this keeps values out of the agent's prompt context, the tool output is still visible to the MCP client process. Scope production tokens and ACLs tightly — grant agents only the minimum paths they need.
+> **Security note:** `phoenix_get` and `phoenix_resolve` return plaintext secret values in the MCP tool response. This may keep values out of prompt text, but the tool output is still visible to the MCP client process. Scope production tokens and ACLs tightly — grant agents only the minimum paths they need.
 
 ### Claude Code Skill (SKILL.md)
 
@@ -826,7 +872,7 @@ docker compose up -d
 ## Security Model
 
 **What Phoenix protects against:**
-- Secret exfiltration via agent output (agents work with references, never raw values)
+- Secret exfiltration risk reduction via reference-first workflows (`phoenix://` + `phoenix exec`)
 - Unauthorized access (ACL + configurable attestation policy per path)
 - Credential replay from wrong network location (source IP binding)
 - Stolen bearer tokens accessing sensitive paths (deny_bearer + mTLS)

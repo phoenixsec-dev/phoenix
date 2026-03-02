@@ -20,6 +20,9 @@ phoenix-server --init /data/phoenix
 phoenix-server --config /data/phoenix/config.json
 ```
 
+Immediately store the admin token in a secure manager/vault and treat it as bootstrap-only.
+Detailed guidance: [Admin Token Lifecycle](admin-token-lifecycle.md).
+
 Set CLI auth env for admin operations:
 
 ```bash
@@ -104,4 +107,3 @@ If needed, keep a temporary rollback path:
 2. switch runtime command from `phoenix exec` back to prior launcher
 3. diagnose ACL/policy failures via audit logs
 4. re-enable `phoenix exec` after fixes
-
