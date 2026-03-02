@@ -54,7 +54,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: phoenixsec/phoenix
+          images: phoenixsecdev/phoenix
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
