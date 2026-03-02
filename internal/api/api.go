@@ -206,6 +206,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/challenge", s.handleChallenge)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/token/mint", s.handleMintToken)
+	s.mux.HandleFunc("POST /v1/proxy", s.handleProxy)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -421,7 +422,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		var visible []string
 		for _, p := range allPaths {
-			if s.acl.Authorize(agentName, p, acl.ActionRead) != nil {
+			if s.acl.Authorize(agentName, p, acl.ActionList) != nil {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
@@ -435,16 +436,16 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Single secret read
-	if err := s.acl.Authorize(agentName, path, acl.ActionRead); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "read", path, ip, "acl"))
-		jsonError(w, "access denied", http.StatusForbidden)
+	// Single secret read — requires read_value permission
+	if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
+		s.logAudit(s.audit.LogDenied(agentName, "read_value", path, ip, "acl"))
+		jsonError(w, "access denied: read_value permission required (use phoenix exec for context-free secret injection)", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "read", path, ip, "attestation"))
+		s.logAudit(s.audit.LogDenied(agentName, "read_value", path, ip, "attestation"))
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -464,7 +465,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "read", path, ip))
+	s.logAudit(s.audit.LogAllowed(agentName, "read_value", path, ip))
 	jsonOK(w, secret)
 }
 
@@ -945,9 +946,9 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if err := s.acl.Authorize(agentName, path, acl.ActionRead); err != nil {
+		if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
 			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "acl"))
-			errors[refStr] = "access denied"
+			errors[refStr] = "access denied: read_value permission required"
 			continue
 		}
 
@@ -1234,4 +1235,30 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 		"expires_at": claims.ExpiresAt.Format(time.RFC3339),
 		"ttl":        s.tokens.TTL().String(),
 	})
+}
+
+// handleProxy is a stub for the future orchestrator proxy endpoint.
+// The orchestrator will accept templated HTTP requests containing phoenix://
+// references, resolve them server-side, execute the outbound request, and
+// return the response — keeping secret values entirely within the server.
+//
+// Agents using the proxy only need "list" permission to discover and reference
+// secrets. The server performs privileged internal resolution, so agents never
+// need "read_value" and secrets never enter agent context.
+//
+// Expected future request schema:
+//
+//	{
+//	  "method": "POST",
+//	  "url": "https://api.example.com/v1/deploy",
+//	  "headers": {"Authorization": "Bearer phoenix://myapp/api-key"},
+//	  "body": "{\"token\": \"phoenix://myapp/deploy-token\"}"
+//	}
+func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	_, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	jsonError(w, "proxy endpoint not yet implemented", http.StatusNotImplemented)
 }

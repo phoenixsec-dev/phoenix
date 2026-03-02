@@ -405,3 +405,135 @@ func TestAddAgentConcurrent(t *testing.T) {
 		t.Fatalf("expected 20 agents after reload, got %d", len(agents2))
 	}
 }
+
+func TestNormalizeActions(t *testing.T) {
+	// Legacy "read" expands to list + read_value
+	result, dep := NormalizeActions([]Action{ActionRead})
+	if !dep {
+		t.Fatal("expected deprecation=true for ActionRead")
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 actions, got %d: %v", len(result), result)
+	}
+	if result[0] != ActionList || result[1] != ActionReadValue {
+		t.Fatalf("expected [list, read_value], got %v", result)
+	}
+
+	// New actions pass through unchanged
+	result2, dep2 := NormalizeActions([]Action{ActionList, ActionReadValue})
+	if dep2 {
+		t.Fatal("expected deprecation=false for new actions")
+	}
+	if len(result2) != 2 || result2[0] != ActionList || result2[1] != ActionReadValue {
+		t.Fatalf("expected unchanged [list, read_value], got %v", result2)
+	}
+
+	// Mixed: read + write
+	result3, dep3 := NormalizeActions([]Action{ActionRead, ActionWrite})
+	if !dep3 {
+		t.Fatal("expected deprecation=true")
+	}
+	if len(result3) != 3 {
+		t.Fatalf("expected 3 actions, got %d: %v", len(result3), result3)
+	}
+
+	// Deduplication: read + list should not produce double list
+	result4, _ := NormalizeActions([]Action{ActionRead, ActionList})
+	listCount := 0
+	for _, a := range result4 {
+		if a == ActionList {
+			listCount++
+		}
+	}
+	if listCount != 1 {
+		t.Fatalf("expected exactly 1 list action, got %d in %v", listCount, result4)
+	}
+}
+
+func TestHasActionLegacyRead(t *testing.T) {
+	actions := []Action{ActionRead}
+
+	if !hasAction(actions, ActionList) {
+		t.Error("legacy read should grant list")
+	}
+	if !hasAction(actions, ActionReadValue) {
+		t.Error("legacy read should grant read_value")
+	}
+}
+
+func TestAuthorizeListOnly(t *testing.T) {
+	config := &ACLConfig{
+		Agents: map[string]Agent{
+			"lister": {
+				Name:      "lister",
+				TokenHash: crypto.HashToken("lister-token"),
+				Permissions: []Permission{
+					{Path: "test/*", Actions: []Action{ActionList}},
+				},
+			},
+		},
+	}
+	a := NewFromConfig(config)
+
+	if err := a.Authorize("lister", "test/secret", ActionList); err != nil {
+		t.Fatalf("lister should be allowed to list: %v", err)
+	}
+	if err := a.Authorize("lister", "test/secret", ActionReadValue); err != ErrAccessDenied {
+		t.Fatalf("lister should be denied read_value, got %v", err)
+	}
+}
+
+func TestAuthorizeReadValueOnly(t *testing.T) {
+	config := &ACLConfig{
+		Agents: map[string]Agent{
+			"reader": {
+				Name:      "reader",
+				TokenHash: crypto.HashToken("reader-token"),
+				Permissions: []Permission{
+					{Path: "test/*", Actions: []Action{ActionReadValue}},
+				},
+			},
+		},
+	}
+	a := NewFromConfig(config)
+
+	if err := a.Authorize("reader", "test/secret", ActionReadValue); err != nil {
+		t.Fatalf("reader should be allowed read_value: %v", err)
+	}
+	if err := a.Authorize("reader", "test/secret", ActionList); err != ErrAccessDenied {
+		t.Fatalf("reader should be denied list, got %v", err)
+	}
+}
+
+func TestAuthorizeLegacyReadBackcompat(t *testing.T) {
+	config := &ACLConfig{
+		Agents: map[string]Agent{
+			"legacy": {
+				Name:      "legacy",
+				TokenHash: crypto.HashToken("legacy-token"),
+				Permissions: []Permission{
+					{Path: "test/*", Actions: []Action{ActionRead}},
+				},
+			},
+		},
+	}
+	a := NewFromConfig(config)
+
+	if err := a.Authorize("legacy", "test/secret", ActionList); err != nil {
+		t.Fatalf("legacy read should grant list: %v", err)
+	}
+	if err := a.Authorize("legacy", "test/secret", ActionReadValue); err != nil {
+		t.Fatalf("legacy read should grant read_value: %v", err)
+	}
+}
+
+func TestValidatePermissionsNewActions(t *testing.T) {
+	perms := []Permission{
+		{Path: "ns/*", Actions: []Action{ActionList}},
+		{Path: "ns/*", Actions: []Action{ActionReadValue}},
+		{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue, ActionWrite}},
+	}
+	if err := ValidatePermissions(perms); err != nil {
+		t.Fatalf("new actions should be valid: %v", err)
+	}
+}

@@ -832,7 +832,7 @@ func cmdAgentCreate(args []string) error {
 			for _, a := range rawActions {
 				a = strings.TrimSpace(a)
 				if !acl.ValidActions[acl.Action(a)] {
-					return fmt.Errorf("invalid action %q in ACL rule %q (valid: read, write, delete, admin)", a, rule)
+					return fmt.Errorf("invalid action %q in ACL rule %q (valid: list, read_value, read, write, delete, admin)", a, rule)
 				}
 				actions = append(actions, a)
 			}

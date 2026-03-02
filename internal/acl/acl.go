@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,10 +22,12 @@ import (
 type Action string
 
 const (
-	ActionRead   Action = "read"
-	ActionWrite  Action = "write"
-	ActionDelete Action = "delete"
-	ActionAdmin  Action = "admin"
+	ActionRead      Action = "read"       // Deprecated: use ActionList and ActionReadValue instead
+	ActionList      Action = "list"       // can enumerate paths and metadata
+	ActionReadValue Action = "read_value" // can retrieve secret values
+	ActionWrite     Action = "write"
+	ActionDelete    Action = "delete"
+	ActionAdmin     Action = "admin"
 )
 
 var (
@@ -35,10 +38,12 @@ var (
 
 	// ValidActions is the set of recognized action strings.
 	ValidActions = map[Action]bool{
-		ActionRead:   true,
-		ActionWrite:  true,
-		ActionDelete: true,
-		ActionAdmin:  true,
+		ActionRead:      true, // deprecated but still accepted
+		ActionList:      true,
+		ActionReadValue: true,
+		ActionWrite:     true,
+		ActionDelete:    true,
+		ActionAdmin:     true,
 	}
 )
 
@@ -53,7 +58,7 @@ func ValidatePermissions(perms []Permission) error {
 		}
 		for _, a := range p.Actions {
 			if !ValidActions[a] {
-				return fmt.Errorf("invalid action %q for path %q (valid: read, write, delete, admin)", a, p.Path)
+				return fmt.Errorf("invalid action %q for path %q (valid: list, read_value, read, write, delete, admin)", a, p.Path)
 			}
 		}
 	}
@@ -94,6 +99,33 @@ func New(path string) (*ACL, error) {
 	return a, nil
 }
 
+// NormalizeActions expands the deprecated "read" action into "list" + "read_value".
+// Returns the expanded slice and whether a deprecation was triggered.
+func NormalizeActions(actions []Action) ([]Action, bool) {
+	deprecated := false
+	seen := map[Action]bool{}
+	var result []Action
+	for _, a := range actions {
+		if a == ActionRead {
+			deprecated = true
+			if !seen[ActionList] {
+				result = append(result, ActionList)
+				seen[ActionList] = true
+			}
+			if !seen[ActionReadValue] {
+				result = append(result, ActionReadValue)
+				seen[ActionReadValue] = true
+			}
+			continue
+		}
+		if !seen[a] {
+			result = append(result, a)
+			seen[a] = true
+		}
+	}
+	return result, deprecated
+}
+
 // NewFromConfig creates an ACL from an in-memory config (useful for tests).
 func NewFromConfig(config *ACLConfig) *ACL {
 	return &ACL{config: config}
@@ -117,6 +149,21 @@ func (a *ACL) load() error {
 	if config.Agents == nil {
 		config.Agents = make(map[string]Agent)
 	}
+
+	// Normalize deprecated "read" actions to "list" + "read_value".
+	for name, agent := range config.Agents {
+		warned := false
+		for i, perm := range agent.Permissions {
+			normalized, dep := NormalizeActions(perm.Actions)
+			if dep && !warned {
+				log.Printf("WARNING: agent %q uses deprecated 'read' action; migrate to 'list' and/or 'read_value'", name)
+				warned = true
+			}
+			agent.Permissions[i].Actions = normalized
+		}
+		config.Agents[name] = agent
+	}
+
 	a.config = &config
 	return nil
 }
@@ -308,9 +355,13 @@ func matchPath(pattern, path string) bool {
 }
 
 // hasAction checks if a list of actions contains the target action.
+// Legacy "read" implicitly grants both "list" and "read_value" for backward compat.
 func hasAction(actions []Action, target Action) bool {
 	for _, a := range actions {
 		if a == target || a == ActionAdmin {
+			return true
+		}
+		if a == ActionRead && (target == ActionList || target == ActionReadValue) {
 			return true
 		}
 	}

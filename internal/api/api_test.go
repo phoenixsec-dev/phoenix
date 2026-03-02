@@ -970,8 +970,9 @@ func TestResolveACLEnforcement(t *testing.T) {
 	}
 
 	errors := resp["errors"].(map[string]interface{})
-	if errors["phoenix://other/hidden"] != "access denied" {
-		t.Fatalf("hidden error = %v, want 'access denied'", errors["phoenix://other/hidden"])
+	hiddenErr, _ := errors["phoenix://other/hidden"].(string)
+	if !strings.Contains(hiddenErr, "access denied") {
+		t.Fatalf("hidden error = %v, want string containing 'access denied'", errors["phoenix://other/hidden"])
 	}
 }
 
@@ -2740,5 +2741,171 @@ func TestCreateAgentValidPermissions(t *testing.T) {
 
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// setupTestServerWithGranularACL creates a server with agents using the new
+// granular list/read_value permissions plus a legacy "read" agent.
+func setupTestServerWithGranularACL(t *testing.T) *Server {
+	t.Helper()
+	dir := t.TempDir()
+
+	keyPath := filepath.Join(dir, "master.key")
+	masterKey, _ := crypto.GenerateAndSaveMasterKey(keyPath)
+
+	s, err := store.New(filepath.Join(dir, "store.json"), masterKey)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	aclConfig := &acl.ACLConfig{
+		Agents: map[string]acl.Agent{
+			"admin": {
+				Name:      "admin",
+				TokenHash: crypto.HashToken("admin-token"),
+				Permissions: []acl.Permission{
+					{Path: "*", Actions: []acl.Action{acl.ActionAdmin}},
+				},
+			},
+			"lister": {
+				Name:      "lister",
+				TokenHash: crypto.HashToken("lister-token"),
+				Permissions: []acl.Permission{
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList}},
+				},
+			},
+			"value-reader": {
+				Name:      "value-reader",
+				TokenHash: crypto.HashToken("value-reader-token"),
+				Permissions: []acl.Permission{
+					{Path: "test/*", Actions: []acl.Action{acl.ActionReadValue}},
+				},
+			},
+			"legacy-reader": {
+				Name:      "legacy-reader",
+				TokenHash: crypto.HashToken("legacy-reader-token"),
+				Permissions: []acl.Permission{
+					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+				},
+			},
+		},
+	}
+	a := acl.NewFromConfig(aclConfig)
+
+	auditPath := filepath.Join(dir, "audit.log")
+	al, _ := audit.NewLogger(auditPath)
+
+	fb := store.NewFileBackend(s)
+	srv := NewServer(fb, a, al, auditPath)
+	srv.SetMasterKeyPath(keyPath)
+
+	// Seed a test secret
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-value"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/key", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 && w.Code != 201 {
+		t.Fatalf("seed secret: expected 200/201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	return srv
+}
+
+func TestListOnlyAgentCannotReadValue(t *testing.T) {
+	srv := setupTestServerWithGranularACL(t)
+
+	// Lister can list secrets
+	req := httptest.NewRequest("GET", "/v1/secrets/test/", nil)
+	req.Header.Set("Authorization", "Bearer lister-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("list: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var listResp struct {
+		Paths []string `json:"paths"`
+	}
+	json.NewDecoder(w.Body).Decode(&listResp)
+	if len(listResp.Paths) == 0 {
+		t.Fatal("lister should see at least one path")
+	}
+
+	// Lister cannot read a secret value
+	req2 := httptest.NewRequest("GET", "/v1/secrets/test/key", nil)
+	req2.Header.Set("Authorization", "Bearer lister-token")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+
+	if w2.Code != 403 {
+		t.Fatalf("read value: expected 403, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if !strings.Contains(w2.Body.String(), "read_value") {
+		t.Fatalf("error should mention read_value, got: %s", w2.Body.String())
+	}
+
+	// Lister cannot resolve refs
+	resolveBody, _ := json.Marshal(map[string]interface{}{
+		"refs": []string{"phoenix://test/key"},
+	})
+	req3 := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(resolveBody))
+	req3.Header.Set("Authorization", "Bearer lister-token")
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, req3)
+
+	if w3.Code != 200 {
+		t.Fatalf("resolve: expected 200 (with per-ref errors), got %d: %s", w3.Code, w3.Body.String())
+	}
+	var resolveResp struct {
+		Values map[string]string `json:"values"`
+		Errors map[string]string `json:"errors"`
+	}
+	json.NewDecoder(w3.Body).Decode(&resolveResp)
+	if len(resolveResp.Errors) == 0 {
+		t.Fatal("resolve should have per-ref errors for lister agent")
+	}
+	if len(resolveResp.Values) > 0 {
+		t.Fatal("resolve should not return values for lister agent")
+	}
+}
+
+func TestLegacyReadAgentBackcompat(t *testing.T) {
+	srv := setupTestServerWithGranularACL(t)
+
+	// Legacy reader can list
+	req := httptest.NewRequest("GET", "/v1/secrets/test/", nil)
+	req.Header.Set("Authorization", "Bearer legacy-reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("list: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Legacy reader can read values
+	req2 := httptest.NewRequest("GET", "/v1/secrets/test/key", nil)
+	req2.Header.Set("Authorization", "Bearer legacy-reader-token")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+
+	if w2.Code != 200 {
+		t.Fatalf("read value: expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+}
+
+func TestProxyStub(t *testing.T) {
+	srv := setupTestServerWithGranularACL(t)
+
+	req := httptest.NewRequest("POST", "/v1/proxy", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 501 {
+		t.Fatalf("proxy: expected 501, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not yet implemented") {
+		t.Fatalf("proxy should say not yet implemented, got: %s", w.Body.String())
 	}
 }
