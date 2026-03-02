@@ -34,6 +34,15 @@ var (
 	ErrPassphraseRequired  = errors.New("master key is passphrase-protected")
 )
 
+// ZeroBytes overwrites a byte slice with zeros. Best-effort mitigation for
+// key material lingering in memory — Go's GC may copy heap objects, but this
+// closes the most common exposure window.
+func ZeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
 // EncryptedBlob holds an encrypted value with its nonce.
 type EncryptedBlob struct {
 	Nonce      string `json:"nonce"`      // base64-encoded nonce
@@ -142,6 +151,7 @@ func UnwrapDEK(masterKey []byte, wrapped *WrappedDEK) ([]byte, error) {
 // Returns ErrPassphraseRequired if the file is passphrase-protected.
 func LoadMasterKey(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
+	defer ZeroBytes(data)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrKeyFileNotFound
 	}
@@ -170,6 +180,7 @@ func LoadMasterKey(path string) ([]byte, error) {
 // For unprotected files, the passphrase is ignored.
 func LoadMasterKeyWithPassphrase(path, passphrase string) ([]byte, error) {
 	data, err := os.ReadFile(path)
+	defer ZeroBytes(data)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrKeyFileNotFound
 	}

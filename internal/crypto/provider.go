@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"fmt"
+	"sync"
 )
 
 // KeyProvider abstracts master key operations for envelope encryption.
@@ -44,6 +45,7 @@ type KeyProvider interface {
 // FileKeyProvider implements KeyProvider using a raw 256-bit key loaded from disk.
 // This is the Phase 1 compatible implementation — same crypto, just behind an interface.
 type FileKeyProvider struct {
+	mu         sync.RWMutex
 	masterKey  []byte
 	pendingKey []byte // non-nil during two-phase rotation
 	passphrase string // set if master key is passphrase-protected
@@ -54,7 +56,8 @@ func NewFileKeyProvider(masterKey []byte) (*FileKeyProvider, error) {
 	if len(masterKey) != KeySize {
 		return nil, ErrInvalidKey
 	}
-	return &FileKeyProvider{masterKey: masterKey}, nil
+	keyCopy := append([]byte(nil), masterKey...)
+	return &FileKeyProvider{masterKey: keyCopy}, nil
 }
 
 // NewFileKeyProviderFromPath loads the master key from a file and creates a provider.
@@ -67,14 +70,21 @@ func NewFileKeyProviderFromPath(keyPath string) (*FileKeyProvider, error) {
 }
 
 func (p *FileKeyProvider) WrapKey(dek []byte) (*WrappedDEK, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return WrapDEK(p.masterKey, dek)
 }
 
 func (p *FileKeyProvider) UnwrapKey(wrapped *WrappedDEK) ([]byte, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return UnwrapDEK(p.masterKey, wrapped)
 }
 
 func (p *FileKeyProvider) RotateMaster(wrappedDEKs []*WrappedDEK) ([]*WrappedDEK, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	// 1. Unwrap all DEKs with current master key
 	deks := make([][]byte, len(wrappedDEKs))
 	for i, w := range wrappedDEKs {
@@ -101,6 +111,11 @@ func (p *FileKeyProvider) RotateMaster(wrappedDEKs []*WrappedDEK) ([]*WrappedDEK
 		result[i] = wrapped
 	}
 
+	// Zero plaintext DEKs now that they're re-wrapped
+	for _, dek := range deks {
+		ZeroBytes(dek)
+	}
+
 	// 4. Stage new key — do NOT swap masterKey yet (two-phase commit).
 	// Caller must call CommitRotation() after persisting both the store
 	// and the key file, or RollbackRotation() on failure.
@@ -112,7 +127,10 @@ func (p *FileKeyProvider) RotateMaster(wrappedDEKs []*WrappedDEK) ([]*WrappedDEK
 // CommitRotation promotes the staged key to active use.
 // Must be called after both the store and key file are persisted.
 func (p *FileKeyProvider) CommitRotation() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.pendingKey != nil {
+		ZeroBytes(p.masterKey)
 		p.masterKey = p.pendingKey
 		p.pendingKey = nil
 	}
@@ -121,33 +139,49 @@ func (p *FileKeyProvider) CommitRotation() {
 // RollbackRotation discards the staged key.
 // Call this if the store save or key file write fails.
 func (p *FileKeyProvider) RollbackRotation() {
-	p.pendingKey = nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pendingKey != nil {
+		ZeroBytes(p.pendingKey)
+		p.pendingKey = nil
+	}
 }
 
 func (p *FileKeyProvider) Name() string {
 	return "file"
 }
 
-// MasterKey returns the raw active master key bytes. This is needed for writing
-// the key back to disk during rotation. Only FileKeyProvider exposes this —
-// other providers (KMS, HSM) would never expose raw key material.
+// MasterKey returns a copy of the active master key bytes. This is needed for
+// writing the key back to disk during rotation. Only FileKeyProvider exposes
+// this — other providers (KMS, HSM) would never expose raw key material.
 func (p *FileKeyProvider) MasterKey() []byte {
-	return p.masterKey
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]byte(nil), p.masterKey...)
 }
 
-// PendingMasterKey returns the staged (not yet committed) master key bytes.
+// PendingMasterKey returns a copy of the staged (not yet committed) master key.
 // Returns nil if no rotation is pending.
 func (p *FileKeyProvider) PendingMasterKey() []byte {
-	return p.pendingKey
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.pendingKey == nil {
+		return nil
+	}
+	return append([]byte(nil), p.pendingKey...)
 }
 
 // SetPassphrase stores the passphrase used to protect the master key on disk.
 // This is used during rotation to re-encrypt the new key file.
 func (p *FileKeyProvider) SetPassphrase(pp string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.passphrase = pp
 }
 
 // Passphrase returns the passphrase, or "" if the key is unprotected.
 func (p *FileKeyProvider) Passphrase() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.passphrase
 }

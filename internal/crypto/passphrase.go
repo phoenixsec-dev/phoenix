@@ -61,6 +61,7 @@ func EncryptMasterKey(masterKey []byte, passphrase string) (*ProtectedKeyFile, e
 	}
 
 	derived := DeriveKeyFromPassphrase(passphrase, salt, defaultKDFTime, defaultKDFMemory, defaultKDFThreads)
+	defer ZeroBytes(derived)
 
 	block, err := aes.NewCipher(derived)
 	if err != nil {
@@ -134,6 +135,7 @@ func DecryptMasterKey(pf *ProtectedKeyFile, passphrase string) ([]byte, error) {
 	}
 
 	derived := DeriveKeyFromPassphrase(passphrase, salt, pf.KDFTime, pf.KDFMemory, pf.KDFThreads)
+	defer ZeroBytes(derived)
 
 	block, err := aes.NewCipher(derived)
 	if err != nil {

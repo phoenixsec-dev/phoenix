@@ -26,8 +26,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -41,7 +43,31 @@ var (
 	ErrCANotInitialized = errors.New("CA not initialized")
 	ErrCertExpired      = errors.New("certificate has expired")
 	ErrCertRevoked      = errors.New("certificate has been revoked")
+	ErrInvalidAgentName = errors.New("invalid agent name")
+
+	agentNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 )
+
+const maxAgentNameLen = 253
+
+// ValidateAgentName checks that a name is safe for use as a certificate CN.
+func ValidateAgentName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: must not be empty", ErrInvalidAgentName)
+	}
+	if len(name) > maxAgentNameLen {
+		return fmt.Errorf("%w: exceeds %d characters", ErrInvalidAgentName, maxAgentNameLen)
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || r == 0 {
+			return fmt.Errorf("%w: contains control characters", ErrInvalidAgentName)
+		}
+	}
+	if !agentNameRe.MatchString(name) {
+		return fmt.Errorf("%w: must match [a-zA-Z0-9._-]+", ErrInvalidAgentName)
+	}
+	return nil
+}
 
 // CA is the internal Certificate Authority.
 type CA struct {
@@ -147,6 +173,13 @@ func LoadCAFromPEM(certPEM, keyPEM []byte) (*CA, error) {
 		return nil, fmt.Errorf("parsing CA certificate: %w", err)
 	}
 
+	if !cert.BasicConstraintsValid || !cert.IsCA {
+		return nil, errors.New("certificate is not a CA (BasicConstraints missing or IsCA=false)")
+	}
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, errors.New("CA certificate missing KeyUsageCertSign")
+	}
+
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
 		return nil, errors.New("failed to decode CA key PEM")
@@ -191,6 +224,10 @@ func (ca *CA) Save(certPath, keyPath string) error {
 // The agent name becomes the certificate's Common Name (CN), which is used
 // as the ACL identity during mTLS authentication.
 func (ca *CA) IssueAgentCert(agentName string) (*CertBundle, error) {
+	if err := ValidateAgentName(agentName); err != nil {
+		return nil, err
+	}
+
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
 
@@ -331,7 +368,7 @@ func (ca *CA) TLSConfig() *tls.Config {
 	return &tls.Config{
 		ClientCAs:  certPool,
 		ClientAuth: tls.VerifyClientCertIfGiven, // Optional — bearer tokens still work
-		MinVersion: tls.VersionTLS12,
+		MinVersion: tls.VersionTLS13,
 		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			// Additional check: CRL revocation
 			if len(verifiedChains) > 0 && len(verifiedChains[0]) > 0 {

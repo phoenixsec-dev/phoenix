@@ -402,6 +402,12 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 			now = time.Now()
 		}
 		age := now.Sub(*ctx.TokenIssuedAt)
+		if age < -30*time.Second {
+			return &DeniedError{
+				Pattern: pattern,
+				Reason:  fmt.Sprintf("token issued in the future (issued %s from now)", (-age).Round(time.Second)),
+			}
+		}
 		if age > maxTTL {
 			return &DeniedError{
 				Pattern: pattern,

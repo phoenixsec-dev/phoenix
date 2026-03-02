@@ -31,6 +31,7 @@ var (
 	ErrUnauthorized  = errors.New("unauthorized: invalid or missing token")
 	ErrAccessDenied  = errors.New("access denied: insufficient permissions")
 	ErrAgentNotFound = errors.New("agent not found")
+	ErrAgentExists   = errors.New("agent already exists")
 
 	// ValidActions is the set of recognized action strings.
 	ValidActions = map[Action]bool{
@@ -190,9 +191,36 @@ func (a *ACL) Authorize(agentName string, secretPath string, action Action) erro
 }
 
 // AddAgent registers a new agent with a token and permissions.
+// Returns ErrAgentExists if an agent with the same name already exists.
 func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if _, exists := a.config.Agents[name]; exists {
+		return ErrAgentExists
+	}
+
+	a.config.Agents[name] = Agent{
+		Name:        name,
+		TokenHash:   crypto.HashToken(token),
+		Permissions: permissions,
+	}
+
+	if a.path != "" {
+		return a.saveLocked()
+	}
+	return nil
+}
+
+// UpdateAgent overwrites an existing agent's token and permissions.
+// Returns ErrAgentNotFound if the agent does not exist.
+func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if _, exists := a.config.Agents[name]; !exists {
+		return ErrAgentNotFound
+	}
 
 	a.config.Agents[name] = Agent{
 		Name:        name,

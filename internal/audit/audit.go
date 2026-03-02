@@ -67,7 +67,13 @@ func (l *Logger) Log(agent, action, path, status, ip, reason string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	return l.enc.Encode(entry)
+	if err := l.enc.Encode(entry); err != nil {
+		return err
+	}
+	if l.file != nil {
+		return l.file.Sync()
+	}
+	return nil
 }
 
 // LogAllowed is a convenience for logging permitted actions.

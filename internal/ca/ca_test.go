@@ -267,8 +267,8 @@ func TestTLSConfig(t *testing.T) {
 	if tlsCfg.ClientAuth != 3 { // tls.VerifyClientCertIfGiven
 		t.Fatalf("expected VerifyClientCertIfGiven, got %d", tlsCfg.ClientAuth)
 	}
-	if tlsCfg.MinVersion != 0x0303 { // tls.VersionTLS12
-		t.Fatalf("expected TLS 1.2 min, got %#x", tlsCfg.MinVersion)
+	if tlsCfg.MinVersion != 0x0304 { // tls.VersionTLS13
+		t.Fatalf("expected TLS 1.3 min, got %#x", tlsCfg.MinVersion)
 	}
 	if tlsCfg.ClientCAs == nil {
 		t.Fatal("ClientCAs pool is nil")
@@ -498,5 +498,37 @@ func TestFingerprintIsSHA256(t *testing.T) {
 	// SHA-256 hex should be 64 chars
 	if len(fp) != 64 {
 		t.Fatalf("fingerprint should be 64 hex chars, got %d: %s", len(fp), fp)
+	}
+}
+
+func TestValidateAgentName(t *testing.T) {
+	valid := []string{"agent1", "my-agent", "my.agent", "agent_1", "a"}
+	for _, name := range valid {
+		if err := ValidateAgentName(name); err != nil {
+			t.Errorf("ValidateAgentName(%q) unexpected error: %v", name, err)
+		}
+	}
+	invalid := []string{"", "../etc", "agent/bad", "agent\x00name", "a b", strings.Repeat("a", 254)}
+	for _, name := range invalid {
+		if err := ValidateAgentName(name); err == nil {
+			t.Errorf("ValidateAgentName(%q) should have failed", name)
+		}
+	}
+}
+
+func TestIssueAgentCertInvalidName(t *testing.T) {
+	authority, _ := GenerateCA("Test")
+	_, err := authority.IssueAgentCert("bad/name")
+	if err == nil {
+		t.Fatal("expected error for invalid agent name")
+	}
+}
+
+func TestLoadCAFromPEM_RejectsNonCA(t *testing.T) {
+	authority, _ := GenerateCA("Test")
+	bundle, _ := authority.IssueAgentCert("agent")
+	_, err := LoadCAFromPEM(bundle.CertPEM, bundle.KeyPEM)
+	if err == nil {
+		t.Fatal("LoadCAFromPEM should reject non-CA certificates")
 	}
 }

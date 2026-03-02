@@ -41,6 +41,10 @@ func main() {
 	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
 	flag.Parse()
 
+	if *initPassphrase != "" {
+		fmt.Fprintln(os.Stderr, "WARNING: --passphrase is visible in process listings. Use PHOENIX_MASTER_PASSPHRASE env var or --passphrase-stdin instead.")
+	}
+
 	if *showVersion {
 		fmt.Printf("phoenix-server %s\n", version.Version)
 		return

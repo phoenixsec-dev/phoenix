@@ -51,7 +51,7 @@ type CryptoConfig struct {
 
 // ServerConfig controls the HTTP server.
 type ServerConfig struct {
-	Listen string `json:"listen"` // e.g., "0.0.0.0:9090" (all interfaces) or "127.0.0.1:9090" (loopback only)
+	Listen string `json:"listen"` // e.g., "127.0.0.1:9090" (loopback, default) or "0.0.0.0:9090" (all interfaces)
 }
 
 // StoreConfig controls the secret store.
@@ -115,7 +115,7 @@ type OPConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Listen: "0.0.0.0:9090",
+			Listen: "127.0.0.1:9090",
 		},
 		Store: StoreConfig{
 			Path:      "/data/store.json",
