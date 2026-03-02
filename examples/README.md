@@ -16,7 +16,7 @@ Each script will:
 
 ## Examples
 
-1. **Local quickstart**
+1. **Local quickstart (prefers `phoenix exec`)**
    ```bash
    ./examples/01-local-quickstart/run.sh
    ```
@@ -31,6 +31,7 @@ Each script will:
    ./examples/03-acl-strictness/run.sh
    ```
 
+
 ## MCP HTTP quick check (no script)
 
 If you need MCP Streamable HTTP instead of stdio:
@@ -39,5 +40,5 @@ If you need MCP Streamable HTTP instead of stdio:
 PHOENIX_MCP_TOKEN=test-mcp-token ./bin/phoenix mcp-server --http 127.0.0.1:8080
 ```
 
-Endpoint: `http://127.0.0.1:8080/mcp`  
+Endpoint: `http://127.0.0.1:8080/mcp`
 Auth header: `Authorization: Bearer test-mcp-token`

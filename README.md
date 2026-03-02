@@ -28,12 +28,11 @@ Phoenix is designed to be set up and operated by your AI agent. The security is 
 # Store a secret
 phoenix set myapp/api-key -v "sk-abc123" -d "OpenAI API key"
 
-# Agents use references, not values
-phoenix resolve phoenix://myapp/api-key
-sk-abc123
-
 # Run a command with secrets injected (reference-first workflow)
 phoenix exec --env OPENAI_KEY=phoenix://myapp/api-key -- python app.py
+
+# Optional manual/debug inspection (plaintext output)
+phoenix resolve phoenix://myapp/api-key
 ```
 
 ---
@@ -116,6 +115,7 @@ Levels compose — a production database password can require mTLS from a specif
 
 ## Additional Docs
 
+- [Public Roadmap](docs/roadmap.md)
 - [Threat Model](docs/threat-model.md)
 - [Migration Guide: `.env` to Phoenix](docs/migration-env-to-phoenix.md)
 - [Admin Token Lifecycle](docs/admin-token-lifecycle.md)

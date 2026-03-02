@@ -8,6 +8,10 @@ Important: Phoenix does not currently enforce global "reference-only" usage.
 Agents with read-capable credentials can still retrieve plaintext via `phoenix get`,
 `phoenix resolve`, or direct API reads.
 
+Operational preference: use `phoenix exec` as the default secret-consumption path.
+Use `phoenix get`/`phoenix resolve` only when explicitly needed for debugging or
+manual inspection.
+
 ## Commands
 
 Use the `phoenix` CLI for all operations. The CLI must be configured with
@@ -18,13 +22,20 @@ environment variables before use:
 - `PHOENIX_CA_CERT` — CA certificate path (for TLS)
 - `PHOENIX_CLIENT_CERT` / `PHOENIX_CLIENT_KEY` — mTLS client auth
 
-### Read a secret
+### Preferred: run a command with secrets injected
 
 ```bash
-phoenix get <namespace/key>
+phoenix exec --env KEY=phoenix://namespace/secret -- <command> [args...]
 ```
 
-Returns the decrypted value. Use sparingly — prefer `phoenix://` references.
+Resolves references and injects them as environment variables into the child
+process. Phoenix broker credentials are stripped from the child environment.
+
+To write resolved env vars to a file instead of exec'ing (for Docker init-container patterns):
+
+```bash
+phoenix exec --env KEY=phoenix://namespace/secret --output-env /path/to/envfile -- true
+```
 
 ### Store a secret
 
@@ -52,22 +63,16 @@ phoenix delete <namespace/key>
 phoenix resolve phoenix://namespace/key [phoenix://namespace/key2 ...]
 ```
 
-Resolves one or more `phoenix://` references to their values.
+Resolves one or more `phoenix://` references to their values. Prefer
+`phoenix exec` for normal operations; use explicit resolve for targeted debugging.
 
-### Run a command with secrets injected
-
-```bash
-phoenix exec --env KEY=phoenix://namespace/secret -- <command> [args...]
-```
-
-Resolves references and injects them as environment variables into the child
-process. Phoenix broker credentials are stripped from the child environment.
-
-To write resolved env vars to a file instead of exec'ing (for Docker init-container patterns):
+### Read a secret directly
 
 ```bash
-phoenix exec --env KEY=phoenix://namespace/secret --output-env /path/to/envfile -- true
+phoenix get <namespace/key>
 ```
+
+Returns the decrypted value. Use sparingly — prefer `phoenix exec` and references.
 
 ### Verify references in a file
 
