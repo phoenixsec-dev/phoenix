@@ -57,6 +57,12 @@ retrieve plaintext via:
 
 Use scoped ACLs, mTLS/attestation, and operational guardrails to minimize plaintext exposure.
 
+## Execution model (quick deployment guidance)
+
+- **Requires local `phoenix` binary:** `phoenix exec`, MCP **stdio** mode, and normal CLI commands.
+- **Can be remote API only:** direct HTTP integrations with `/v1/*` endpoints.
+- **Container pattern:** run `phoenix exec --output-env ...` in an init container (or pre-start step) and consume the generated env file in the app container.
+
 ---
 
 ## Why Phoenix?
