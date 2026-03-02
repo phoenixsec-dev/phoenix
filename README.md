@@ -404,6 +404,10 @@ paths (mTLS handshakes, nonce freshness/replay state, signed payload validation)
 
 Phoenix includes a built-in MCP server. Agents resolve secrets through tool calls, which can keep values out of prompt text in many workflows.
 
+**Transport options:**
+- `phoenix mcp-server` → stdio JSON-RPC (best for local Claude Code/Desktop setup)
+- `phoenix mcp-server --http :8080 --mcp-token <token>` → Streamable HTTP on `/mcp` (best for remote/shared MCP clients)
+
 ```json
 {
   "mcpServers": {
@@ -418,6 +422,19 @@ Phoenix includes a built-in MCP server. Agents resolve secrets through tool call
   }
 }
 ```
+
+Streamable HTTP mode example:
+
+```bash
+export PHOENIX_SERVER="https://phoenix:9090"
+export PHOENIX_TOKEN="<phoenix-agent-token>"
+export PHOENIX_MCP_TOKEN="<separate-mcp-client-token>"
+phoenix mcp-server --http 127.0.0.1:8080
+```
+
+Then point your MCP client to `http://127.0.0.1:8080/mcp` with:
+- `Authorization: Bearer <PHOENIX_MCP_TOKEN>`
+- `Mcp-Session-Id: <session-id>` after `initialize`
 
 The agent can list available secrets, resolve references, and read values — all through the authenticated, policy-checked API. MCP tool calls include tool identity headers (`X-Phoenix-Tool`), enabling `allowed_tools`/`deny_tools` attestation policies to control which MCP tools can access which secrets.
 

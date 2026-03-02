@@ -83,6 +83,17 @@ phoenix exec \
   --output-env /run/secrets/app.env
 ```
 
+If your agent platform uses MCP over HTTP instead of local stdio, run Phoenix MCP in Streamable HTTP mode:
+
+```bash
+export PHOENIX_SERVER="https://localhost:9090"
+export PHOENIX_TOKEN="<phoenix-agent-token>"
+export PHOENIX_MCP_TOKEN="<mcp-client-token>"
+phoenix mcp-server --http 127.0.0.1:8080
+```
+
+Use `http://127.0.0.1:8080/mcp` as the MCP endpoint. Keep `PHOENIX_MCP_TOKEN` separate from `PHOENIX_TOKEN`.
+
 ## 7) Validate and audit
 
 - Verify app startup succeeds with references only.
