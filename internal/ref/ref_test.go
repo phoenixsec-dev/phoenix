@@ -16,14 +16,14 @@ func TestParse(t *testing.T) {
 
 		// Invalid references
 		{"", "", true},                           // empty
-		{"openclaw/api-key", "", true},            // no scheme
-		{"http://openclaw/api-key", "", true},     // wrong scheme
-		{"phoenix://", "", true},                  // empty path
-		{"phoenix://noslash", "", true},            // path must have slash
-		{"phoenix:///leading", "", true},           // leading slash
-		{"phoenix://trailing/", "", true},          // trailing slash
-		{"phoenix://double//slash", "", true},      // double slash
-		{"phoenix://dot/../traversal", "", true},   // path traversal
+		{"openclaw/api-key", "", true},           // no scheme
+		{"http://openclaw/api-key", "", true},    // wrong scheme
+		{"phoenix://", "", true},                 // empty path
+		{"phoenix://noslash", "", true},          // path must have slash
+		{"phoenix:///leading", "", true},         // leading slash
+		{"phoenix://trailing/", "", true},        // trailing slash
+		{"phoenix://double//slash", "", true},    // double slash
+		{"phoenix://dot/../traversal", "", true}, // path traversal
 	}
 
 	for _, tt := range tests {

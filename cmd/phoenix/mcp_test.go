@@ -216,11 +216,11 @@ func TestMCPUnknownTool(t *testing.T) {
 func TestMCPToolResolve(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/resolve" {
-			http.Error(w, "not found", 404)
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer test-token" {
-			http.Error(w, "unauthorized", 401)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		var req struct {
@@ -295,7 +295,7 @@ func TestMCPToolResolvePartialError(t *testing.T) {
 func TestMCPToolGet(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/secrets/myapp/db-password" {
-			http.Error(w, `{"error":"not found"}`, 404)
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -464,7 +464,7 @@ func TestMCPMultipleRequests(t *testing.T) {
 				"path": "ns/key1", "value": "val1",
 			})
 		default:
-			http.Error(w, "not found", 404)
+			http.Error(w, "not found", http.StatusNotFound)
 		}
 	})
 
@@ -617,7 +617,7 @@ func TestMCPE2ERealStdinStdout(t *testing.T) {
 				"paths": []string{"e2e/secret1"},
 			})
 		default:
-			http.Error(w, "not found", 404)
+			http.Error(w, "not found", http.StatusNotFound)
 		}
 	})
 	ts := httptest.NewServer(handler)

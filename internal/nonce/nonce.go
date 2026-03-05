@@ -36,11 +36,11 @@ type Entry struct {
 
 // Store manages nonce issuance and validation.
 type Store struct {
-	mu       sync.Mutex
-	nonces   map[string]*Entry
-	maxAge   time.Duration
-	stopCh   chan struct{}
-	stopped  bool
+	mu      sync.Mutex
+	nonces  map[string]*Entry
+	maxAge  time.Duration
+	stopCh  chan struct{}
+	stopped bool
 }
 
 // NewStore creates a new nonce store with the given max age.

@@ -37,9 +37,9 @@ type AttestRequest struct {
 
 // AttestResponse is returned by the attestation agent.
 type AttestResponse struct {
-	OK       bool      `json:"ok"`
-	Peer     *PeerInfo `json:"peer,omitempty"`
-	Error    string    `json:"error,omitempty"`
+	OK    bool      `json:"ok"`
+	Peer  *PeerInfo `json:"peer,omitempty"`
+	Error string    `json:"error,omitempty"`
 }
 
 // Agent is the local Unix socket attestation agent.

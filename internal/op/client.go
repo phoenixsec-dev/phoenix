@@ -17,11 +17,11 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("item not found")
-	ErrPermission     = errors.New("permission denied")
-	ErrTimeout        = errors.New("op command timed out")
-	ErrNotAvailable   = errors.New("op CLI not available")
-	ErrTokenMissing   = errors.New("service account token not set")
+	ErrNotFound     = errors.New("item not found")
+	ErrPermission   = errors.New("permission denied")
+	ErrTimeout      = errors.New("op command timed out")
+	ErrNotAvailable = errors.New("op CLI not available")
+	ErrTokenMissing = errors.New("service account token not set")
 )
 
 // DefaultTimeout is the per-command timeout for op CLI calls.
@@ -51,7 +51,7 @@ type Vault struct {
 // Field represents a single field within a 1Password item.
 type Field struct {
 	ID    string `json:"id"`
-	Type  string `json:"type"`  // STRING, CONCEALED, EMAIL, URL, OTP, etc.
+	Type  string `json:"type"` // STRING, CONCEALED, EMAIL, URL, OTP, etc.
 	Label string `json:"label"`
 	Value string `json:"value"`
 }

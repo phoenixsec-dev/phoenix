@@ -111,13 +111,13 @@ type Server struct {
 	acl           *acl.ACL
 	audit         *audit.Logger
 	auditPath     string
-	masterKeyPath string // path to master.key file (needed for KEK rotation)
-	ca            *ca.CA            // nil when mTLS is disabled
-	policy        *policy.Engine    // nil when no attestation policy configured
-	bearerEnabled bool              // whether bearer token auth is allowed
-	nonces        *nonce.Store      // nil when nonce challenge is not configured
-	tokens        *token.Issuer     // nil when short-lived tokens are not configured
-	startTime     time.Time         // server start time for uptime reporting
+	masterKeyPath string         // path to master.key file (needed for KEK rotation)
+	ca            *ca.CA         // nil when mTLS is disabled
+	policy        *policy.Engine // nil when no attestation policy configured
+	bearerEnabled bool           // whether bearer token auth is allowed
+	nonces        *nonce.Store   // nil when nonce challenge is not configured
+	tokens        *token.Issuer  // nil when short-lived tokens are not configured
+	startTime     time.Time      // server start time for uptime reporting
 	authRL        *rateLimiter
 	mux           *http.ServeMux
 }
@@ -214,9 +214,9 @@ type authInfo struct {
 	Agent           string
 	UsedMTLS        bool
 	UsedBearer      bool
-	CertFingerprint string // "sha256:<hex>" or empty
-	TokenIssuedAt   *time.Time              // set when authenticated via short-lived token
-	Process         *policy.ProcessContext   // set when token carries process attestation claims
+	CertFingerprint string                 // "sha256:<hex>" or empty
+	TokenIssuedAt   *time.Time             // set when authenticated via short-lived token
+	Process         *policy.ProcessContext // set when token carries process attestation claims
 }
 
 // authenticate identifies the calling agent from the request.

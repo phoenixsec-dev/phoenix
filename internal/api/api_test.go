@@ -895,10 +895,10 @@ func TestResolvePartialFailure(t *testing.T) {
 	// Resolve mix of valid, not-found, and invalid refs
 	body, _ = json.Marshal(map[string]interface{}{
 		"refs": []string{
-			"phoenix://test/exists",       // exists
-			"phoenix://test/missing",      // not found
-			"not-a-ref",                   // invalid scheme
-			"phoenix://noslash",           // invalid path
+			"phoenix://test/exists",  // exists
+			"phoenix://test/missing", // not found
+			"not-a-ref",              // invalid scheme
+			"phoenix://noslash",      // invalid path
 		},
 	})
 	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
@@ -1007,9 +1007,9 @@ func TestResolveAuditsAllPaths(t *testing.T) {
 	// Resolve: 1 success, 1 not-found, 1 malformed ref
 	body, _ = json.Marshal(map[string]interface{}{
 		"refs": []string{
-			"phoenix://test/audited",  // success
-			"phoenix://test/missing",  // not found
-			"not-a-ref",               // malformed
+			"phoenix://test/audited", // success
+			"phoenix://test/missing", // not found
+			"not-a-ref",              // malformed
 		},
 	})
 	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
@@ -2697,7 +2697,7 @@ func TestCreateAgentInvalidPermissions(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
 	tests := []struct {
-		name string
+		name  string
 		perms []acl.Permission
 	}{
 		{"empty path", []acl.Permission{{Path: "", Actions: []acl.Action{acl.ActionRead}}}},

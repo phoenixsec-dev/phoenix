@@ -135,7 +135,7 @@ func DefaultConfig() *Config {
 			Path: "/data/audit.log",
 		},
 		OnePassword: OPConfig{
-			Enabled:              false,
+			Enabled:                false,
 			ServiceAccountTokenEnv: "OP_SERVICE_ACCOUNT_TOKEN",
 		},
 	}
