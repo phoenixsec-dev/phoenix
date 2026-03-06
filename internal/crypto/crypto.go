@@ -28,10 +28,10 @@ const (
 )
 
 var (
-	ErrInvalidKey          = errors.New("invalid key size: must be 32 bytes")
-	ErrDecryptionFailed    = errors.New("decryption failed: ciphertext tampered or wrong key")
-	ErrKeyFileNotFound     = errors.New("master key file not found")
-	ErrPassphraseRequired  = errors.New("master key is passphrase-protected")
+	ErrInvalidKey         = errors.New("invalid key size: must be 32 bytes")
+	ErrDecryptionFailed   = errors.New("decryption failed: ciphertext tampered or wrong key")
+	ErrKeyFileNotFound    = errors.New("master key file not found")
+	ErrPassphraseRequired = errors.New("master key is passphrase-protected")
 )
 
 // ZeroBytes overwrites a byte slice with zeros. Best-effort mitigation for

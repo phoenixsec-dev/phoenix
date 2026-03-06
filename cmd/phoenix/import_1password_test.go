@@ -69,10 +69,10 @@ func TestIsImportableField(t *testing.T) {
 func TestPathMapping(t *testing.T) {
 	// Verify the path construction matches expectations
 	tests := []struct {
-		prefix    string
-		itemTitle string
+		prefix     string
+		itemTitle  string
 		fieldLabel string
-		want      string
+		want       string
 	}{
 		{"myapp/", "Database Creds", "password", "myapp/database-creds/password"},
 		{"myapp/", "Stripe API", "secret-key", "myapp/stripe-api/secret-key"},

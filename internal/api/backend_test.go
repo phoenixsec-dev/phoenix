@@ -61,9 +61,9 @@ func (b *stubBackend) Delete(path string) error {
 	return nil
 }
 
-func (b *stubBackend) Count() int { return len(b.secrets) }
+func (b *stubBackend) Count() int     { return len(b.secrets) }
 func (b *stubBackend) ReadOnly() bool { return b.readOnly }
-func (b *stubBackend) Name() string { return "stub" }
+func (b *stubBackend) Name() string   { return "stub" }
 
 func setupStubServer(t *testing.T, backend store.SecretBackend) (*Server, string) {
 	t.Helper()

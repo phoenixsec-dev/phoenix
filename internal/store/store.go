@@ -50,9 +50,9 @@ type namespaceDEK struct {
 
 // storeData is the top-level on-disk structure.
 type storeData struct {
-	Version    int                       `json:"version"`
+	Version    int                        `json:"version"`
 	Secrets    map[string]encryptedSecret `json:"secrets"`
-	Namespaces map[string]namespaceDEK   `json:"namespaces"`
+	Namespaces map[string]namespaceDEK    `json:"namespaces"`
 }
 
 // Secret is the decrypted representation returned to callers.

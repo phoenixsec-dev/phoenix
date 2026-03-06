@@ -216,7 +216,7 @@ func TestDecryptCorruptedBlob(t *testing.T) {
 
 	// Valid nonce but corrupted ciphertext
 	_, err := Decrypt(key, &EncryptedBlob{
-		Nonce:      "AAAAAAAAAAAAAAAA", // 12 bytes base64
+		Nonce:      "AAAAAAAAAAAAAAAA",                         // 12 bytes base64
 		Ciphertext: "dGhpcyBpcyBub3QgYSB2YWxpZCBjaXBoZXJ0ZXh0", // garbage
 	})
 	if err != ErrDecryptionFailed {

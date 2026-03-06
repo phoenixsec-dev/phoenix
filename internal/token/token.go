@@ -29,8 +29,8 @@ const (
 )
 
 var (
-	ErrTokenExpired    = errors.New("token expired")
-	ErrTokenMalformed  = errors.New("malformed token")
+	ErrTokenExpired     = errors.New("token expired")
+	ErrTokenMalformed   = errors.New("malformed token")
 	ErrSignatureInvalid = errors.New("invalid token signature")
 )
 
