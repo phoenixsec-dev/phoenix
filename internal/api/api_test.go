@@ -3246,6 +3246,65 @@ func TestUnregisteredAgentSealKeyRejected(t *testing.T) {
 	}
 }
 
+func TestRequireSealedPolicyDeniesWithoutKey(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Set a secret
+	body, _ := json.Marshal(setSecretRequest{Value: "policy-test"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/sealed-pol", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Set require_sealed policy
+	policyJSON := `{"attestation":{"test/*":{"require_sealed":true}}}`
+	e, _ := policy.Load([]byte(policyJSON))
+	srv.SetPolicy(e)
+
+	// Reader without seal key should be denied
+	req = httptest.NewRequest("GET", "/v1/secrets/test/sealed-pol", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "sealed response required") {
+		t.Errorf("expected 'sealed response required' in error, got: %s", w.Body.String())
+	}
+}
+
+func TestRequireSealedPolicyAllowsWithKey(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "policy-test"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/sealed-pol", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Register seal key for reader
+	kp, _ := crypto.GenerateSealKeyPair()
+	srv.acl.SetAgentSealKey("reader", crypto.EncodeSealKey(&kp.PublicKey))
+
+	// Set require_sealed policy
+	policyJSON := `{"attestation":{"test/*":{"require_sealed":true}}}`
+	e, _ := policy.Load([]byte(policyJSON))
+	srv.SetPolicy(e)
+
+	// Reader with valid seal key should be allowed
+	req = httptest.NewRequest("GET", "/v1/secrets/test/sealed-pol", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&kp.PublicKey))
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestDryRunUnchangedWithSealKey(t *testing.T) {
 	srv, _, kp := setupSealedTestServer(t)
 

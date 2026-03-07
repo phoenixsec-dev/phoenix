@@ -313,10 +313,14 @@ func certFingerprint(raw []byte) string {
 // Returns nil if no policy is configured or if the request passes.
 // nonceValidated indicates whether a nonce was submitted and validated for this request.
 func (s *Server) attest(r *http.Request, path string, info *authInfo, nonceValidated bool) error {
-	return s.attestSigned(r, path, info, nonceValidated, false)
+	return s.attestFull(r, path, info, nonceValidated, false, false)
 }
 
 func (s *Server) attestSigned(r *http.Request, path string, info *authInfo, nonceValidated, signatureVerified bool) error {
+	return s.attestFull(r, path, info, nonceValidated, signatureVerified, false)
+}
+
+func (s *Server) attestFull(r *http.Request, path string, info *authInfo, nonceValidated, signatureVerified, sealKeyValidated bool) error {
 	if s.policy == nil {
 		return nil
 	}
@@ -330,6 +334,7 @@ func (s *Server) attestSigned(r *http.Request, path string, info *authInfo, nonc
 		NonceValidated:    nonceValidated,
 		SignatureVerified: signatureVerified,
 		TokenIssuedAt:     info.TokenIssuedAt,
+		SealKeyPresented:  sealKeyValidated,
 	}
 	return s.policy.Evaluate(path, ctx)
 }
@@ -414,6 +419,15 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Validate seal header early so attestation gets the correct state
+	// for both list mode and single-secret reads.
+	sealKey, sealErr := s.validateSealHeader(r, agentName)
+	if sealErr != nil {
+		jsonError(w, sealErr.Error(), http.StatusBadRequest)
+		return
+	}
+	sealKeyValidated := sealKey != nil
+
 	// List mode: path is empty or ends with /
 	if path == "" || strings.HasSuffix(path, "/") {
 		allPaths, err := s.backend.List(path)
@@ -428,7 +442,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
-			if s.attest(r, p, info, false) != nil {
+			if s.attestFull(r, p, info, false, false, sealKeyValidated) != nil {
 				continue
 			}
 			visible = append(visible, p)
@@ -445,8 +459,8 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Attestation policy check
-	if err := s.attest(r, path, info, false); err != nil {
+	// Attestation policy check (with validated seal key state)
+	if err := s.attestFull(r, path, info, false, false, sealKeyValidated); err != nil {
 		s.logAudit(s.audit.LogDenied(agentName, "read_value", path, ip, "attestation"))
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
@@ -464,13 +478,6 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("error reading secret %q: %v", path, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	// Sealed response: if agent presented a valid seal key header, encrypt the value
-	sealKey, sealErr := s.validateSealHeader(r, agentName)
-	if sealErr != nil {
-		jsonError(w, sealErr.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -987,7 +994,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Attestation policy check (per-ref)
-		if err := s.attestSigned(r, path, info, nonceValidated, signatureVerified); err != nil {
+		if err := s.attestFull(r, path, info, nonceValidated, signatureVerified, sealKey != nil); err != nil {
 			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "attestation"))
 			errors[refStr] = "attestation required"
 			continue
@@ -1205,6 +1212,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			}
 			if rule.RequireFreshAttestation {
 				checks = append(checks, "fresh-credential")
+			}
+			if rule.RequireSealed {
+				checks = append(checks, "sealed-required")
+			}
+			if rule.AllowUnseal {
+				checks = append(checks, "unseal-allowed")
 			}
 			policySummary[pattern] = strings.Join(checks, " + ")
 		}
