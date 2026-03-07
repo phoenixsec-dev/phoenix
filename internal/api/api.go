@@ -207,6 +207,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/token/mint", s.handleMintToken)
 	s.mux.HandleFunc("POST /v1/proxy", s.handleProxy)
+	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
+	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -465,7 +467,31 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sealed response: if agent presented a valid seal key header, encrypt the value
+	sealKey, sealErr := s.validateSealHeader(r, agentName)
+	if sealErr != nil {
+		jsonError(w, sealErr.Error(), http.StatusBadRequest)
+		return
+	}
+
 	s.logAudit(s.audit.LogAllowed(agentName, "read_value", path, ip))
+	if sealKey != nil {
+		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
+		if err != nil {
+			log.Printf("error sealing secret %q: %v", path, err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		jsonOK(w, map[string]interface{}{
+			"path":         path,
+			"metadata":     secret.Metadata,
+			"sealed_value": env,
+		})
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, secret)
 }
 
@@ -860,6 +886,13 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 	dryRun := r.URL.Query().Get("dry_run") == "true"
 
+	// Validate seal key header early (before processing refs)
+	sealKey, sealErr := s.validateSealHeader(r, agentName)
+	if sealErr != nil {
+		jsonError(w, sealErr.Error(), http.StatusBadRequest)
+		return
+	}
+
 	var req resolveRequest
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -936,6 +969,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	values := make(map[string]string)
+	sealedValues := make(map[string]*crypto.SealedEnvelope)
 	errors := make(map[string]string)
 
 	for _, refStr := range req.Refs {
@@ -997,14 +1031,31 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.logAudit(s.audit.LogAllowed(agentName, "resolve", path, ip))
-		values[refStr] = secret.Value
+
+		if sealKey != nil {
+			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
+			if err != nil {
+				log.Printf("error sealing resolved secret %q: %v", path, err)
+				errors[refStr] = "internal error"
+				continue
+			}
+			sealedValues[refStr] = env
+		} else {
+			values[refStr] = secret.Value
+		}
 	}
 
-	resp := map[string]interface{}{
-		"values": values,
+	resp := map[string]interface{}{}
+	if sealKey != nil && !dryRun {
+		resp["sealed_values"] = sealedValues
+	} else {
+		resp["values"] = values
 	}
 	if len(errors) > 0 {
 		resp["errors"] = errors
+	}
+	if !dryRun {
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	jsonOK(w, resp)
 }
@@ -1234,6 +1285,152 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 		"issued_at":  claims.IssuedAt.Format(time.RFC3339),
 		"expires_at": claims.ExpiresAt.Format(time.RFC3339),
 		"ttl":        s.tokens.TTL().String(),
+	})
+}
+
+// validateSealHeader checks the X-Phoenix-Seal-Key header against the agent's
+// registered public seal key. Returns the decoded 32-byte public key if valid,
+// or nil if no header is present. Returns an error if the header is present but
+// invalid or mismatched.
+func (s *Server) validateSealHeader(r *http.Request, agentName string) (*[32]byte, error) {
+	header := r.Header.Get("X-Phoenix-Seal-Key")
+	if header == "" {
+		return nil, nil
+	}
+
+	pubKey, err := crypto.DecodeSealKey(header)
+	if err != nil {
+		return nil, fmt.Errorf("malformed seal key header: %w", err)
+	}
+
+	registered, err := s.acl.GetAgentSealKey(agentName)
+	if err != nil {
+		return nil, fmt.Errorf("agent lookup failed: %w", err)
+	}
+	if registered == "" {
+		return nil, fmt.Errorf("agent has no registered seal key")
+	}
+	if registered != header {
+		return nil, fmt.Errorf("seal key does not match registered key")
+	}
+
+	return pubKey, nil
+}
+
+// generateKeyPairRequest is the JSON body for keypair generation.
+type generateKeyPairRequest struct {
+	AgentName string `json:"agent_name"`
+}
+
+func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := s.acl.Authorize(agentName, "keypair", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	var req generateKeyPairRequest
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.AgentName == "" {
+		jsonError(w, "agent_name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Verify agent exists
+	_, err = s.acl.GetAgent(req.AgentName)
+	if err != nil {
+		jsonError(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	// Check if agent already has a seal key
+	existing, _ := s.acl.GetAgentSealKey(req.AgentName)
+	force := r.URL.Query().Get("force") == "true"
+	if existing != "" && !force {
+		jsonError(w, "agent already has a seal key (use ?force=true to rotate)", http.StatusConflict)
+		return
+	}
+
+	kp, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		log.Printf("error generating seal keypair: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	pubEncoded := crypto.EncodeSealKey(&kp.PublicKey)
+	privEncoded := crypto.EncodeSealKey(&kp.PrivateKey)
+
+	if err := s.acl.SetAgentSealKey(req.AgentName, pubEncoded); err != nil {
+		log.Printf("error storing seal key for %q: %v", req.AgentName, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	ip := clientIP(r)
+	auditAction := "generate-keypair"
+	if existing != "" {
+		auditAction = "rotate-keypair"
+	}
+	s.logAudit(s.audit.LogAllowed(agentName, auditAction, req.AgentName, ip))
+
+	w.Header().Set("Cache-Control", "no-store")
+	jsonOK(w, map[string]string{
+		"agent_name":       req.AgentName,
+		"seal_public_key":  pubEncoded,
+		"seal_private_key": privEncoded,
+	})
+}
+
+// handleAgentSubresource routes GET /v1/agents/{name}/seal-key
+func (s *Server) handleAgentSubresource(w http.ResponseWriter, r *http.Request) {
+	// Parse: /v1/agents/{name}/seal-key
+	path := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[1] != "seal-key" {
+		jsonError(w, "not found", http.StatusNotFound)
+		return
+	}
+	agentTarget := parts[0]
+	if agentTarget == "" {
+		jsonError(w, "agent name is required", http.StatusBadRequest)
+		return
+	}
+
+	s.handleGetSealKey(w, r, agentTarget)
+}
+
+func (s *Server) handleGetSealKey(w http.ResponseWriter, r *http.Request, agentTarget string) {
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := s.acl.Authorize(agentName, "keypair", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	pubKey, err := s.acl.GetAgentSealKey(agentTarget)
+	if err != nil {
+		jsonError(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	jsonOK(w, map[string]string{
+		"agent_name":      agentTarget,
+		"seal_public_key": pubKey,
 	})
 }
 

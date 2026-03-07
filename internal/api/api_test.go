@@ -2909,3 +2909,371 @@ func TestProxyStub(t *testing.T) {
 		t.Fatalf("proxy should say not yet implemented, got: %s", w.Body.String())
 	}
 }
+
+// --- Sealed Responses Tests (Phase 3) ---
+
+func setupSealedTestServer(t *testing.T) (*Server, string, *crypto.SealKeyPair) {
+	t.Helper()
+	srv, adminToken := setupTestServer(t)
+
+	// Create a test secret
+	body, _ := json.Marshal(setSecretRequest{Value: "sealed-test-value"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/sealed-secret", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("setup secret: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Generate a seal keypair for the reader agent
+	kp, _ := crypto.GenerateSealKeyPair()
+	pubEncoded := crypto.EncodeSealKey(&kp.PublicKey)
+	srv.acl.SetAgentSealKey("reader", pubEncoded)
+
+	return srv, adminToken, kp
+}
+
+func TestGenerateKeyPairSuccess(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if resp["agent_name"] != "reader" {
+		t.Errorf("agent_name = %q, want %q", resp["agent_name"], "reader")
+	}
+	if resp["seal_public_key"] == "" {
+		t.Error("seal_public_key is empty")
+	}
+	if resp["seal_private_key"] == "" {
+		t.Error("seal_private_key is empty")
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", w.Header().Get("Cache-Control"), "no-store")
+	}
+
+	// Verify the key was actually stored
+	stored, _ := srv.acl.GetAgentSealKey("reader")
+	if stored != resp["seal_public_key"] {
+		t.Error("stored key doesn't match returned key")
+	}
+}
+
+func TestGenerateKeyPairRotationRequiresForce(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// First generation
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("first gen: expected 200, got %d", w.Code)
+	}
+
+	// Second generation without force should fail
+	body, _ = json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	req = httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 409 {
+		t.Fatalf("second gen without force: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// With force=true should succeed
+	body, _ = json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	req = httptest.NewRequest("POST", "/v1/keypair?force=true", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("gen with force: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGenerateKeyPairNonAdmin(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestGenerateKeyPairAgentNotFound(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "nonexistent"})
+	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 404 {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestGetSealKey(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Generate a keypair first
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var genResp map[string]string
+	json.NewDecoder(w.Body).Decode(&genResp)
+
+	// Now get the seal key
+	req = httptest.NewRequest("GET", "/v1/agents/reader/seal-key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if resp["agent_name"] != "reader" {
+		t.Errorf("agent_name = %q, want %q", resp["agent_name"], "reader")
+	}
+	if resp["seal_public_key"] != genResp["seal_public_key"] {
+		t.Error("returned public key doesn't match generated key")
+	}
+	// Must never return private key
+	if _, ok := resp["seal_private_key"]; ok {
+		t.Error("seal_private_key must not be returned by GET seal-key")
+	}
+}
+
+func TestSealedGetResponse(t *testing.T) {
+	srv, _, kp := setupSealedTestServer(t)
+
+	req := httptest.NewRequest("GET", "/v1/secrets/test/sealed-secret", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&kp.PublicKey))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	// Should have sealed_value, not value
+	if _, ok := resp["sealed_value"]; !ok {
+		t.Fatal("expected sealed_value in response")
+	}
+	if _, ok := resp["value"]; ok {
+		t.Fatal("value should not be present in sealed response")
+	}
+	if resp["path"] != "test/sealed-secret" {
+		t.Errorf("path = %v, want %q", resp["path"], "test/sealed-secret")
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", w.Header().Get("Cache-Control"), "no-store")
+	}
+
+	// Verify we can decrypt the sealed value
+	envJSON, _ := json.Marshal(resp["sealed_value"])
+	var env crypto.SealedEnvelope
+	json.Unmarshal(envJSON, &env)
+
+	payload, err := crypto.OpenSealedEnvelope(&env, &kp.PrivateKey)
+	if err != nil {
+		t.Fatalf("OpenSealedEnvelope: %v", err)
+	}
+	if payload.Value != "sealed-test-value" {
+		t.Errorf("decrypted value = %q, want %q", payload.Value, "sealed-test-value")
+	}
+}
+
+func TestSealedResolveResponse(t *testing.T) {
+	srv, _, kp := setupSealedTestServer(t)
+
+	body, _ := json.Marshal(resolveRequest{
+		Refs: []string{"phoenix://test/sealed-secret"},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&kp.PublicKey))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	// Should have sealed_values, not values
+	if _, ok := resp["sealed_values"]; !ok {
+		t.Fatal("expected sealed_values in response")
+	}
+	if _, ok := resp["values"]; ok {
+		t.Fatal("values should not be present in sealed response")
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", w.Header().Get("Cache-Control"), "no-store")
+	}
+
+	// Verify we can decrypt
+	sealedMap := resp["sealed_values"].(map[string]interface{})
+	envJSON, _ := json.Marshal(sealedMap["phoenix://test/sealed-secret"])
+	var env crypto.SealedEnvelope
+	json.Unmarshal(envJSON, &env)
+
+	payload, err := crypto.OpenSealedEnvelope(&env, &kp.PrivateKey)
+	if err != nil {
+		t.Fatalf("OpenSealedEnvelope: %v", err)
+	}
+	if payload.Value != "sealed-test-value" {
+		t.Errorf("decrypted value = %q, want %q", payload.Value, "sealed-test-value")
+	}
+	if payload.Ref != "phoenix://test/sealed-secret" {
+		t.Errorf("ref = %q, want %q", payload.Ref, "phoenix://test/sealed-secret")
+	}
+}
+
+func TestPlaintextFallbackWithoutSealHeader(t *testing.T) {
+	srv, _, _ := setupSealedTestServer(t)
+
+	// GET without seal header should return plaintext
+	req := httptest.NewRequest("GET", "/v1/secrets/test/sealed-secret", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	if _, ok := resp["sealed_value"]; ok {
+		t.Fatal("sealed_value should not be present without seal header")
+	}
+	if resp["value"] != "sealed-test-value" {
+		t.Errorf("value = %v, want %q", resp["value"], "sealed-test-value")
+	}
+}
+
+func TestMalformedSealHeaderRejected(t *testing.T) {
+	srv, _, _ := setupSealedTestServer(t)
+
+	req := httptest.NewRequest("GET", "/v1/secrets/test/sealed-secret", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", "not-valid-base64!!!")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestMismatchedSealKeyRejected(t *testing.T) {
+	srv, _, _ := setupSealedTestServer(t)
+
+	// Generate a different key pair
+	otherKP, _ := crypto.GenerateSealKeyPair()
+
+	req := httptest.NewRequest("GET", "/v1/secrets/test/sealed-secret", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&otherKP.PublicKey))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "does not match") {
+		t.Errorf("expected 'does not match' error, got: %s", w.Body.String())
+	}
+}
+
+func TestUnregisteredAgentSealKeyRejected(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Set a secret that admin can read
+	body, _ := json.Marshal(setSecretRequest{Value: "test-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/s", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// reader has no seal key registered — presenting one should fail
+	kp, _ := crypto.GenerateSealKeyPair()
+	req = httptest.NewRequest("GET", "/v1/secrets/test/s", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&kp.PublicKey))
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "no registered seal key") {
+		t.Errorf("expected 'no registered seal key' error, got: %s", w.Body.String())
+	}
+}
+
+func TestDryRunUnchangedWithSealKey(t *testing.T) {
+	srv, _, kp := setupSealedTestServer(t)
+
+	body, _ := json.Marshal(resolveRequest{
+		Refs: []string{"phoenix://test/sealed-secret"},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve?dry_run=true", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&kp.PublicKey))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	// dry_run should still return values map with "ok", not sealed_values
+	vals, ok := resp["values"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected values map in dry_run response")
+	}
+	if vals["phoenix://test/sealed-secret"] != "ok" {
+		t.Errorf("dry_run value = %v, want %q", vals["phoenix://test/sealed-secret"], "ok")
+	}
+	if _, ok := resp["sealed_values"]; ok {
+		t.Fatal("sealed_values should not be present in dry_run response")
+	}
+}
