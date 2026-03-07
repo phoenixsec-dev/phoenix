@@ -6,6 +6,7 @@
 package acl
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,9 +74,10 @@ type Permission struct {
 
 // Agent represents an authenticated entity with permissions.
 type Agent struct {
-	Name        string       `json:"name"`
-	TokenHash   string       `json:"token_hash"`
-	Permissions []Permission `json:"permissions"`
+	Name          string       `json:"name"`
+	TokenHash     string       `json:"token_hash"`
+	Permissions   []Permission `json:"permissions"`
+	SealPublicKey string       `json:"seal_public_key,omitempty"`
 }
 
 // ACLConfig is the on-disk ACL configuration.
@@ -265,14 +267,16 @@ func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if _, exists := a.config.Agents[name]; !exists {
+	existing, exists := a.config.Agents[name]
+	if !exists {
 		return ErrAgentNotFound
 	}
 
 	a.config.Agents[name] = Agent{
-		Name:        name,
-		TokenHash:   crypto.HashToken(token),
-		Permissions: permissions,
+		Name:          name,
+		TokenHash:     crypto.HashToken(token),
+		Permissions:   permissions,
+		SealPublicKey: existing.SealPublicKey,
 	}
 
 	if a.path != "" {
@@ -320,6 +324,48 @@ func (a *ACL) GetAgent(name string) (*Agent, error) {
 		return nil, ErrAgentNotFound
 	}
 	return &agent, nil
+}
+
+// SetAgentSealKey registers or updates an agent's public seal key.
+// The key must be valid base64 encoding exactly 32 bytes (X25519 public key).
+func (a *ACL) SetAgentSealKey(name string, publicKey string) error {
+	raw, err := base64.StdEncoding.DecodeString(publicKey)
+	if err != nil {
+		return fmt.Errorf("invalid seal key encoding: %w", err)
+	}
+	if len(raw) != 32 {
+		return fmt.Errorf("invalid seal key size: got %d bytes, want 32", len(raw))
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	agent, ok := a.config.Agents[name]
+	if !ok {
+		return ErrAgentNotFound
+	}
+
+	agent.SealPublicKey = publicKey
+	a.config.Agents[name] = agent
+
+	if a.path != "" {
+		return a.saveLocked()
+	}
+	return nil
+}
+
+// GetAgentSealKey returns an agent's registered public seal key.
+// Returns ErrAgentNotFound if the agent does not exist.
+// Returns empty string (no error) if the agent has no seal key.
+func (a *ACL) GetAgentSealKey(name string) (string, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	agent, ok := a.config.Agents[name]
+	if !ok {
+		return "", ErrAgentNotFound
+	}
+	return agent.SealPublicKey, nil
 }
 
 // matchPath checks if a glob pattern matches a secret path.

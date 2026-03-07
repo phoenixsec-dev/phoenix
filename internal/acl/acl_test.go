@@ -2,6 +2,7 @@ package acl
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -535,5 +536,163 @@ func TestValidatePermissionsNewActions(t *testing.T) {
 	}
 	if err := ValidatePermissions(perms); err != nil {
 		t.Fatalf("new actions should be valid: %v", err)
+	}
+}
+
+func TestSetAgentSealKey(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+
+	// Valid 32-byte key in base64
+	validKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+	if err := a.SetAgentSealKey("test", validKey); err != nil {
+		t.Fatalf("SetAgentSealKey: %v", err)
+	}
+
+	got, err := a.GetAgentSealKey("test")
+	if err != nil {
+		t.Fatalf("GetAgentSealKey: %v", err)
+	}
+	if got != validKey {
+		t.Errorf("seal key = %q, want %q", got, validKey)
+	}
+}
+
+func TestSetAgentSealKeyNotFound(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+
+	if err := a.SetAgentSealKey("nonexistent", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="); err != ErrAgentNotFound {
+		t.Errorf("expected ErrAgentNotFound, got %v", err)
+	}
+}
+
+func TestSetAgentSealKeyBadBase64(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+
+	if err := a.SetAgentSealKey("test", "not-valid-base64!!!"); err == nil {
+		t.Error("expected error for bad base64")
+	}
+}
+
+func TestSetAgentSealKeyWrongSize(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+
+	// 16 bytes instead of 32
+	shortKey := "AAAAAAAAAAAAAAAAAAAAAA=="
+	if err := a.SetAgentSealKey("test", shortKey); err == nil {
+		t.Error("expected error for wrong key size")
+	}
+}
+
+func TestGetAgentSealKeyNoKey(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+
+	got, err := a.GetAgentSealKey("test")
+	if err != nil {
+		t.Fatalf("GetAgentSealKey: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty seal key, got %q", got)
+	}
+}
+
+func TestGetAgentSealKeyNotFound(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+
+	_, err := a.GetAgentSealKey("nonexistent")
+	if err != ErrAgentNotFound {
+		t.Errorf("expected ErrAgentNotFound, got %v", err)
+	}
+}
+
+func TestSealKeyPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/acl.json"
+
+	a1, _ := New(path)
+	a1.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+
+	validKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if err := a1.SetAgentSealKey("test", validKey); err != nil {
+		t.Fatalf("SetAgentSealKey: %v", err)
+	}
+
+	// Reload from disk
+	a2, err := New(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	got, err := a2.GetAgentSealKey("test")
+	if err != nil {
+		t.Fatalf("GetAgentSealKey after reload: %v", err)
+	}
+	if got != validKey {
+		t.Errorf("seal key after reload = %q, want %q", got, validKey)
+	}
+}
+
+func TestSealKeyBackwardCompat(t *testing.T) {
+	// Simulate loading an old ACL config with no seal_public_key field
+	dir := t.TempDir()
+	path := dir + "/acl.json"
+
+	oldConfig := `{"agents":{"legacy":{"name":"legacy","token_hash":"sha256:abc","permissions":[{"path":"ns/*","actions":["list"]}]}}}`
+	if err := os.WriteFile(path, []byte(oldConfig), 0600); err != nil {
+		t.Fatalf("writing old config: %v", err)
+	}
+
+	a, err := New(path)
+	if err != nil {
+		t.Fatalf("loading old config: %v", err)
+	}
+
+	got, err := a.GetAgentSealKey("legacy")
+	if err != nil {
+		t.Fatalf("GetAgentSealKey: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty seal key for old config, got %q", got)
+	}
+}
+
+func TestUpdateAgentPreservesSealKey(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+	a.AddAgent("test", "tok1", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+
+	validKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	a.SetAgentSealKey("test", validKey)
+
+	// UpdateAgent with new token and permissions
+	if err := a.UpdateAgent("test", "tok2", []Permission{{Path: "other/*", Actions: []Action{ActionWrite}}}); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+
+	got, err := a.GetAgentSealKey("test")
+	if err != nil {
+		t.Fatalf("GetAgentSealKey after update: %v", err)
+	}
+	if got != validKey {
+		t.Errorf("seal key after UpdateAgent = %q, want %q (should be preserved)", got, validKey)
+	}
+}
+
+func TestSetAgentSealKeyOverwrite(t *testing.T) {
+	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+
+	key1 := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	key2 := "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+
+	a.SetAgentSealKey("test", key1)
+	a.SetAgentSealKey("test", key2)
+
+	got, _ := a.GetAgentSealKey("test")
+	if got != key2 {
+		t.Errorf("seal key = %q, want %q (should be overwritten)", got, key2)
 	}
 }
