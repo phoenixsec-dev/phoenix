@@ -34,11 +34,11 @@ Generate an X25519 key pair per agent:
 phoenix keypair generate myagent
 ```
 
-This writes two files:
-- `myagent.seal.key` (private key, mode `0600`)
-- `myagent.seal.pub` (public key)
+This writes one file:
+- `myagent.seal.key` (private key, base64-encoded 32 bytes, mode `0600`)
 
-Both are base64-encoded 32-byte values.
+The derived public key is printed to stdout for reference (e.g., for
+server-side registration). It is not written to a file.
 
 Override the output directory:
 

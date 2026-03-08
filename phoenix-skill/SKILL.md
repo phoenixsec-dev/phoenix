@@ -158,8 +158,8 @@ Query the audit log. Filter by count, agent, or time range.
 phoenix keypair generate <agent-name> [-o /path/to/keys/]
 ```
 
-Generates `<name>.seal.key` (private) and `<name>.seal.pub` (public) for
-sealed mode. Set `PHOENIX_SEAL_KEY` to the private key path to enable.
+Writes `<name>.seal.key` (private key, mode `0600`) and prints the derived
+public key to stdout. Set `PHOENIX_SEAL_KEY` to the private key path to enable.
 
 When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 `phoenix exec` transparently encrypt/decrypt values using NaCl box.
