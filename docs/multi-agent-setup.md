@@ -11,14 +11,9 @@ should be encrypted per-agent even in transit.
 
 ## Setup
 
-### 1. Generate key pairs
+### 1. Create agents with scoped ACLs
 
-```bash
-phoenix keypair generate builder -o /etc/phoenix/keys/
-phoenix keypair generate deployer -o /etc/phoenix/keys/
-```
-
-### 2. Create agents with scoped ACLs
+Agents must exist before key pairs can be generated.
 
 ```bash
 phoenix agent create builder \
@@ -28,6 +23,13 @@ phoenix agent create builder \
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
   --acl "deploy/*:read;infra/*:read"
+```
+
+### 2. Generate key pairs
+
+```bash
+phoenix keypair generate builder -o /etc/phoenix/keys/
+phoenix keypair generate deployer -o /etc/phoenix/keys/
 ```
 
 ### 3. Configure policy
@@ -106,9 +108,11 @@ Each agent's MCP config points to its own seal key:
 ## Verification
 
 ```bash
-# Check that sealed mode is active (look for sealed_values in response)
+# Check that sealed mode works (resolves successfully with seal key)
 PHOENIX_SEAL_KEY=/etc/phoenix/keys/builder.seal.key \
   phoenix resolve phoenix://build/api-key
+# If this prints the secret value, sealed mode is working — the CLI
+# decrypts locally and prints plaintext for single refs.
 
 # Verify deployer cannot access builder paths
 PHOENIX_TOKEN=<deployer-token> \

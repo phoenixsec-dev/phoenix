@@ -1041,6 +1041,11 @@ func cmdResolve(args []string) error {
 		}
 		errs = result.Errors
 		for ref, raw := range result.SealedValues {
+			if envMap, ok := raw.(map[string]interface{}); ok {
+				if envRef, _ := envMap["ref"].(string); envRef != ref {
+					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
+				}
+			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
 				return fmt.Errorf("decrypting %s: %w", ref, err)
@@ -1270,6 +1275,11 @@ func cmdExec(args []string) error {
 		}
 		resolveErrors = result.Errors
 		for ref, raw := range result.SealedValues {
+			if envMap, ok := raw.(map[string]interface{}); ok {
+				if envRef, _ := envMap["ref"].(string); envRef != ref {
+					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
+				}
+			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
 				return fmt.Errorf("decrypting %s: %w", ref, err)
@@ -2284,6 +2294,11 @@ func cmdAgentSockResolve(args []string) error {
 		}
 		errs = result.Errors
 		for ref, raw := range result.SealedValues {
+			if envMap, ok := raw.(map[string]interface{}); ok {
+				if envRef, _ := envMap["ref"].(string); envRef != ref {
+					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
+				}
+			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
 				return fmt.Errorf("decrypting %s: %w", ref, err)

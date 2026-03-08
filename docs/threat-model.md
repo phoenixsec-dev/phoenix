@@ -77,8 +77,10 @@ ephemeral key pair to the requesting agent's public key.
 - **MCP tool output leakage** — sealed values appear as opaque
   `PHOENIX_SEALED:...` tokens in tool responses.
 - **Relabeling attacks** — inner/outer binding (path + ref in both
-  envelope and encrypted payload) prevents a malicious intermediary
-  from swapping sealed values between refs.
+  envelope and encrypted payload) combined with map-key validation in
+  clients detects attempts to swap sealed values between refs. All
+  SDK clients and the CLI validate that the map key matches the
+  envelope's ref field before decryption.
 
 **Not mitigated:**
 - Compromised agent private key (all sealed values to that key are exposed).

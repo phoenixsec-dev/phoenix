@@ -326,6 +326,13 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		hasErrors := len(result.Errors) > 0
 		for _, ref := range params.Refs {
 			if raw, ok := result.SealedValues[ref]; ok {
+				if envMap, ok := raw.(map[string]interface{}); ok {
+					if envRef, _ := envMap["ref"].(string); envRef != ref {
+						lines = append(lines, fmt.Sprintf("%s: ERROR: sealed envelope ref mismatch (envelope has %q)", ref, envRef))
+						hasErrors = true
+						continue
+					}
+				}
 				envJSON, _ := json.Marshal(raw)
 				sealToken := "PHOENIX_SEALED:" + base64.StdEncoding.EncodeToString(envJSON)
 				lines = append(lines, fmt.Sprintf("%s = %s", ref, sealToken))
@@ -418,6 +425,11 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 		}
 		if sealed.SealedValue == nil {
 			return fmt.Sprintf("%s: expected sealed_value in response", params.Path), true
+		}
+		if envMap, ok := sealed.SealedValue.(map[string]interface{}); ok {
+			if envPath, _ := envMap["path"].(string); envPath != params.Path {
+				return fmt.Sprintf("%s: sealed envelope path mismatch (envelope has %q)", params.Path, envPath), true
+			}
 		}
 		envJSON, _ := json.Marshal(sealed.SealedValue)
 		token := "PHOENIX_SEALED:" + base64.StdEncoding.EncodeToString(envJSON)
