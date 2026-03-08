@@ -25,6 +25,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,8 +33,13 @@ import (
 	"os"
 	"strings"
 
+	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/version"
 )
+
+// mcpSealPrivKey holds the loaded seal private key for MCP sealed mode.
+// Set during cmdMCP startup if PHOENIX_SEAL_KEY is configured.
+var mcpSealPrivKey *[32]byte
 
 // JSON-RPC wire types.
 
@@ -96,7 +102,7 @@ type mcpCallToolParams struct {
 
 // Tool definitions with JSON Schema input schemas.
 
-var mcpTools = []mcpTool{
+var mcpBaseTools = []mcpTool{
 	{
 		Name:        "phoenix_resolve",
 		Description: "Resolve one or more phoenix:// secret references to their values. References are opaque URIs like phoenix://namespace/secret-name. Returns the resolved values for each reference.",
@@ -141,6 +147,32 @@ var mcpTools = []mcpTool{
 	},
 }
 
+var mcpUnsealTool = mcpTool{
+	Name:        "phoenix_unseal",
+	Description: "Decrypt a sealed secret value. The decrypted value will be visible in this conversation. Only works when allow_unseal policy is set for the secret's path.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"sealed": {
+				"type": "string",
+				"description": "Sealed token (PHOENIX_SEALED:...)"
+			}
+		},
+		"required": ["sealed"]
+	}`),
+}
+
+// mcpGetTools returns the tool list, including phoenix_unseal only when sealed mode is active.
+func mcpGetTools() []mcpTool {
+	if mcpSealPrivKey != nil {
+		tools := make([]mcpTool, len(mcpBaseTools)+1)
+		copy(tools, mcpBaseTools)
+		tools[len(mcpBaseTools)] = mcpUnsealTool
+		return tools
+	}
+	return mcpBaseTools
+}
+
 // mcpHandleRequest processes a single JSON-RPC request and writes the
 // response to enc. Notifications (no id) are silently ignored.
 func mcpHandleRequest(req mcpRequest, enc *json.Encoder, logger *log.Logger) {
@@ -162,7 +194,7 @@ func mcpHandleRequest(req mcpRequest, enc *json.Encoder, logger *log.Logger) {
 		})
 
 	case "tools/list":
-		mcpSendResult(enc, req.ID, mcpListToolsResult{Tools: mcpTools})
+		mcpSendResult(enc, req.ID, mcpListToolsResult{Tools: mcpGetTools()})
 
 	case "tools/call":
 		var params mcpCallToolParams
@@ -187,8 +219,18 @@ func cmdMCP(args []string) error {
 		return err
 	}
 
+	// Load seal key if configured.
+	sealKey, err := loadSealKey()
+	if err != nil {
+		return fmt.Errorf("loading seal key: %w", err)
+	}
+	mcpSealPrivKey = sealKey
+
 	// All logging goes to stderr — stdout is the MCP protocol channel.
 	logger := log.New(os.Stderr, "phoenix-mcp: ", 0)
+	if mcpSealPrivKey != nil {
+		logger.Println("sealed mode enabled")
+	}
 	logger.Println("server starting (stdio)")
 
 	dec := json.NewDecoder(os.Stdin)
@@ -221,6 +263,8 @@ func mcpDispatchTool(name string, args json.RawMessage, logger *log.Logger) (str
 		return mcpToolGet(args, logger)
 	case "phoenix_list":
 		return mcpToolList(args, logger)
+	case "phoenix_unseal":
+		return mcpToolUnseal(args, logger)
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name), true
 	}
@@ -243,8 +287,14 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Internal error: %v", err), true
 	}
 
-	resp, err := apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)),
-		map[string]string{"X-Phoenix-Tool": "phoenix_resolve"})
+	hdrs := map[string]string{"X-Phoenix-Tool": "phoenix_resolve"}
+	if mcpSealPrivKey != nil {
+		for k, v := range sealHeaders(mcpSealPrivKey) {
+			hdrs[k] = v
+		}
+	}
+
+	resp, err := apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -254,6 +304,44 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Server error: HTTP %d", resp.StatusCode), true
 	}
 
+	// Sealed mode: return opaque PHOENIX_SEALED: tokens
+	if mcpSealPrivKey != nil {
+		var result struct {
+			SealedValues map[string]interface{} `json:"sealed_values"`
+			Errors       map[string]string      `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Sprintf("Failed to decode response: %v", err), true
+		}
+
+		if len(result.SealedValues) == 0 && len(result.Errors) > 0 {
+			var msgs []string
+			for ref, errMsg := range result.Errors {
+				msgs = append(msgs, fmt.Sprintf("%s: %s", ref, errMsg))
+			}
+			return strings.Join(msgs, "\n"), true
+		}
+
+		var lines []string
+		hasErrors := len(result.Errors) > 0
+		for _, ref := range params.Refs {
+			if raw, ok := result.SealedValues[ref]; ok {
+				envJSON, _ := json.Marshal(raw)
+				sealToken := "PHOENIX_SEALED:" + base64.StdEncoding.EncodeToString(envJSON)
+				lines = append(lines, fmt.Sprintf("%s = %s", ref, sealToken))
+			} else if errMsg, ok := result.Errors[ref]; ok {
+				lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, errMsg))
+			} else {
+				lines = append(lines, fmt.Sprintf("%s: ERROR: no value returned by server", ref))
+				hasErrors = true
+			}
+		}
+
+		logger.Printf("resolved %d/%d refs (sealed)", len(result.SealedValues), len(params.Refs))
+		return strings.Join(lines, "\n"), hasErrors
+	}
+
+	// Plaintext mode
 	var result struct {
 		Values map[string]string `json:"values"`
 		Errors map[string]string `json:"errors"`
@@ -262,7 +350,6 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Failed to decode response: %v", err), true
 	}
 
-	// If all refs failed, report errors.
 	if len(result.Values) == 0 && len(result.Errors) > 0 {
 		var msgs []string
 		for ref, errMsg := range result.Errors {
@@ -271,7 +358,6 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return strings.Join(msgs, "\n"), true
 	}
 
-	// Build output: values first, then any partial errors.
 	var lines []string
 	for _, ref := range params.Refs {
 		if val, ok := result.Values[ref]; ok {
@@ -282,7 +368,6 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 
 	logger.Printf("resolved %d/%d refs", len(result.Values), len(params.Refs))
-
 	hasErrors := len(result.Errors) > 0
 	return strings.Join(lines, "\n"), hasErrors
 }
@@ -299,8 +384,14 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return "Path is required", true
 	}
 
-	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+params.Path, nil,
-		map[string]string{"X-Phoenix-Tool": "phoenix_get"})
+	hdrs := map[string]string{"X-Phoenix-Tool": "phoenix_get"}
+	if mcpSealPrivKey != nil {
+		for k, v := range sealHeaders(mcpSealPrivKey) {
+			hdrs[k] = v
+		}
+	}
+
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+params.Path, nil, hdrs)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -315,6 +406,23 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 			return fmt.Sprintf("%s: %s", params.Path, errResp.Error), true
 		}
 		return fmt.Sprintf("%s: HTTP %d", params.Path, resp.StatusCode), true
+	}
+
+	// Sealed mode: return opaque PHOENIX_SEALED: token
+	if mcpSealPrivKey != nil {
+		var sealed struct {
+			SealedValue interface{} `json:"sealed_value"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&sealed); err != nil {
+			return fmt.Sprintf("Failed to decode response: %v", err), true
+		}
+		if sealed.SealedValue == nil {
+			return fmt.Sprintf("%s: expected sealed_value in response", params.Path), true
+		}
+		envJSON, _ := json.Marshal(sealed.SealedValue)
+		token := "PHOENIX_SEALED:" + base64.StdEncoding.EncodeToString(envJSON)
+		logger.Printf("get %s (sealed)", params.Path)
+		return token, false
 	}
 
 	var result struct {
@@ -378,6 +486,73 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 
 	logger.Printf("listed %d secrets", len(result.Paths))
 	return strings.Join(result.Paths, "\n"), false
+}
+
+// mcpToolUnseal decrypts a sealed secret token locally.
+func mcpToolUnseal(args json.RawMessage, logger *log.Logger) (string, bool) {
+	if mcpSealPrivKey == nil {
+		return "Sealed mode is not enabled (PHOENIX_SEAL_KEY not set)", true
+	}
+
+	var params struct {
+		Sealed string `json:"sealed"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return fmt.Sprintf("Invalid arguments: %v", err), true
+	}
+
+	const prefix = "PHOENIX_SEALED:"
+	if !strings.HasPrefix(params.Sealed, prefix) {
+		return "Invalid sealed token: must start with PHOENIX_SEALED:", true
+	}
+
+	envJSON, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(params.Sealed, prefix))
+	if err != nil {
+		return fmt.Sprintf("Invalid sealed token: bad base64: %v", err), true
+	}
+
+	var env crypto.SealedEnvelope
+	if err := json.Unmarshal(envJSON, &env); err != nil {
+		return fmt.Sprintf("Invalid sealed envelope: %v", err), true
+	}
+
+	// Check allow_unseal via server policy (authoritative source)
+	allowed, err := mcpCheckAllowUnseal(env.Path)
+	if err != nil {
+		return fmt.Sprintf("Policy check failed: %v", err), true
+	}
+	if !allowed {
+		return "Unseal denied: allow_unseal is not set for this path", true
+	}
+
+	payload, err := crypto.OpenSealedEnvelope(&env, mcpSealPrivKey)
+	if err != nil {
+		return fmt.Sprintf("Decryption failed: %v", err), true
+	}
+
+	logger.Printf("unseal %s (value now visible in conversation)", env.Path)
+	return payload.Value, false
+}
+
+// mcpCheckAllowUnseal queries the server's authoritative policy for allow_unseal.
+func mcpCheckAllowUnseal(path string) (bool, error) {
+	resp, err := apiRequest("GET", "/v1/policy/check?path="+path+"&check=allow_unseal", nil)
+	if err != nil {
+		return false, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Allowed bool `json:"allowed"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("decoding response: %w", err)
+	}
+	return result.Allowed, nil
 }
 
 // mcpSendResult sends a successful JSON-RPC response.

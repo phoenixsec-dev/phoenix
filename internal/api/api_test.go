@@ -3336,3 +3336,104 @@ func TestDryRunUnchangedWithSealKey(t *testing.T) {
 		t.Fatal("sealed_values should not be present in dry_run response")
 	}
 }
+
+// --- Policy check endpoint tests ---
+
+func TestPolicyCheckAllowUnseal(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	pe, _ := policy.Load([]byte(`{"rules":[{"path":"test/*","allow_unseal":true}]}`))
+	srv.SetPolicy(pe)
+
+	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["allowed"] != true {
+		t.Fatalf("allowed = %v, want true", resp["allowed"])
+	}
+}
+
+func TestPolicyCheckDenyUnseal(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	pe, _ := policy.Load([]byte(`{"rules":[{"path":"other/*","allow_unseal":true}]}`))
+	srv.SetPolicy(pe)
+
+	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["allowed"] != false {
+		t.Fatalf("allowed = %v, want false", resp["allowed"])
+	}
+}
+
+func TestPolicyCheckNoPolicy(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	// No policy set — should return allowed=false
+
+	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["allowed"] != false {
+		t.Fatalf("allowed = %v, want false (no policy)", resp["allowed"])
+	}
+}
+
+func TestPolicyCheckRequiresAuth(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestPolicyCheckMissingParams(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestPolicyCheckUnsupportedCheck(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=bogus", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}

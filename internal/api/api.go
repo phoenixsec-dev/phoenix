@@ -209,6 +209,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/proxy", s.handleProxy)
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
+	s.mux.HandleFunc("GET /v1/policy/check", s.handlePolicyCheck)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -1251,6 +1252,43 @@ type mintTokenRequest struct {
 	Agent      string `json:"agent"`
 	ProcessUID *int   `json:"process_uid,omitempty"`
 	BinaryHash string `json:"binary_hash,omitempty"`
+}
+
+// handlePolicyCheck returns whether a specific policy check passes for a path.
+// Query params: path (required), check (required, e.g. "allow_unseal").
+func (s *Server) handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
+	_, err := s.authenticate(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	path := r.URL.Query().Get("path")
+	check := r.URL.Query().Get("check")
+	if path == "" || check == "" {
+		jsonError(w, "path and check query parameters required", http.StatusBadRequest)
+		return
+	}
+
+	if check != "allow_unseal" {
+		jsonError(w, "unsupported check: "+check, http.StatusBadRequest)
+		return
+	}
+
+	allowed := false
+	if s.policy != nil {
+		rule, _ := s.policy.RuleFor(path)
+		if rule != nil {
+			allowed = rule.AllowUnseal
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"path":    path,
+		"check":   check,
+		"allowed": allowed,
+	})
 }
 
 // handleMintToken creates a short-lived token for an agent.
