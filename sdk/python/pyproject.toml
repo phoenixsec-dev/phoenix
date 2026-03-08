@@ -8,6 +8,10 @@ version = "0.1.0"
 description = "Python client for the Phoenix secrets management API"
 requires-python = ">=3.9"
 license = "MIT"
+dependencies = []
+
+[project.optional-dependencies]
+sealed = ["PyNaCl>=1.5.0"]
 
 [project.urls]
 Repository = "https://github.com/phoenixsec/phoenix"

@@ -8,5 +8,8 @@
     "test": "node --test src/client.test.js"
   },
   "license": "MIT",
-  "keywords": ["secrets", "phoenix", "ai-agents", "security"]
+  "keywords": ["secrets", "phoenix", "ai-agents", "security"],
+  "optionalDependencies": {
+    "tweetnacl": "^1.0.3"
+  }
 }
