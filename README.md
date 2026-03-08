@@ -55,7 +55,12 @@ retrieve plaintext via:
 - `phoenix resolve`
 - direct API calls (`GET /v1/secrets/*`, `POST /v1/resolve`)
 
-Use scoped ACLs, mTLS/attestation, and operational guardrails to minimize plaintext exposure.
+**Sealed responses** (v1.0.0+) add per-agent transport encryption. With `require_sealed`
+policy, agents must use sealed mode — values are encrypted to the agent's key pair and
+never sent as plaintext. With `allow_unseal: false`, MCP tool output stays opaque.
+This significantly reduces plaintext exposure in multi-agent and MCP workflows.
+
+Use scoped ACLs, mTLS/attestation, sealed mode, and operational guardrails to minimize plaintext exposure.
 
 ## Execution model (quick deployment guidance)
 
@@ -102,6 +107,7 @@ Phoenix is the layer underneath. It provides the actual vault, the identity veri
 | Network-bound | Request comes from expected host | `source_ip` |
 | Identity-pinned | Specific certificate required | `cert_fingerprint` |
 | mTLS-only | Cryptographic identity, no tokens | `require_mtls` + `deny_bearer` |
+| Sealed | Values encrypted to agent's key pair | `require_sealed` |
 
 Levels compose — a production database password can require mTLS from a specific IP with a pinned cert, while a staging API key just needs a valid token.
 
@@ -112,6 +118,8 @@ Levels compose — a production database password can require mTLS from a specif
 **Crash-Safe Key Rotation** — Master key rotation uses two-phase commit with pre-rotation backups. If anything fails mid-rotation, the system recovers automatically.
 
 **Full Audit Trail** — Every secret access, denial, and resolution attempt is logged with agent identity, action, path, IP, and reason. Audit logs are append-only JSON Lines. Secret values are never logged.
+
+**Sealed Responses** — Per-agent X25519 key pairs encrypt secret values end-to-end from the server to the requesting agent using NaCl box. Each response uses a fresh ephemeral key (forward secrecy). Multi-agent deployments on the same host get cryptographic isolation — one agent cannot read another's sealed responses. MCP mode returns opaque `PHOENIX_SEALED:` tokens instead of plaintext. Policy controls (`require_sealed`, `allow_unseal`) enforce sealed mode per path.
 
 **Agent-Native Integration** — MCP server mode for Claude Code/Desktop. Works as an OpenClaw exec backend. SDK clients for Go, Python, and TypeScript. Your agent framework talks to Phoenix natively.
 
@@ -125,6 +133,8 @@ Levels compose — a production database password can require mTLS from a specif
 - [Threat Model](docs/threat-model.md)
 - [Migration Guide: `.env` to Phoenix](docs/migration-env-to-phoenix.md)
 - [Admin Token Lifecycle](docs/admin-token-lifecycle.md)
+- [Sealed Responses](docs/sealed-responses.md)
+- [Multi-Agent Setup](docs/multi-agent-setup.md)
 - [API Reference Index](docs/api-reference-index.md)
 - [Reference-Only Enforcement Design (WIP)](docs/reference-only-enforcement-design.md)
 - [Release Runbook](docs/release-runbook.md)
@@ -444,7 +454,7 @@ Then point your MCP client to `http://127.0.0.1:8080/mcp` with:
 
 The agent can list available secrets, resolve references, and read values — all through the authenticated, policy-checked API. MCP tool calls include tool identity headers (`X-Phoenix-Tool`), enabling `allowed_tools`/`deny_tools` attestation policies to control which MCP tools can access which secrets.
 
-> **Security note:** `phoenix_get` and `phoenix_resolve` return plaintext secret values in the MCP tool response. This may keep values out of prompt text, but the tool output is still visible to the MCP client process. Scope production tokens and ACLs tightly — grant agents only the minimum paths they need.
+> **Security note:** By default, `phoenix_get` and `phoenix_resolve` return plaintext secret values in the MCP tool response. With sealed mode (`PHOENIX_SEAL_KEY`), these tools return opaque `PHOENIX_SEALED:` tokens instead — use the `phoenix_unseal` tool to decrypt when policy permits. See [Sealed Responses](docs/sealed-responses.md) for details.
 
 ### Claude Code Skill (SKILL.md)
 
@@ -842,6 +852,7 @@ Troubleshooting:
 | `PHOENIX_CA_CERT` | CA certificate for TLS verification |
 | `PHOENIX_CLIENT_CERT` | Client certificate for mTLS |
 | `PHOENIX_CLIENT_KEY` | Client key for mTLS |
+| `PHOENIX_SEAL_KEY` | Seal private key file path (enables sealed mode) |
 | `PHOENIX_POLICY` | Policy file path (for `phoenix policy` commands) |
 | `PHOENIX_OP_TOKEN_ENV` | (Import only) env var name holding 1Password token |
 
@@ -911,6 +922,7 @@ docker compose up -d
 - Audit trail gaps (append-only log, values never logged, every access recorded)
 - Crash corruption during key rotation (two-phase commit + emergency recovery)
 - Lateral movement between agents (per-agent ACL with namespace isolation)
+- Response interception between agents (sealed responses with per-agent key pairs)
 
 **What Phoenix does NOT protect against:**
 - Root/kernel compromise on the Phoenix host

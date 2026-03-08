@@ -63,6 +63,32 @@ Per-path policy can require combinations of:
 - `require_nonce`
 - `require_fresh_attestation`
 
+## Sealed responses
+
+Sealed responses add per-agent transport encryption using NaCl box
+(X25519 + XSalsa20-Poly1305). Each response is encrypted with a fresh
+ephemeral key pair to the requesting agent's public key.
+
+**Threats mitigated:**
+- **Network eavesdropping past TLS termination** — values are encrypted
+  end-to-end from server to agent, independent of TLS.
+- **Cross-agent response interception** — agents on the same host each
+  have unique key pairs; one agent cannot decrypt another's responses.
+- **MCP tool output leakage** — sealed values appear as opaque
+  `PHOENIX_SEALED:...` tokens in tool responses.
+- **Relabeling attacks** — inner/outer binding (path + ref in both
+  envelope and encrypted payload) prevents a malicious intermediary
+  from swapping sealed values between refs.
+
+**Not mitigated:**
+- Compromised agent private key (all sealed values to that key are exposed).
+- Agent process memory (once decrypted, plaintext is in agent memory).
+- Server-side compromise (sealed responses are transport, not storage).
+
+**Policy controls:**
+- `require_sealed` — deny access without a valid seal key header.
+- `allow_unseal` — server-authoritative gate on MCP unseal tool.
+
 ## Out of scope / non-goals
 
 - Host root compromise or kernel compromise

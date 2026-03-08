@@ -79,6 +79,39 @@ Query params:
 - `process_uid` (optional)
 - `binary_hash` (optional)
 
+## Policy checks
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/v1/policy/check` | Query server-authoritative policy for a path |
+
+Query params:
+- `path` (required): secret path to check
+- `check` (required): policy check to perform (currently only `allow_unseal`)
+
+Response:
+```json
+{ "path": "myapp/key", "check": "allow_unseal", "allowed": true }
+```
+
+## Sealed responses
+
+When a request includes the `X-Phoenix-Seal-Key` header (base64-encoded
+X25519 public key), secret-returning endpoints respond with `sealed_values`
+instead of `values`. Each value is a sealed envelope encrypted to the
+provided public key using NaCl box (X25519 + XSalsa20-Poly1305).
+
+Affected endpoints:
+- `GET /v1/secrets/{path}` — returns `sealed_value` instead of `value`
+- `POST /v1/resolve` — returns `sealed_values` map instead of `values`
+
+`POST /v1/resolve?dry_run=true` always returns plaintext `"ok"` status
+values regardless of seal key presence.
+
+All secret-returning responses include `Cache-Control: no-store`.
+
+See [Sealed Responses](sealed-responses.md) for the full guide.
+
 ## Common error shape
 
 Most failures return:
