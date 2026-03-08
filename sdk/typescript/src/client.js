@@ -59,8 +59,13 @@ class PhoenixClient {
    * @param {string} path - Path to the seal private key file
    */
   async setSealKey(path) {
-    const fs = await import("node:fs/promises");
-    const raw = (await fs.readFile(path, "utf8")).trim();
+    let raw;
+    try {
+      const fs = await import("node:fs/promises");
+      raw = (await fs.readFile(path, "utf8")).trim();
+    } catch (err) {
+      throw new PhoenixError(`reading seal key: ${err.message}`);
+    }
     const privBytes = Buffer.from(raw, "base64");
     if (privBytes.length !== 32) {
       throw new PhoenixError(
@@ -81,6 +86,7 @@ class PhoenixClient {
       new Uint8Array(privBytes)
     );
     this._sealPubB64 = Buffer.from(keyPair.publicKey).toString("base64");
+    this._sealKeyError = null;
   }
 
   /**

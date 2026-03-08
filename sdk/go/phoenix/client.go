@@ -130,33 +130,39 @@ func (c *Client) ResolveBatch(refs []string) (*ResolveResult, error) {
 	body := map[string]interface{}{"refs": refs}
 
 	if c.sealPriv != nil {
-		// Sealed mode: parse sealed_values and decrypt locally
+		// Sealed mode: parse sealed_values and decrypt locally,
+		// falling back to plaintext values if server doesn't seal.
 		var raw struct {
 			SealedValues map[string]json.RawMessage `json:"sealed_values"`
+			Values       map[string]string          `json:"values"`
 			Errors       map[string]string          `json:"errors,omitempty"`
 		}
 		if err := c.doRequest("POST", "/v1/resolve", body, &raw); err != nil {
 			return nil, err
 		}
-		result := &ResolveResult{
-			Values: make(map[string]string, len(raw.SealedValues)),
-			Errors: raw.Errors,
+		if len(raw.SealedValues) > 0 {
+			result := &ResolveResult{
+				Values: make(map[string]string, len(raw.SealedValues)),
+				Errors: raw.Errors,
+			}
+			for ref, envJSON := range raw.SealedValues {
+				var env SealedEnvelope
+				if err := json.Unmarshal(envJSON, &env); err != nil {
+					return nil, &Error{Message: fmt.Sprintf("parsing sealed envelope for %s: %v", ref, err)}
+				}
+				if env.Ref != ref {
+					return nil, &Error{Message: fmt.Sprintf("sealed envelope ref mismatch: map key %q, envelope %q", ref, env.Ref)}
+				}
+				val, err := openSealedEnvelope(&env, c.sealPriv)
+				if err != nil {
+					return nil, &Error{Message: fmt.Sprintf("decrypting %s: %v", ref, err)}
+				}
+				result.Values[ref] = val
+			}
+			return result, nil
 		}
-		for ref, envJSON := range raw.SealedValues {
-			var env SealedEnvelope
-			if err := json.Unmarshal(envJSON, &env); err != nil {
-				return nil, &Error{Message: fmt.Sprintf("parsing sealed envelope for %s: %v", ref, err)}
-			}
-			if env.Ref != ref {
-				return nil, &Error{Message: fmt.Sprintf("sealed envelope ref mismatch: map key %q, envelope %q", ref, env.Ref)}
-			}
-			val, err := openSealedEnvelope(&env, c.sealPriv)
-			if err != nil {
-				return nil, &Error{Message: fmt.Sprintf("decrypting %s: %v", ref, err)}
-			}
-			result.Values[ref] = val
-		}
-		return result, nil
+		// Fallback: server returned plaintext values
+		return &ResolveResult{Values: raw.Values, Errors: raw.Errors}, nil
 	}
 
 	var result ResolveResult

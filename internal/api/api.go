@@ -1361,7 +1361,11 @@ func (s *Server) validateSealHeader(r *http.Request, agentName string) (*[32]byt
 	if registered == "" {
 		return nil, fmt.Errorf("agent has no registered seal key")
 	}
-	if registered != header {
+	registeredKey, err := crypto.DecodeSealKey(registered)
+	if err != nil {
+		return nil, fmt.Errorf("registered seal key is malformed: %w", err)
+	}
+	if *registeredKey != *pubKey {
 		return nil, fmt.Errorf("seal key does not match registered key")
 	}
 

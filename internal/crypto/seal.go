@@ -171,19 +171,24 @@ func OpenSealedEnvelope(env *SealedEnvelope, recipientPrivKey *[32]byte) (*Seale
 
 // LoadSealPrivateKey reads a base64-encoded 32-byte X25519 private key from a file.
 func LoadSealPrivateKey(path string) (*[32]byte, error) {
-	info, err := os.Stat(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrSealKeyFileNotFound
 	}
 	if err != nil {
+		return nil, fmt.Errorf("opening seal key file: %w", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
 		return nil, fmt.Errorf("stat seal key file: %w", err)
 	}
-
 	if info.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("%w: %s has mode %04o", ErrSealKeyInsecurePerm, path, info.Mode().Perm())
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("reading seal key file: %w", err)
 	}

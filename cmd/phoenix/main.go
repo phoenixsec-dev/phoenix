@@ -317,6 +317,8 @@ Usage:
   phoenix agent-sock attest [--socket <path>]  Attest via local Unix socket agent
   phoenix agent-sock token --agent <name>      Mint/cache short-lived token via socket
   phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
+  phoenix keypair generate <name> [-o dir]     Generate X25519 seal key pair
+  phoenix keypair show <name>                 Show public key for a seal key pair
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix mcp-server --http :8080             Run MCP server (Streamable HTTP)
   phoenix init <dir>                          Initialize data directory
@@ -327,6 +329,7 @@ Environment:
   PHOENIX_CA_CERT      CA certificate for TLS verification
   PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
   PHOENIX_CLIENT_KEY   Client key for mTLS authentication
+  PHOENIX_SEAL_KEY     Seal private key file (enables sealed mode)
   PHOENIX_POLICY       Path to attestation policy file (JSON)
   PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)
   PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)`)
