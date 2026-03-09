@@ -63,6 +63,20 @@ Per-path policy can require combinations of:
 - `require_nonce`
 - `require_fresh_attestation`
 
+## Sealed responses
+
+Sealed responses add per-agent transport encryption (NaCl box: X25519 +
+XSalsa20-Poly1305) with fresh ephemeral keys per response. This mitigates
+network eavesdropping past TLS termination, cross-agent response interception
+on shared hosts, MCP tool output leakage, and relabeling attacks.
+
+It does not protect against a compromised agent private key, in-process
+memory access after decryption, or server-side compromise.
+
+For the full sealed responses design, wire format, policy controls
+(`require_sealed`, `allow_unseal`), and SDK integration, see
+[Sealed Responses](sealed-responses.md).
+
 ## Out of scope / non-goals
 
 - Host root compromise or kernel compromise

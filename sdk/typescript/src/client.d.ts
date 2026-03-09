@@ -12,6 +12,7 @@ export interface PhoenixClientOptions {
   server?: string;
   token?: string;
   timeout?: number;
+  sealKeyPath?: string;
 }
 
 export class PhoenixClient {
@@ -21,6 +22,7 @@ export class PhoenixClient {
 
   constructor(options?: PhoenixClientOptions);
 
+  setSealKey(path: string): Promise<void>;
   health(): Promise<Record<string, unknown>>;
   resolve(ref: string): Promise<string>;
   resolveBatch(refs: string[]): Promise<ResolveResult>;

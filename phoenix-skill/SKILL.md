@@ -21,6 +21,7 @@ environment variables before use:
 - `PHOENIX_TOKEN` — bearer token for authentication
 - `PHOENIX_CA_CERT` — CA certificate path (for TLS)
 - `PHOENIX_CLIENT_CERT` / `PHOENIX_CLIENT_KEY` — mTLS client auth
+- `PHOENIX_SEAL_KEY` — seal private key file path (enables sealed mode)
 
 ### Preferred: run a command with secrets injected
 
@@ -150,6 +151,18 @@ phoenix audit [-n 20] [-a agent-name] [-s 2025-01-01T00:00:00Z]
 ```
 
 Query the audit log. Filter by count, agent, or time range.
+
+### Generate a seal key pair
+
+```bash
+phoenix keypair generate <agent-name> [-o /path/to/keys/]
+```
+
+Writes `<name>.seal.key` (private key, mode `0600`) and prints the derived
+public key to stdout. Set `PHOENIX_SEAL_KEY` to the private key path to enable.
+
+When sealed mode is active, `phoenix get`, `phoenix resolve`, and
+`phoenix exec` transparently encrypt/decrypt values using NaCl box.
 
 ## Safety Guardrails
 

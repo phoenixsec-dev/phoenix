@@ -82,6 +82,10 @@ type Rule struct {
 	// When true, require_nonce resolves must include a detached signature
 	// over the canonical payload, verified against the mTLS cert public key.
 	RequireSigned bool `json:"require_signed,omitempty"`
+
+	// L9: sealed response requirements
+	RequireSealed bool `json:"require_sealed,omitempty"` // deny if no valid seal key presented
+	AllowUnseal   bool `json:"allow_unseal,omitempty"`   // gate for MCP unseal tool
 }
 
 // ProcessContext contains process-level attestation evidence.
@@ -113,6 +117,9 @@ type RequestContext struct {
 
 	// Override evaluation time (for testing; zero means use time.Now())
 	EvalTime time.Time
+
+	// Seal key validation (set when X-Phoenix-Seal-Key is present and validated)
+	SealKeyPresented bool
 }
 
 // Engine loads and evaluates attestation policies.
@@ -151,6 +158,8 @@ type legacyRule struct {
 	RequireNonce            bool   `json:"require_nonce"`
 	NonceMaxAge             string `json:"nonce_max_age,omitempty"`
 	RequireSigned           bool   `json:"require_signed,omitempty"`
+	RequireSealed           bool   `json:"require_sealed,omitempty"`
+	AllowUnseal             bool   `json:"allow_unseal,omitempty"`
 }
 
 // NewEngine creates a policy engine with no rules (all requests pass).
@@ -225,6 +234,8 @@ func Load(data []byte) (*Engine, error) {
 				RequireNonce:            r.RequireNonce,
 				NonceMaxAge:             r.NonceMaxAge,
 				RequireSigned:           r.RequireSigned,
+				RequireSealed:           r.RequireSealed,
+				AllowUnseal:             r.AllowUnseal,
 			}
 		}
 		return &Engine{rules: rules}, nil
@@ -429,6 +440,14 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		return &DeniedError{
 			Pattern: pattern,
 			Reason:  "signed resolve payload required but not provided or invalid",
+		}
+	}
+
+	// L9: Check sealed response requirement
+	if rule.RequireSealed && !ctx.SealKeyPresented {
+		return &DeniedError{
+			Pattern: pattern,
+			Reason:  "sealed response required but no valid seal key presented",
 		}
 	}
 

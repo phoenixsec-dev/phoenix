@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="phoenixsec/phoenix"
+REPO="phoenixsec-dev/phoenix"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 VERSION="${PHOENIX_VERSION:-latest}" # e.g. v0.10.2 or "latest"
 

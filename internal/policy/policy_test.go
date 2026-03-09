@@ -1004,3 +1004,151 @@ func TestRequireSignedNotNeededWithoutPolicy(t *testing.T) {
 		t.Fatalf("expected allow when require_signed not set, got: %v", err)
 	}
 }
+
+// --- L9: Sealed Response Policy Tests ---
+
+func TestRequireSealedDeniesWithoutKey(t *testing.T) {
+	policyJSON := `{"attestation":{"secure/*":{"require_sealed":true}}}`
+	e, err := Load([]byte(policyJSON))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ctx := &RequestContext{SealKeyPresented: false}
+	err = e.Evaluate("secure/api-key", ctx)
+	if err == nil {
+		t.Fatal("expected denial when require_sealed and no seal key")
+	}
+	denied, ok := err.(*DeniedError)
+	if !ok {
+		t.Fatalf("expected DeniedError, got %T", err)
+	}
+	if !strings.Contains(denied.Reason, "sealed response required") {
+		t.Errorf("unexpected reason: %s", denied.Reason)
+	}
+}
+
+func TestRequireSealedAllowsWithKey(t *testing.T) {
+	policyJSON := `{"attestation":{"secure/*":{"require_sealed":true}}}`
+	e, err := Load([]byte(policyJSON))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ctx := &RequestContext{SealKeyPresented: true}
+	if err := e.Evaluate("secure/api-key", ctx); err != nil {
+		t.Fatalf("expected allow with seal key, got: %v", err)
+	}
+}
+
+func TestRequireSealedNoEffectOnUnmatchedPaths(t *testing.T) {
+	policyJSON := `{"attestation":{"secure/*":{"require_sealed":true}}}`
+	e, err := Load([]byte(policyJSON))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Path that doesn't match the policy
+	ctx := &RequestContext{SealKeyPresented: false}
+	if err := e.Evaluate("open/key", ctx); err != nil {
+		t.Fatalf("expected allow for unmatched path, got: %v", err)
+	}
+}
+
+func TestAllowUnsealParseBackwardCompat(t *testing.T) {
+	// allow_unseal should parse without breaking anything
+	policyJSON := `{"attestation":{"ns/*":{"allow_unseal":true}}}`
+	e, err := Load([]byte(policyJSON))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	rule, _ := e.RuleFor("ns/secret")
+	if rule == nil {
+		t.Fatal("expected rule for ns/secret")
+	}
+	if !rule.AllowUnseal {
+		t.Error("expected AllowUnseal=true")
+	}
+
+	// Should not affect evaluation (allow_unseal is not an access check)
+	ctx := &RequestContext{}
+	if err := e.Evaluate("ns/secret", ctx); err != nil {
+		t.Fatalf("allow_unseal should not deny access: %v", err)
+	}
+}
+
+func TestRequireSealedWithOtherChecks(t *testing.T) {
+	policyJSON := `{"attestation":{"secure/*":{"require_sealed":true,"require_nonce":true}}}`
+	e, err := Load([]byte(policyJSON))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Seal key but no nonce — should fail on nonce check (L8 before L9)
+	ctx := &RequestContext{SealKeyPresented: true, NonceValidated: false}
+	err = e.Evaluate("secure/key", ctx)
+	if err == nil {
+		t.Fatal("expected denial for missing nonce")
+	}
+	if !strings.Contains(err.Error(), "nonce") {
+		t.Errorf("expected nonce denial, got: %v", err)
+	}
+
+	// Nonce but no seal key — should fail on sealed check (L9)
+	ctx = &RequestContext{SealKeyPresented: false, NonceValidated: true}
+	err = e.Evaluate("secure/key", ctx)
+	if err == nil {
+		t.Fatal("expected denial for missing seal key")
+	}
+	if !strings.Contains(err.Error(), "sealed") {
+		t.Errorf("expected sealed denial, got: %v", err)
+	}
+
+	// Both present — should pass
+	ctx = &RequestContext{SealKeyPresented: true, NonceValidated: true}
+	if err := e.Evaluate("secure/key", ctx); err != nil {
+		t.Fatalf("expected allow with both, got: %v", err)
+	}
+}
+
+func TestNoNewFieldsNoChange(t *testing.T) {
+	// Existing policy without any sealed fields should work as before
+	policyJSON := `{"attestation":{"ns/*":{"require_mtls":true}}}`
+	e, err := Load([]byte(policyJSON))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ctx := &RequestContext{UsedMTLS: true}
+	if err := e.Evaluate("ns/key", ctx); err != nil {
+		t.Fatalf("expected allow, got: %v", err)
+	}
+
+	rule, _ := e.RuleFor("ns/key")
+	if rule.RequireSealed {
+		t.Error("RequireSealed should default to false")
+	}
+	if rule.AllowUnseal {
+		t.Error("AllowUnseal should default to false")
+	}
+}
+
+func TestRequireSealedLegacyFormat(t *testing.T) {
+	policyJSON := `{"rules":[{"path":"secure/*","require_sealed":true,"allow_unseal":true}]}`
+	e, err := Load([]byte(policyJSON))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	rule, _ := e.RuleFor("secure/key")
+	if rule == nil {
+		t.Fatal("expected rule")
+	}
+	if !rule.RequireSealed {
+		t.Error("expected RequireSealed=true from legacy format")
+	}
+	if !rule.AllowUnseal {
+		t.Error("expected AllowUnseal=true from legacy format")
+	}
+}

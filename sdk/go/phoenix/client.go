@@ -34,11 +34,24 @@ type ResolveResult struct {
 	Errors map[string]string `json:"errors,omitempty"`
 }
 
+// SealedEnvelope is the wire format for a sealed secret value.
+type SealedEnvelope struct {
+	Version      int    `json:"version"`
+	Algorithm    string `json:"algorithm"`
+	Path         string `json:"path"`
+	Ref          string `json:"ref"`
+	EphemeralKey string `json:"ephemeral_key"`
+	Nonce        string `json:"nonce"`
+	Ciphertext   string `json:"ciphertext"`
+}
+
 // Client is a thin HTTP client for the Phoenix API.
 type Client struct {
 	Server     string
 	Token      string
 	HTTPClient *http.Client
+	sealPubKey string    // base64-encoded public key for sealed requests
+	sealPriv   *[32]byte // private key for decrypting sealed responses
 }
 
 // New creates a new Phoenix client. Server and token default to
@@ -63,6 +76,22 @@ func New(server, token string) *Client {
 			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// SetSealKey loads a seal private key from a file, enabling sealed mode.
+// When set, Resolve and ResolveBatch auto-decrypt sealed responses.
+func (c *Client) SetSealKey(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading seal key: %w", err)
+	}
+	privKey, err := decodeSealKey(strings.TrimSpace(string(data)))
+	if err != nil {
+		return err
+	}
+	c.sealPriv = privKey
+	c.sealPubKey = encodeSealKey(deriveSealPublicKey(privKey))
+	return nil
 }
 
 // Health checks server health. Returns the parsed JSON response.
@@ -91,12 +120,51 @@ func (c *Client) Resolve(ref string) (string, error) {
 }
 
 // ResolveBatch resolves multiple phoenix:// references in one API call.
+// When sealed mode is enabled (via SetSealKey), responses are automatically
+// decrypted — callers see plaintext values transparently.
 func (c *Client) ResolveBatch(refs []string) (*ResolveResult, error) {
 	if len(refs) == 0 {
 		return nil, &Error{Message: "refs must not be empty"}
 	}
 
 	body := map[string]interface{}{"refs": refs}
+
+	if c.sealPriv != nil {
+		// Sealed mode: parse sealed_values and decrypt locally,
+		// falling back to plaintext values if server doesn't seal.
+		var raw struct {
+			SealedValues map[string]json.RawMessage `json:"sealed_values"`
+			Values       map[string]string          `json:"values"`
+			Errors       map[string]string          `json:"errors,omitempty"`
+		}
+		if err := c.doRequest("POST", "/v1/resolve", body, &raw); err != nil {
+			return nil, err
+		}
+		if len(raw.SealedValues) > 0 {
+			result := &ResolveResult{
+				Values: make(map[string]string, len(raw.SealedValues)),
+				Errors: raw.Errors,
+			}
+			for ref, envJSON := range raw.SealedValues {
+				var env SealedEnvelope
+				if err := json.Unmarshal(envJSON, &env); err != nil {
+					return nil, &Error{Message: fmt.Sprintf("parsing sealed envelope for %s: %v", ref, err)}
+				}
+				if env.Ref != ref {
+					return nil, &Error{Message: fmt.Sprintf("sealed envelope ref mismatch: map key %q, envelope %q", ref, env.Ref)}
+				}
+				val, err := openSealedEnvelope(&env, c.sealPriv)
+				if err != nil {
+					return nil, &Error{Message: fmt.Sprintf("decrypting %s: %v", ref, err)}
+				}
+				result.Values[ref] = val
+			}
+			return result, nil
+		}
+		// Fallback: server returned plaintext values
+		return &ResolveResult{Values: raw.Values, Errors: raw.Errors}, nil
+	}
+
 	var result ResolveResult
 	if err := c.doRequest("POST", "/v1/resolve", body, &result); err != nil {
 		return nil, err
@@ -123,6 +191,9 @@ func (c *Client) doRequest(method, path string, body interface{}, out interface{
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.sealPubKey != "" {
+		req.Header.Set("X-Phoenix-Seal-Key", c.sealPubKey)
 	}
 
 	resp, err := c.HTTPClient.Do(req)

@@ -1,0 +1,68 @@
+# Phoenix Secrets — Authentication
+
+Phoenix supports bearer tokens, mTLS client certificates, and sealed-response key
+pairs. These can be combined — mTLS for identity, bearer for bootstrap, sealed keys
+for context-safe delivery.
+
+## Bearer tokens
+
+Create an agent with scoped permissions:
+
+```bash
+phoenix agent create deployer \
+  -t "deploy-token-abc" \
+  --acl "myapp/*:read;staging/*:read,write"
+```
+
+The `deployer` agent can read anything under `myapp/` and read/write under `staging/`.
+
+## Mutual TLS (recommended)
+
+Issue a client certificate for an agent:
+
+```bash
+phoenix cert issue deployer -o /etc/phoenix/certs/
+```
+
+This writes `deployer.crt`, `deployer.key`, and `ca.crt`.
+
+```bash
+export PHOENIX_SERVER="https://phoenix.home:9090"
+export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
+export PHOENIX_CLIENT_CERT="/etc/phoenix/certs/deployer.crt"
+export PHOENIX_CLIENT_KEY="/etc/phoenix/certs/deployer.key"
+
+phoenix get myapp/db-password
+```
+
+No bearer token is required when the cert identifies the agent.
+
+## Sealed-response key pairs
+
+When `PHOENIX_SEAL_KEY` points to a local private key file, Phoenix clients can:
+- send the matching seal public key to the server
+- receive sealed secret payloads instead of plaintext
+- decrypt locally
+
+This is especially important for MCP and multi-agent same-host workflows.
+See [Sealed Responses](sealed-responses.md) and [Multi-Agent Setup](multi-agent-setup.md).
+
+## CLI environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `PHOENIX_SERVER` | Server URL (default: `http://127.0.0.1:9090`) |
+| `PHOENIX_TOKEN` | Bearer token |
+| `PHOENIX_CA_CERT` | CA certificate for TLS verification |
+| `PHOENIX_CLIENT_CERT` | Client certificate for mTLS |
+| `PHOENIX_CLIENT_KEY` | Client key for mTLS |
+| `PHOENIX_SEAL_KEY` | Seal private key file path |
+| `PHOENIX_POLICY` | Policy file path for local `phoenix policy` commands |
+| `PHOENIX_OP_TOKEN_ENV` | Import-only env var name holding 1Password token |
+
+## Related docs
+
+- [Getting Started](getting-started.md)
+- [Policy and Attestation](policy-and-attestation.md)
+- [Sealed Responses](sealed-responses.md)
+- [Admin Token Lifecycle](admin-token-lifecycle.md)

@@ -13,32 +13,28 @@ Identify secrets currently in:
 
 Group by namespace you want in Phoenix (for example `myapp/*`, `staging/*`, `production/*`).
 
-## 2) Initialize Phoenix and save admin credentials
+## 2) Initialize Phoenix
+
+Follow [Getting Started](getting-started.md) to install, initialize, and start
+the server. Come back here once you have a running server and admin token.
+
+## 3) Import secrets into Phoenix
+
+Bulk import from an existing `.env` file:
 
 ```bash
-phoenix-server --init /data/phoenix
-phoenix-server --config /data/phoenix/config.json
+phoenix import secrets.env --prefix myapp/
 ```
 
-Immediately store the admin token in a secure manager/vault and treat it as bootstrap-only.
-Detailed guidance: [Admin Token Lifecycle](admin-token-lifecycle.md).
-
-Set CLI auth env for admin operations:
-
-```bash
-export PHOENIX_SERVER="https://localhost:9090"
-export PHOENIX_TOKEN="<admin-token>"
-export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
-```
-
-## 3) Import/store secrets in Phoenix
+Or store individually:
 
 ```bash
 phoenix set myapp/db-password -v "..." -d "DB password"
 phoenix set myapp/api-key -v "..." -d "API key"
 ```
 
-Optional: use 1Password import path if applicable.
+See [CLI Usage](cli-usage.md) for import options including 1Password migration
+(`--from 1password`), `--dry-run`, and `--skip-existing`.
 
 ## 4) Create least-privilege agent identities
 
@@ -47,7 +43,8 @@ phoenix agent create myapp-runtime -t "runtime-token" --acl "myapp/*:read"
 phoenix agent create myapp-deployer -t "deploy-token" --acl "myapp/*:read,write"
 ```
 
-For production, prefer mTLS certs and stricter attestation policies.
+For production, prefer mTLS certs over bearer tokens.
+See [Authentication](authentication.md) for mTLS setup.
 
 ## 5) Replace plaintext values with references
 

@@ -256,6 +256,20 @@ func main() {
 		}
 	case "init":
 		err = cmdInit(args)
+	case "keypair":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix keypair <generate|show>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "generate":
+			err = cmdKeypairGenerate(args[1:])
+		case "show":
+			err = cmdKeypairShow(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown keypair subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "version", "--version", "-V":
 		fmt.Printf("phoenix %s\n", version.Version)
 	case "help", "--help", "-h":
@@ -303,6 +317,8 @@ Usage:
   phoenix agent-sock attest [--socket <path>]  Attest via local Unix socket agent
   phoenix agent-sock token --agent <name>      Mint/cache short-lived token via socket
   phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
+  phoenix keypair generate <name> [-o dir]     Generate X25519 seal key pair
+  phoenix keypair show <name>                 Show public key for a seal key pair
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix mcp-server --http :8080             Run MCP server (Streamable HTTP)
   phoenix init <dir>                          Initialize data directory
@@ -313,6 +329,7 @@ Environment:
   PHOENIX_CA_CERT      CA certificate for TLS verification
   PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
   PHOENIX_CLIENT_KEY   Client key for mTLS authentication
+  PHOENIX_SEAL_KEY     Seal private key file (enables sealed mode)
   PHOENIX_POLICY       Path to attestation policy file (JSON)
   PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)
   PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)`)
@@ -365,7 +382,12 @@ func cmdGet(args []string) error {
 		return fmt.Errorf("usage: phoenix get <path>")
 	}
 
-	resp, err := apiRequest("GET", "/v1/secrets/"+args[0], nil)
+	sealPrivKey, err := loadSealKey()
+	if err != nil {
+		return fmt.Errorf("loading seal key: %w", err)
+	}
+
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+args[0], nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -373,6 +395,24 @@ func cmdGet(args []string) error {
 
 	if resp.StatusCode != 200 {
 		return handleError(resp)
+	}
+
+	if sealPrivKey != nil {
+		var sealed struct {
+			SealedValue interface{} `json:"sealed_value"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&sealed); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		if sealed.SealedValue == nil {
+			return fmt.Errorf("expected sealed_value in response but got none")
+		}
+		value, err := decryptSealedValue(sealed.SealedValue, sealPrivKey)
+		if err != nil {
+			return err
+		}
+		fmt.Print(value)
+		return nil
 	}
 
 	var secret struct {
@@ -918,6 +958,11 @@ func cmdResolve(args []string) error {
 		return fmt.Errorf("usage: phoenix resolve [--signed] <phoenix://ns/secret> [ref...]")
 	}
 
+	sealPrivKey, err := loadSealKey()
+	if err != nil {
+		return fmt.Errorf("loading seal key: %w", err)
+	}
+
 	var bodyMap map[string]interface{}
 
 	if signed {
@@ -975,7 +1020,7 @@ func cmdResolve(args []string) error {
 	}
 
 	body, _ := json.Marshal(bodyMap)
-	resp, err := apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+	resp, err := apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -985,32 +1030,69 @@ func cmdResolve(args []string) error {
 		return handleError(resp)
 	}
 
-	var result struct {
-		Values map[string]string `json:"values"`
-		Errors map[string]string `json:"errors"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
+	// Decode response — handle sealed or plaintext
+	values := make(map[string]string)
+	errs := make(map[string]string)
+
+	if sealPrivKey != nil {
+		var result struct {
+			SealedValues map[string]interface{} `json:"sealed_values"`
+			Errors       map[string]string      `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		errs = result.Errors
+		for ref, raw := range result.SealedValues {
+			if envMap, ok := raw.(map[string]interface{}); ok {
+				if envRef, _ := envMap["ref"].(string); envRef != ref {
+					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
+				}
+			}
+			val, err := decryptSealedValue(raw, sealPrivKey)
+			if err != nil {
+				return fmt.Errorf("decrypting %s: %w", ref, err)
+			}
+			values[ref] = val
+		}
+	} else {
+		var result struct {
+			Values map[string]string `json:"values"`
+			Errors map[string]string `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		values = result.Values
+		errs = result.Errors
 	}
 
 	// Single ref: output raw value for piping
 	if len(refs) == 1 {
-		if errMsg, ok := result.Errors[refs[0]]; ok {
+		if errMsg, ok := errs[refs[0]]; ok {
 			return fmt.Errorf("%s: %s", refs[0], errMsg)
 		}
-		fmt.Print(result.Values[refs[0]])
+		if _, ok := values[refs[0]]; !ok {
+			return fmt.Errorf("%s: no value returned by server", refs[0])
+		}
+		fmt.Print(values[refs[0]])
 		return nil
 	}
 
 	// Multiple refs: output ref → value pairs
 	var hasErr bool
 	for _, ref := range refs {
-		if errMsg, ok := result.Errors[ref]; ok {
+		if errMsg, ok := errs[ref]; ok {
 			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
 			hasErr = true
 			continue
 		}
-		fmt.Printf("%s\t%s\n", ref, result.Values[ref])
+		if _, ok := values[ref]; !ok {
+			fmt.Fprintf(os.Stderr, "%s: error: no value returned by server\n", ref)
+			hasErr = true
+			continue
+		}
+		fmt.Printf("%s\t%s\n", ref, values[ref])
 	}
 	if hasErr {
 		return fmt.Errorf("some references failed to resolve")
@@ -1067,6 +1149,11 @@ func parseECDSAPrivateKey(pemData []byte) (*ecdsa.PrivateKey, error) {
 func cmdExec(args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
+	}
+
+	sealPrivKey, sealErr := loadSealKey()
+	if sealErr != nil {
+		return fmt.Errorf("loading seal key: %w", sealErr)
 	}
 
 	// Parse --env flags and --output-env before "--", command after "--"
@@ -1146,6 +1233,7 @@ func cmdExec(args []string) error {
 	}
 
 	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
+	hdrs := sealHeaders(sealPrivKey)
 	var resp *http.Response
 	var err error
 	if timeout > 0 {
@@ -1160,9 +1248,12 @@ func cmdExec(args []string) error {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		for k, v := range hdrs {
+			req.Header.Set(k, v)
+		}
 		resp, err = httpClient.Do(req)
 	} else {
-		resp, err = apiRequest("POST", "/v1/resolve", strings.NewReader(string(body)))
+		resp, err = apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	}
 	if err != nil {
 		return fmt.Errorf("resolve request failed: %w", err)
@@ -1173,27 +1264,56 @@ func cmdExec(args []string) error {
 		return handleError(resp)
 	}
 
-	var result struct {
-		Values map[string]string `json:"values"`
-		Errors map[string]string `json:"errors"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding resolve response: %w", err)
+	// Decode response — handle sealed or plaintext
+	resolvedValues := make(map[string]string)
+	var resolveErrors map[string]string
+
+	if sealPrivKey != nil {
+		var result struct {
+			SealedValues map[string]interface{} `json:"sealed_values"`
+			Errors       map[string]string      `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding resolve response: %w", err)
+		}
+		resolveErrors = result.Errors
+		for ref, raw := range result.SealedValues {
+			if envMap, ok := raw.(map[string]interface{}); ok {
+				if envRef, _ := envMap["ref"].(string); envRef != ref {
+					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
+				}
+			}
+			val, err := decryptSealedValue(raw, sealPrivKey)
+			if err != nil {
+				return fmt.Errorf("decrypting %s: %w", ref, err)
+			}
+			resolvedValues[ref] = val
+		}
+	} else {
+		var result struct {
+			Values map[string]string `json:"values"`
+			Errors map[string]string `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding resolve response: %w", err)
+		}
+		resolvedValues = result.Values
+		resolveErrors = result.Errors
 	}
 
 	// Check for resolution errors
-	if len(result.Errors) > 0 {
-		for ref, errMsg := range result.Errors {
+	if len(resolveErrors) > 0 {
+		for ref, errMsg := range resolveErrors {
 			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", ref, errMsg)
 		}
-		return fmt.Errorf("failed to resolve %d reference(s)", len(result.Errors))
+		return fmt.Errorf("failed to resolve %d reference(s)", len(resolveErrors))
 	}
 
 	// If --output-env is set, write resolved env to file and exit
 	if outputEnvPath != "" {
 		var lines []string
 		for _, m := range mappings {
-			val, ok := result.Values[m.ref]
+			val, ok := resolvedValues[m.ref]
 			if !ok {
 				return fmt.Errorf("no value returned for %s", m.ref)
 			}
@@ -1214,7 +1334,8 @@ func cmdExec(args []string) error {
 		key := e[:strings.IndexByte(e, '=')]
 		switch key {
 		case "PHOENIX_TOKEN", "PHOENIX_CLIENT_CERT", "PHOENIX_CLIENT_KEY",
-			"PHOENIX_CA_CERT", "PHOENIX_SERVER", "PHOENIX_POLICY":
+			"PHOENIX_CA_CERT", "PHOENIX_SERVER", "PHOENIX_POLICY",
+			"PHOENIX_SEAL_KEY":
 			continue // strip broker credentials
 		}
 		if maskEnv {
@@ -1226,7 +1347,7 @@ func cmdExec(args []string) error {
 		env = append(env, e)
 	}
 	for _, m := range mappings {
-		val, ok := result.Values[m.ref]
+		val, ok := resolvedValues[m.ref]
 		if !ok {
 			return fmt.Errorf("no value returned for %s", m.ref)
 		}
@@ -1336,6 +1457,170 @@ func cmdCertIssue(args []string) error {
 	fmt.Printf("  cert: %s\n", certPath)
 	fmt.Printf("  key:  %s\n", keyPath)
 	fmt.Printf("  CA:   %s\n", caPath)
+	return nil
+}
+
+// --- Seal key helpers ---
+
+// loadSealKey loads the seal private key from PHOENIX_SEAL_KEY env var.
+// Returns nil, nil if the env var is not set (unsealed mode).
+func loadSealKey() (*[32]byte, error) {
+	keyPath := os.Getenv("PHOENIX_SEAL_KEY")
+	if keyPath == "" {
+		return nil, nil
+	}
+	return crypto.LoadSealPrivateKey(keyPath)
+}
+
+// sealHeaders returns HTTP headers for sealed requests.
+// Returns nil if no seal key is loaded.
+func sealHeaders(privKey *[32]byte) map[string]string {
+	if privKey == nil {
+		return nil
+	}
+	pubKey := crypto.DeriveSealPublicKey(privKey)
+	return map[string]string{
+		"X-Phoenix-Seal-Key": crypto.EncodeSealKey(pubKey),
+	}
+}
+
+// decryptSealedValue decrypts a sealed envelope from a raw JSON object.
+func decryptSealedValue(raw interface{}, privKey *[32]byte) (string, error) {
+	envJSON, err := json.Marshal(raw)
+	if err != nil {
+		return "", fmt.Errorf("marshaling sealed envelope: %w", err)
+	}
+	var env crypto.SealedEnvelope
+	if err := json.Unmarshal(envJSON, &env); err != nil {
+		return "", fmt.Errorf("parsing sealed envelope: %w", err)
+	}
+	payload, err := crypto.OpenSealedEnvelope(&env, privKey)
+	if err != nil {
+		return "", fmt.Errorf("decrypting sealed value: %w", err)
+	}
+	return payload.Value, nil
+}
+
+// --- Keypair commands ---
+
+func cmdKeypairGenerate(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	var name, output string
+	force := false
+	i := 0
+	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+		name = args[i]
+		i++
+	}
+	for i < len(args) {
+		switch args[i] {
+		case "-o", "--output":
+			i++
+			if i < len(args) {
+				output = args[i]
+			}
+		case "--force":
+			force = true
+		}
+		i++
+	}
+
+	if name == "" {
+		return fmt.Errorf("usage: phoenix keypair generate <agent-name> [--output <path>] [--force]")
+	}
+
+	urlPath := "/v1/keypair"
+	if force {
+		urlPath += "?force=true"
+	}
+
+	body, _ := json.Marshal(map[string]string{"agent_name": name})
+	resp, err := apiRequest("POST", urlPath, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		AgentName      string `json:"agent_name"`
+		SealPublicKey  string `json:"seal_public_key"`
+		SealPrivateKey string `json:"seal_private_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	// Determine output path
+	if output == "" {
+		home, _ := os.UserHomeDir()
+		dir := filepath.Join(home, ".config", "phoenix", "keys")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return fmt.Errorf("creating key directory: %w", err)
+		}
+		output = filepath.Join(dir, name+".seal.key")
+	}
+
+	// Ensure parent directory has correct permissions
+	dir := filepath.Dir(output)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("creating key directory: %w", err)
+	}
+
+	if err := os.WriteFile(output, []byte(result.SealPrivateKey), 0600); err != nil {
+		return fmt.Errorf("writing private key: %w", err)
+	}
+	// Harden permissions even if the file already existed with weaker mode
+	if err := os.Chmod(output, 0600); err != nil {
+		return fmt.Errorf("setting key file permissions: %w", err)
+	}
+
+	fmt.Printf("Seal keypair generated for agent %q\n", name)
+	fmt.Printf("  private key: %s\n", output)
+	fmt.Printf("  public key:  %s\n", result.SealPublicKey)
+	fmt.Println()
+	fmt.Printf("Set PHOENIX_SEAL_KEY=%s to enable sealed mode\n", output)
+	return nil
+}
+
+func cmdKeypairShow(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix keypair show <agent-name>")
+	}
+	name := args[0]
+
+	resp, err := apiRequest("GET", "/v1/agents/"+name+"/seal-key", nil)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		AgentName     string `json:"agent_name"`
+		SealPublicKey string `json:"seal_public_key"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	fmt.Printf("Agent: %s\n", result.AgentName)
+	if result.SealPublicKey == "" {
+		fmt.Println("Seal key: (none)")
+	} else {
+		fmt.Printf("Seal key: %s\n", result.SealPublicKey)
+	}
 	return nil
 }
 
@@ -1969,15 +2254,24 @@ func cmdAgentSockResolve(args []string) error {
 		saveTokenCache(cache)
 	}
 
+	// Load seal key for sealed mode
+	sealPrivKey, sealErr := loadSealKey()
+	if sealErr != nil {
+		return fmt.Errorf("loading seal key: %w", sealErr)
+	}
+
 	// Resolve using the short-lived token
 	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
-	url := serverURL + "/v1/resolve"
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	reqURL := serverURL + "/v1/resolve"
+	req, err := http.NewRequest("POST", reqURL, strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range sealHeaders(sealPrivKey) {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -1989,32 +2283,61 @@ func cmdAgentSockResolve(args []string) error {
 		return handleError(resp)
 	}
 
-	var result struct {
-		Values map[string]string `json:"values"`
-		Errors map[string]string `json:"errors"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
+	// Decode response — handle sealed or plaintext
+	values := make(map[string]string)
+	errs := make(map[string]string)
+
+	if sealPrivKey != nil {
+		var result struct {
+			SealedValues map[string]interface{} `json:"sealed_values"`
+			Errors       map[string]string      `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		errs = result.Errors
+		for ref, raw := range result.SealedValues {
+			if envMap, ok := raw.(map[string]interface{}); ok {
+				if envRef, _ := envMap["ref"].(string); envRef != ref {
+					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
+				}
+			}
+			val, err := decryptSealedValue(raw, sealPrivKey)
+			if err != nil {
+				return fmt.Errorf("decrypting %s: %w", ref, err)
+			}
+			values[ref] = val
+		}
+	} else {
+		var result struct {
+			Values map[string]string `json:"values"`
+			Errors map[string]string `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		values = result.Values
+		errs = result.Errors
 	}
 
 	// Single ref: output raw value
 	if len(refs) == 1 {
-		if errMsg, ok := result.Errors[refs[0]]; ok {
+		if errMsg, ok := errs[refs[0]]; ok {
 			return fmt.Errorf("%s: %s", refs[0], errMsg)
 		}
-		fmt.Print(result.Values[refs[0]])
+		fmt.Print(values[refs[0]])
 		return nil
 	}
 
 	// Multiple refs
 	var hasErr bool
 	for _, ref := range refs {
-		if errMsg, ok := result.Errors[ref]; ok {
+		if errMsg, ok := errs[ref]; ok {
 			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
 			hasErr = true
 			continue
 		}
-		fmt.Printf("%s\t%s\n", ref, result.Values[ref])
+		fmt.Printf("%s\t%s\n", ref, values[ref])
 	}
 	if hasErr {
 		return fmt.Errorf("some references failed to resolve")
