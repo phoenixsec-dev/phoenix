@@ -31,10 +31,10 @@ Expected from GoReleaser:
 After tagged workflow completes:
 
 ```bash
-docker pull phoenixsec/phoenix:latest
-docker pull phoenixsec/phoenix:vX.Y.Z
-docker run --rm phoenixsec/phoenix:vX.Y.Z --version
-docker run --rm phoenixsec/phoenix:vX.Y.Z phoenix-server --version
+docker pull phoenixsecdev/phoenix:latest
+docker pull phoenixsecdev/phoenix:vX.Y.Z
+docker run --rm phoenixsecdev/phoenix:vX.Y.Z --version
+docker run --rm phoenixsecdev/phoenix:vX.Y.Z phoenix-server --version
 ```
 
 ## 5) `phoenix-server --init` Smoke (<2 min target)

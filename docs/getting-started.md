@@ -11,7 +11,7 @@ First-run guide: install, initialize, start the server, store your first secret.
 ## Install from GitHub Releases
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/phoenixsec/phoenix/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/phoenixsec-dev/phoenix/main/scripts/install.sh | sh
 ```
 
 Options:
@@ -21,7 +21,7 @@ Options:
 ## Build from source
 
 ```bash
-git clone https://github.com/phoenixsec/phoenix.git
+git clone https://github.com/phoenixsec-dev/phoenix.git
 cd phoenix
 go build -o bin/ ./cmd/...
 ```

@@ -7,7 +7,9 @@
   <em>Agents see references. Never raw values.</em>
 </p>
 
-[![CI](https://github.com/phoenixsec/phoenix/actions/workflows/ci.yml/badge.svg)](https://github.com/phoenixsec/phoenix/actions/workflows/ci.yml)
+<!-- CI badge: uncomment when GitHub Actions workflow is added
+[![CI](https://github.com/phoenixsec-dev/phoenix/actions/workflows/ci.yml/badge.svg)](https://github.com/phoenixsec-dev/phoenix/actions/workflows/ci.yml)
+-->
 
 ---
 
@@ -76,10 +78,10 @@ Because "just trust the model stack with your secrets" is not a serious security
 ### 1. Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/phoenixsec/phoenix/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/phoenixsec-dev/phoenix/main/scripts/install.sh | sh
 
 # Or build from source:
-git clone https://github.com/phoenixsec/phoenix.git && cd phoenix
+git clone https://github.com/phoenixsec-dev/phoenix.git && cd phoenix
 go build -o bin/ ./cmd/...
 ```
 

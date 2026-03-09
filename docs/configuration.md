@@ -75,21 +75,21 @@ Authentication flow:
 ## Docker (planned)
 
 > Docker images are not yet published. The examples below show the intended usage
-> for when `phoenixsec/phoenix` is available on Docker Hub. For now, build from
+> for when `phoenixsecdev/phoenix` is available on Docker Hub. For now, build from
 > source or use the install script.
 
 ```bash
-docker pull phoenixsec/phoenix:latest
+docker pull phoenixsecdev/phoenix:latest
 
 # First run: initialize the data directory
-docker run --rm -v phoenix-data:/data phoenixsec/phoenix:latest --init /data
+docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix:latest --init /data
 
 # Start the server
 docker run -d --name phoenix \
   -v phoenix-data:/data \
   -p 9090:9090 \
   --restart unless-stopped \
-  phoenixsec/phoenix:latest
+  phoenixsecdev/phoenix:latest
 ```
 
 Docker Compose example:
@@ -97,7 +97,7 @@ Docker Compose example:
 ```yaml
 services:
   phoenix:
-    image: phoenixsec/phoenix:latest
+    image: phoenixsecdev/phoenix:latest
     ports:
       - "9090:9090"
     volumes:

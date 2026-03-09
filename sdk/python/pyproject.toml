@@ -14,7 +14,7 @@ dependencies = []
 sealed = ["PyNaCl>=1.5.0"]
 
 [project.urls]
-Repository = "https://github.com/phoenixsec/phoenix"
+Repository = "https://github.com/phoenixsec-dev/phoenix"
 
 [tool.setuptools.packages.find]
 include = ["phoenix_secrets*"]

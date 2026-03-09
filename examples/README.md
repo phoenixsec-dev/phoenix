@@ -6,7 +6,7 @@ These examples are end-to-end shell scripts you can run locally.
 
 - Go 1.25+
 - `python3`
-- From repo root: `github.com/phoenixsec/phoenix`
+- From repo root: `github.com/phoenixsec-dev/phoenix`
 
 Each script will:
 - build `bin/phoenix` + `bin/phoenix-server` if missing
