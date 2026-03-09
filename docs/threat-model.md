@@ -65,31 +65,17 @@ Per-path policy can require combinations of:
 
 ## Sealed responses
 
-Sealed responses add per-agent transport encryption using NaCl box
-(X25519 + XSalsa20-Poly1305). Each response is encrypted with a fresh
-ephemeral key pair to the requesting agent's public key.
+Sealed responses add per-agent transport encryption (NaCl box: X25519 +
+XSalsa20-Poly1305) with fresh ephemeral keys per response. This mitigates
+network eavesdropping past TLS termination, cross-agent response interception
+on shared hosts, MCP tool output leakage, and relabeling attacks.
 
-**Threats mitigated:**
-- **Network eavesdropping past TLS termination** — values are encrypted
-  end-to-end from server to agent, independent of TLS.
-- **Cross-agent response interception** — agents on the same host each
-  have unique key pairs; one agent cannot decrypt another's responses.
-- **MCP tool output leakage** — sealed values appear as opaque
-  `PHOENIX_SEALED:...` tokens in tool responses.
-- **Relabeling attacks** — inner/outer binding (path + ref in both
-  envelope and encrypted payload) combined with map-key validation in
-  clients detects attempts to swap sealed values between refs. All
-  SDK clients and the CLI validate that the map key matches the
-  envelope's ref field before decryption.
+It does not protect against a compromised agent private key, in-process
+memory access after decryption, or server-side compromise.
 
-**Not mitigated:**
-- Compromised agent private key (all sealed values to that key are exposed).
-- Agent process memory (once decrypted, plaintext is in agent memory).
-- Server-side compromise (sealed responses are transport, not storage).
-
-**Policy controls:**
-- `require_sealed` — deny access without a valid seal key header.
-- `allow_unseal` — server-authoritative gate on MCP unseal tool.
+For the full sealed responses design, wire format, policy controls
+(`require_sealed`, `allow_unseal`), and SDK integration, see
+[Sealed Responses](sealed-responses.md).
 
 ## Out of scope / non-goals
 

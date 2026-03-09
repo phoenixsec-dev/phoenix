@@ -1,0 +1,258 @@
+# Phoenix Secrets — LAN Deployment
+
+Deploy one Phoenix server serving multiple machines and agents on a local network.
+
+This guide covers the topology, server setup, certificate distribution, agent
+provisioning, and verification for a multi-host deployment. It is written so that
+an agent (or a human) can execute it end-to-end with no prior Phoenix experience.
+
+## Topology
+
+```text
+                    LAN (e.g. 192.168.1.0/24)
+                             |
+              +--------------+--------------+
+              |              |              |
+         [Phoenix Server]  [Host A]       [Host B]    ... [Host N]
+         192.168.1.10       agent-a        agent-b        agent-n
+         port 9090          phoenix CLI    phoenix CLI    phoenix CLI
+                            mTLS cert      mTLS cert      mTLS cert
+```
+
+One server, N clients. Each client machine runs the `phoenix` CLI (and optionally
+the MCP server) with its own identity. The server handles all storage, encryption,
+ACL, and audit.
+
+## Prerequisites
+
+- Phoenix installed on the server and all client machines
+- Network connectivity from clients to server on port 9090 (or your chosen port)
+- SSH or file transfer access to distribute certificates
+
+## 1. Initialize the server
+
+On the server machine:
+
+```bash
+phoenix-server --init /data/phoenix
+```
+
+Save the admin token. You will need it for the next steps.
+
+### Bind to the LAN interface
+
+Edit `/data/phoenix/config.json`:
+
+```json
+{
+  "server": {
+    "listen": "0.0.0.0:9090"
+  }
+}
+```
+
+### Issue a server cert with LAN SANs
+
+The default cert only covers `localhost`. Re-issue it with the server's LAN IP
+and any hostnames clients will use:
+
+```bash
+phoenix cert issue phoenix-server \
+  --san 192.168.1.10 \
+  --san phoenix.internal \
+  -o /data/phoenix/
+```
+
+### Start the server
+
+```bash
+phoenix-server --config /data/phoenix/config.json
+```
+
+## 2. Create agent identities
+
+For each client machine or agent, create an identity with scoped ACLs. Still on
+the server (or any machine with admin credentials):
+
+```bash
+export PHOENIX_SERVER="https://192.168.1.10:9090"
+export PHOENIX_TOKEN="<admin-token>"
+export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
+
+# Create agents with least-privilege ACLs
+phoenix agent create host-a-builder \
+  -t "$(openssl rand -hex 32)" \
+  --acl "build/*:read;ci/*:read"
+
+phoenix agent create host-b-deployer \
+  -t "$(openssl rand -hex 32)" \
+  --acl "deploy/*:read;infra/*:read"
+```
+
+## 3. Issue mTLS certificates
+
+Issue a client cert per agent:
+
+```bash
+phoenix cert issue host-a-builder -o /tmp/certs/host-a/
+phoenix cert issue host-b-deployer -o /tmp/certs/host-b/
+```
+
+Each command produces:
+- `<name>.crt` — client certificate
+- `<name>.key` — client private key
+- `ca.crt` — CA certificate (same for all agents)
+
+## 4. Distribute certificates to client machines
+
+Copy the cert bundle to each client. For example with `scp`:
+
+```bash
+# To Host A
+scp /tmp/certs/host-a/host-a-builder.crt user@192.168.1.20:/etc/phoenix/certs/
+scp /tmp/certs/host-a/host-a-builder.key user@192.168.1.20:/etc/phoenix/certs/
+scp /data/phoenix/ca.crt user@192.168.1.20:/etc/phoenix/certs/
+
+# To Host B
+scp /tmp/certs/host-b/host-b-deployer.crt user@192.168.1.21:/etc/phoenix/certs/
+scp /tmp/certs/host-b/host-b-deployer.key user@192.168.1.21:/etc/phoenix/certs/
+scp /data/phoenix/ca.crt user@192.168.1.21:/etc/phoenix/certs/
+```
+
+On each client machine, lock down permissions (`chmod 700` on the directory,
+`chmod 600` on key files).
+
+## 5. Configure client machines
+
+On each client host, set environment variables for the agent. Add to the agent's
+shell profile, systemd unit, or MCP config:
+
+```bash
+export PHOENIX_SERVER="https://192.168.1.10:9090"
+export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
+export PHOENIX_CLIENT_CERT="/etc/phoenix/certs/host-a-builder.crt"
+export PHOENIX_CLIENT_KEY="/etc/phoenix/certs/host-a-builder.key"
+```
+
+With mTLS configured, no bearer token is needed — the cert identifies the agent.
+
+### MCP configuration (per agent)
+
+If the agent uses MCP (e.g., Claude Code), configure it in the agent's MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "phoenix": {
+      "command": "phoenix",
+      "args": ["mcp-server"],
+      "env": {
+        "PHOENIX_SERVER": "https://192.168.1.10:9090",
+        "PHOENIX_CA_CERT": "/etc/phoenix/certs/ca.crt",
+        "PHOENIX_CLIENT_CERT": "/etc/phoenix/certs/host-a-builder.crt",
+        "PHOENIX_CLIENT_KEY": "/etc/phoenix/certs/host-a-builder.key"
+      }
+    }
+  }
+}
+```
+
+## 6. Add sealed key pairs (optional but recommended)
+
+For context-safe delivery, generate a seal key pair per agent:
+
+```bash
+# On the server or admin machine
+phoenix keypair generate host-a-builder -o /tmp/keys/host-a/
+phoenix keypair generate host-b-deployer -o /tmp/keys/host-b/
+
+# Distribute seal keys to each host
+scp /tmp/keys/host-a/host-a-builder.seal.key user@192.168.1.20:/etc/phoenix/keys/
+scp /tmp/keys/host-b/host-b-deployer.seal.key user@192.168.1.21:/etc/phoenix/keys/
+```
+
+Then add to each agent's environment:
+
+```bash
+export PHOENIX_SEAL_KEY="/etc/phoenix/keys/host-a-builder.seal.key"
+```
+
+## 7. Apply attestation policy (optional)
+
+Create a policy file that uses the LAN topology — lock paths to specific IPs,
+require mTLS, require sealed delivery for sensitive namespaces:
+
+```json
+{
+  "attestation": {
+    "dev/*": {
+      "require_mtls": false
+    },
+    "build/*": {
+      "require_mtls": true,
+      "source_ip": ["192.168.1.0/24"]
+    },
+    "production/*": {
+      "require_mtls": true,
+      "require_sealed": true,
+      "deny_bearer": true,
+      "source_ip": ["192.168.1.21"]
+    }
+  }
+}
+```
+
+Save as `/data/phoenix/policy.json`, add `"policy": {"path": "/data/phoenix/policy.json"}`
+to the server config, and restart.
+
+See [Policy and Attestation](policy-and-attestation.md) for the full reference
+on available policy fields and testing with `phoenix policy test`.
+
+## 8. Verify the deployment
+
+From each client machine:
+
+```bash
+# Test connectivity and auth
+phoenix status
+
+# Store a test secret (from admin)
+phoenix set build/test-key -v "test-value" -d "deployment test"
+
+# Resolve from the appropriate agent
+phoenix resolve phoenix://build/test-key
+
+# Verify access control — this should fail for agents without build/* access
+phoenix get build/test-key
+
+# Check audit trail (from admin)
+phoenix audit --last 20
+```
+
+### Troubleshooting
+
+| Symptom | Check |
+|---------|-------|
+| `certificate signed by unknown authority` | `PHOENIX_CA_CERT` points to the correct `ca.crt` |
+| `connection refused` | Server is bound to `0.0.0.0:9090`, not `127.0.0.1:9090` |
+| `403 denied` | Agent ACL doesn't include the requested path |
+| `TLS handshake failure` | Server cert SANs include the IP/hostname the client is connecting to |
+| `x509: certificate is valid for localhost, not 192.168.x.x` | Re-issue server cert with `--san <server-ip>` |
+
+## Scaling notes
+
+- Phoenix is designed for single-server deployments. For the target audience
+  (homelabs, small teams, startups with < 50 machines), one server handles the
+  load comfortably.
+- If you need HA, replication, or multi-region — you've outgrown Phoenix's niche.
+  Consider Vault, Infisical, or a cloud KMS at that scale.
+- Agent cert rotation: issue new certs with `phoenix cert issue`, distribute, and
+  update client configs. Old certs can be revoked via CRL.
+
+## Related docs
+
+- [Getting Started](getting-started.md)
+- [Authentication](authentication.md)
+- [Multi-Agent Setup](multi-agent-setup.md) (same-host multi-agent isolation)
+- [Policy and Attestation](policy-and-attestation.md)
+- [Configuration](configuration.md)
