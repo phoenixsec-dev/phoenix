@@ -1,12 +1,12 @@
-# Phoenix Getting Started
+# Phoenix Secrets — Getting Started
 
-This guide is the first-run path for Phoenix: install/build, initialize the data
-store, start the server, and perform the first secret operations.
+First-run guide: install, initialize, start the server, store your first secret.
 
 ## Requirements
 
 - Go 1.25+ (if building from source)
 - Linux, macOS, or Windows
+- No external runtime dependencies (no database, no cloud KMS, no Redis)
 
 ## Install from GitHub Releases
 
@@ -33,7 +33,7 @@ This produces:
 ## Initialize
 
 ```bash
-./bin/phoenix-server --init /data/phoenix
+phoenix-server --init /data/phoenix
 ```
 
 This generates:
@@ -43,22 +43,26 @@ This generates:
 - server TLS certificate (SANs: `localhost`, `127.0.0.1`)
 - default configuration file
 
-> **Admin token handling:**
-> 1. Store it in a password manager or secure vault.
-> 2. Use it as a bootstrap credential only.
-> 3. Create scoped agent identities/tokens and mTLS certs for regular workloads.
-> 4. Remove it from your shell env after bootstrap (`unset PHOENIX_TOKEN`).
-> 5. See the full [Admin Token Lifecycle](admin-token-lifecycle.md).
+### Admin token handling
 
-> **Deploying on a LAN?** The default server cert only covers localhost.
-> After init, edit `config.json` to set `server.listen` to your host IP, then
-> re-issue a server cert that includes it:
->
-> ```bash
-> phoenix cert issue phoenix-server -o .
-> ```
->
-> Or put Phoenix behind a reverse proxy that terminates TLS.
+1. Store it in a password manager or secure vault immediately.
+2. Use it as a bootstrap credential only — create scoped agents for real workloads.
+3. Remove it from your shell env after bootstrap (`unset PHOENIX_TOKEN`).
+4. See [Admin Token Lifecycle](admin-token-lifecycle.md) for the full lifecycle.
+
+### Deploying on a LAN?
+
+The default server cert only covers `localhost` and `127.0.0.1`. If other machines need to reach this server, you need a cert that includes the server's LAN IP or hostname.
+
+```bash
+# Edit config.json: set server.listen to "0.0.0.0:9090"
+# Then re-issue a server cert with the correct SANs:
+phoenix cert issue phoenix-server -o /data/phoenix/
+```
+
+Or put Phoenix behind a reverse proxy that terminates TLS.
+
+For full multi-host deployment, see [LAN Deployment](lan-deployment.md).
 
 ## Verify file permissions
 
@@ -96,18 +100,18 @@ export PHOENIX_SERVER="https://localhost:9090"
 export PHOENIX_TOKEN="<your-admin-token>"
 export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 
-phoenix set myapp/db-password -v "hunter2" -d "Production database password"
 phoenix set myapp/api-key -v "sk-live-abc123" -d "Stripe API key"
-
-phoenix get myapp/db-password
-phoenix list myapp/
-phoenix delete myapp/old-key
+phoenix get myapp/api-key
 ```
+
+For the full command reference (`set`, `get`, `list`, `delete`, `resolve`, `exec`,
+`import`, `export`, `audit`), see [CLI Usage](cli-usage.md).
 
 ## Next steps
 
-- [Authentication](authentication.md)
-- [CLI Usage](cli-usage.md)
-- [Policy and Attestation](policy-and-attestation.md)
-- [Configuration and Operations](configuration.md)
-- [Sealed Responses](sealed-responses.md)
+- [CLI Usage](cli-usage.md) — full command reference
+- [Authentication](authentication.md) — bearer tokens, mTLS, sealed key pairs
+- [Policy and Attestation](policy-and-attestation.md) — per-path security rules
+- [LAN Deployment](lan-deployment.md) — multi-host setup
+- [Configuration](configuration.md) — server config reference and Docker
+- [Sealed Responses](sealed-responses.md) — context-safe encrypted delivery

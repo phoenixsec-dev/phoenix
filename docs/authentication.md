@@ -1,7 +1,8 @@
-# Phoenix Authentication
+# Phoenix Secrets — Authentication
 
 Phoenix supports bearer tokens, mTLS client certificates, and sealed-response key
-pairs for clients that want encrypted response transport.
+pairs. These can be combined — mTLS for identity, bearer for bootstrap, sealed keys
+for context-safe delivery.
 
 ## Bearer tokens
 

@@ -1,4 +1,4 @@
-# Phoenix Key Management
+# Phoenix Secrets — Key Management
 
 ## Master key rotation
 

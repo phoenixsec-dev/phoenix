@@ -1,4 +1,4 @@
-# Phoenix Policy and Attestation
+# Phoenix Secrets — Policy and Attestation
 
 Phoenix evaluates policy per path. Different secrets can require different proof.
 

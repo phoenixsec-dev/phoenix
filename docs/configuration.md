@@ -1,4 +1,4 @@
-# Phoenix Configuration and Operations
+# Phoenix Secrets — Configuration and Operations
 
 ## Configuration reference
 
@@ -72,7 +72,11 @@ Authentication flow:
 - secret access
 - audit log write
 
-## Docker
+## Docker (planned)
+
+> Docker images are not yet published. The examples below show the intended usage
+> for when `phoenixsec/phoenix` is available on Docker Hub. For now, build from
+> source or use the install script.
 
 ```bash
 docker pull phoenixsec/phoenix:latest
@@ -104,8 +108,8 @@ volumes:
   phoenix-data:
 ```
 
-> **Docker note:** The generated config inside the container defaults to `127.0.0.1:9090`.
-> For Docker port mapping to work, set `server.listen` to `0.0.0.0:9090`.
+**Important:** The generated config defaults to `127.0.0.1:9090`. For Docker port
+mapping to work, set `server.listen` to `0.0.0.0:9090` in the config.
 
 ## Related docs
 

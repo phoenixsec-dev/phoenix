@@ -1,4 +1,4 @@
-# Phoenix CLI Usage
+# Phoenix Secrets — CLI Usage
 
 ## Store and retrieve secrets
 

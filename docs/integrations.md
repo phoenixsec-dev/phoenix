@@ -1,4 +1,4 @@
-# Phoenix Integrations
+# Phoenix Secrets — Integrations
 
 ## MCP server (Claude Code / Claude Desktop)
 
