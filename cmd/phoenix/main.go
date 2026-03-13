@@ -1031,8 +1031,8 @@ func cmdResolve(args []string) error {
 	}
 
 	// Decode response — handle sealed or plaintext
-	values := make(map[string]string)
-	errs := make(map[string]string)
+	var values map[string]string
+	var errs map[string]string
 
 	if sealPrivKey != nil {
 		var result struct {
@@ -1043,6 +1043,7 @@ func cmdResolve(args []string) error {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		values = make(map[string]string)
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
 				if envRef, _ := envMap["ref"].(string); envRef != ref {
@@ -2284,8 +2285,8 @@ func cmdAgentSockResolve(args []string) error {
 	}
 
 	// Decode response — handle sealed or plaintext
-	values := make(map[string]string)
-	errs := make(map[string]string)
+	var values map[string]string
+	var errs map[string]string
 
 	if sealPrivKey != nil {
 		var result struct {
@@ -2296,6 +2297,7 @@ func cmdAgentSockResolve(args []string) error {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		values = make(map[string]string)
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
 				if envRef, _ := envMap["ref"].(string); envRef != ref {
