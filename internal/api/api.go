@@ -317,10 +317,6 @@ func (s *Server) attest(r *http.Request, path string, info *authInfo, nonceValid
 	return s.attestFull(r, path, info, nonceValidated, false, false)
 }
 
-func (s *Server) attestSigned(r *http.Request, path string, info *authInfo, nonceValidated, signatureVerified bool) error {
-	return s.attestFull(r, path, info, nonceValidated, signatureVerified, false)
-}
-
 func (s *Server) attestFull(r *http.Request, path string, info *authInfo, nonceValidated, signatureVerified, sealKeyValidated bool) error {
 	if s.policy == nil {
 		return nil
