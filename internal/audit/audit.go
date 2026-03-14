@@ -22,6 +22,7 @@ type Entry struct {
 	Status    string    `json:"status"` // "allowed" or "denied"
 	IP        string    `json:"ip,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
 }
 
 // Logger writes audit entries to a file.

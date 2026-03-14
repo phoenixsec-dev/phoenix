@@ -21,10 +21,12 @@ import (
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
+	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/ref"
+	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
 )
@@ -119,6 +121,8 @@ type Server struct {
 	tokens        *token.Issuer  // nil when short-lived tokens are not configured
 	startTime     time.Time      // server start time for uptime reporting
 	authRL        *rateLimiter
+	sessions      *session.Store            // nil when sessions are not configured
+	sessionRoles  map[string]config.RoleConfig // nil when sessions are not configured
 	mux           *http.ServeMux
 }
 
@@ -186,6 +190,16 @@ func (s *Server) SetTokenIssuer(ti *token.Issuer) {
 	s.tokens = ti
 }
 
+// SetSessionStore configures the session identity store.
+func (s *Server) SetSessionStore(ss *session.Store) {
+	s.sessions = ss
+}
+
+// SetSessionRoles configures the role definitions for session minting.
+func (s *Server) SetSessionRoles(roles map[string]config.RoleConfig) {
+	s.sessionRoles = roles
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -210,6 +224,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
 	s.mux.HandleFunc("GET /v1/policy/check", s.handlePolicyCheck)
+	s.mux.HandleFunc("POST /v1/session/mint", s.handleSessionMint)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -217,9 +232,17 @@ type authInfo struct {
 	Agent           string
 	UsedMTLS        bool
 	UsedBearer      bool
+	IsLocal         bool                   // true when client IP is loopback
 	CertFingerprint string                 // "sha256:<hex>" or empty
 	TokenIssuedAt   *time.Time             // set when authenticated via short-lived token
 	Process         *policy.ProcessContext // set when token carries process attestation claims
+
+	// Session identity (set when authenticated via session token)
+	UsedSession       bool
+	SessionID         string
+	SessionRole       string
+	SessionNamespaces []string
+	SessionActions    []string
 }
 
 // authenticate identifies the calling agent from the request.
@@ -239,6 +262,7 @@ func (s *Server) authenticate(r *http.Request) (string, error) {
 // evidence from the request (auth method, cert fingerprint, etc.).
 func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	ip := clientIP(r)
+	local := session.IsLoopback(ip)
 
 	// Try mTLS first: check for verified client certificate
 	// Rate limiting is NOT applied to mTLS — it uses cryptographic auth, not secrets.
@@ -250,6 +274,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			return &authInfo{
 				Agent:           agentName,
 				UsedMTLS:        true,
+				IsLocal:         local,
 				CertFingerprint: fp,
 			}, nil
 		}
@@ -265,6 +290,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			iat := claims.IssuedAt
 			info := &authInfo{
 				Agent:         claims.Agent,
+				IsLocal:       local,
 				TokenIssuedAt: &iat,
 			}
 			// Propagate process attestation claims from the token
@@ -279,7 +305,24 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			}
 			return info, nil
 		}
-		// Not a valid short-lived token — fall through to bearer
+		// Not a valid short-lived token — fall through to session token
+	}
+
+	// Try session token authentication (phxs_ prefix)
+	if s.sessions != nil && tok != "" && strings.HasPrefix(tok, session.TokenPrefix) {
+		sess, err := s.sessions.Validate(tok)
+		if err != nil {
+			return nil, fmt.Errorf("session auth failed: %w", err)
+		}
+		return &authInfo{
+			Agent:             sess.Agent,
+			IsLocal:           local,
+			UsedSession:       true,
+			SessionID:         sess.ID,
+			SessionRole:       sess.Role,
+			SessionNamespaces: sess.Namespaces,
+			SessionActions:    sess.Actions,
+		}, nil
 	}
 
 	// Fall back to bearer token if enabled — rate limit applies here
@@ -301,6 +344,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	return &authInfo{
 		Agent:      agent,
 		UsedBearer: true,
+		IsLocal:    local,
 	}, nil
 }
 
@@ -332,6 +376,8 @@ func (s *Server) attestFull(r *http.Request, path string, info *authInfo, nonceV
 		SignatureVerified: signatureVerified,
 		TokenIssuedAt:     info.TokenIssuedAt,
 		SealKeyPresented:  sealKeyValidated,
+		SessionID:         info.SessionID,
+		SessionRole:       info.SessionRole,
 	}
 	return s.policy.Evaluate(path, ctx)
 }
@@ -384,6 +430,92 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// jsonDenied sends a structured denial response with a machine-readable code.
+func jsonDenied(w http.ResponseWriter, errMsg, code, detail, remediation string, httpCode int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpCode)
+	resp := map[string]string{
+		"error":  errMsg,
+		"code":   code,
+		"detail": detail,
+	}
+	if remediation != "" {
+		resp["remediation"] = remediation
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// checkSessionScope verifies the request path is within session namespace scope.
+// Returns true if access is allowed, false if denied (and writes the error response).
+func (s *Server) checkSessionScope(w http.ResponseWriter, info *authInfo, path, ip string) bool {
+	if !info.UsedSession {
+		return true
+	}
+	if !session.PathInScope(path, info.SessionNamespaces) {
+		s.logAudit(s.audit.LogDenied(info.Agent, "scope_check", path, ip, "session_scope"))
+		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
+			"request a session with a role that includes this namespace",
+			http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// checkSessionAction verifies the requested action is allowed by the session role.
+// Returns true if access is allowed, false if denied (and writes the error response).
+func (s *Server) checkSessionAction(w http.ResponseWriter, info *authInfo, action, path, ip string) bool {
+	if !info.UsedSession {
+		return true
+	}
+	for _, a := range info.SessionActions {
+		if a == action || a == "admin" {
+			return true
+		}
+	}
+	s.logAudit(s.audit.LogDenied(info.Agent, action, path, ip, "session_action"))
+	jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+		fmt.Sprintf("action %q is not permitted by session role %q", action, info.SessionRole),
+		"request a session with a role that includes this action",
+		http.StatusForbidden)
+	return false
+}
+
+// checkSessionSealKey verifies the request seal key matches the session binding.
+// Returns true if check passes, false if denied.
+func (s *Server) checkSessionSealKey(w http.ResponseWriter, r *http.Request, info *authInfo) bool {
+	if !info.UsedSession || info.SessionID == "" {
+		return true
+	}
+	sess := s.sessions.Get(info.SessionID)
+	if sess == nil || sess.SealKeyFingerprint == "" {
+		return true
+	}
+	header := r.Header.Get("X-Phoenix-Seal-Key")
+	if header == "" {
+		// Seal key is bound but not presented -- deny
+		jsonDenied(w, "access_denied", "SEAL_KEY_MISMATCH",
+			"session has a bound seal key but no X-Phoenix-Seal-Key header was provided",
+			"include the seal key that was used when minting this session",
+			http.StatusBadRequest)
+		return false
+	}
+	pubKey, err := crypto.DecodeSealKey(header)
+	if err != nil {
+		jsonError(w, "malformed seal key header: "+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	fp := session.SealKeyFingerprint(pubKey[:])
+	if fp != sess.SealKeyFingerprint {
+		jsonDenied(w, "access_denied", "SEAL_KEY_MISMATCH",
+			"request seal key does not match session binding",
+			"use the same seal key that was provided at session mint",
+			http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // jsonOK sends a JSON success response.
 func jsonOK(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -416,9 +548,21 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Session scope enforcement (before ACL)
+	if path != "" && !strings.HasSuffix(path, "/") {
+		if !s.checkSessionScope(w, info, path, ip) {
+			return
+		}
+	}
+
+	// Session seal key binding check
+	if !s.checkSessionSealKey(w, r, info) {
+		return
+	}
+
 	// Validate seal header early so attestation gets the correct state
 	// for both list mode and single-secret reads.
-	sealKey, sealErr := s.validateSealHeader(r, agentName)
+	sealKey, sealErr := s.validateSealHeader(r, info)
 	if sealErr != nil {
 		jsonError(w, sealErr.Error(), http.StatusBadRequest)
 		return
@@ -427,6 +571,10 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// List mode: path is empty or ends with /
 	if path == "" || strings.HasSuffix(path, "/") {
+		// Session action enforcement: list
+		if !s.checkSessionAction(w, info, "list", path, ip) {
+			return
+		}
 		allPaths, err := s.backend.List(path)
 		if err != nil {
 			log.Printf("error listing secrets with prefix %q: %v", path, err)
@@ -435,6 +583,10 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		var visible []string
 		for _, p := range allPaths {
+			// Session scope filter: hide paths outside session namespace
+			if info.UsedSession && !session.PathInScope(p, info.SessionNamespaces) {
+				continue
+			}
 			if s.acl.Authorize(agentName, p, acl.ActionList) != nil {
 				continue
 			}
@@ -446,6 +598,11 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logAudit(s.audit.LogAllowed(agentName, "list", path, ip))
 		jsonOK(w, map[string]interface{}{"paths": visible})
+		return
+	}
+
+	// Session action enforcement: read_value
+	if !s.checkSessionAction(w, info, "read_value", path, ip) {
 		return
 	}
 
@@ -517,6 +674,14 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Session scope and action enforcement
+	if !s.checkSessionScope(w, info, path, ip) {
+		return
+	}
+	if !s.checkSessionAction(w, info, "write", path, ip) {
+		return
+	}
+
 	if err := s.acl.Authorize(agentName, path, acl.ActionWrite); err != nil {
 		s.logAudit(s.audit.LogDenied(agentName, "write", path, ip, "acl"))
 		jsonError(w, "access denied", http.StatusForbidden)
@@ -571,6 +736,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 
 	path := secretPath(r)
 	ip := clientIP(r)
+
+	// Session scope and action enforcement
+	if !s.checkSessionScope(w, info, path, ip) {
+		return
+	}
+	if !s.checkSessionAction(w, info, "delete", path, ip) {
+		return
+	}
 
 	if err := s.acl.Authorize(agentName, path, acl.ActionDelete); err != nil {
 		s.logAudit(s.audit.LogDenied(agentName, "delete", path, ip, "acl"))
@@ -891,7 +1064,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	dryRun := r.URL.Query().Get("dry_run") == "true"
 
 	// Validate seal key header early (before processing refs)
-	sealKey, sealErr := s.validateSealHeader(r, agentName)
+	sealKey, sealErr := s.validateSealHeader(r, info)
 	if sealErr != nil {
 		jsonError(w, sealErr.Error(), http.StatusBadRequest)
 		return
@@ -976,12 +1149,40 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	sealedValues := make(map[string]*crypto.SealedEnvelope)
 	errors := make(map[string]string)
 
+	// Session seal key binding check (once, before processing refs)
+	if !s.checkSessionSealKey(w, r, info) {
+		return
+	}
+
 	for _, refStr := range req.Refs {
 		path, err := ref.Parse(refStr)
 		if err != nil {
 			s.logAudit(s.audit.LogDenied(agentName, "resolve", refStr, ip, "malformed_ref"))
 			errors[refStr] = err.Error()
 			continue
+		}
+
+		// Session scope enforcement (per-ref)
+		if info.UsedSession && !session.PathInScope(path, info.SessionNamespaces) {
+			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "session_scope"))
+			errors[refStr] = "path outside session scope"
+			continue
+		}
+
+		// Session action enforcement (per-ref)
+		if info.UsedSession {
+			allowed := false
+			for _, a := range info.SessionActions {
+				if a == "read_value" || a == "admin" {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "session_action"))
+				errors[refStr] = "action read_value not permitted by session role"
+				continue
+			}
 		}
 
 		if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
@@ -1339,7 +1540,11 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 // registered public seal key. Returns the decoded 32-byte public key if valid,
 // or nil if no header is present. Returns an error if the header is present but
 // invalid or mismatched.
-func (s *Server) validateSealHeader(r *http.Request, agentName string) (*[32]byte, error) {
+//
+// For session-authenticated requests, the ACL-registered seal key check is
+// skipped. Session seal key binding is handled separately by checkSessionSealKey,
+// which validates the header against the fingerprint bound at session mint time.
+func (s *Server) validateSealHeader(r *http.Request, info *authInfo) (*[32]byte, error) {
 	header := r.Header.Get("X-Phoenix-Seal-Key")
 	if header == "" {
 		return nil, nil
@@ -1350,7 +1555,13 @@ func (s *Server) validateSealHeader(r *http.Request, agentName string) (*[32]byt
 		return nil, fmt.Errorf("malformed seal key header: %w", err)
 	}
 
-	registered, err := s.acl.GetAgentSealKey(agentName)
+	// Session-authenticated requests: seal key was already validated against
+	// the session's bound fingerprint by checkSessionSealKey. Skip ACL check.
+	if info.UsedSession {
+		return pubKey, nil
+	}
+
+	registered, err := s.acl.GetAgentSealKey(info.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("agent lookup failed: %w", err)
 	}
@@ -1509,4 +1720,148 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonError(w, "proxy endpoint not yet implemented", http.StatusNotImplemented)
+}
+
+// sessionMintRequest is the JSON body for minting a session token.
+type sessionMintRequest struct {
+	Role         string `json:"role"`
+	SealPublicKey string `json:"seal_public_key,omitempty"` // base64-encoded 32-byte X25519 key
+}
+
+func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil || s.sessionRoles == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	// Authenticate the bootstrap request using existing auth channels
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	ip := clientIP(r)
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	var req sessionMintRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Role == "" {
+		jsonError(w, "role is required", http.StatusBadRequest)
+		return
+	}
+
+	// Look up role
+	role, ok := s.sessionRoles[req.Role]
+	if !ok {
+		jsonDenied(w, "access_denied", "ROLE_NOT_FOUND",
+			fmt.Sprintf("role %q does not exist", req.Role),
+			"check available roles in server config",
+			http.StatusNotFound)
+		s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "role_not_found"))
+		return
+	}
+
+	// Determine bootstrap method from auth info
+	bootstrapMethod := s.bootstrapMethod(info)
+
+	// Check bootstrap trust
+	if !s.bootstrapAllowed(role.BootstrapTrust, bootstrapMethod, info.IsLocal) {
+		jsonDenied(w, "access_denied", "BOOTSTRAP_FAILED",
+			fmt.Sprintf("auth method %q is not in role's bootstrap_trust list", bootstrapMethod),
+			fmt.Sprintf("role %q accepts: %v", req.Role, role.BootstrapTrust),
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "bootstrap_failed"))
+		return
+	}
+
+	// Validate seal key if required
+	var sealPubKey []byte
+	if role.RequireSealKey {
+		if req.SealPublicKey == "" {
+			jsonDenied(w, "bad_request", "SEAL_KEY_REQUIRED",
+				fmt.Sprintf("role %q requires a seal public key", req.Role),
+				"include seal_public_key in the mint request",
+				http.StatusBadRequest)
+			return
+		}
+	}
+	if req.SealPublicKey != "" {
+		decoded, err := crypto.DecodeSealKey(req.SealPublicKey)
+		if err != nil {
+			jsonError(w, "invalid seal_public_key: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		sealPubKey = decoded[:]
+	}
+
+	// Compute effective TTL
+	ttl := s.sessionTTL(role.MaxTTL)
+
+	namespaces := role.Namespaces
+	actions := role.Actions // nil -> store defaults to ["list", "read_value"]
+
+	// Mint session
+	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, ip, ttl)
+	if err != nil {
+		log.Printf("session mint error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Audit log
+	s.logAudit(s.audit.LogAllowed(info.Agent, "session.mint.approved", req.Role, ip))
+
+	jsonOK(w, map[string]interface{}{
+		"session_id":           sess.ID,
+		"session_token":        tokenStr,
+		"role":                 sess.Role,
+		"expires_at":           sess.ExpiresAt.Format(time.RFC3339),
+		"namespaces":           sess.Namespaces,
+		"seal_key_fingerprint": sess.SealKeyFingerprint,
+	})
+}
+
+// bootstrapMethod returns the primary auth method string from authInfo.
+func (s *Server) bootstrapMethod(info *authInfo) string {
+	if info.UsedMTLS {
+		return "mtls"
+	}
+	if info.UsedBearer {
+		return "bearer"
+	}
+	if info.TokenIssuedAt != nil {
+		return "token"
+	}
+	return "unknown"
+}
+
+// bootstrapAllowed checks if the auth method satisfies the role's bootstrap trust.
+// "local" is additive -- a bearer+local request matches both "bearer" and "local".
+func (s *Server) bootstrapAllowed(trustMethods []string, method string, isLocal bool) bool {
+	for _, allowed := range trustMethods {
+		if allowed == method {
+			return true
+		}
+		if allowed == "local" && isLocal {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionTTL computes the effective TTL for a session, respecting the role's max_ttl.
+func (s *Server) sessionTTL(maxTTL string) time.Duration {
+	if maxTTL == "" {
+		return 0 // use store default
+	}
+	d, err := time.ParseDuration(maxTTL)
+	if err != nil {
+		return 0 // validated at config load, shouldn't happen
+	}
+	return d
 }

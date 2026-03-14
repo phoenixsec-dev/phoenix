@@ -27,6 +27,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
+	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
 	"github.com/phoenixsec/phoenix/internal/version"
@@ -210,6 +211,24 @@ func main() {
 		log.Printf("  Short-lived tokens: enabled (ttl=%s)", ttl)
 	} else {
 		log.Printf("  Short-lived tokens: disabled")
+	}
+
+	// Initialize session identity if enabled
+	if cfg.Session.Enabled {
+		sessionTTL := session.DefaultTTL
+		if cfg.Session.TTL != "" {
+			sessionTTL, _ = time.ParseDuration(cfg.Session.TTL) // validated above
+		}
+		ss, err := session.NewStore(sessionTTL)
+		if err != nil {
+			log.Fatalf("initializing session store: %v", err)
+		}
+		srv.SetSessionStore(ss)
+		srv.SetSessionRoles(cfg.Session.Roles)
+		defer ss.Stop()
+		log.Printf("  Sessions: enabled (roles=%d, ttl=%s)", len(cfg.Session.Roles), sessionTTL)
+	} else {
+		log.Printf("  Sessions: disabled")
 	}
 
 	// Start local attestation agent if enabled

@@ -20,6 +20,7 @@ type Config struct {
 	Policy      PolicyConfig      `json:"policy,omitempty"`
 	Attestation AttestationConfig `json:"attestation,omitempty"`
 	OnePassword OPConfig          `json:"onepassword,omitempty"`
+	Session     SessionConfig     `json:"session,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -109,6 +110,32 @@ type OPConfig struct {
 	Vault                  string `json:"vault,omitempty"`                     // 1Password vault name
 	ServiceAccountTokenEnv string `json:"service_account_token_env,omitempty"` // env var name (default: OP_SERVICE_ACCOUNT_TOKEN)
 	CacheTTL               string `json:"cache_ttl,omitempty"`                 // duration string, e.g. "60s" (default)
+}
+
+// SessionConfig controls the v1 session identity system.
+type SessionConfig struct {
+	Enabled bool                  `json:"enabled"`
+	TTL     string                `json:"ttl,omitempty"` // default "1h"
+	Roles   map[string]RoleConfig `json:"roles,omitempty"`
+}
+
+// RoleConfig defines a named role that agents assume via session tokens.
+type RoleConfig struct {
+	Namespaces     []string `json:"namespaces"`
+	Actions        []string `json:"actions,omitempty"`      // default: ["list", "read_value"]
+	BootstrapTrust []string `json:"bootstrap_trust"`        // allowed auth methods: "mtls", "bearer", "local"
+	RequireSealKey bool     `json:"require_seal_key"`       // must present seal pubkey at mint
+	MaxTTL         string   `json:"max_ttl,omitempty"`      // per-role session TTL override
+	Attestation    []string `json:"attestation,omitempty"`  // declared, enforcement deferred to Phase 2
+	StepUp         bool     `json:"step_up,omitempty"`      // declared, enforcement deferred to Phase 3
+	StepUpTTL      string   `json:"step_up_ttl,omitempty"`  // declared, enforcement deferred to Phase 3
+}
+
+// validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.
+var validBootstrapMethods = map[string]bool{
+	"mtls":   true,
+	"bearer": true,
+	"local":  true,
 }
 
 // DefaultConfig returns a config with sensible defaults for /data volume mount.
@@ -228,6 +255,41 @@ func (c *Config) Validate() error {
 	}
 	if c.Attestation.LocalAgent.Enabled && c.Attestation.LocalAgent.SocketPath == "" {
 		return errors.New("attestation.local_agent.socket_path is required when local_agent is enabled")
+	}
+
+	// Validate session config
+	if c.Session.Enabled {
+		if c.Session.TTL != "" {
+			if _, err := time.ParseDuration(c.Session.TTL); err != nil {
+				return fmt.Errorf("session.ttl: invalid duration %q: %w", c.Session.TTL, err)
+			}
+		}
+		if len(c.Session.Roles) == 0 {
+			return errors.New("session.roles: at least one role must be defined when sessions are enabled")
+		}
+		for name, role := range c.Session.Roles {
+			if len(role.Namespaces) == 0 {
+				return fmt.Errorf("session.roles.%s: at least one namespace is required", name)
+			}
+			if len(role.BootstrapTrust) == 0 {
+				return fmt.Errorf("session.roles.%s: at least one bootstrap_trust method is required", name)
+			}
+			for _, method := range role.BootstrapTrust {
+				if !validBootstrapMethods[method] {
+					return fmt.Errorf("session.roles.%s: unknown bootstrap_trust method %q (valid: mtls, bearer, local)", name, method)
+				}
+			}
+			if role.MaxTTL != "" {
+				if _, err := time.ParseDuration(role.MaxTTL); err != nil {
+					return fmt.Errorf("session.roles.%s.max_ttl: invalid duration %q: %w", name, role.MaxTTL, err)
+				}
+			}
+			if role.StepUpTTL != "" {
+				if _, err := time.ParseDuration(role.StepUpTTL); err != nil {
+					return fmt.Errorf("session.roles.%s.step_up_ttl: invalid duration %q: %w", name, role.StepUpTTL, err)
+				}
+			}
+		}
 	}
 
 	return nil
