@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
@@ -123,6 +124,7 @@ type Server struct {
 	authRL        *rateLimiter
 	sessions      *session.Store            // nil when sessions are not configured
 	sessionRoles  map[string]config.RoleConfig // nil when sessions are not configured
+	approvals     *approval.Store           // nil when step-up not configured
 	mux           *http.ServeMux
 }
 
@@ -200,6 +202,11 @@ func (s *Server) SetSessionRoles(roles map[string]config.RoleConfig) {
 	s.sessionRoles = roles
 }
 
+// SetApprovalStore configures the step-up approval store.
+func (s *Server) SetApprovalStore(as *approval.Store) {
+	s.approvals = as
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -226,6 +233,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/policy/check", s.handlePolicyCheck)
 	s.mux.HandleFunc("POST /v1/session/mint", s.handleSessionMint)
 	s.mux.HandleFunc("POST /v1/session/renew", s.handleSessionRenew)
+	s.mux.HandleFunc("GET /v1/approvals", s.handleApprovalList)
+	s.mux.HandleFunc("/v1/approval/", s.handleApprovalRouter)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -1771,8 +1780,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 // sessionMintRequest is the JSON body for minting a session token.
 type sessionMintRequest struct {
-	Role         string `json:"role"`
+	Role          string `json:"role"`
 	SealPublicKey string `json:"seal_public_key,omitempty"` // base64-encoded 32-byte X25519 key
+	RequesterTTY  string `json:"requester_tty,omitempty"`   // best-effort TTY path for step-up warning
 }
 
 func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
@@ -1860,6 +1870,38 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 
 	// Compute effective TTL
 	ttl := s.sessionTTL(role.MaxTTL)
+
+	// Step-up approval: if the role requires it, create a pending approval instead of minting
+	if role.StepUp {
+		if s.approvals == nil {
+			jsonError(w, "step-up approval not configured", http.StatusNotImplemented)
+			return
+		}
+		approvalTimeout := s.parseStepUpTTL(role.StepUpTTL)
+		apr, aprErr := s.approvals.Create(
+			req.Role, info.Agent, sealPubKey,
+			role.Namespaces, role.Actions,
+			bootstrapMethod, info.CertFingerprint, ip, req.RequesterTTY,
+			ttl, approvalTimeout,
+		)
+		if aprErr != nil {
+			log.Printf("approval create error: %v", aprErr)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		s.logAudit(s.audit.LogAllowed(info.Agent, "approval.created", req.Role, ip))
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted) // 202
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":          "approval_required",
+			"approval_id":     apr.ID,
+			"code":            "APPROVAL_REQUIRED",
+			"reason":          fmt.Sprintf("role %q requires human approval", req.Role),
+			"approve_command": fmt.Sprintf("phoenix approve %s", apr.ID),
+			"expires_at":      apr.ExpiresAt.Format(time.RFC3339),
+		})
+		return
+	}
 
 	namespaces := role.Namespaces
 	actions := role.Actions // nil -> store defaults to ["list", "read_value"]
@@ -2050,4 +2092,316 @@ func (s *Server) sessionTTL(maxTTL string) time.Duration {
 		return 0 // validated at config load, shouldn't happen
 	}
 	return d
+}
+
+// parseStepUpTTL parses the step-up approval window duration from a role config string.
+func (s *Server) parseStepUpTTL(ttlStr string) time.Duration {
+	if ttlStr == "" {
+		return approval.DefaultTimeout
+	}
+	d, err := time.ParseDuration(ttlStr)
+	if err != nil {
+		return approval.DefaultTimeout
+	}
+	return d
+}
+
+// handleApprovalRouter dispatches /v1/approval/{id}[/approve|/deny] requests.
+func (s *Server) handleApprovalRouter(w http.ResponseWriter, r *http.Request) {
+	if s.approvals == nil {
+		jsonError(w, "step-up approval not configured", http.StatusNotImplemented)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/v1/approval/")
+	parts := strings.SplitN(path, "/", 2)
+	id := parts[0]
+	if id == "" {
+		jsonError(w, "approval ID required", http.StatusBadRequest)
+		return
+	}
+
+	if len(parts) == 1 {
+		if r.Method != "GET" {
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleApprovalStatus(w, r, id)
+	} else if parts[1] == "approve" && r.Method == "POST" {
+		s.handleApprovalApprove(w, r, id)
+	} else if parts[1] == "deny" && r.Method == "POST" {
+		s.handleApprovalDeny(w, r, id)
+	} else {
+		jsonError(w, "not found", http.StatusNotFound)
+	}
+}
+
+// handleApprovalStatus returns the current status of an approval request.
+// The requesting agent (the one who triggered step-up) can poll for their own approval.
+// Admins can poll for any approval. Session token includes the token only for the
+// original requester or admins.
+func (s *Server) handleApprovalStatus(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	apr := s.approvals.Get(id)
+	if apr == nil {
+		jsonError(w, "approval not found", http.StatusNotFound)
+		return
+	}
+
+	// Authorization: requester can poll their own, admins can poll any
+	isRequester := info.Agent == apr.Agent
+	isAdmin := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin) == nil
+	if !isRequester && !isAdmin {
+		jsonError(w, "access denied: not the requester or admin", http.StatusForbidden)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"id":         apr.ID,
+		"role":       apr.Role,
+		"agent":      apr.Agent,
+		"status":     string(apr.Status),
+		"created_at": apr.CreatedAt.Format(time.RFC3339),
+		"expires_at": apr.ExpiresAt.Format(time.RFC3339),
+	}
+	// Only include session token for the original requester or admins
+	if apr.Status == approval.StatusApproved && (isRequester || isAdmin) {
+		resp["session_token"] = apr.SessionToken
+		resp["session_id"] = apr.SessionID
+		resp["session_expiry"] = apr.SessionExpiry.Format(time.RFC3339)
+	}
+	jsonOK(w, resp)
+}
+
+// handleApprovalApprove approves a pending step-up request and mints a session.
+func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Approvers must NOT use session auth — require admin bearer or mTLS
+	if info.UsedSession {
+		jsonDenied(w, "access_denied", "ADMIN_AUTH_REQUIRED",
+			"session tokens cannot approve step-up requests",
+			"use a bearer token or mTLS certificate to approve",
+			http.StatusForbidden)
+		return
+	}
+
+	// Require ACL admin permission
+	if err := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	ip := clientIP(r)
+
+	apr := s.approvals.Get(id)
+	if apr == nil {
+		jsonError(w, "approval not found", http.StatusNotFound)
+		return
+	}
+	if apr.Status != approval.StatusPending {
+		jsonOK(w, map[string]interface{}{
+			"id":     apr.ID,
+			"status": string(apr.Status),
+			"detail": fmt.Sprintf("approval is already %s", apr.Status),
+		})
+		return
+	}
+
+	// Re-read current role config to prevent minting with stale permissions
+	role, ok := s.sessionRoles[apr.Role]
+	if !ok {
+		jsonDenied(w, "access_denied", "ROLE_NOT_FOUND",
+			fmt.Sprintf("role %q no longer exists in server config", apr.Role),
+			"the role was removed while approval was pending",
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "role_not_found"))
+		return
+	}
+	if !role.StepUp {
+		jsonDenied(w, "access_denied", "ROLE_CHANGED",
+			fmt.Sprintf("role %q no longer requires step-up approval", apr.Role),
+			"role config changed while approval was pending",
+			http.StatusConflict)
+		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "role_changed"))
+		return
+	}
+
+	// Re-check bootstrap trust: the stored bootstrap method must still be allowed
+	if !s.bootstrapAllowed(role.BootstrapTrust, apr.BootstrapMethod, session.IsLoopback(apr.SourceIP)) {
+		jsonDenied(w, "access_denied", "BOOTSTRAP_FAILED",
+			fmt.Sprintf("original auth method %q is no longer in role's bootstrap_trust list", apr.BootstrapMethod),
+			fmt.Sprintf("role %q now accepts: %v", apr.Role, role.BootstrapTrust),
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "bootstrap_recheck_failed"))
+		return
+	}
+
+	// Re-check attestation requirements against current role
+	if len(role.Attestation) > 0 {
+		// Build a synthetic authInfo from the stored approval data to re-check
+		aprInfo := &authInfo{
+			Agent:           apr.Agent,
+			UsedMTLS:        apr.BootstrapMethod == "mtls",
+			UsedBearer:      apr.BootstrapMethod == "bearer",
+			IsLocal:         session.IsLoopback(apr.SourceIP),
+			CertFingerprint: apr.CertFingerprint,
+		}
+		if reason := s.checkRoleAttestation(role.Attestation, aprInfo, apr.SourceIP); reason != "" {
+			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+				fmt.Sprintf("current role attestation requirements not met: %s", reason),
+				fmt.Sprintf("role %q attestation changed while approval was pending", apr.Role),
+				http.StatusForbidden)
+			s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "attestation_recheck_failed"))
+			return
+		}
+	}
+
+	// Re-check seal key requirement
+	if role.RequireSealKey && len(apr.SealPubKey) == 0 {
+		jsonDenied(w, "access_denied", "SEAL_KEY_REQUIRED",
+			fmt.Sprintf("role %q now requires a seal key, but none was provided at request time", apr.Role),
+			"the agent must re-request with a seal key",
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "seal_key_recheck_failed"))
+		return
+	}
+
+	// Parse optional approver_tty from request body
+	var body struct {
+		ApproverTTY string `json:"approver_tty"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	json.NewDecoder(r.Body).Decode(&body) // best-effort
+
+	// Mint session using CURRENT role config, not stale stored data
+	ttl := s.sessionTTL(role.MaxTTL)
+	tokenStr, sess, mintErr := s.sessions.Create(
+		apr.Role, apr.Agent, apr.SealPubKey,
+		role.Namespaces, role.Actions,
+		apr.BootstrapMethod, apr.SourceIP, ttl,
+	)
+	if mintErr != nil {
+		log.Printf("session mint on approval error: %v", mintErr)
+		jsonError(w, "internal error minting session", http.StatusInternalServerError)
+		return
+	}
+
+	// Record approval
+	if aprErr := s.approvals.Approve(id, info.Agent, ip, body.ApproverTTY, tokenStr, sess.ID, sess.ExpiresAt); aprErr != nil {
+		jsonError(w, "approval failed: "+aprErr.Error(), http.StatusConflict)
+		return
+	}
+
+	s.logAudit(s.audit.LogAllowed(info.Agent, "approval.approved", apr.Role, ip))
+
+	// TTY warning: compare requester and approver TTYs
+	sameTTYWarning := false
+	if apr.RequesterTTY != "" && body.ApproverTTY != "" && apr.RequesterTTY == body.ApproverTTY {
+		sameTTYWarning = true
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"id":               apr.ID,
+		"status":           "approved",
+		"session_id":       sess.ID,
+		"session_expiry":   sess.ExpiresAt.Format(time.RFC3339),
+		"same_tty_warning": sameTTYWarning,
+	})
+}
+
+// handleApprovalDeny denies a pending step-up request.
+func (s *Server) handleApprovalDeny(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if info.UsedSession {
+		jsonDenied(w, "access_denied", "ADMIN_AUTH_REQUIRED",
+			"session tokens cannot deny step-up requests",
+			"use a bearer token or mTLS certificate to deny",
+			http.StatusForbidden)
+		return
+	}
+
+	// Require ACL admin permission
+	if err := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	ip := clientIP(r)
+
+	if denyErr := s.approvals.Deny(id, info.Agent, ip); denyErr != nil {
+		if denyErr == approval.ErrNotFound {
+			jsonError(w, "approval not found", http.StatusNotFound)
+		} else {
+			jsonError(w, "deny failed: "+denyErr.Error(), http.StatusConflict)
+		}
+		return
+	}
+
+	s.logAudit(s.audit.LogAllowed(info.Agent, "approval.denied", id, ip))
+
+	jsonOK(w, map[string]interface{}{
+		"id":     id,
+		"status": "denied",
+	})
+}
+
+// handleApprovalList returns all pending approval requests.
+func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
+	if s.approvals == nil {
+		jsonError(w, "step-up approval not configured", http.StatusNotImplemented)
+		return
+	}
+
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if info.UsedSession {
+		jsonDenied(w, "access_denied", "ADMIN_AUTH_REQUIRED",
+			"session tokens cannot list approvals",
+			"use a bearer token or mTLS certificate",
+			http.StatusForbidden)
+		return
+	}
+
+	// Require ACL admin permission
+	if err := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	pending := s.approvals.ListPending()
+	items := make([]map[string]interface{}, 0, len(pending))
+	for _, apr := range pending {
+		items = append(items, map[string]interface{}{
+			"id":               apr.ID,
+			"role":             apr.Role,
+			"agent":            apr.Agent,
+			"source_ip":        apr.SourceIP,
+			"bootstrap_method": apr.BootstrapMethod,
+			"created_at":       apr.CreatedAt.Format(time.RFC3339),
+			"expires_at":       apr.ExpiresAt.Format(time.RFC3339),
+		})
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"approvals": items,
+	})
 }

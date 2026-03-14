@@ -20,6 +20,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/agent"
 	"github.com/phoenixsec/phoenix/internal/api"
+	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
@@ -227,6 +228,26 @@ func main() {
 		srv.SetSessionRoles(cfg.Session.Roles)
 		defer ss.Stop()
 		log.Printf("  Sessions: enabled (roles=%d, ttl=%s)", len(cfg.Session.Roles), sessionTTL)
+
+		// Check if any role requires step-up approval
+		hasStepUp := false
+		var stepUpTimeout time.Duration
+		for _, role := range cfg.Session.Roles {
+			if role.StepUp {
+				hasStepUp = true
+				if role.StepUpTTL != "" {
+					if d, err := time.ParseDuration(role.StepUpTTL); err == nil && stepUpTimeout == 0 {
+						stepUpTimeout = d
+					}
+				}
+			}
+		}
+		if hasStepUp {
+			as := approval.NewStore(stepUpTimeout)
+			srv.SetApprovalStore(as)
+			defer as.Stop()
+			log.Printf("  Step-up approvals: enabled (timeout=%s)", stepUpTimeout)
+		}
 	} else {
 		log.Printf("  Sessions: disabled")
 	}

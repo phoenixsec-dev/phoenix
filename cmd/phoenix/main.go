@@ -232,6 +232,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent-sock subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "approve":
+		err = cmdApprove(args)
 	case "mcp-server":
 		httpAddr := ""
 		mcpToken := os.Getenv("PHOENIX_MCP_TOKEN")
@@ -319,6 +321,7 @@ Usage:
   phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
   phoenix keypair generate <name> [-o dir]     Generate X25519 seal key pair
   phoenix keypair show <name>                 Show public key for a seal key pair
+  phoenix approve <approval-id>                Approve a step-up session request
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix mcp-server --http :8080             Run MCP server (Streamable HTTP)
   phoenix init <dir>                          Initialize data directory
@@ -332,6 +335,7 @@ Environment:
   PHOENIX_SEAL_KEY     Seal private key file (enables sealed mode)
   PHOENIX_POLICY       Path to attestation policy file (JSON)
   PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)
+  PHOENIX_ROLE         Role name for auto-mint session identity
   PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)`)
 }
 
@@ -2122,6 +2126,9 @@ func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
 	if sealPubKeyB64 != "" {
 		body["seal_public_key"] = sealPubKeyB64
 	}
+	if tty := detectTTY(); tty != "" {
+		body["requester_tty"] = tty
+	}
 	bodyBytes, _ := json.Marshal(body)
 
 	resp, err := apiRequest("POST", "/v1/session/mint", strings.NewReader(string(bodyBytes)))
@@ -2131,6 +2138,19 @@ func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+
+	// Step-up approval: 202 means approval required
+	if resp.StatusCode == http.StatusAccepted {
+		var pending struct {
+			Status     string `json:"status"`
+			ApprovalID string `json:"approval_id"`
+			ApproveCmd string `json:"approve_command"`
+			ExpiresAt  string `json:"expires_at"`
+		}
+		if err := json.Unmarshal(respBody, &pending); err == nil && pending.Status == "approval_required" {
+			return pollForApproval(pending.ApprovalID, pending.ExpiresAt, pending.ApproveCmd)
+		}
+	}
 
 	if resp.StatusCode != 200 {
 		var errResp struct {
@@ -2732,4 +2752,175 @@ func handleError(resp *http.Response) error {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, structured.Error)
 	}
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
+}
+
+// detectTTY returns the TTY path for the current process, or empty string.
+func detectTTY() string {
+	link, err := os.Readlink("/proc/self/fd/0")
+	if err != nil {
+		return ""
+	}
+	if strings.HasPrefix(link, "/dev/pts/") || strings.HasPrefix(link, "/dev/tty") {
+		return link
+	}
+	return ""
+}
+
+// pollForApproval polls an approval status endpoint until approved, denied, or expired.
+func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.Time, error) {
+	fmt.Fprintf(os.Stderr, "Step-up approval required. Run:\n  %s\n\nWaiting for approval...\n", approveCmd)
+
+	deadline := time.Now().Add(10 * time.Minute) // fallback
+	if exp, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
+		deadline = exp.Add(5 * time.Second) // small grace past server expiry
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window has expired")
+			}
+
+			resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  poll error: %v\n", err)
+				continue
+			}
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			var status struct {
+				Status        string `json:"status"`
+				SessionToken  string `json:"session_token"`
+				SessionExpiry string `json:"session_expiry"`
+			}
+			if err := json.Unmarshal(respBody, &status); err != nil {
+				continue
+			}
+
+			switch status.Status {
+			case "approved":
+				fmt.Fprintf(os.Stderr, "Approved.\n")
+				exp, _ := time.Parse(time.RFC3339, status.SessionExpiry)
+				return status.SessionToken, exp, nil
+			case "denied":
+				return "", time.Time{}, fmt.Errorf("[APPROVAL_DENIED] step-up approval was denied")
+			case "expired":
+				return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window expired before human approval")
+			case "pending":
+				// continue polling
+			}
+		}
+	}
+}
+
+// cmdApprove handles the "phoenix approve <approval-id>" command.
+func cmdApprove(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix approve <approval-id>")
+	}
+	approvalID := args[0]
+
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	// Fetch approval details
+	resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
+	if err != nil {
+		return fmt.Errorf("fetching approval: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var details struct {
+		ID        string `json:"id"`
+		Role      string `json:"role"`
+		Agent     string `json:"agent"`
+		Status    string `json:"status"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+		return fmt.Errorf("decoding approval: %w", err)
+	}
+
+	if details.Status != "pending" {
+		return fmt.Errorf("approval %s is already %s", approvalID, details.Status)
+	}
+
+	// Prompt for confirmation via /dev/tty
+	fmt.Fprintf(os.Stderr, "\nApprove session for role '%s'?\n", details.Role)
+	fmt.Fprintf(os.Stderr, "  Requested by: agent %q\n", details.Agent)
+	fmt.Fprintf(os.Stderr, "  Expires at: %s\n", details.ExpiresAt)
+	fmt.Fprintf(os.Stderr, "\nApprove? [y/N]: ")
+
+	answer, err := readFromTTY()
+	if err != nil {
+		return fmt.Errorf("reading confirmation: %w", err)
+	}
+
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	myTTY := detectTTY()
+
+	if answer == "y" || answer == "yes" {
+		body, _ := json.Marshal(map[string]string{"approver_tty": myTTY})
+		resp, err := apiRequest("POST", "/v1/approval/"+approvalID+"/approve", strings.NewReader(string(body)))
+		if err != nil {
+			return fmt.Errorf("approve request: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return handleError(resp)
+		}
+
+		var result struct {
+			SameTTYWarning bool `json:"same_tty_warning"`
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		json.Unmarshal(respBody, &result)
+
+		if result.SameTTYWarning {
+			fmt.Fprintf(os.Stderr, "WARNING: approver and requester are on the same TTY — this may indicate the same operator is both requesting and approving.\n")
+		}
+		fmt.Fprintln(os.Stderr, "Session approved.")
+		return nil
+	}
+
+	// Deny
+	resp2, err := apiRequest("POST", "/v1/approval/"+approvalID+"/deny", strings.NewReader("{}"))
+	if err != nil {
+		return fmt.Errorf("deny request: %w", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		return handleError(resp2)
+	}
+	fmt.Fprintln(os.Stderr, "Session denied.")
+	return nil
+}
+
+// readFromTTY reads a line from /dev/tty (works even when stdin is piped).
+func readFromTTY() (string, error) {
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		// Fallback to stdin
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			return scanner.Text(), nil
+		}
+		return "", fmt.Errorf("no input available")
+	}
+	defer tty.Close()
+	scanner := bufio.NewScanner(tty)
+	if scanner.Scan() {
+		return scanner.Text(), nil
+	}
+	return "", fmt.Errorf("no input from /dev/tty")
 }
