@@ -32,6 +32,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/version"
@@ -231,6 +232,12 @@ func cmdMCP(args []string) error {
 	if mcpSealPrivKey != nil {
 		logger.Println("sealed mode enabled")
 	}
+
+	// Start background session renewal if using a session token
+	if os.Getenv("PHOENIX_ROLE") != "" && strings.HasPrefix(token, "phxs_") {
+		go sessionRenewalLoop(logger)
+	}
+
 	logger.Println("server starting (stdio)")
 
 	dec := json.NewDecoder(os.Stdin)
@@ -301,7 +308,8 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Sprintf("Server error: HTTP %d", resp.StatusCode), true
+		respBody, _ := io.ReadAll(resp.Body)
+		return mcpFormatDenial(respBody, resp.StatusCode), true
 	}
 
 	// Sealed mode: return opaque PHOENIX_SEALED: tokens
@@ -405,14 +413,8 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		var errResp struct {
-			Error string `json:"error"`
-		}
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Error != "" {
-			return fmt.Sprintf("%s: %s", params.Path, errResp.Error), true
-		}
-		return fmt.Sprintf("%s: HTTP %d", params.Path, resp.StatusCode), true
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Sprintf("%s: %s", params.Path, mcpFormatDenial(body, resp.StatusCode)), true
 	}
 
 	// Sealed mode: return opaque PHOENIX_SEALED: token
@@ -475,14 +477,8 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		var errResp struct {
-			Error string `json:"error"`
-		}
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Error != "" {
-			return errResp.Error, true
-		}
-		return fmt.Sprintf("HTTP %d", resp.StatusCode), true
+		respBody, _ := io.ReadAll(resp.Body)
+		return mcpFormatDenial(respBody, resp.StatusCode), true
 	}
 
 	var result struct {
@@ -565,6 +561,41 @@ func mcpCheckAllowUnseal(path string) (bool, error) {
 		return false, fmt.Errorf("decoding response: %w", err)
 	}
 	return result.Allowed, nil
+}
+
+// sessionRenewalLoop runs in the background during MCP server mode,
+// periodically renewing the session token before it expires.
+func sessionRenewalLoop(logger *log.Logger) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		renewSessionIfNeeded()
+		if logger != nil {
+			logger.Println("session renewal check complete")
+		}
+	}
+}
+
+// mcpFormatDenial parses a structured denial response body and returns
+// a formatted error string for the agent.
+func mcpFormatDenial(body []byte, statusCode int) string {
+	var denial struct {
+		Error       string `json:"error"`
+		Code        string `json:"code"`
+		Detail      string `json:"detail"`
+		Remediation string `json:"remediation"`
+	}
+	if json.Unmarshal(body, &denial) == nil && denial.Code != "" {
+		msg := fmt.Sprintf("[%s] %s", denial.Code, denial.Detail)
+		if denial.Remediation != "" {
+			msg += "\nhint: " + denial.Remediation
+		}
+		return msg
+	}
+	if json.Unmarshal(body, &denial) == nil && denial.Error != "" {
+		return denial.Error
+	}
+	return fmt.Sprintf("HTTP %d", statusCode)
 }
 
 // mcpSendResult sends a successful JSON-RPC response.

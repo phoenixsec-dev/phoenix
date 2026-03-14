@@ -338,14 +338,29 @@ Environment:
 // requireAuth checks that at least one auth method is configured
 // (bearer token or mTLS client cert).
 func requireAuth() error {
-	if token != "" {
+	// PHOENIX_ROLE takes precedence: always mint a scoped session token,
+	// even when PHOENIX_TOKEN is set (the broad token is used only for bootstrap).
+	if os.Getenv("PHOENIX_ROLE") != "" {
+		if err := autoMintSession(); err != nil {
+			return fmt.Errorf("session auto-mint: %w", err)
+		}
+		renewSessionIfNeeded()
 		return nil
 	}
+
+	// Already have a token (bootstrap bearer or session from env)
+	if token != "" {
+		if strings.HasPrefix(token, "phxs_") {
+			renewSessionIfNeeded()
+		}
+		return nil
+	}
+
 	// Check if mTLS client cert is configured
 	if os.Getenv("PHOENIX_CLIENT_CERT") != "" && os.Getenv("PHOENIX_CLIENT_KEY") != "" {
 		return nil
 	}
-	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN or PHOENIX_CLIENT_CERT + PHOENIX_CLIENT_KEY")
+	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN, PHOENIX_ROLE, or PHOENIX_CLIENT_CERT + PHOENIX_CLIENT_KEY")
 }
 
 func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
@@ -2035,6 +2050,224 @@ func getCachedToken(agentName string, ttlBuffer time.Duration) string {
 	return entry.Token
 }
 
+// getCachedSessionToken returns a valid cached session token for the role, or empty string.
+func getCachedSessionToken(role string, ttlBuffer time.Duration) string {
+	return getCachedToken("session:"+role, ttlBuffer)
+}
+
+// cacheSessionToken stores a session token in the cache.
+func cacheSessionToken(role, tok string, expiresAt time.Time) {
+	cache, _ := loadTokenCache()
+	cache["session:"+role] = &tokenCacheEntry{
+		Token:     tok,
+		Agent:     "session:" + role,
+		ExpiresAt: expiresAt,
+	}
+	if err := saveTokenCache(cache); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not cache session token: %v\n", err)
+	}
+}
+
+// ensureSealKey loads or generates a seal key for session use.
+// Priority: PHOENIX_SEAL_KEY env > ~/.phoenix/session-seal-<role>.key > generate new.
+func ensureSealKey(role string) (*[32]byte, string, error) {
+	// Check env first
+	envPath := os.Getenv("PHOENIX_SEAL_KEY")
+	if envPath != "" {
+		priv, err := crypto.LoadSealPrivateKey(envPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("loading PHOENIX_SEAL_KEY: %w", err)
+		}
+		pub := crypto.DeriveSealPublicKey(priv)
+		return priv, crypto.EncodeSealKey(pub), nil
+	}
+
+	// Check per-role key file
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	keyDir := filepath.Join(home, ".phoenix")
+	keyPath := filepath.Join(keyDir, "session-seal-"+role+".key")
+
+	if _, statErr := os.Stat(keyPath); statErr == nil {
+		priv, loadErr := crypto.LoadSealPrivateKey(keyPath)
+		if loadErr != nil {
+			return nil, "", fmt.Errorf("loading seal key %s: %w", keyPath, loadErr)
+		}
+		pub := crypto.DeriveSealPublicKey(priv)
+		return priv, crypto.EncodeSealKey(pub), nil
+	}
+
+	// Generate new key
+	if err := os.MkdirAll(keyDir, 0700); err != nil {
+		return nil, "", fmt.Errorf("creating key directory: %w", err)
+	}
+	kp, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		return nil, "", fmt.Errorf("generating seal key: %w", err)
+	}
+	privKey := kp.PrivateKey
+	pubKey := kp.PublicKey
+	encoded := crypto.EncodeSealKey(&privKey)
+	if err := os.WriteFile(keyPath, []byte(encoded+"\n"), 0600); err != nil {
+		return nil, "", fmt.Errorf("saving seal key: %w", err)
+	}
+	return &privKey, crypto.EncodeSealKey(&pubKey), nil
+}
+
+// mintSessionViaAPI calls POST /v1/session/mint and returns the session token.
+func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
+	body := map[string]string{"role": role}
+	if sealPubKeyB64 != "" {
+		body["seal_public_key"] = sealPubKeyB64
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	resp, err := apiRequest("POST", "/v1/session/mint", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("session mint request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		var errResp struct {
+			Error       string `json:"error"`
+			Code        string `json:"code"`
+			Detail      string `json:"detail"`
+			Remediation string `json:"remediation"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
+			return "", time.Time{}, fmt.Errorf("[%s] %s\n  hint: %s", errResp.Code, errResp.Detail, errResp.Remediation)
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
+			return "", time.Time{}, fmt.Errorf("session mint: %s", errResp.Error)
+		}
+		return "", time.Time{}, fmt.Errorf("session mint: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		SessionToken string `json:"session_token"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing mint response: %w", err)
+	}
+	exp, err := time.Parse(time.RFC3339, result.ExpiresAt)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing expires_at: %w", err)
+	}
+	return result.SessionToken, exp, nil
+}
+
+// autoMintSession checks PHOENIX_ROLE and auto-mints a session token.
+func autoMintSession() error {
+	role := os.Getenv("PHOENIX_ROLE")
+	if role == "" {
+		return fmt.Errorf("PHOENIX_ROLE not set")
+	}
+
+	// Check cache first
+	if cached := getCachedSessionToken(role, 5*time.Minute); cached != "" {
+		token = cached
+		return nil
+	}
+
+	// Need bootstrap auth to mint
+	if token == "" {
+		if os.Getenv("PHOENIX_CLIENT_CERT") == "" || os.Getenv("PHOENIX_CLIENT_KEY") == "" {
+			return fmt.Errorf("PHOENIX_ROLE=%s set but no bootstrap auth available (set PHOENIX_TOKEN or mTLS certs)", role)
+		}
+	}
+
+	// Load or generate seal key
+	_, sealPubB64, err := ensureSealKey(role)
+	if err != nil {
+		// Non-fatal: mint without seal key
+		fmt.Fprintf(os.Stderr, "warning: seal key unavailable: %v\n", err)
+		sealPubB64 = ""
+	}
+
+	sessionToken, expiresAt, err := mintSessionViaAPI(role, sealPubB64)
+	if err != nil {
+		return err
+	}
+
+	cacheSessionToken(role, sessionToken, expiresAt)
+	token = sessionToken
+	return nil
+}
+
+// renewSessionViaAPI calls POST /v1/session/renew with the current session token.
+func renewSessionViaAPI() (string, time.Time, error) {
+	resp, err := apiRequest("POST", "/v1/session/renew", strings.NewReader("{}"))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("session renew request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		var errResp struct {
+			Error       string `json:"error"`
+			Code        string `json:"code"`
+			Detail      string `json:"detail"`
+			Remediation string `json:"remediation"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
+			return "", time.Time{}, fmt.Errorf("[%s] %s", errResp.Code, errResp.Detail)
+		}
+		return "", time.Time{}, fmt.Errorf("session renew: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		SessionToken string `json:"session_token"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing renew response: %w", err)
+	}
+	exp, err := time.Parse(time.RFC3339, result.ExpiresAt)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing expires_at: %w", err)
+	}
+	return result.SessionToken, exp, nil
+}
+
+// renewSessionIfNeeded checks if the current session token is nearing expiry
+// and renews it if so (within 10 minutes of expiry).
+func renewSessionIfNeeded() {
+	if !strings.HasPrefix(token, "phxs_") {
+		return
+	}
+	role := os.Getenv("PHOENIX_ROLE")
+	if role == "" {
+		return
+	}
+
+	// Check if cached token is nearing expiry
+	cache, _ := loadTokenCache()
+	entry, ok := cache["session:"+role]
+	if !ok {
+		return
+	}
+	if time.Until(entry.ExpiresAt) > 10*time.Minute {
+		return // still plenty of time
+	}
+
+	newToken, newExpiry, err := renewSessionViaAPI()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session renewal failed: %v\n", err)
+		return
+	}
+
+	cacheSessionToken(role, newToken, newExpiry)
+	token = newToken
+}
+
 // attestViaSocket connects to the agent socket and returns peer info.
 func attestViaSocket(socketPath string, agentName string) (peerUID int, binaryHash string, err error) {
 	conn, err := net.Dial("unix", socketPath)
@@ -2479,12 +2712,24 @@ func cmdEmergencyGet(args []string) error {
 }
 
 func handleError(resp *http.Response) error {
-	var errResp struct {
-		Error string `json:"error"`
+	body, _ := io.ReadAll(resp.Body)
+
+	var structured struct {
+		Error       string `json:"error"`
+		Code        string `json:"code"`
+		Detail      string `json:"detail"`
+		Remediation string `json:"remediation"`
 	}
-	json.NewDecoder(resp.Body).Decode(&errResp)
-	if errResp.Error != "" {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	if json.Unmarshal(body, &structured) == nil && structured.Code != "" {
+		msg := fmt.Sprintf("HTTP %d [%s]: %s", resp.StatusCode, structured.Code, structured.Detail)
+		if structured.Remediation != "" {
+			msg += "\n  hint: " + structured.Remediation
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
+	if json.Unmarshal(body, &structured) == nil && structured.Error != "" {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, structured.Error)
 	}
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
 }

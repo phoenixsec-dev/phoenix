@@ -87,6 +87,51 @@ func (l *Logger) LogDenied(agent, action, path, ip, reason string) error {
 	return l.Log(agent, action, path, "denied", ip, reason)
 }
 
+// LogSessionAllowed logs a permitted action with session context.
+func (l *Logger) LogSessionAllowed(agent, action, path, ip, sessionID string) error {
+	entry := Entry{
+		Timestamp: time.Now().UTC(),
+		Agent:     agent,
+		Action:    action,
+		Path:      path,
+		Status:    "allowed",
+		IP:        ip,
+		SessionID: sessionID,
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.enc.Encode(entry); err != nil {
+		return err
+	}
+	if l.file != nil {
+		return l.file.Sync()
+	}
+	return nil
+}
+
+// LogSessionDenied logs a denied action with session context.
+func (l *Logger) LogSessionDenied(agent, action, path, ip, reason, sessionID string) error {
+	entry := Entry{
+		Timestamp: time.Now().UTC(),
+		Agent:     agent,
+		Action:    action,
+		Path:      path,
+		Status:    "denied",
+		IP:        ip,
+		Reason:    reason,
+		SessionID: sessionID,
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.enc.Encode(entry); err != nil {
+		return err
+	}
+	if l.file != nil {
+		return l.file.Sync()
+	}
+	return nil
+}
+
 // Close flushes and closes the audit log file.
 func (l *Logger) Close() error {
 	l.mu.Lock()

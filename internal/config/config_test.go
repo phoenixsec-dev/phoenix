@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -272,6 +273,54 @@ func TestDefaultConfigNoLocalAgent(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Attestation.LocalAgent.Enabled {
 		t.Error("local_agent should be disabled by default")
+	}
+}
+
+func TestValidateSessionActionNames(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"bad": {
+			Namespaces:     []string{"dev/*"},
+			Actions:        []string{"list", "explode"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid action name")
+	}
+	if !strings.Contains(err.Error(), "explode") {
+		t.Fatalf("error should mention invalid action: %v", err)
+	}
+}
+
+func TestValidateSessionActionNamesValid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"good": {
+			Namespaces:     []string{"dev/*"},
+			Actions:        []string{"list", "read_value", "write"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid actions should pass: %v", err)
+	}
+}
+
+func TestValidateBootstrapTrustToken(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"via-token": {
+			Namespaces:     []string{"dev/*"},
+			BootstrapTrust: []string{"token"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("bootstrap_trust 'token' should be valid: %v", err)
 	}
 }
 

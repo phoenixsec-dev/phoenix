@@ -136,6 +136,16 @@ var validBootstrapMethods = map[string]bool{
 	"mtls":   true,
 	"bearer": true,
 	"local":  true,
+	"token":  true,
+}
+
+// validSessionActions lists the allowed values for RoleConfig.Actions.
+var validSessionActions = map[string]bool{
+	"list":       true,
+	"read_value": true,
+	"write":      true,
+	"delete":     true,
+	"admin":      true,
 }
 
 // DefaultConfig returns a config with sensible defaults for /data volume mount.
@@ -277,6 +287,11 @@ func (c *Config) Validate() error {
 			for _, method := range role.BootstrapTrust {
 				if !validBootstrapMethods[method] {
 					return fmt.Errorf("session.roles.%s: unknown bootstrap_trust method %q (valid: mtls, bearer, local)", name, method)
+				}
+			}
+			for _, action := range role.Actions {
+				if !validSessionActions[action] {
+					return fmt.Errorf("session.roles.%s: unknown action %q (valid: list, read_value, write, delete, admin)", name, action)
 				}
 			}
 			if role.MaxTTL != "" {

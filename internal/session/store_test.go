@@ -292,6 +292,85 @@ func TestStoreAdminAction(t *testing.T) {
 	}
 }
 
+func TestStoreRenew(t *testing.T) {
+	s := newTestStore(t, time.Hour)
+
+	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	origExpiry := sess.ExpiresAt
+	time.Sleep(5 * time.Millisecond)
+
+	newToken, renewed, err := s.Renew(sess.ID, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+
+	if newToken == token {
+		t.Error("expected new token to differ from original")
+	}
+	if renewed.ID != sess.ID {
+		t.Errorf("session ID changed: %s -> %s", sess.ID, renewed.ID)
+	}
+	if !renewed.ExpiresAt.After(origExpiry) {
+		t.Errorf("ExpiresAt not extended: %v -> %v", origExpiry, renewed.ExpiresAt)
+	}
+
+	// New token should validate
+	got, err := s.Validate(newToken)
+	if err != nil {
+		t.Fatalf("Validate new token: %v", err)
+	}
+	if got.ID != sess.ID {
+		t.Errorf("validated session ID mismatch")
+	}
+}
+
+func TestStoreRenewExpired(t *testing.T) {
+	s := newTestStore(t, time.Millisecond)
+
+	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	_, _, err = s.Renew(sess.ID, time.Hour)
+	if err != ErrTokenExpired {
+		t.Fatalf("expected ErrTokenExpired, got %v", err)
+	}
+}
+
+func TestStoreRenewRevoked(t *testing.T) {
+	s := newTestStore(t, time.Hour)
+
+	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := s.Revoke(sess.ID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	_, _, err = s.Renew(sess.ID, time.Hour)
+	if err != ErrSessionRevoked {
+		t.Fatalf("expected ErrSessionRevoked, got %v", err)
+	}
+}
+
+func TestStoreRenewNotFound(t *testing.T) {
+	s := newTestStore(t, time.Hour)
+
+	_, _, err := s.Renew("ses_nonexistent", time.Hour)
+	if err != ErrSessionNotFound {
+		t.Fatalf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
 func TestStoreDefaultTTL(t *testing.T) {
 	s := newTestStore(t, 0)
 

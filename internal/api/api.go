@@ -225,6 +225,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
 	s.mux.HandleFunc("GET /v1/policy/check", s.handlePolicyCheck)
 	s.mux.HandleFunc("POST /v1/session/mint", s.handleSessionMint)
+	s.mux.HandleFunc("POST /v1/session/renew", s.handleSessionRenew)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -260,11 +261,49 @@ func (s *Server) authenticate(r *http.Request) (string, error) {
 
 // authenticateInfo identifies the calling agent and collects attestation
 // evidence from the request (auth method, cert fingerprint, etc.).
+//
+// Auth priority: session token > mTLS > short-lived token > bearer.
+// Session tokens are checked first so that a renewal request carrying both
+// a phxs_ token and a client certificate authenticates via the session.
+// When a session is authenticated and a verified client cert is also present,
+// the cert evidence (UsedMTLS, CertFingerprint) is layered onto the authInfo
+// so that role attestation checks can inspect the current TLS state.
 func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	ip := clientIP(r)
 	local := session.IsLoopback(ip)
 
-	// Try mTLS first: check for verified client certificate
+	tok := extractToken(r)
+
+	// --- Session token authentication (phxs_ prefix) ---
+	// Checked first: session tokens are scoped credentials that agents use
+	// for all operations after bootstrap. If present, session auth is
+	// authoritative for identity; mTLS evidence is layered on as attestation.
+	if s.sessions != nil && tok != "" && strings.HasPrefix(tok, session.TokenPrefix) {
+		sess, err := s.sessions.Validate(tok)
+		if err != nil {
+			return nil, fmt.Errorf("session auth failed: %w", err)
+		}
+		info := &authInfo{
+			Agent:             sess.Agent,
+			IsLocal:           local,
+			UsedSession:       true,
+			SessionID:         sess.ID,
+			SessionRole:       sess.Role,
+			SessionNamespaces: sess.Namespaces,
+			SessionActions:    sess.Actions,
+		}
+		// Layer on mTLS attestation evidence from the current TLS connection.
+		// The session token is the auth method; the cert is attestation context.
+		if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			if _, verifyErr := s.ca.VerifyClientCert(r.TLS.PeerCertificates); verifyErr == nil {
+				info.UsedMTLS = true
+				info.CertFingerprint = certFingerprint(r.TLS.PeerCertificates[0].Raw)
+			}
+		}
+		return info, nil
+	}
+
+	// --- mTLS authentication ---
 	// Rate limiting is NOT applied to mTLS — it uses cryptographic auth, not secrets.
 	if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		agentName, err := s.ca.VerifyClientCert(r.TLS.PeerCertificates)
@@ -282,8 +321,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
 	}
 
-	// Try short-lived token authentication
-	tok := extractToken(r)
+	// --- Short-lived token authentication ---
 	if s.tokens != nil && tok != "" {
 		claims, err := s.tokens.Validate(tok)
 		if err == nil {
@@ -305,27 +343,10 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			}
 			return info, nil
 		}
-		// Not a valid short-lived token — fall through to session token
+		// Not a valid short-lived token — fall through to bearer
 	}
 
-	// Try session token authentication (phxs_ prefix)
-	if s.sessions != nil && tok != "" && strings.HasPrefix(tok, session.TokenPrefix) {
-		sess, err := s.sessions.Validate(tok)
-		if err != nil {
-			return nil, fmt.Errorf("session auth failed: %w", err)
-		}
-		return &authInfo{
-			Agent:             sess.Agent,
-			IsLocal:           local,
-			UsedSession:       true,
-			SessionID:         sess.ID,
-			SessionRole:       sess.Role,
-			SessionNamespaces: sess.Namespaces,
-			SessionActions:    sess.Actions,
-		}, nil
-	}
-
-	// Fall back to bearer token if enabled — rate limit applies here
+	// --- Bearer token authentication ---
 	if err := s.authRL.check(ip); err != nil {
 		return nil, err
 	}
@@ -445,6 +466,32 @@ func jsonDenied(w http.ResponseWriter, errMsg, code, detail, remediation string,
 	json.NewEncoder(w).Encode(resp)
 }
 
+// auditAllowed logs an allowed action, including session ID when a session was used.
+func (s *Server) auditAllowed(info *authInfo, action, path, ip string) {
+	if info != nil && info.UsedSession {
+		s.logAudit(s.audit.LogSessionAllowed(info.Agent, action, path, ip, info.SessionID))
+	} else {
+		agent := ""
+		if info != nil {
+			agent = info.Agent
+		}
+		s.logAudit(s.audit.LogAllowed(agent, action, path, ip))
+	}
+}
+
+// auditDenied logs a denied action, including session ID when a session was used.
+func (s *Server) auditDenied(info *authInfo, action, path, ip, reason string) {
+	if info != nil && info.UsedSession {
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, action, path, ip, reason, info.SessionID))
+	} else {
+		agent := ""
+		if info != nil {
+			agent = info.Agent
+		}
+		s.logAudit(s.audit.LogDenied(agent, action, path, ip, reason))
+	}
+}
+
 // checkSessionScope verifies the request path is within session namespace scope.
 // Returns true if access is allowed, false if denied (and writes the error response).
 func (s *Server) checkSessionScope(w http.ResponseWriter, info *authInfo, path, ip string) bool {
@@ -452,7 +499,7 @@ func (s *Server) checkSessionScope(w http.ResponseWriter, info *authInfo, path, 
 		return true
 	}
 	if !session.PathInScope(path, info.SessionNamespaces) {
-		s.logAudit(s.audit.LogDenied(info.Agent, "scope_check", path, ip, "session_scope"))
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
 		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
 			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
 			"request a session with a role that includes this namespace",
@@ -473,8 +520,8 @@ func (s *Server) checkSessionAction(w http.ResponseWriter, info *authInfo, actio
 			return true
 		}
 	}
-	s.logAudit(s.audit.LogDenied(info.Agent, action, path, ip, "session_action"))
-	jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+	s.logAudit(s.audit.LogSessionDenied(info.Agent, action, path, ip, "session_action", info.SessionID))
+	jsonDenied(w, "access_denied", "ACTION_DENIED",
 		fmt.Sprintf("action %q is not permitted by session role %q", action, info.SessionRole),
 		"request a session with a role that includes this action",
 		http.StatusForbidden)
@@ -596,7 +643,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 			}
 			visible = append(visible, p)
 		}
-		s.logAudit(s.audit.LogAllowed(agentName, "list", path, ip))
+		s.auditAllowed(info, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"paths": visible})
 		return
 	}
@@ -608,14 +655,14 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Single secret read — requires read_value permission
 	if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "read_value", path, ip, "acl"))
+		s.auditDenied(info, "read_value", path, ip, "acl")
 		jsonError(w, "access denied: read_value permission required (use phoenix exec for context-free secret injection)", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check (with validated seal key state)
 	if err := s.attestFull(r, path, info, false, false, sealKeyValidated); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "read_value", path, ip, "attestation"))
+		s.auditDenied(info, "read_value", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -635,7 +682,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "read_value", path, ip))
+	s.auditAllowed(info, "read_value", path, ip)
 	if sealKey != nil {
 		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
 		if err != nil {
@@ -683,14 +730,14 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.acl.Authorize(agentName, path, acl.ActionWrite); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "write", path, ip, "acl"))
+		s.auditDenied(info, "write", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "write", path, ip, "attestation"))
+		s.auditDenied(info, "write", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -722,7 +769,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "write", path, ip))
+	s.auditAllowed(info, "write", path, ip)
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
@@ -746,14 +793,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.acl.Authorize(agentName, path, acl.ActionDelete); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "delete", path, ip, "acl"))
+		s.auditDenied(info, "delete", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "delete", path, ip, "attestation"))
+		s.auditDenied(info, "delete", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -777,7 +824,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "delete", path, ip))
+	s.auditAllowed(info, "delete", path, ip)
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
@@ -1157,14 +1204,14 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	for _, refStr := range req.Refs {
 		path, err := ref.Parse(refStr)
 		if err != nil {
-			s.logAudit(s.audit.LogDenied(agentName, "resolve", refStr, ip, "malformed_ref"))
+			s.auditDenied(info, "resolve", refStr, ip, "malformed_ref")
 			errors[refStr] = err.Error()
 			continue
 		}
 
 		// Session scope enforcement (per-ref)
 		if info.UsedSession && !session.PathInScope(path, info.SessionNamespaces) {
-			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "session_scope"))
+			s.auditDenied(info, "resolve", path, ip, "session_scope")
 			errors[refStr] = "path outside session scope"
 			continue
 		}
@@ -1179,21 +1226,21 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if !allowed {
-				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "session_action"))
+				s.auditDenied(info, "resolve", path, ip, "session_action")
 				errors[refStr] = "action read_value not permitted by session role"
 				continue
 			}
 		}
 
 		if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
-			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "acl"))
+			s.auditDenied(info, "resolve", path, ip, "acl")
 			errors[refStr] = "access denied: read_value permission required"
 			continue
 		}
 
 		// Attestation policy check (per-ref)
 		if err := s.attestFull(r, path, info, nonceValidated, signatureVerified, sealKey != nil); err != nil {
-			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "attestation"))
+			s.auditDenied(info, "resolve", path, ip, "attestation")
 			errors[refStr] = "attestation required"
 			continue
 		}
@@ -1202,19 +1249,19 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			// Dry-run: verify path exists without returning the secret value.
 			if _, err := s.backend.Get(path); err != nil {
 				if err == store.ErrSecretNotFound {
-					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "not_found"))
+					s.auditDenied(info, "dry-resolve", path, ip, "not_found")
 					errors[refStr] = "secret not found"
 				} else if err == store.ErrInvalidPath {
-					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "invalid_path"))
+					s.auditDenied(info, "dry-resolve", path, ip, "invalid_path")
 					errors[refStr] = "invalid path"
 				} else {
-					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "internal_error"))
+					s.auditDenied(info, "dry-resolve", path, ip, "internal_error")
 					log.Printf("error dry-resolving %q for %s: %v", path, agentName, err)
 					errors[refStr] = "internal error"
 				}
 				continue
 			}
-			s.logAudit(s.audit.LogAllowed(agentName, "dry-resolve", path, ip))
+			s.auditAllowed(info, "dry-resolve", path, ip)
 			values[refStr] = "ok"
 			continue
 		}
@@ -1222,20 +1269,20 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		secret, err := s.backend.Get(path)
 		if err != nil {
 			if err == store.ErrSecretNotFound {
-				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "not_found"))
+				s.auditDenied(info, "resolve", path, ip, "not_found")
 				errors[refStr] = "secret not found"
 			} else if err == store.ErrInvalidPath {
-				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "invalid_path"))
+				s.auditDenied(info, "resolve", path, ip, "invalid_path")
 				errors[refStr] = "invalid path"
 			} else {
-				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "internal_error"))
+				s.auditDenied(info, "resolve", path, ip, "internal_error")
 				log.Printf("error resolving %q for %s: %v", path, agentName, err)
 				errors[refStr] = "internal error"
 			}
 			continue
 		}
 
-		s.logAudit(s.audit.LogAllowed(agentName, "resolve", path, ip))
+		s.auditAllowed(info, "resolve", path, ip)
 
 		if sealKey != nil {
 			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
@@ -1779,6 +1826,18 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check role attestation requirements
+	if len(role.Attestation) > 0 {
+		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
+			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+				reason,
+				fmt.Sprintf("role %q requires attestation: %v", req.Role, role.Attestation),
+				http.StatusForbidden)
+			s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "attestation_failed"))
+			return
+		}
+	}
+
 	// Validate seal key if required
 	var sealPubKey []byte
 	if role.RequireSealKey {
@@ -1816,6 +1875,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	// Audit log
 	s.logAudit(s.audit.LogAllowed(info.Agent, "session.mint.approved", req.Role, ip))
 
+	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]interface{}{
 		"session_id":           sess.ID,
 		"session_token":        tokenStr,
@@ -1824,6 +1884,132 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 		"namespaces":           sess.Namespaces,
 		"seal_key_fingerprint": sess.SealKeyFingerprint,
 	})
+}
+
+func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil || s.sessionRoles == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if !info.UsedSession {
+		jsonDenied(w, "bad_request", "SESSION_REQUIRED",
+			"only session tokens can be renewed",
+			"authenticate with a session token (phxs_ prefix)",
+			http.StatusBadRequest)
+		return
+	}
+
+	ip := clientIP(r)
+
+	// Re-check that the role still exists in config
+	role, ok := s.sessionRoles[info.SessionRole]
+	if !ok {
+		jsonDenied(w, "access_denied", "ROLE_NOT_FOUND",
+			fmt.Sprintf("role %q no longer exists in server config", info.SessionRole),
+			"contact your administrator",
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "role_not_found", info.SessionID))
+		return
+	}
+
+	// Re-check bootstrap trust: look up the original bootstrap method from the session
+	sess := s.sessions.Get(info.SessionID)
+	if sess == nil {
+		jsonDenied(w, "access_denied", "SESSION_EXPIRED",
+			"session no longer exists",
+			"mint a new session",
+			http.StatusUnauthorized)
+		return
+	}
+
+	if !s.bootstrapAllowed(role.BootstrapTrust, sess.BootstrapMethod, session.IsLoopback(ip)) {
+		jsonDenied(w, "access_denied", "BOOTSTRAP_FAILED",
+			fmt.Sprintf("original bootstrap method %q is no longer trusted for role %q", sess.BootstrapMethod, info.SessionRole),
+			"mint a new session with a currently trusted auth method",
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "bootstrap_failed", info.SessionID))
+		return
+	}
+
+	// Re-check role attestation requirements against the CURRENT request.
+	// authenticateInfo() layers mTLS evidence onto session authInfo when a
+	// verified client cert is present on the TLS connection, so info already
+	// carries the real current-request attestation state.
+	if len(role.Attestation) > 0 {
+		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
+			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+				reason,
+				fmt.Sprintf("role %q requires attestation: %v", info.SessionRole, role.Attestation),
+				http.StatusForbidden)
+			s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID))
+			return
+		}
+	}
+
+	ttl := s.sessionTTL(role.MaxTTL)
+
+	tokenStr, renewedSess, err := s.sessions.Renew(info.SessionID, ttl)
+	if err != nil {
+		switch err {
+		case session.ErrSessionRevoked:
+			jsonDenied(w, "access_denied", "SESSION_REVOKED",
+				"session has been revoked",
+				"mint a new session",
+				http.StatusForbidden)
+		case session.ErrTokenExpired:
+			jsonDenied(w, "access_denied", "SESSION_EXPIRED",
+				"session has expired",
+				"mint a new session",
+				http.StatusUnauthorized)
+		default:
+			log.Printf("session renew error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	s.logAudit(s.audit.LogSessionAllowed(info.Agent, "session.renewed", info.SessionRole, ip, info.SessionID))
+
+	w.Header().Set("Cache-Control", "no-store")
+	jsonOK(w, map[string]interface{}{
+		"session_id":    renewedSess.ID,
+		"session_token": tokenStr,
+		"role":          renewedSess.Role,
+		"expires_at":    renewedSess.ExpiresAt.Format(time.RFC3339),
+		"renewed":       true,
+	})
+}
+
+// checkRoleAttestation verifies that the request satisfies the role's attestation
+// requirements. Returns a non-empty reason string if any check fails.
+func (s *Server) checkRoleAttestation(attestation []string, info *authInfo, ip string) string {
+	for _, req := range attestation {
+		switch req {
+		case "require_mtls":
+			if !info.UsedMTLS {
+				return "role requires mTLS authentication"
+			}
+		case "source_ip":
+			// source_ip attestation on a role means the caller must be local
+			if !info.IsLocal {
+				return "role requires local (loopback) access"
+			}
+		case "cert_fingerprint":
+			if info.CertFingerprint == "" {
+				return "role requires client certificate fingerprint"
+			}
+		case "require_sealed":
+			// Seal key is checked separately at mint time
+		}
+	}
+	return ""
 }
 
 // bootstrapMethod returns the primary auth method string from authInfo.

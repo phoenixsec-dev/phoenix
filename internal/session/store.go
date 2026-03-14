@@ -101,6 +101,48 @@ func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, action
 	return token, sess, nil
 }
 
+// Renew extends an existing session's expiry and mints a new signed token.
+// The session ID is preserved so the audit trail remains continuous.
+// Returns ErrSessionNotFound, ErrSessionRevoked, or ErrTokenExpired as appropriate.
+func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, error) {
+	if ttl <= 0 {
+		ttl = s.defaultTTL
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return "", nil, ErrSessionNotFound
+	}
+	if sess.Revoked {
+		return "", nil, ErrSessionRevoked
+	}
+	if time.Now().After(sess.ExpiresAt) {
+		return "", nil, ErrTokenExpired
+	}
+
+	now := time.Now().UTC()
+	sess.ExpiresAt = now.Add(ttl)
+
+	claims := &Claims{
+		SessionID:          sess.ID,
+		Role:               sess.Role,
+		Agent:              sess.Agent,
+		SealKeyFingerprint: sess.SealKeyFingerprint,
+		ExpiresAt:          sess.ExpiresAt,
+		IssuedAt:           now,
+	}
+
+	token, err := mintToken(claims, s.signingKey)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return token, sess, nil
+}
+
 // Validate verifies a session token and returns the associated session.
 // Returns ErrSessionRevoked if the session was explicitly revoked,
 // ErrTokenExpired if the TTL elapsed, or ErrSessionNotFound if the
