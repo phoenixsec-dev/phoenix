@@ -149,6 +149,42 @@ func validateToken(tokenStr string, signingKey []byte) (*Claims, error) {
 	return &claims, nil
 }
 
+// validateTokenNoExpiry verifies signature and parses claims but skips the
+// expiry check. Used for audit logging of expired/revoked session tokens
+// where we need the agent identity even though the token is no longer valid.
+func validateTokenNoExpiry(tokenStr string, signingKey []byte) (*Claims, error) {
+	if !strings.HasPrefix(tokenStr, TokenPrefix) {
+		return nil, ErrTokenMalformed
+	}
+	tokenStr = strings.TrimPrefix(tokenStr, TokenPrefix)
+
+	dot := strings.LastIndexByte(tokenStr, '.')
+	if dot < 0 {
+		return nil, ErrTokenMalformed
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(tokenStr[:dot])
+	if err != nil {
+		return nil, ErrTokenMalformed
+	}
+
+	sig, err := base64.RawURLEncoding.DecodeString(tokenStr[dot+1:])
+	if err != nil {
+		return nil, ErrTokenMalformed
+	}
+
+	if !hmac.Equal(sig, sign(payload, signingKey)) {
+		return nil, ErrSignatureInvalid
+	}
+
+	var claims Claims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, ErrTokenMalformed
+	}
+
+	return &claims, nil
+}
+
 // sign computes HMAC-SHA256 of the payload.
 func sign(payload, key []byte) []byte {
 	mac := hmac.New(sha256.New, key)

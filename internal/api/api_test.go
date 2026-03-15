@@ -4855,3 +4855,133 @@ func TestSessionTokenCannotInspectSiblingSession(t *testing.T) {
 		t.Fatalf("expected 403 for sibling session revoke, got %d, body: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestSessionExpiredStructuredDenial(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	// Create a session store with a very short TTL
+	ss, err := session.NewStore(1 * time.Second)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	})
+
+	// Mint a session with the short TTL
+	sessionToken := mintTestSession(t, srv, "admin-token", "dev")
+
+	// Wait for it to expire
+	time.Sleep(2 * time.Second)
+
+	// Try to use the expired session
+	req := httptest.NewRequest("GET", "/v1/secrets/test/secret1", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "SESSION_EXPIRED" {
+		t.Errorf("code = %q, want SESSION_EXPIRED", result.Code)
+	}
+}
+
+func TestSessionRevokedStructuredDenial(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Get session ID and revoke it
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	sessionID := listResult.Sessions[len(listResult.Sessions)-1].SessionID
+
+	// Revoke
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Try to use the revoked session
+	req = httptest.NewRequest("GET", "/v1/secrets/test/secret1", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "SESSION_REVOKED" {
+		t.Errorf("code = %q, want SESSION_REVOKED", result.Code)
+	}
+}
+
+func TestSessionTokenBlockedOnAdminEndpoints(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Admin endpoints that use authenticate() should all reject session tokens
+	adminEndpoints := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{"GET", "/v1/audit", ""},
+		{"GET", "/v1/agents", ""},
+		{"POST", "/v1/agents", `{"name":"x","token":"y","permissions":[]}`},
+		{"GET", "/v1/status", ""},
+		{"POST", "/v1/rotate-master", ""},
+		{"GET", "/v1/policy/check?path=test/x&check=allow_unseal", ""},
+	}
+
+	for _, ep := range adminEndpoints {
+		var req *http.Request
+		if ep.body != "" {
+			req = httptest.NewRequest(ep.method, ep.path, strings.NewReader(ep.body))
+		} else {
+			req = httptest.NewRequest(ep.method, ep.path, nil)
+		}
+		req.Header.Set("Authorization", "Bearer "+sessionToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+
+		if w.Code != 401 {
+			t.Errorf("%s %s: expected 401, got %d, body: %s", ep.method, ep.path, w.Code, w.Body.String())
+			continue
+		}
+
+		var result struct {
+			Code string `json:"code"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &result)
+		if result.Code != "ADMIN_AUTH_REQUIRED" {
+			t.Errorf("%s %s: code = %q, want ADMIN_AUTH_REQUIRED", ep.method, ep.path, result.Code)
+		}
+	}
+}

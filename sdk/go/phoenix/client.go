@@ -287,6 +287,9 @@ func (e *Error) IsScopeExceeded() bool { return e.Code == "SCOPE_EXCEEDED" }
 // IsActionDenied returns true if the error indicates the action is not permitted.
 func (e *Error) IsActionDenied() bool { return e.Code == "ACTION_DENIED" }
 
+// IsSessionRevoked returns true if the error indicates the session was revoked.
+func (e *Error) IsSessionRevoked() bool { return e.Code == "SESSION_REVOKED" }
+
 func (c *Client) doRequest(method, path string, body interface{}, out interface{}) error {
 	// Auto-renew session if nearing expiry (within 5 min)
 	if c.Role != "" && !c.sessionExp.IsZero() && time.Until(c.sessionExp) < 5*time.Minute {

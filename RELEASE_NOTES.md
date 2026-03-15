@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Session Identity (v1)
+
+Role-based session tokens replace static bearer tokens for agent access.
+
+- **Named roles** — define namespace scope, allowed actions, bootstrap trust,
+  and optional step-up approval per role in server config
+- **Session tokens** — short-lived (`phxs_` prefix), scoped credentials with
+  auto-renewal and explicit revocation
+- **Bootstrap trust** — roles declare which auth methods (bearer, mTLS, local,
+  token) can mint sessions
+- **Step-up approval** — roles with `step_up: true` require human confirmation
+  via `phoenix approve` before the session is granted
+- **CLI** — `phoenix sessions list|info|revoke` for session management
+- **SDK** — `NewWithRole()`, `MintSession()`, `ListSessions()`, `RevokeSession()`,
+  and error classification helpers (`IsSessionExpired`, `IsSessionRevoked`,
+  `IsScopeExceeded`, `IsApprovalRequired`, `IsActionDenied`)
+- **MCP** — auto-mint via `PHOENIX_ROLE`, background renewal,
+  `phoenix_session_list` and `phoenix_session_revoke` tools, agent-friendly
+  denial messages with remediation hints
+- **Structured denials** — machine-readable denial codes on all session and
+  access control failures (SESSION_EXPIRED, SCOPE_EXCEEDED, etc.)
+- **Audit** — full session lifecycle audit trail: mint, renew, revoke, auth
+  failures with session context, step-up approval workflow events
+- **Access isolation** — session tokens can only inspect/revoke their own
+  exact session; no ACL escalation from scoped credentials
+
 ### Infrastructure & Publishing
 - Added GitHub Actions repository secrets required for Docker publishing:
   - `DOCKERHUB_USERNAME`

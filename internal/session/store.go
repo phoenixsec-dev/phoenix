@@ -207,6 +207,18 @@ func (s *Store) List() []*Session {
 	return result
 }
 
+// ParseClaimsInsecure extracts the agent and session ID from a session token
+// without checking expiry. The HMAC signature is still verified to prevent
+// logging spoofed identities. Returns ok=false if the token is malformed
+// or has an invalid signature.
+func (s *Store) ParseClaimsInsecure(tokenStr string) (agent, sessionID string, ok bool) {
+	claims, err := validateTokenNoExpiry(tokenStr, s.signingKey)
+	if err != nil {
+		return "", "", false
+	}
+	return claims.Agent, claims.SessionID, true
+}
+
 // ActiveCount returns the number of active sessions.
 func (s *Store) ActiveCount() int {
 	return len(s.List())

@@ -22,9 +22,45 @@ The server reads a JSON config file. `config.example.json` is a starter template
 | `attestation.token.ttl` | Token lifetime | `15m` |
 | `attestation.local_agent.enabled` | Enable local Unix-socket attestation agent | `false` |
 | `attestation.local_agent.socket_path` | Unix socket path when enabled | — |
+| `session.enabled` | Enable session identity | `false` |
+| `session.ttl` | Default session lifetime | `1h` |
+| `session.roles` | Named role definitions (see below) | — |
 | `onepassword.vault` | 1Password vault name | — |
 | `onepassword.service_account_token_env` | Token env var name | `OP_SERVICE_ACCOUNT_TOKEN` |
 | `onepassword.cache_ttl` | Runtime read/list cache duration | `60s` |
+
+## Session identity
+
+Session identity replaces static tokens with short-lived, role-scoped sessions.
+See [Session Identity](session-identity.md) for the full guide.
+
+```json
+{
+  "session": {
+    "enabled": true,
+    "ttl": "1h",
+    "roles": {
+      "dev": {
+        "namespaces": ["dev/*", "staging/*"],
+        "actions": ["list", "read_value"],
+        "bootstrap_trust": ["bearer"]
+      },
+      "deploy": {
+        "namespaces": ["prod/*"],
+        "actions": ["list", "read_value"],
+        "bootstrap_trust": ["mtls"],
+        "require_seal_key": true,
+        "step_up": true,
+        "step_up_ttl": "15m"
+      }
+    }
+  }
+}
+```
+
+Each role defines: `namespaces` (required), `bootstrap_trust` (required),
+`actions` (default: list + read_value), and optional fields for seal key
+requirements, attestation, and step-up approval.
 
 ## 1Password runtime backend (broker mode, read-only)
 
@@ -115,5 +151,6 @@ mapping to work, set `server.listen` to `0.0.0.0:9090` in the config.
 
 - [Getting Started](getting-started.md)
 - [Authentication](authentication.md)
+- [Session Identity](session-identity.md)
 - [Key Management](key-management.md)
 - [API Reference Index](api-reference-index.md)

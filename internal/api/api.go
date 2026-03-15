@@ -257,15 +257,21 @@ type authInfo struct {
 	SessionActions    []string
 }
 
-// authenticate identifies the calling agent from the request.
-// It tries mTLS client certificate first (if CA is configured and client
-// presented a cert), then falls back to bearer token authentication.
-// Both paths are gated by their respective feature flags.
-// Returns the agent name or an error.
+// authenticate identifies the calling agent for admin/control-plane handlers.
+// Session tokens are rejected here — scoped session credentials must not
+// reach admin endpoints even if the underlying agent has admin ACL.
+// Data-plane handlers use authenticateInfo() directly and enforce session
+// scope/action checks themselves.
 func (s *Server) authenticate(r *http.Request) (string, error) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
 		return "", err
+	}
+	if info.UsedSession {
+		return "", &sessionAuthError{
+			code: "ADMIN_AUTH_REQUIRED",
+			err:  fmt.Errorf("session tokens cannot access admin endpoints"),
+		}
 	}
 	return info.Agent, nil
 }
@@ -292,7 +298,17 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	if s.sessions != nil && tok != "" && strings.HasPrefix(tok, session.TokenPrefix) {
 		sess, err := s.sessions.Validate(tok)
 		if err != nil {
-			return nil, fmt.Errorf("session auth failed: %w", err)
+			code := "SESSION_INVALID"
+			if errors.Is(err, session.ErrTokenExpired) {
+				code = "SESSION_EXPIRED"
+			} else if errors.Is(err, session.ErrSessionRevoked) {
+				code = "SESSION_REVOKED"
+			}
+			// Extract identity for audit even from expired/revoked tokens
+			if agent, sessID, known := s.sessions.ParseClaimsInsecure(tok); known {
+				s.logAudit(s.audit.LogSessionDenied(agent, "session.auth", "", ip, code, sessID))
+			}
+			return nil, &sessionAuthError{code: code, err: err}
 		}
 		info := &authInfo{
 			Agent:             sess.Agent,
@@ -477,6 +493,31 @@ func jsonDenied(w http.ResponseWriter, errMsg, code, detail, remediation string,
 	json.NewEncoder(w).Encode(resp)
 }
 
+// sessionAuthError is returned by authenticateInfo when a session token is
+// present but invalid (expired, revoked, etc.). It carries a structured
+// denial code so handlers can return machine-readable errors.
+type sessionAuthError struct {
+	code string // SESSION_EXPIRED, SESSION_REVOKED, SESSION_INVALID
+	err  error
+}
+
+func (e *sessionAuthError) Error() string { return e.err.Error() }
+
+// handleAuthError writes an appropriate error response for authentication failures.
+// If the error is a session auth error, it returns a structured denial with the
+// machine-readable code. Otherwise, it returns a generic 401.
+func handleAuthError(w http.ResponseWriter, err error) {
+	var sae *sessionAuthError
+	if errors.As(err, &sae) {
+		jsonDenied(w, "access_denied", sae.code,
+			sae.err.Error(),
+			"mint a new session",
+			http.StatusUnauthorized)
+		return
+	}
+	jsonError(w, "unauthorized", http.StatusUnauthorized)
+}
+
 // auditAllowed logs an allowed action, including session ID when a session was used.
 func (s *Server) auditAllowed(info *authInfo, action, path, ip string) {
 	if info != nil && info.UsedSession {
@@ -598,7 +639,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -724,7 +765,7 @@ type setSecretRequest struct {
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -787,7 +828,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -842,7 +883,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -895,7 +936,7 @@ type createAgentRequest struct {
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -957,7 +998,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -983,7 +1024,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1025,7 +1066,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1112,7 +1153,7 @@ const signedResolveMaxSkew = 60 * time.Second
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -1333,7 +1374,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	// Authentication required to get a challenge
 	_, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1365,7 +1406,7 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1416,7 +1457,7 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1514,7 +1555,7 @@ type mintTokenRequest struct {
 func (s *Server) handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
 	_, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1555,7 +1596,7 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1645,7 +1686,7 @@ type generateKeyPairRequest struct {
 func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1733,7 +1774,7 @@ func (s *Server) handleAgentSubresource(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetSealKey(w http.ResponseWriter, r *http.Request, agentTarget string) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1774,7 +1815,7 @@ func (s *Server) handleGetSealKey(w http.ResponseWriter, r *http.Request, agentT
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	_, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	jsonError(w, "proxy endpoint not yet implemented", http.StatusNotImplemented)
@@ -1796,7 +1837,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	// Authenticate the bootstrap request using existing auth channels
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1938,7 +1979,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2145,7 +2186,7 @@ func (s *Server) handleApprovalRouter(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleApprovalStatus(w http.ResponseWriter, r *http.Request, id string) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2184,7 +2225,7 @@ func (s *Server) handleApprovalStatus(w http.ResponseWriter, r *http.Request, id
 func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, id string) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2325,7 +2366,7 @@ func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, i
 func (s *Server) handleApprovalDeny(w http.ResponseWriter, r *http.Request, id string) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2371,7 +2412,7 @@ func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
 
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2419,7 +2460,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2507,7 +2548,7 @@ func (s *Server) handleSessionRouter(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id string) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2543,7 +2584,7 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id st
 func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id string) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -2576,7 +2617,7 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(info.Agent, "session.revoke", id, ip))
+	s.auditAllowed(info, "session.revoke", id, ip)
 	jsonOK(w, map[string]string{
 		"status":     "revoked",
 		"session_id": id,

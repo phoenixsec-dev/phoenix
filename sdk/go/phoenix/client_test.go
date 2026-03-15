@@ -257,6 +257,8 @@ func TestErrorHelpers(t *testing.T) {
 		{"scope exceeded false", Error{Code: "OTHER"}, (*Error).IsScopeExceeded, false},
 		{"action denied true", Error{Code: "ACTION_DENIED"}, (*Error).IsActionDenied, true},
 		{"action denied false", Error{Code: "OTHER"}, (*Error).IsActionDenied, false},
+		{"session revoked true", Error{Code: "SESSION_REVOKED"}, (*Error).IsSessionRevoked, true},
+		{"session revoked false", Error{Code: "OTHER"}, (*Error).IsSessionRevoked, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

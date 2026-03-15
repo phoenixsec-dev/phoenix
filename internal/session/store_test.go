@@ -386,3 +386,61 @@ func TestStoreDefaultTTL(t *testing.T) {
 		t.Errorf("session duration = %v, want ~%v", actualDuration, expectedDuration)
 	}
 }
+
+func TestParseClaimsInsecure(t *testing.T) {
+	store, err := NewStore(1 * time.Second) // very short TTL
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Stop()
+
+	token, sess, err := store.Create("dev", "test-agent", nil, []string{"test/*"}, nil, "bearer", "127.0.0.1", 1*time.Second)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Immediately, claims should be parseable
+	agent, sessID, ok := store.ParseClaimsInsecure(token)
+	if !ok {
+		t.Fatal("expected ParseClaimsInsecure to succeed for valid token")
+	}
+	if agent != "test-agent" {
+		t.Errorf("agent = %q, want test-agent", agent)
+	}
+	if sessID != sess.ID {
+		t.Errorf("sessionID = %q, want %q", sessID, sess.ID)
+	}
+
+	// Wait for token to expire
+	time.Sleep(2 * time.Second)
+
+	// Validate should fail
+	_, err = store.Validate(token)
+	if err == nil {
+		t.Fatal("expected Validate to fail for expired token")
+	}
+
+	// ParseClaimsInsecure should still succeed
+	agent, sessID, ok = store.ParseClaimsInsecure(token)
+	if !ok {
+		t.Fatal("expected ParseClaimsInsecure to succeed for expired token")
+	}
+	if agent != "test-agent" {
+		t.Errorf("agent = %q, want test-agent (expired)", agent)
+	}
+	if sessID != sess.ID {
+		t.Errorf("sessionID = %q, want %q (expired)", sessID, sess.ID)
+	}
+
+	// Tampered token should fail
+	_, _, ok = store.ParseClaimsInsecure(token + "tampered")
+	if ok {
+		t.Error("expected ParseClaimsInsecure to fail for tampered token")
+	}
+
+	// Garbage should fail
+	_, _, ok = store.ParseClaimsInsecure("garbage")
+	if ok {
+		t.Error("expected ParseClaimsInsecure to fail for garbage input")
+	}
+}

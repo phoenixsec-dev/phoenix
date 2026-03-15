@@ -100,10 +100,40 @@ Options:
 phoenix export myapp/ --format env > .env
 ```
 
+## Session management
+
+```bash
+# List active sessions (admin sees all, non-admin sees own)
+phoenix sessions list
+phoenix sessions list --role dev
+phoenix sessions list --agent deployer
+
+# Show session details
+phoenix sessions info ses_abc123def456
+
+# Revoke a session (immediate effect)
+phoenix sessions revoke ses_abc123def456
+
+# Approve a step-up session request
+phoenix approve apr_xyz789
+```
+
+When `PHOENIX_ROLE` is set, the CLI auto-mints a session on the first request
+and caches it for the session lifetime:
+
+```bash
+export PHOENIX_ROLE=dev
+phoenix get dev/api-key  # mints session, then reads
+phoenix get dev/db-pass  # reuses cached session
+```
+
+See [Session Identity](session-identity.md) for full details.
+
 ## Related docs
 
 - [Getting Started](getting-started.md)
 - [Authentication](authentication.md)
+- [Session Identity](session-identity.md)
 - [Policy and Attestation](policy-and-attestation.md)
 - [Integrations](integrations.md)
 - [Sealed Responses](sealed-responses.md)
