@@ -236,6 +236,8 @@ func TestResolveNoValueReturned(t *testing.T) {
 }
 
 func TestNewDefaults(t *testing.T) {
+	t.Setenv("PHOENIX_SERVER", "")
+	t.Setenv("PHOENIX_TOKEN", "")
 	c := New("", "")
 	if c.Server != "http://127.0.0.1:9090" {
 		t.Fatalf("expected default server, got %q", c.Server)

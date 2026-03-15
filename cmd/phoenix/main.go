@@ -44,6 +44,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,6 +58,7 @@ import (
 var (
 	serverURL  string
 	token      string
+	tokenMu    sync.RWMutex // guards token in concurrent MCP mode
 	httpClient *http.Client
 )
 
@@ -396,8 +398,11 @@ func apiRequestWithHeaders(method, path string, body io.Reader, headers map[stri
 	if err != nil {
 		return nil, err
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	tokenMu.RLock()
+	tok := token
+	tokenMu.RUnlock()
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -2073,15 +2078,23 @@ func getCachedToken(agentName string, ttlBuffer time.Duration) string {
 	return entry.Token
 }
 
+// sessionCacheKey returns a cache key scoped to both role and server URL,
+// preventing collisions when the same role name is used across different servers.
+func sessionCacheKey(role string) string {
+	h := sha256pkg.Sum256([]byte(serverURL))
+	return fmt.Sprintf("session:%s@%.8x", role, h[:4])
+}
+
 // getCachedSessionToken returns a valid cached session token for the role, or empty string.
 func getCachedSessionToken(role string, ttlBuffer time.Duration) string {
-	return getCachedToken("session:"+role, ttlBuffer)
+	return getCachedToken(sessionCacheKey(role), ttlBuffer)
 }
 
 // cacheSessionToken stores a session token in the cache.
 func cacheSessionToken(role, tok string, expiresAt time.Time) {
 	cache, _ := loadTokenCache()
-	cache["session:"+role] = &tokenCacheEntry{
+	key := sessionCacheKey(role)
+	cache[key] = &tokenCacheEntry{
 		Token:     tok,
 		Agent:     "session:" + role,
 		ExpiresAt: expiresAt,
@@ -2210,12 +2223,17 @@ func autoMintSession() error {
 
 	// Check cache first
 	if cached := getCachedSessionToken(role, 5*time.Minute); cached != "" {
+		tokenMu.Lock()
 		token = cached
+		tokenMu.Unlock()
 		return nil
 	}
 
 	// Need bootstrap auth to mint
-	if token == "" {
+	tokenMu.RLock()
+	noToken := token == ""
+	tokenMu.RUnlock()
+	if noToken {
 		if os.Getenv("PHOENIX_CLIENT_CERT") == "" || os.Getenv("PHOENIX_CLIENT_KEY") == "" {
 			return fmt.Errorf("PHOENIX_ROLE=%s set but no bootstrap auth available (set PHOENIX_TOKEN or mTLS certs)", role)
 		}
@@ -2235,7 +2253,9 @@ func autoMintSession() error {
 	}
 
 	cacheSessionToken(role, sessionToken, expiresAt)
+	tokenMu.Lock()
 	token = sessionToken
+	tokenMu.Unlock()
 	return nil
 }
 
@@ -2289,7 +2309,7 @@ func renewSessionIfNeeded() {
 
 	// Check if cached token is nearing expiry
 	cache, _ := loadTokenCache()
-	entry, ok := cache["session:"+role]
+	entry, ok := cache[sessionCacheKey(role)]
 	if !ok {
 		return
 	}
@@ -2304,7 +2324,9 @@ func renewSessionIfNeeded() {
 	}
 
 	cacheSessionToken(role, newToken, newExpiry)
+	tokenMu.Lock()
 	token = newToken
+	tokenMu.Unlock()
 }
 
 // attestViaSocket connects to the agent socket and returns peer info.
