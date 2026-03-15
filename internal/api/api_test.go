@@ -4432,3 +4432,426 @@ func TestApprovalRejectsSealKeyTightened(t *testing.T) {
 		t.Errorf("code = %q, want SEAL_KEY_REQUIRED", result.Code)
 	}
 }
+
+func TestSessionListAdmin(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	// Mint two sessions for different roles
+	mintTestSession(t, srv, adminToken, "dev")
+	mintTestSession(t, srv, adminToken, "writer")
+
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(result.Sessions))
+	}
+}
+
+func TestSessionListSelfOnly(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Add a non-admin agent that can mint sessions but has no admin on sessions
+	srv.acl = acl.NewFromConfig(&acl.ACLConfig{
+		Agents: map[string]acl.Agent{
+			"admin": {
+				Name:      "admin",
+				TokenHash: crypto.HashToken("admin-token"),
+				Permissions: []acl.Permission{
+					{Path: "*", Actions: []acl.Action{acl.ActionAdmin}},
+				},
+			},
+			"reader": {
+				Name:      "reader",
+				TokenHash: crypto.HashToken("reader-token"),
+				Permissions: []acl.Permission{
+					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+				},
+			},
+		},
+	})
+
+	// Mint sessions as different agents
+	mintTestSession(t, srv, adminToken, "dev")   // admin's session
+	mintTestSession(t, srv, "reader-token", "dev") // reader's session
+
+	// Reader should only see their own
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 1 {
+		t.Fatalf("expected 1 session (own only), got %d", len(result.Sessions))
+	}
+	if result.Sessions[0]["agent"] != "reader" {
+		t.Errorf("expected agent=reader, got %v", result.Sessions[0]["agent"])
+	}
+}
+
+func TestSessionListSessionToken(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Mint another session to ensure it's not visible
+	mintTestSession(t, srv, adminToken, "writer")
+
+	// Session token caller should only see their own session
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 1 {
+		t.Fatalf("expected 1 session (own only), got %d", len(result.Sessions))
+	}
+}
+
+func TestSessionRevokeAdmin(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Extract session ID from the session list
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) == 0 {
+		t.Fatal("no sessions to revoke")
+	}
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Admin revokes the session
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("revoke: status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var revokeResult struct {
+		Status    string `json:"status"`
+		SessionID string `json:"session_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &revokeResult)
+	if revokeResult.Status != "revoked" {
+		t.Errorf("status = %q, want 'revoked'", revokeResult.Status)
+	}
+
+	// Verify the revoked session token is rejected
+	_ = sessionToken
+	req = httptest.NewRequest("GET", "/v1/secrets/test/secret1", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("expected 401 for revoked session, got %d", w.Code)
+	}
+}
+
+func TestSessionRevokeSelf(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// List to get session ID via the session token itself
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) == 0 {
+		t.Fatal("no sessions found")
+	}
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Session token revokes itself
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("self-revoke: status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionRevokeOtherDenied(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Reconfigure ACL with a non-admin reader
+	srv.acl = acl.NewFromConfig(&acl.ACLConfig{
+		Agents: map[string]acl.Agent{
+			"admin": {
+				Name:      "admin",
+				TokenHash: crypto.HashToken("admin-token"),
+				Permissions: []acl.Permission{
+					{Path: "*", Actions: []acl.Action{acl.ActionAdmin}},
+				},
+			},
+			"reader": {
+				Name:      "reader",
+				TokenHash: crypto.HashToken("reader-token"),
+				Permissions: []acl.Permission{
+					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+				},
+			},
+		},
+	})
+
+	// Admin mints a session
+	mintTestSession(t, srv, adminToken, "dev")
+
+	// Get admin's session ID
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) == 0 {
+		t.Fatal("no sessions found")
+	}
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Reader tries to revoke admin's session - should fail
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionInfo(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	mintTestSession(t, srv, adminToken, "dev")
+
+	// Get session ID
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Get session info
+	req = httptest.NewRequest("GET", "/v1/sessions/"+sessionID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("info: status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var info struct {
+		SessionID string `json:"session_id"`
+		Role      string `json:"role"`
+		Agent     string `json:"agent"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &info)
+	if info.SessionID != sessionID {
+		t.Errorf("session_id = %q, want %q", info.SessionID, sessionID)
+	}
+	if info.Role != "dev" {
+		t.Errorf("role = %q, want 'dev'", info.Role)
+	}
+	if info.Agent != "admin" {
+		t.Errorf("agent = %q, want 'admin'", info.Agent)
+	}
+}
+
+func TestSessionRevokedDeniesAccess(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Store a test secret first
+	body := `{"value":"secret123"}`
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/mysecret", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 && w.Code != 201 {
+		t.Fatalf("set secret: status %d", w.Code)
+	}
+
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Use session to read secret - should work
+	req = httptest.NewRequest("GET", "/v1/secrets/test/mysecret", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("get before revoke: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// Get session ID and revoke
+	req = httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	// Find the session we minted (most recent)
+	sessionID := listResult.Sessions[len(listResult.Sessions)-1].SessionID
+
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("revoke: status %d", w.Code)
+	}
+
+	// Try to use revoked session - should fail
+	req = httptest.NewRequest("GET", "/v1/secrets/test/mysecret", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401 for revoked session, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionListRoleFilter(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	mintTestSession(t, srv, adminToken, "dev")
+	mintTestSession(t, srv, adminToken, "writer")
+
+	// Filter by role=dev
+	req := httptest.NewRequest("GET", "/v1/sessions?role=dev", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 1 {
+		t.Fatalf("expected 1 session with role=dev, got %d", len(result.Sessions))
+	}
+	if result.Sessions[0]["role"] != "dev" {
+		t.Errorf("expected role=dev, got %v", result.Sessions[0]["role"])
+	}
+}
+
+func TestSessionTokenCannotInspectSiblingSession(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Mint two sessions for the same agent (admin)
+	sessionToken1 := mintTestSession(t, srv, adminToken, "dev")
+	mintTestSession(t, srv, adminToken, "writer")
+
+	// Get session IDs via admin bearer
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+			Role      string `json:"role"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) < 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(listResult.Sessions))
+	}
+
+	// Find the "writer" session (the sibling)
+	var siblingID string
+	for _, s := range listResult.Sessions {
+		if s.Role == "writer" {
+			siblingID = s.SessionID
+			break
+		}
+	}
+	if siblingID == "" {
+		t.Fatal("could not find writer session")
+	}
+
+	// Session token 1 (dev) tries to inspect the writer session — should be denied
+	req = httptest.NewRequest("GET", "/v1/sessions/"+siblingID, nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken1)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for sibling session info, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// Session token 1 (dev) tries to revoke the writer session — should be denied
+	req = httptest.NewRequest("POST", "/v1/sessions/"+siblingID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken1)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for sibling session revoke, got %d, body: %s", w.Code, w.Body.String())
+	}
+}

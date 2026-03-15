@@ -148,6 +148,31 @@ var mcpBaseTools = []mcpTool{
 	},
 }
 
+var mcpSessionTools = []mcpTool{
+	{
+		Name:        "phoenix_session_list",
+		Description: "List active Phoenix sessions. Returns session IDs, roles, agents, and expiry times. Agents see their own sessions; admins see all.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {}
+		}`),
+	},
+	{
+		Name:        "phoenix_session_revoke",
+		Description: "Revoke a Phoenix session by its ID. The session token becomes invalid immediately.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"session_id": {
+					"type": "string",
+					"description": "Session ID to revoke (e.g. 'ses_...')"
+				}
+			},
+			"required": ["session_id"]
+		}`),
+	},
+}
+
 var mcpUnsealTool = mcpTool{
 	Name:        "phoenix_unseal",
 	Description: "Decrypt a sealed secret value. The decrypted value will be visible in this conversation. Only works when allow_unseal policy is set for the secret's path.",
@@ -163,15 +188,15 @@ var mcpUnsealTool = mcpTool{
 	}`),
 }
 
-// mcpGetTools returns the tool list, including phoenix_unseal only when sealed mode is active.
+// mcpGetTools returns the tool list, including optional tools based on config.
 func mcpGetTools() []mcpTool {
+	tools := make([]mcpTool, len(mcpBaseTools))
+	copy(tools, mcpBaseTools)
+	tools = append(tools, mcpSessionTools...)
 	if mcpSealPrivKey != nil {
-		tools := make([]mcpTool, len(mcpBaseTools)+1)
-		copy(tools, mcpBaseTools)
-		tools[len(mcpBaseTools)] = mcpUnsealTool
-		return tools
+		tools = append(tools, mcpUnsealTool)
 	}
-	return mcpBaseTools
+	return tools
 }
 
 // mcpHandleRequest processes a single JSON-RPC request and writes the
@@ -272,6 +297,10 @@ func mcpDispatchTool(name string, args json.RawMessage, logger *log.Logger) (str
 		return mcpToolList(args, logger)
 	case "phoenix_unseal":
 		return mcpToolUnseal(args, logger)
+	case "phoenix_session_list":
+		return mcpToolSessionList(args, logger)
+	case "phoenix_session_revoke":
+		return mcpToolSessionRevoke(args, logger)
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name), true
 	}
@@ -306,6 +335,11 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 202 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return mcpFormatApprovalRequired(respBody), false
+	}
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -412,6 +446,11 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == 202 {
+		body, _ := io.ReadAll(resp.Body)
+		return mcpFormatApprovalRequired(body), false
+	}
+
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Sprintf("%s: %s", params.Path, mcpFormatDenial(body, resp.StatusCode)), true
@@ -475,6 +514,11 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 202 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return mcpFormatApprovalRequired(respBody), false
+	}
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -596,6 +640,94 @@ func mcpFormatDenial(body []byte, statusCode int) string {
 		return denial.Error
 	}
 	return fmt.Sprintf("HTTP %d", statusCode)
+}
+
+// mcpFormatApprovalRequired parses a 202 approval-required response
+// and returns a message suitable for an agent to present to the human.
+func mcpFormatApprovalRequired(body []byte) string {
+	var pending struct {
+		Status     string `json:"status"`
+		ApproveCmd string `json:"approve_command"`
+		ExpiresAt  string `json:"expires_at"`
+	}
+	if json.Unmarshal(body, &pending) == nil && pending.Status == "approval_required" {
+		msg := "[APPROVAL_REQUIRED] This operation requires human approval."
+		if pending.ApproveCmd != "" {
+			msg += "\nRun: " + pending.ApproveCmd
+		}
+		if pending.ExpiresAt != "" {
+			msg += "\nExpires: " + pending.ExpiresAt
+		}
+		return msg
+	}
+	return "[APPROVAL_REQUIRED] This operation requires human approval."
+}
+
+// mcpToolSessionList handles the phoenix_session_list tool.
+func mcpToolSessionList(args json.RawMessage, logger *log.Logger) (string, bool) {
+	resp, err := apiRequest("GET", "/v1/sessions", nil)
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return mcpFormatDenial(body, resp.StatusCode), true
+	}
+
+	var result struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+			Role      string `json:"role"`
+			Agent     string `json:"agent"`
+			CreatedAt string `json:"created_at"`
+			ExpiresAt string `json:"expires_at"`
+			SourceIP  string `json:"source_ip"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+
+	if len(result.Sessions) == 0 {
+		return "No active sessions.", false
+	}
+
+	var lines []string
+	for _, s := range result.Sessions {
+		lines = append(lines, fmt.Sprintf("%s  role=%s  agent=%s  expires=%s  ip=%s",
+			s.SessionID, s.Role, s.Agent, s.ExpiresAt, s.SourceIP))
+	}
+	logger.Printf("listed %d sessions", len(result.Sessions))
+	return strings.Join(lines, "\n"), false
+}
+
+// mcpToolSessionRevoke handles the phoenix_session_revoke tool.
+func mcpToolSessionRevoke(args json.RawMessage, logger *log.Logger) (string, bool) {
+	var params struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return fmt.Sprintf("Invalid arguments: %v", err), true
+	}
+	if params.SessionID == "" {
+		return "session_id is required", true
+	}
+
+	resp, err := apiRequest("POST", "/v1/sessions/"+params.SessionID+"/revoke", strings.NewReader("{}"))
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return mcpFormatDenial(body, resp.StatusCode), true
+	}
+
+	logger.Printf("revoked session %s", params.SessionID)
+	return fmt.Sprintf("Session %s revoked.", params.SessionID), false
 }
 
 // mcpSendResult sends a successful JSON-RPC response.

@@ -232,6 +232,22 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent-sock subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "sessions":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix sessions <list|info|revoke>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "list":
+			err = cmdSessionList(args[1:])
+		case "info":
+			err = cmdSessionInfo(args[1:])
+		case "revoke":
+			err = cmdSessionRevoke(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown sessions subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "approve":
 		err = cmdApprove(args)
 	case "mcp-server":
@@ -321,6 +337,9 @@ Usage:
   phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
   phoenix keypair generate <name> [-o dir]     Generate X25519 seal key pair
   phoenix keypair show <name>                 Show public key for a seal key pair
+  phoenix sessions list [--role R] [--agent A]  List active sessions
+  phoenix sessions info <session-id>            Show session details
+  phoenix sessions revoke <session-id>          Revoke a session
   phoenix approve <approval-id>                Approve a step-up session request
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix mcp-server --http :8080             Run MCP server (Streamable HTTP)
@@ -2819,6 +2838,148 @@ func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.
 }
 
 // cmdApprove handles the "phoenix approve <approval-id>" command.
+func cmdSessionList(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	queryParams := ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "--role" || args[i] == "-r") && i+1 < len(args):
+			if queryParams == "" {
+				queryParams = "?"
+			} else {
+				queryParams += "&"
+			}
+			queryParams += "role=" + url.QueryEscape(args[i+1])
+			i++
+		case (args[i] == "--agent" || args[i] == "-a") && i+1 < len(args):
+			if queryParams == "" {
+				queryParams = "?"
+			} else {
+				queryParams += "&"
+			}
+			queryParams += "agent=" + url.QueryEscape(args[i+1])
+			i++
+		}
+	}
+
+	resp, err := apiRequest("GET", "/v1/sessions"+queryParams, nil)
+	if err != nil {
+		return fmt.Errorf("listing sessions: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Sessions []struct {
+			SessionID       string `json:"session_id"`
+			Role            string `json:"role"`
+			Agent           string `json:"agent"`
+			BootstrapMethod string `json:"bootstrap_method"`
+			SourceIP        string `json:"source_ip"`
+			CreatedAt       string `json:"created_at"`
+			ExpiresAt       string `json:"expires_at"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	if len(result.Sessions) == 0 {
+		fmt.Println("No active sessions.")
+		return nil
+	}
+
+	fmt.Printf("%-36s  %-10s  %-12s  %-20s  %-20s  %-15s\n",
+		"SESSION_ID", "ROLE", "AGENT", "CREATED", "EXPIRES", "SOURCE_IP")
+	for _, s := range result.Sessions {
+		fmt.Printf("%-36s  %-10s  %-12s  %-20s  %-20s  %-15s\n",
+			s.SessionID, s.Role, s.Agent, s.CreatedAt, s.ExpiresAt, s.SourceIP)
+	}
+	return nil
+}
+
+func cmdSessionInfo(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix sessions info <session-id>")
+	}
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	sessionID := args[0]
+	resp, err := apiRequest("GET", "/v1/sessions/"+sessionID, nil)
+	if err != nil {
+		return fmt.Errorf("fetching session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var sess struct {
+		SessionID       string   `json:"session_id"`
+		Role            string   `json:"role"`
+		Agent           string   `json:"agent"`
+		Namespaces      []string `json:"namespaces"`
+		Actions         []string `json:"actions"`
+		BootstrapMethod string   `json:"bootstrap_method"`
+		SourceIP        string   `json:"source_ip"`
+		CreatedAt       string   `json:"created_at"`
+		ExpiresAt       string   `json:"expires_at"`
+		Revoked         bool     `json:"revoked"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	fmt.Printf("Session ID:       %s\n", sess.SessionID)
+	fmt.Printf("Role:             %s\n", sess.Role)
+	fmt.Printf("Agent:            %s\n", sess.Agent)
+	fmt.Printf("Namespaces:       %s\n", strings.Join(sess.Namespaces, ", "))
+	fmt.Printf("Actions:          %s\n", strings.Join(sess.Actions, ", "))
+	fmt.Printf("Bootstrap Method: %s\n", sess.BootstrapMethod)
+	fmt.Printf("Source IP:        %s\n", sess.SourceIP)
+	fmt.Printf("Created At:       %s\n", sess.CreatedAt)
+	fmt.Printf("Expires At:       %s\n", sess.ExpiresAt)
+	fmt.Printf("Revoked:          %v\n", sess.Revoked)
+	return nil
+}
+
+func cmdSessionRevoke(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix sessions revoke <session-id>")
+	}
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	sessionID := args[0]
+	resp, err := apiRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	if err != nil {
+		return fmt.Errorf("revoking session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Status    string `json:"status"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	fmt.Printf("Session %s revoked.\n", result.SessionID)
+	return nil
+}
+
 func cmdApprove(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: phoenix approve <approval-id>")

@@ -235,6 +235,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/session/renew", s.handleSessionRenew)
 	s.mux.HandleFunc("GET /v1/approvals", s.handleApprovalList)
 	s.mux.HandleFunc("/v1/approval/", s.handleApprovalRouter)
+	s.mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
+	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -2404,4 +2406,195 @@ func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"approvals": items,
 	})
+}
+
+// handleSessionList returns sessions visible to the caller.
+// Session-token callers see only their own session. Admins see all.
+// Non-admin bearer/mTLS callers see sessions belonging to their agent.
+func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	ip := clientIP(r)
+
+	// Session-token callers: can only see their own session
+	if info.UsedSession {
+		sess := s.sessions.Get(info.SessionID)
+		if sess == nil {
+			jsonOK(w, map[string]interface{}{"sessions": []interface{}{}})
+			return
+		}
+		jsonOK(w, map[string]interface{}{"sessions": []interface{}{sessionToMap(sess)}})
+		s.auditAllowed(info, "session.list", "self", ip)
+		return
+	}
+
+	isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+
+	// Query filters
+	roleFilter := r.URL.Query().Get("role")
+	agentFilter := r.URL.Query().Get("agent")
+
+	// Non-admin cannot filter by another agent
+	if agentFilter != "" && agentFilter != info.Agent && !isAdmin {
+		jsonError(w, "access denied: admin required to filter by agent", http.StatusForbidden)
+		return
+	}
+
+	all := s.sessions.List()
+
+	var result []*session.Session
+	for _, sess := range all {
+		// Non-admin: only own sessions
+		if !isAdmin && sess.Agent != info.Agent {
+			continue
+		}
+		if roleFilter != "" && sess.Role != roleFilter {
+			continue
+		}
+		if agentFilter != "" && sess.Agent != agentFilter {
+			continue
+		}
+		result = append(result, sess)
+	}
+
+	items := make([]map[string]interface{}, 0, len(result))
+	for _, sess := range result {
+		items = append(items, sessionToMap(sess))
+	}
+
+	jsonOK(w, map[string]interface{}{"sessions": items})
+	s.auditAllowed(info, "session.list", "", ip)
+}
+
+// handleSessionRouter dispatches /v1/sessions/{id} and /v1/sessions/{id}/revoke.
+func (s *Server) handleSessionRouter(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
+	parts := strings.SplitN(path, "/", 2)
+	id := parts[0]
+	if id == "" {
+		jsonError(w, "session ID required", http.StatusBadRequest)
+		return
+	}
+
+	if len(parts) == 1 {
+		if r.Method != "GET" {
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleSessionInfo(w, r, id)
+	} else if parts[1] == "revoke" && r.Method == "POST" {
+		s.handleSessionRevoke(w, r, id)
+	} else {
+		jsonError(w, "not found", http.StatusNotFound)
+	}
+}
+
+// handleSessionInfo returns details of a single session.
+func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	ip := clientIP(r)
+
+	sess := s.sessions.Get(id)
+	if sess == nil {
+		jsonError(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	// Authorization: session-token callers can only see their exact session
+	// (scoped credentials never escalate to admin). Bearer/mTLS callers can
+	// see sessions belonging to their agent, or all sessions if admin.
+	if info.UsedSession {
+		if info.SessionID != id {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	} else {
+		isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+		if info.Agent != sess.Agent && !isAdmin {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	}
+
+	jsonOK(w, sessionToMap(sess))
+	s.auditAllowed(info, "session.info", id, ip)
+}
+
+// handleSessionRevoke revokes a session by ID.
+func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	ip := clientIP(r)
+
+	sess := s.sessions.Get(id)
+	if sess == nil {
+		jsonError(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	// Authorization: session-token callers can only revoke their exact session
+	// (scoped credentials never escalate to admin). Bearer/mTLS callers can
+	// revoke sessions belonging to their agent, or all sessions if admin.
+	if info.UsedSession {
+		if info.SessionID != id {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	} else {
+		isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+		if info.Agent != sess.Agent && !isAdmin {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	}
+
+	if err := s.sessions.Revoke(id); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.logAudit(s.audit.LogAllowed(info.Agent, "session.revoke", id, ip))
+	jsonOK(w, map[string]string{
+		"status":     "revoked",
+		"session_id": id,
+	})
+}
+
+// sessionToMap converts a session to a JSON-friendly map (no token).
+func sessionToMap(sess *session.Session) map[string]interface{} {
+	return map[string]interface{}{
+		"session_id":       sess.ID,
+		"role":             sess.Role,
+		"agent":            sess.Agent,
+		"namespaces":       sess.Namespaces,
+		"actions":          sess.Actions,
+		"bootstrap_method": sess.BootstrapMethod,
+		"source_ip":        sess.SourceIP,
+		"created_at":       sess.CreatedAt.Format(time.RFC3339),
+		"expires_at":       sess.ExpiresAt.Format(time.RFC3339),
+		"revoked":          sess.Revoked,
+	}
 }

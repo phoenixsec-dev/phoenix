@@ -245,6 +245,48 @@ func (c *Client) RenewSession() error {
 	return nil
 }
 
+// SessionInfo contains details about an active session.
+type SessionInfo struct {
+	SessionID       string   `json:"session_id"`
+	Role            string   `json:"role"`
+	Agent           string   `json:"agent"`
+	Namespaces      []string `json:"namespaces"`
+	Actions         []string `json:"actions"`
+	BootstrapMethod string   `json:"bootstrap_method"`
+	SourceIP        string   `json:"source_ip"`
+	CreatedAt       string   `json:"created_at"`
+	ExpiresAt       string   `json:"expires_at"`
+	Revoked         bool     `json:"revoked"`
+}
+
+// ListSessions returns sessions visible to the caller.
+func (c *Client) ListSessions() ([]SessionInfo, error) {
+	var result struct {
+		Sessions []SessionInfo `json:"sessions"`
+	}
+	if err := c.doRequest("GET", "/v1/sessions", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Sessions, nil
+}
+
+// RevokeSession revokes a session by ID.
+func (c *Client) RevokeSession(sessionID string) error {
+	return c.doRequest("POST", "/v1/sessions/"+sessionID+"/revoke", map[string]string{}, nil)
+}
+
+// IsApprovalRequired returns true if the error indicates approval is needed.
+func (e *Error) IsApprovalRequired() bool { return e.Code == "APPROVAL_REQUIRED" }
+
+// IsSessionExpired returns true if the error indicates the session has expired.
+func (e *Error) IsSessionExpired() bool { return e.Code == "SESSION_EXPIRED" }
+
+// IsScopeExceeded returns true if the error indicates the request is outside session scope.
+func (e *Error) IsScopeExceeded() bool { return e.Code == "SCOPE_EXCEEDED" }
+
+// IsActionDenied returns true if the error indicates the action is not permitted.
+func (e *Error) IsActionDenied() bool { return e.Code == "ACTION_DENIED" }
+
 func (c *Client) doRequest(method, path string, body interface{}, out interface{}) error {
 	// Auto-renew session if nearing expiry (within 5 min)
 	if c.Role != "" && !c.sessionExp.IsZero() && time.Until(c.sessionExp) < 5*time.Minute {
