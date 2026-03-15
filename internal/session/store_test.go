@@ -21,7 +21,7 @@ func newTestStore(t *testing.T, ttl time.Duration) *Store {
 func TestStoreCreateValidate(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestStoreCreateWithSealKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, sess, err := s.Create("secure", "agent1", sealKey, []string{"prod/*"}, nil, "mtls", "192.168.0.10", 0)
+	_, sess, err := s.Create("secure", "agent1", sealKey, []string{"prod/*"}, nil, "mtls", "", "192.168.0.10", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestStoreCreateWithSealKey(t *testing.T) {
 func TestStoreRevoke(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestStoreRevokeNotFound(t *testing.T) {
 func TestStoreExpiredSession(t *testing.T) {
 	s := newTestStore(t, 1*time.Millisecond)
 
-	token, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 1*time.Millisecond)
+	token, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 1*time.Millisecond)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestStoreExpiredSession(t *testing.T) {
 func TestStoreGet(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestStoreList(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
 	for i := 0; i < 3; i++ {
-		_, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+		_, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 		if err != nil {
 			t.Fatalf("Create %d: %v", i, err)
 		}
@@ -159,8 +159,8 @@ func TestStoreList(t *testing.T) {
 func TestStoreListExcludesRevoked(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess1, _ := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
-	s.Create("dev", "agent2", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess1, _ := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
+	s.Create("dev", "agent2", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 
 	s.Revoke(sess1.ID)
 
@@ -178,7 +178,7 @@ func TestStoreConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			token, _, err := s.Create("dev", "agent", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+			token, _, err := s.Create("dev", "agent", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 			if err != nil {
 				t.Errorf("Create: %v", err)
 				return
@@ -200,7 +200,7 @@ func TestStoreCleanup(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
 	// Create one that will be "expired" and one active
-	_, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestStoreCleanup(t *testing.T) {
 	s.mu.Unlock()
 
 	// Create an active one
-	_, _, err = s.Create("dev", "agent2", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, _, err = s.Create("dev", "agent2", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestStoreDefaultActions(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
 	// nil actions -> defaults to ["list", "read_value"]
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestStoreDefaultActions(t *testing.T) {
 func TestStoreExplicitActions(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("deployer", "agent1", nil, []string{"deploy/*"}, []string{"list", "read_value", "write"}, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("deployer", "agent1", nil, []string{"deploy/*"}, []string{"list", "read_value", "write"}, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestStoreExplicitActions(t *testing.T) {
 func TestStoreAdminAction(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("admin", "agent1", nil, []string{"*"}, []string{"admin"}, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("admin", "agent1", nil, []string{"*"}, []string{"admin"}, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestStoreAdminAction(t *testing.T) {
 func TestStoreRenew(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestStoreRenew(t *testing.T) {
 func TestStoreRenewExpired(t *testing.T) {
 	s := newTestStore(t, time.Millisecond)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond)
+	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", time.Millisecond)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestStoreRenewExpired(t *testing.T) {
 func TestStoreRenewRevoked(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestStoreRenewNotFound(t *testing.T) {
 func TestStoreDefaultTTL(t *testing.T) {
 	s := newTestStore(t, 0)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestParseClaimsInsecure(t *testing.T) {
 	}
 	defer store.Stop()
 
-	token, sess, err := store.Create("dev", "test-agent", nil, []string{"test/*"}, nil, "bearer", "127.0.0.1", 1*time.Second)
+	token, sess, err := store.Create("dev", "test-agent", nil, []string{"test/*"}, nil, "bearer", "", "127.0.0.1", 1*time.Second)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

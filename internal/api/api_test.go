@@ -3674,6 +3674,72 @@ func TestSessionRenewLocalityRecheck(t *testing.T) {
 	}
 }
 
+func TestSessionRenewCertFingerprintContinuity(t *testing.T) {
+	srv, authority, _ := setupTestServerWithCA(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"secure": {
+			Namespaces:     []string{"test/*"},
+			BootstrapTrust: []string{"mtls"},
+			Attestation:    []string{"cert_fingerprint"},
+		},
+	})
+
+	bundle1, err := authority.IssueAgentCert("admin")
+	if err != nil {
+		t.Fatalf("issuing cert1: %v", err)
+	}
+	bundle2, err := authority.IssueAgentCert("reader")
+	if err != nil {
+		t.Fatalf("issuing cert2: %v", err)
+	}
+
+	// Mint with cert1.
+	req := makeMTLSRequest("POST", "/v1/session/mint", []byte(`{"role":"secure"}`), bundle1.CertPEM)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("mint: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var mint struct {
+		SessionToken string `json:"session_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &mint); err != nil {
+		t.Fatalf("unmarshal mint: %v", err)
+	}
+
+	// Renew with a different cert: should fail continuity check.
+	req = makeMTLSRequest("POST", "/v1/session/renew", []byte(`{}`), bundle2.CertPEM)
+	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("renew with wrong cert: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var denied struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &denied)
+	if denied.Code != "ATTESTATION_FAILED" {
+		t.Fatalf("code = %q, want ATTESTATION_FAILED", denied.Code)
+	}
+
+	// Renew with the original cert: should succeed.
+	req = makeMTLSRequest("POST", "/v1/session/renew", []byte(`{}`), bundle1.CertPEM)
+	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("renew with original cert: status %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleSessionRenewExpired(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
@@ -4481,7 +4547,7 @@ func TestSessionListSelfOnly(t *testing.T) {
 	})
 
 	// Mint sessions as different agents
-	mintTestSession(t, srv, adminToken, "dev")   // admin's session
+	mintTestSession(t, srv, adminToken, "dev")     // admin's session
 	mintTestSession(t, srv, "reader-token", "dev") // reader's session
 
 	// Reader should only see their own

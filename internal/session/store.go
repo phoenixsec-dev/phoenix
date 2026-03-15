@@ -47,7 +47,7 @@ func NewStore(defaultTTL time.Duration) (*Store, error) {
 }
 
 // Create mints a new session and returns the signed token.
-func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, actions []string, bootstrapMethod, sourceIP string, ttl time.Duration) (string, *Session, error) {
+func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, actions []string, bootstrapMethod, certFingerprint, sourceIP string, ttl time.Duration) (string, *Session, error) {
 	if ttl <= 0 {
 		ttl = s.defaultTTL
 	}
@@ -72,6 +72,7 @@ func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, action
 		Role:               role,
 		Agent:              agent,
 		SealKeyFingerprint: fingerprint,
+		CertFingerprint:    certFingerprint,
 		Namespaces:         namespaces,
 		Actions:            actions,
 		BootstrapMethod:    bootstrapMethod,

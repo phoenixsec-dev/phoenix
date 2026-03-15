@@ -2,8 +2,10 @@ package phoenix
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -241,6 +243,31 @@ func TestNewDefaults(t *testing.T) {
 	c := New("", "")
 	if c.Server != "http://127.0.0.1:9090" {
 		t.Fatalf("expected default server, got %q", c.Server)
+	}
+}
+
+func TestNewWithRoleFailsClosedOnMintError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/session/mint" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "mint denied",
+			"code":  "BOOTSTRAP_FAILED",
+		})
+	}))
+	defer srv.Close()
+
+	c, err := NewWithRole(srv.URL, "bootstrap-token", "dev")
+	if err == nil {
+		t.Fatal("expected mint failure")
+	}
+	if c != nil {
+		t.Fatal("expected nil client on mint failure")
+	}
+	if got := fmt.Sprint(err); got == "" || !strings.Contains(got, "session mint for role") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

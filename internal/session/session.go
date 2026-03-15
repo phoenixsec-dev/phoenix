@@ -48,6 +48,7 @@ type Session struct {
 	Role               string    `json:"role"`
 	Agent              string    `json:"agent"`
 	SealKeyFingerprint string    `json:"seal_key_fingerprint,omitempty"`
+	CertFingerprint    string    `json:"-"`
 	Namespaces         []string  `json:"namespaces"`
 	Actions            []string  `json:"actions"`
 	BootstrapMethod    string    `json:"bootstrap_method"`

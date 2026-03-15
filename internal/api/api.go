@@ -122,9 +122,9 @@ type Server struct {
 	tokens        *token.Issuer  // nil when short-lived tokens are not configured
 	startTime     time.Time      // server start time for uptime reporting
 	authRL        *rateLimiter
-	sessions      *session.Store            // nil when sessions are not configured
+	sessions      *session.Store               // nil when sessions are not configured
 	sessionRoles  map[string]config.RoleConfig // nil when sessions are not configured
-	approvals     *approval.Store           // nil when step-up not configured
+	approvals     *approval.Store              // nil when step-up not configured
 	mux           *http.ServeMux
 }
 
@@ -1950,7 +1950,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	actions := role.Actions // nil -> store defaults to ["list", "read_value"]
 
 	// Mint session
-	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, ip, ttl)
+	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, info.CertFingerprint, ip, ttl)
 	if err != nil {
 		log.Printf("session mint error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -2036,6 +2036,14 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 			s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID))
 			return
 		}
+		if slicesContains(role.Attestation, "cert_fingerprint") && sess.CertFingerprint != "" && info.CertFingerprint != sess.CertFingerprint {
+			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+				"role requires the same client certificate fingerprint used when the session was minted",
+				"renew using the original client certificate or mint a new session",
+				http.StatusForbidden)
+			s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "cert_continuity_failed", info.SessionID))
+			return
+		}
 	}
 
 	ttl := s.sessionTTL(role.MaxTTL)
@@ -2095,6 +2103,15 @@ func (s *Server) checkRoleAttestation(attestation []string, info *authInfo, ip s
 		}
 	}
 	return ""
+}
+
+func slicesContains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 // bootstrapMethod returns the primary auth method string from authInfo.
@@ -2331,7 +2348,7 @@ func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, i
 	tokenStr, sess, mintErr := s.sessions.Create(
 		apr.Role, apr.Agent, apr.SealPubKey,
 		role.Namespaces, role.Actions,
-		apr.BootstrapMethod, apr.SourceIP, ttl,
+		apr.BootstrapMethod, apr.CertFingerprint, apr.SourceIP, ttl,
 	)
 	if mintErr != nil {
 		log.Printf("session mint on approval error: %v", mintErr)
