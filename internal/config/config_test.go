@@ -426,6 +426,20 @@ func TestDashboardConfigJSON(t *testing.T) {
 	}
 }
 
+func TestExampleConfigIncludesSessionAndDashboard(t *testing.T) {
+	cfg := ExampleConfig()
+
+	if cfg.Session.TTL != "1h" {
+		t.Fatalf("session.ttl = %q, want 1h", cfg.Session.TTL)
+	}
+	if len(cfg.Session.Roles) == 0 {
+		t.Fatal("expected example session roles")
+	}
+	if cfg.Dashboard.SessionTTL != "4h" {
+		t.Fatalf("dashboard.session_ttl = %q, want 4h", cfg.Dashboard.SessionTTL)
+	}
+}
+
 func TestOPConfigJSON(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Store.Backend = "1password"

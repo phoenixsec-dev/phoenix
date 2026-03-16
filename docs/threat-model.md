@@ -94,8 +94,10 @@ The dashboard uses a **separate auth surface** from the API:
 
 - Single shared password (bcrypt) or PIN (constant-time compare)
 - Cookie-based sessions with HMAC-SHA256 signed payloads
-- CSRF tokens embedded in the cookie and validated on every POST
+- CSRF tokens embedded in the cookie and validated on every POST (including logout)
 - Exponential backoff rate limiting per source IP (5 attempts, then 1s–60s delay)
+- Full audit trail: login success/failure, logout, expired cookie rejection,
+  CSRF failures, and all mutations (approve, deny, revoke)
 
 This is simpler than the API's auth model by design: the dashboard targets human
 operators, not programmatic access. The trade-off is that all dashboard users share

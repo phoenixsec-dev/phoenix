@@ -123,13 +123,13 @@ type SessionConfig struct {
 // RoleConfig defines a named role that agents assume via session tokens.
 type RoleConfig struct {
 	Namespaces     []string `json:"namespaces"`
-	Actions        []string `json:"actions,omitempty"`      // default: ["list", "read_value"]
-	BootstrapTrust []string `json:"bootstrap_trust"`        // allowed auth methods: "mtls", "bearer", "local"
-	RequireSealKey bool     `json:"require_seal_key"`       // must present seal pubkey at mint
-	MaxTTL         string   `json:"max_ttl,omitempty"`      // per-role session TTL override
-	Attestation    []string `json:"attestation,omitempty"`  // declared, enforcement deferred to Phase 2
-	StepUp         bool     `json:"step_up,omitempty"`      // declared, enforcement deferred to Phase 3
-	StepUpTTL      string   `json:"step_up_ttl,omitempty"`  // declared, enforcement deferred to Phase 3
+	Actions        []string `json:"actions,omitempty"`     // default: ["list", "read_value"]
+	BootstrapTrust []string `json:"bootstrap_trust"`       // allowed auth methods: "mtls", "bearer", "local"
+	RequireSealKey bool     `json:"require_seal_key"`      // must present seal pubkey at mint
+	MaxTTL         string   `json:"max_ttl,omitempty"`     // per-role session TTL override
+	Attestation    []string `json:"attestation,omitempty"` // declared, enforcement deferred to Phase 2
+	StepUp         bool     `json:"step_up,omitempty"`     // declared, enforcement deferred to Phase 3
+	StepUpTTL      string   `json:"step_up_ttl,omitempty"` // declared, enforcement deferred to Phase 3
 }
 
 // DashboardConfig controls the optional operator dashboard web UI.
@@ -185,6 +185,48 @@ func DefaultConfig() *Config {
 			ServiceAccountTokenEnv: "OP_SERVICE_ACCOUNT_TOKEN",
 		},
 	}
+}
+
+// ExampleConfig returns a fuller reference config for config.example.json and
+// other human-facing examples. Unlike DefaultConfig, it includes optional
+// sections in disabled/sample form so operators can see the current surface
+// area without having to cross-reference multiple docs.
+func ExampleConfig() *Config {
+	cfg := DefaultConfig()
+	cfg.Server.Listen = "0.0.0.0:9090"
+	cfg.Store.Backend = "file"
+	cfg.Attestation.Nonce.Enabled = false
+	cfg.Attestation.Nonce.MaxAge = "30s"
+	cfg.Attestation.Token.Enabled = false
+	cfg.Attestation.Token.TTL = "15m"
+	cfg.Attestation.LocalAgent.Enabled = false
+	cfg.Attestation.LocalAgent.SocketPath = "/tmp/phoenix-agent.sock"
+	cfg.OnePassword.Vault = "Engineering"
+	cfg.OnePassword.CacheTTL = "60s"
+	cfg.Session = SessionConfig{
+		Enabled: false,
+		TTL:     "1h",
+		Roles: map[string]RoleConfig{
+			"dev": {
+				Namespaces:     []string{"dev/*", "staging/*"},
+				Actions:        []string{"list", "read_value"},
+				BootstrapTrust: []string{"bearer"},
+			},
+			"deploy": {
+				Namespaces:     []string{"prod/*"},
+				Actions:        []string{"list", "read_value"},
+				BootstrapTrust: []string{"mtls"},
+				RequireSealKey: true,
+				StepUp:         true,
+				StepUpTTL:      "15m",
+			},
+		},
+	}
+	cfg.Dashboard = DashboardConfig{
+		Enabled:    false,
+		SessionTTL: "4h",
+	}
+	return cfg
 }
 
 // Load reads a config file from disk. Missing file returns defaults.
@@ -333,7 +375,7 @@ func (c *Config) Validate() error {
 
 // SaveExample writes a default config to disk as a reference.
 func SaveExample(path string) error {
-	cfg := DefaultConfig()
+	cfg := ExampleConfig()
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

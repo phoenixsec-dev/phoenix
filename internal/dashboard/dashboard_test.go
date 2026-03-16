@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,11 +11,18 @@ import (
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/approval"
+	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/session"
 )
 
 func testHandler(t *testing.T) (*Handler, *session.Store, *approval.Store) {
+	t.Helper()
+	h, ss, as, _ := testHandlerWithAudit(t)
+	return h, ss, as
+}
+
+func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *approval.Store, *bytes.Buffer) {
 	t.Helper()
 	ss, err := session.NewStore(time.Hour)
 	if err != nil {
@@ -33,6 +42,9 @@ func testHandler(t *testing.T) (*Handler, *session.Store, *approval.Store) {
 		},
 	}
 
+	var auditBuf bytes.Buffer
+	al := audit.NewWriterLogger(&auditBuf)
+
 	cfg := config.DashboardConfig{
 		Enabled:  true,
 		Password: "testpass",
@@ -42,13 +54,38 @@ func testHandler(t *testing.T) (*Handler, *session.Store, *approval.Store) {
 		SessionRoles: roles,
 		Approvals:    as,
 		StartTime:    time.Now(),
+		Audit:        al,
 	}
 
 	h, err := New(cfg, deps)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return h, ss, as
+	return h, ss, as, &auditBuf
+}
+
+// parseAuditEntries reads JSONL audit entries from a buffer.
+func parseAuditEntries(buf *bytes.Buffer) []audit.Entry {
+	var entries []audit.Entry
+	dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+	for dec.More() {
+		var e audit.Entry
+		if err := dec.Decode(&e); err != nil {
+			break
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// findAuditEntry returns the first entry matching action and status.
+func findAuditEntry(entries []audit.Entry, action, status string) *audit.Entry {
+	for i := range entries {
+		if entries[i].Action == action && entries[i].Status == status {
+			return &entries[i]
+		}
+	}
+	return nil
 }
 
 func login(t *testing.T, h *Handler) *http.Cookie {
@@ -331,4 +368,197 @@ func TestNonSecureCookieOnPlainHTTP(t *testing.T) {
 		}
 	}
 	t.Fatal("no phoenix_dash cookie set")
+}
+
+// --- Audit event tests ---
+
+func TestLoginSuccessAudit(t *testing.T) {
+	h, _, _, buf := testHandlerWithAudit(t)
+
+	form := url.Values{"credential": {"testpass"}}
+	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "10.0.0.5:9999"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	entries := parseAuditEntries(buf)
+	e := findAuditEntry(entries, "dashboard.login", "allowed")
+	if e == nil {
+		t.Fatal("expected allowed dashboard.login audit entry")
+	}
+	if e.Agent != "dashboard@10.0.0.5" {
+		t.Fatalf("expected agent dashboard@10.0.0.5, got %s", e.Agent)
+	}
+	if e.IP != "10.0.0.5" {
+		t.Fatalf("expected IP 10.0.0.5, got %s", e.IP)
+	}
+}
+
+func TestLoginFailureAudit(t *testing.T) {
+	h, _, _, buf := testHandlerWithAudit(t)
+
+	form := url.Values{"credential": {"wrong"}}
+	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "10.0.0.5:9999"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	entries := parseAuditEntries(buf)
+	e := findAuditEntry(entries, "dashboard.login", "denied")
+	if e == nil {
+		t.Fatal("expected denied dashboard.login audit entry")
+	}
+	if e.Agent != "dashboard" {
+		t.Fatalf("expected agent 'dashboard' for pre-login failure, got %s", e.Agent)
+	}
+	if e.Reason != "invalid_credentials" {
+		t.Fatalf("expected reason invalid_credentials, got %s", e.Reason)
+	}
+}
+
+func TestLoginRateLimitAudit(t *testing.T) {
+	h, _, _, buf := testHandlerWithAudit(t)
+
+	// Exhaust free attempts
+	for i := 0; i < loginMaxFailures; i++ {
+		form := url.Values{"credential": {"wrong"}}
+		req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "10.0.0.77:9999"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+	}
+
+	// Next attempt should be rate-limited
+	buf.Reset() // clear prior entries, we only care about the rate-limit one
+	form := url.Values{"credential": {"wrong"}}
+	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "10.0.0.77:9999"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	entries := parseAuditEntries(buf)
+	e := findAuditEntry(entries, "dashboard.login", "denied")
+	if e == nil {
+		t.Fatal("expected denied audit entry for rate-limited login")
+	}
+	if e.Path != "rate_limited" {
+		t.Fatalf("expected path 'rate_limited', got %s", e.Path)
+	}
+}
+
+func TestLogoutAudit(t *testing.T) {
+	h, _, _, buf := testHandlerWithAudit(t)
+	cookie := login(t, h)
+	csrf := csrfFromCookie(t, h, cookie)
+
+	buf.Reset() // clear login audit
+
+	form := url.Values{"_csrf": {csrf}}
+	req := httptest.NewRequest("POST", "/dashboard/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "10.0.0.5:9999"
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	entries := parseAuditEntries(buf)
+	e := findAuditEntry(entries, "dashboard.logout", "allowed")
+	if e == nil {
+		t.Fatal("expected allowed dashboard.logout audit entry")
+	}
+	if e.Agent != "dashboard@10.0.0.5" {
+		t.Fatalf("expected agent dashboard@10.0.0.5, got %s", e.Agent)
+	}
+}
+
+func TestExpiredCookieAudit(t *testing.T) {
+	h, _, _, buf := testHandlerWithAudit(t)
+
+	// Create a cookie that's already expired
+	payload := cookiePayload{
+		Exp:  time.Now().Add(-time.Hour).Unix(), // expired 1h ago
+		CSRF: "deadbeef",
+	}
+	cookieVal, err := h.signCookie(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/dashboard/", nil)
+	req.AddCookie(&http.Cookie{Name: "phoenix_dash", Value: cookieVal})
+	req.RemoteAddr = "10.0.0.5:9999"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected redirect, got %d", w.Code)
+	}
+
+	entries := parseAuditEntries(buf)
+	e := findAuditEntry(entries, "dashboard.auth", "denied")
+	if e == nil {
+		t.Fatal("expected denied dashboard.auth audit entry for expired cookie")
+	}
+	if !strings.Contains(e.Reason, "expired") {
+		t.Fatalf("expected reason containing 'expired', got %s", e.Reason)
+	}
+}
+
+func TestCSRFFailureAudit(t *testing.T) {
+	h, _, as, buf := testHandlerWithAudit(t)
+	cookie := login(t, h)
+
+	apr, _ := as.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "", "10.0.0.1", "", time.Hour, 0)
+
+	buf.Reset()
+
+	// POST with wrong CSRF
+	form := url.Values{"_csrf": {"wrong"}}
+	req := httptest.NewRequest("POST", "/dashboard/approvals/"+apr.ID+"/approve", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	req.RemoteAddr = "10.0.0.5:9999"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", w.Code)
+	}
+
+	entries := parseAuditEntries(buf)
+	e := findAuditEntry(entries, "dashboard.csrf", "denied")
+	if e == nil {
+		t.Fatal("expected denied dashboard.csrf audit entry")
+	}
+}
+
+func TestLogoutRequiresAuth(t *testing.T) {
+	h, _, _ := testHandler(t)
+
+	// POST logout without any cookie should redirect to login
+	form := url.Values{}
+	req := httptest.NewRequest("POST", "/dashboard/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "/dashboard/login") {
+		t.Fatalf("expected redirect to login, got %s", loc)
+	}
 }

@@ -177,18 +177,25 @@ and attestation requirements.
 
 All dashboard actions are logged to the same audit trail as API actions.
 
-| Action | Status | When |
-|--------|--------|------|
-| `dashboard.login` | allowed | Successful login |
-| `dashboard.login` | denied | Failed login (invalid credentials) |
-| `dashboard.login` | denied | Rate-limited login attempt |
-| `approval.approved` | allowed | Step-up request approved via dashboard |
-| `approval.denied` | allowed | Step-up request denied via dashboard |
-| `session.revoke` | allowed | Session revoked via dashboard |
+| Action | Status | Agent | When |
+|--------|--------|-------|------|
+| `dashboard.login` | allowed | `dashboard@<ip>` | Successful login |
+| `dashboard.login` | denied | `dashboard` | Failed login (invalid credentials) |
+| `dashboard.login` | denied | `dashboard` | Rate-limited login attempt |
+| `dashboard.logout` | allowed | `dashboard@<ip>` | Explicit logout |
+| `dashboard.auth` | denied | `dashboard` | Expired or invalid cookie on a protected page |
+| `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action |
+| `approval.approved` | allowed | `dashboard@<ip>` | Step-up request approved |
+| `approval.denied` | allowed | `dashboard@<ip>` | Step-up request denied |
+| `session.revoke` | allowed | `dashboard@<ip>` | Session revoked |
 
-The agent field for post-login actions is `dashboard@<client_ip>`,
-providing per-operator forensic distinction. Pre-login events (failures,
-rate limiting) use `dashboard` since there is no authenticated identity.
+Post-login actions use `dashboard@<client_ip>` for per-operator forensic
+distinction. Pre-login events (failures, rate limiting, expired cookies)
+use `dashboard` since there is no authenticated identity.
+
+Missing-cookie redirects (e.g., a first visit to `/dashboard/`) are not
+logged — they are normal navigation, not security events. Only present-
+but-invalid cookies generate `dashboard.auth` denied entries.
 
 ## Deployment checklist
 

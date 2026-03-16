@@ -42,8 +42,47 @@
       "socket_path": "/tmp/phoenix-agent.sock"
     }
   },
+  "session": {
+    "enabled": false,
+    "ttl": "1h",
+    "roles": {
+      "dev": {
+        "namespaces": [
+          "dev/*",
+          "staging/*"
+        ],
+        "actions": [
+          "list",
+          "read_value"
+        ],
+        "bootstrap_trust": [
+          "bearer"
+        ]
+      },
+      "deploy": {
+        "namespaces": [
+          "prod/*"
+        ],
+        "actions": [
+          "list",
+          "read_value"
+        ],
+        "bootstrap_trust": [
+          "mtls"
+        ],
+        "require_seal_key": true,
+        "step_up": true,
+        "step_up_ttl": "15m"
+      }
+    }
+  },
+  "dashboard": {
+    "enabled": false,
+    "session_ttl": "4h"
+  },
   "onepassword": {
     "vault": "Engineering",
-    "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN"
+    "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN",
+    "cache_ttl": "60s"
   }
 }

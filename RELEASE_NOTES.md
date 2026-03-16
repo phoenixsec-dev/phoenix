@@ -40,7 +40,12 @@ dependencies, all assets embedded via `go:embed`.
 - **Audit** — filterable audit log with auto-refresh
 - **Roles** — read-only role inspection with namespace/action/trust pills
 - **Auth** — cookie-based with HMAC-signed tokens, bcrypt password or PIN,
-  CSRF protection on all mutations
+  CSRF protection on all mutations (including logout), `Secure` cookie
+  flag auto-detected from TLS
+- **Rate limiting** — exponential backoff per source IP on login
+- **Audit** — full lifecycle: login success/failure, logout, expired session
+  rejection, CSRF failures, approve/deny/revoke actions; post-login actions
+  tagged `dashboard@<ip>` for per-operator distinction
 - **Mobile** — responsive layout with bottom nav bar on small screens
 - **Design** — dark industrial theme, phoenix red-orange accent gradient
 

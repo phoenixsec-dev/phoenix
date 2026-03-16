@@ -205,7 +205,7 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	// Routes
 	h.mux.HandleFunc("GET /dashboard/login", h.handleLoginPage)
 	h.mux.HandleFunc("POST /dashboard/login", h.handleLogin)
-	h.mux.HandleFunc("POST /dashboard/logout", h.handleLogout)
+	h.mux.HandleFunc("POST /dashboard/logout", h.requireAuth(h.handleLogout))
 	h.mux.HandleFunc("GET /dashboard/", h.requireAuth(h.handleOverview))
 	h.mux.HandleFunc("GET /dashboard/approvals", h.requireAuth(h.handleApprovals))
 	h.mux.HandleFunc("POST /dashboard/approvals/{id}/approve", h.requireAuth(h.handleApprove))
@@ -298,6 +298,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "phoenix_dash",
 		Value:    "",
@@ -305,6 +306,9 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		MaxAge:   -1,
 	})
+	if h.deps.Audit != nil {
+		h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.logout", "logout", clientIP)
+	}
 	http.Redirect(w, r, "/dashboard/login", http.StatusSeeOther)
 }
 
@@ -313,6 +317,15 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		payload, err := h.verifyCookie(r)
 		if err != nil {
+			// Audit expired/invalid dashboard sessions (but not missing cookies —
+			// those are just unauthenticated first visits, not security events).
+			if h.deps.Audit != nil {
+				if _, cookieErr := r.Cookie("phoenix_dash"); cookieErr == nil {
+					// Cookie was present but invalid/expired
+					clientIP := extractClientIP(r)
+					h.deps.Audit.LogDenied("dashboard", "dashboard.auth", r.URL.Path, clientIP, err.Error())
+				}
+			}
 			http.Redirect(w, r, "/dashboard/login", http.StatusSeeOther)
 			return
 		}
@@ -321,6 +334,10 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		if r.Method == "POST" {
 			formCSRF := r.FormValue("_csrf")
 			if !hmac.Equal([]byte(payload.CSRF), []byte(formCSRF)) {
+				if h.deps.Audit != nil {
+					clientIP := extractClientIP(r)
+					h.deps.Audit.LogDenied("dashboard", "dashboard.csrf", r.URL.Path, clientIP, "csrf_token_mismatch")
+				}
 				http.Error(w, "CSRF validation failed", http.StatusForbidden)
 				return
 			}
