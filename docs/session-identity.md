@@ -120,6 +120,15 @@ phoenix approve apr_xyz789
 The approval request includes role, agent identity, and expiry. The human
 sees full context before approving. Approvals expire if not acted on.
 
+### Dashboard approval
+
+When the dashboard is enabled, approvals can also be managed from the browser
+at `/dashboard/approvals`. Each pending approval is shown as a card with full
+context (role, agent, source IP, bootstrap method, namespaces, TTY, expiry
+countdown). Approve or deny with one click. The same safety checks apply —
+role config, bootstrap trust, attestation, and seal key are all re-verified
+at approve time.
+
 ## CLI commands
 
 ```bash
@@ -243,5 +252,6 @@ the underlying agent has admin ACL permissions.
 
 - [Authentication](authentication.md)
 - [Configuration](configuration.md)
+- [Dashboard](dashboard.md) — browser-based approval and session management
 - [CLI Usage](cli-usage.md)
 - [API Reference](api-reference-index.md)

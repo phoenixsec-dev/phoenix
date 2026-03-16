@@ -28,6 +28,22 @@ Role-based session tokens replace static bearer tokens for agent access.
 - **Access isolation** — session tokens can only inspect/revoke their own
   exact session; no ACL escalation from scoped credentials
 
+### Operator Dashboard
+
+Lightweight browser-based operator UI at `/dashboard/` — no external
+dependencies, all assets embedded via `go:embed`.
+
+- **Overview** — secret/agent/session counts, server uptime, recent audit
+- **Approvals** — pending step-up approvals as cards with full context;
+  approve/deny with shared safety checks (role, bootstrap, attestation, seal key)
+- **Sessions** — active sessions table with filters and one-click revoke
+- **Audit** — filterable audit log with auto-refresh
+- **Roles** — read-only role inspection with namespace/action/trust pills
+- **Auth** — cookie-based with HMAC-signed tokens, bcrypt password or PIN,
+  CSRF protection on all mutations
+- **Mobile** — responsive layout with bottom nav bar on small screens
+- **Design** — dark industrial theme, phoenix red-orange accent gradient
+
 ### Infrastructure & Publishing
 - Added GitHub Actions repository secrets required for Docker publishing:
   - `DOCKERHUB_USERNAME`

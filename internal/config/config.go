@@ -21,6 +21,7 @@ type Config struct {
 	Attestation AttestationConfig `json:"attestation,omitempty"`
 	OnePassword OPConfig          `json:"onepassword,omitempty"`
 	Session     SessionConfig     `json:"session,omitempty"`
+	Dashboard   DashboardConfig   `json:"dashboard,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -129,6 +130,14 @@ type RoleConfig struct {
 	Attestation    []string `json:"attestation,omitempty"`  // declared, enforcement deferred to Phase 2
 	StepUp         bool     `json:"step_up,omitempty"`      // declared, enforcement deferred to Phase 3
 	StepUpTTL      string   `json:"step_up_ttl,omitempty"`  // declared, enforcement deferred to Phase 3
+}
+
+// DashboardConfig controls the optional operator dashboard web UI.
+type DashboardConfig struct {
+	Enabled    bool   `json:"enabled"`
+	Password   string `json:"password,omitempty"`
+	PIN        string `json:"pin,omitempty"`
+	SessionTTL string `json:"session_ttl,omitempty"` // default "4h"
 }
 
 // validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.
@@ -265,6 +274,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Attestation.LocalAgent.Enabled && c.Attestation.LocalAgent.SocketPath == "" {
 		return errors.New("attestation.local_agent.socket_path is required when local_agent is enabled")
+	}
+
+	// Validate dashboard config
+	if c.Dashboard.Enabled {
+		if c.Dashboard.Password == "" && c.Dashboard.PIN == "" {
+			return errors.New("dashboard: password or pin is required when dashboard is enabled")
+		}
+		if c.Dashboard.SessionTTL != "" {
+			if _, err := time.ParseDuration(c.Dashboard.SessionTTL); err != nil {
+				return fmt.Errorf("dashboard.session_ttl: invalid duration %q: %w", c.Dashboard.SessionTTL, err)
+			}
+		}
 	}
 
 	// Validate session config

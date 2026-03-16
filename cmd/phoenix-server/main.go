@@ -25,6 +25,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/dashboard"
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
@@ -215,18 +216,21 @@ func main() {
 	}
 
 	// Initialize session identity if enabled
+	var sessionStore *session.Store
+	var approvalStore *approval.Store
 	if cfg.Session.Enabled {
 		sessionTTL := session.DefaultTTL
 		if cfg.Session.TTL != "" {
 			sessionTTL, _ = time.ParseDuration(cfg.Session.TTL) // validated above
 		}
-		ss, err := session.NewStore(sessionTTL)
+		var err error
+		sessionStore, err = session.NewStore(sessionTTL)
 		if err != nil {
 			log.Fatalf("initializing session store: %v", err)
 		}
-		srv.SetSessionStore(ss)
+		srv.SetSessionStore(sessionStore)
 		srv.SetSessionRoles(cfg.Session.Roles)
-		defer ss.Stop()
+		defer sessionStore.Stop()
 		log.Printf("  Sessions: enabled (roles=%d, ttl=%s)", len(cfg.Session.Roles), sessionTTL)
 
 		// Check if any role requires step-up approval
@@ -243,13 +247,33 @@ func main() {
 			}
 		}
 		if hasStepUp {
-			as := approval.NewStore(stepUpTimeout)
-			srv.SetApprovalStore(as)
-			defer as.Stop()
+			approvalStore = approval.NewStore(stepUpTimeout)
+			srv.SetApprovalStore(approvalStore)
+			defer approvalStore.Stop()
 			log.Printf("  Step-up approvals: enabled (timeout=%s)", stepUpTimeout)
 		}
 	} else {
 		log.Printf("  Sessions: disabled")
+	}
+
+	// Initialize dashboard if enabled
+	if cfg.Dashboard.Enabled {
+		deps := dashboard.Deps{
+			Sessions:     sessionStore,
+			SessionRoles: cfg.Session.Roles,
+			Approvals:    approvalStore,
+			AuditPath:    cfg.Audit.Path,
+			Backend:      backend,
+			ACL:          a,
+			StartTime:    time.Now(),
+			Audit:        al,
+		}
+		dash, err := dashboard.New(cfg.Dashboard, deps)
+		if err != nil {
+			log.Fatalf("initializing dashboard: %v", err)
+		}
+		srv.SetDashboard(dash)
+		log.Printf("  Dashboard: enabled at /dashboard/")
 	}
 
 	// Start local attestation agent if enabled

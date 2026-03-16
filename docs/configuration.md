@@ -62,6 +62,43 @@ Each role defines: `namespaces` (required), `bootstrap_trust` (required),
 `actions` (default: list + read_value), and optional fields for seal key
 requirements, attestation, and step-up approval.
 
+## Dashboard
+
+The operator dashboard provides a browser-based UI for approvals, sessions,
+audit, and role inspection. All assets are embedded — no CDN or build step.
+
+```json
+{
+  "dashboard": {
+    "enabled": true,
+    "password": "operator-password",
+    "session_ttl": "4h"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
+| `dashboard.password` | `string` | Login password (bcrypt-hashed internally) |
+| `dashboard.pin` | `string` | Alternative: login PIN (constant-time compare) |
+| `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
+
+Either `password` or `pin` is required when the dashboard is enabled.
+The dashboard uses cookie-based auth with HMAC-signed tokens and CSRF protection.
+Login attempts are rate-limited with exponential backoff (5 failures before lockout,
+up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.
+
+**Transport security:** When the server runs with mTLS enabled or behind a TLS
+reverse proxy (detected via `X-Forwarded-Proto: https`), the session cookie is
+set with `Secure` flag automatically. For production use:
+
+- Run behind a TLS reverse proxy (e.g., Nginx Proxy Manager), or
+- Use the built-in mTLS mode (`auth.mtls.enabled: true`), or
+- Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`)
+
+Do not expose the dashboard over plain HTTP on a network you do not control.
+
 ## 1Password runtime backend (broker mode, read-only)
 
 Phoenix can broker access to secrets stored in 1Password:
@@ -152,5 +189,6 @@ mapping to work, set `server.listen` to `0.0.0.0:9090` in the config.
 - [Getting Started](getting-started.md)
 - [Authentication](authentication.md)
 - [Session Identity](session-identity.md)
+- [Dashboard](dashboard.md) — operator UI deployment and security model
 - [Key Management](key-management.md)
 - [API Reference Index](api-reference-index.md)

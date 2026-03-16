@@ -107,10 +107,36 @@ phoenix get myapp/api-key
 For the full command reference (`set`, `get`, `list`, `delete`, `resolve`, `exec`,
 `import`, `export`, `audit`), see [CLI Usage](cli-usage.md).
 
+## Enable the operator dashboard (optional)
+
+The dashboard provides a browser-based UI for approvals, sessions, audit, and
+roles. It is especially useful for step-up approval workflows where a human
+needs to approve agent access from a phone or browser.
+
+Add to your config:
+
+```json
+{
+  "dashboard": {
+    "enabled": true,
+    "password": "your-operator-password"
+  }
+}
+```
+
+After restarting, open `http://localhost:9090/dashboard/` (or your server's
+address) in a browser.
+
+**Important:** If the server is reachable over a network, put it behind a TLS
+reverse proxy or use mTLS. Do not serve the dashboard over plain HTTP on a
+network you do not control. See [Dashboard](dashboard.md) for the full
+deployment guide and security model.
+
 ## Next steps
 
 - [CLI Usage](cli-usage.md) — full command reference
 - [Authentication](authentication.md) — bearer tokens, mTLS, sealed key pairs
+- [Dashboard](dashboard.md) — browser-based operator UI
 - [Policy and Attestation](policy-and-attestation.md) — per-path security rules
 - [LAN Deployment](lan-deployment.md) — multi-host setup
 - [Configuration](configuration.md) — server config reference and Docker

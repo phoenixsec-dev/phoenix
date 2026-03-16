@@ -207,6 +207,14 @@ func (s *Server) SetApprovalStore(as *approval.Store) {
 	s.approvals = as
 }
 
+// SetDashboard registers the dashboard handler under /dashboard/.
+func (s *Server) SetDashboard(h http.Handler) {
+	s.mux.Handle("/dashboard/", h)
+	s.mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+	})
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -2277,62 +2285,22 @@ func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Re-read current role config to prevent minting with stale permissions
-	role, ok := s.sessionRoles[apr.Role]
-	if !ok {
-		jsonDenied(w, "access_denied", "ROLE_NOT_FOUND",
-			fmt.Sprintf("role %q no longer exists in server config", apr.Role),
-			"the role was removed while approval was pending",
-			http.StatusForbidden)
-		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "role_not_found"))
-		return
-	}
-	if !role.StepUp {
-		jsonDenied(w, "access_denied", "ROLE_CHANGED",
-			fmt.Sprintf("role %q no longer requires step-up approval", apr.Role),
+	// Shared safety checks: role exists, step-up enabled, bootstrap, attestation, seal key
+	role, valErr := approval.ValidateForMint(apr, s.sessionRoles)
+	if valErr != nil {
+		code := "VALIDATION_FAILED"
+		status := http.StatusForbidden
+		if ve, ok := valErr.(*approval.ValidationError); ok {
+			code = ve.Code
+			if code == "ROLE_CHANGED" {
+				status = http.StatusConflict
+			}
+		}
+		jsonDenied(w, "access_denied", code,
+			valErr.Error(),
 			"role config changed while approval was pending",
-			http.StatusConflict)
-		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "role_changed"))
-		return
-	}
-
-	// Re-check bootstrap trust: the stored bootstrap method must still be allowed
-	if !s.bootstrapAllowed(role.BootstrapTrust, apr.BootstrapMethod, session.IsLoopback(apr.SourceIP)) {
-		jsonDenied(w, "access_denied", "BOOTSTRAP_FAILED",
-			fmt.Sprintf("original auth method %q is no longer in role's bootstrap_trust list", apr.BootstrapMethod),
-			fmt.Sprintf("role %q now accepts: %v", apr.Role, role.BootstrapTrust),
-			http.StatusForbidden)
-		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "bootstrap_recheck_failed"))
-		return
-	}
-
-	// Re-check attestation requirements against current role
-	if len(role.Attestation) > 0 {
-		// Build a synthetic authInfo from the stored approval data to re-check
-		aprInfo := &authInfo{
-			Agent:           apr.Agent,
-			UsedMTLS:        apr.BootstrapMethod == "mtls",
-			UsedBearer:      apr.BootstrapMethod == "bearer",
-			IsLocal:         session.IsLoopback(apr.SourceIP),
-			CertFingerprint: apr.CertFingerprint,
-		}
-		if reason := s.checkRoleAttestation(role.Attestation, aprInfo, apr.SourceIP); reason != "" {
-			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
-				fmt.Sprintf("current role attestation requirements not met: %s", reason),
-				fmt.Sprintf("role %q attestation changed while approval was pending", apr.Role),
-				http.StatusForbidden)
-			s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "attestation_recheck_failed"))
-			return
-		}
-	}
-
-	// Re-check seal key requirement
-	if role.RequireSealKey && len(apr.SealPubKey) == 0 {
-		jsonDenied(w, "access_denied", "SEAL_KEY_REQUIRED",
-			fmt.Sprintf("role %q now requires a seal key, but none was provided at request time", apr.Role),
-			"the agent must re-request with a seal key",
-			http.StatusForbidden)
-		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, "seal_key_recheck_failed"))
+			status)
+		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, valErr.Error()))
 		return
 	}
 

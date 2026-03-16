@@ -81,10 +81,25 @@ step-up approval, and configuration.
 | `PHOENIX_POLICY` | Policy file path for local `phoenix policy` commands |
 | `PHOENIX_OP_TOKEN_ENV` | Import-only env var name holding 1Password token |
 
+## Dashboard auth (separate surface)
+
+The operator dashboard (`/dashboard/`) uses its own authentication — it does
+**not** use bearer tokens, mTLS, or session tokens. Instead, it uses a shared
+password or PIN with cookie-based sessions.
+
+This is intentional: the dashboard is a human operator interface, not an agent
+interface. The API auth model (bearer, mTLS, session tokens) is designed for
+programmatic access with per-agent identity. The dashboard auth model is
+designed for browser access with shared-credential simplicity.
+
+See [Dashboard](dashboard.md) for the full security model, deployment
+requirements, and threat analysis.
+
 ## Related docs
 
 - [Getting Started](getting-started.md)
 - [Session Identity](session-identity.md)
+- [Dashboard](dashboard.md)
 - [Policy and Attestation](policy-and-attestation.md)
 - [Sealed Responses](sealed-responses.md)
 - [Admin Token Lifecycle](admin-token-lifecycle.md)

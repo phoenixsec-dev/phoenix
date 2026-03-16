@@ -1,0 +1,43 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">Roles</h1>
+
+{{if .Roles}}
+<div class="role-grid">
+{{range .Roles}}
+    <div class="role-card">
+        <h2 class="role-name">{{.Name}}</h2>
+        <div class="pill-group">
+            <span class="pill-label">Namespaces</span>
+            {{range .Config.Namespaces}}<span class="pill pill-ns">{{.}}</span>{{end}}
+        </div>
+        <div class="pill-group">
+            <span class="pill-label">Actions</span>
+            {{range .Config.Actions}}<span class="pill pill-action">{{.}}</span>{{end}}
+            {{if not .Config.Actions}}<span class="pill pill-action">list</span><span class="pill pill-action">read_value</span>{{end}}
+        </div>
+        <div class="pill-group">
+            <span class="pill-label">Bootstrap Trust</span>
+            {{range .Config.BootstrapTrust}}<span class="pill pill-bootstrap">{{.}}</span>{{end}}
+        </div>
+        <div class="role-flags">
+            {{if .Config.StepUp}}<span class="flag flag-stepup">step-up</span>{{end}}
+            {{if .Config.RequireSealKey}}<span class="flag flag-seal">seal key</span>{{end}}
+            {{if .Config.MaxTTL}}<span class="flag flag-ttl">max TTL: {{.Config.MaxTTL}}</span>{{end}}
+            {{if .Config.StepUpTTL}}<span class="flag flag-ttl">step-up TTL: {{.Config.StepUpTTL}}</span>{{end}}
+        </div>
+        {{if .Config.Attestation}}
+        <div class="pill-group">
+            <span class="pill-label">Attestation</span>
+            {{range .Config.Attestation}}<span class="pill pill-attest">{{.}}</span>{{end}}
+        </div>
+        {{end}}
+    </div>
+{{end}}
+</div>
+{{else}}
+<div class="empty-state">
+    <p>No roles configured</p>
+</div>
+{{end}}
+{{end}}

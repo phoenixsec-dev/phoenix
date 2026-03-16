@@ -176,6 +176,22 @@ func (s *Store) ListPending() []*Approval {
 	return result
 }
 
+// ListAll returns all approvals (pending, approved, denied, expired).
+func (s *Store) ListAll() []*Approval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	result := make([]*Approval, 0, len(s.approvals))
+	for _, apr := range s.approvals {
+		if apr.Status == StatusPending && now.After(apr.ExpiresAt) {
+			apr.Status = StatusExpired
+		}
+		result = append(result, apr)
+	}
+	return result
+}
+
 // Stop halts the background cleanup goroutine.
 func (s *Store) Stop() {
 	s.mu.Lock()

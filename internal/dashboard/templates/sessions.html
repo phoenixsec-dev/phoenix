@@ -1,0 +1,61 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">Sessions</h1>
+
+{{if .Flash}}<div class="flash flash-info">{{.Flash}}</div>{{end}}
+
+<form class="filter-bar" method="GET" action="/dashboard/sessions">
+    <select name="role" class="input input-sm">
+        <option value="">All Roles</option>
+        {{range .Roles}}<option value="{{.}}"{{if eq . $.RoleFilter}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    <input type="text" name="agent" class="input input-sm" placeholder="Agent..." value="{{.AgentFilter}}">
+    <button type="submit" class="btn btn-sm">Filter</button>
+</form>
+
+{{if .Sessions}}
+<div class="table-wrap">
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Role</th>
+            <th>Agent</th>
+            <th>Source IP</th>
+            <th>Bootstrap</th>
+            <th>Created</th>
+            <th>TTL Remaining</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Sessions}}
+        <tr>
+            <td class="mono">{{truncate .ID 16}}</td>
+            <td>{{.Role}}</td>
+            <td>{{.Agent}}</td>
+            <td class="mono">{{.SourceIP}}</td>
+            <td>{{.BootstrapMethod}}</td>
+            <td data-time="{{.CreatedAt.Unix}}">{{fmtTime .CreatedAt}}</td>
+            <td class="ttl-{{if .Revoked}}expired{{else}}active{{end}}">
+                {{if .Revoked}}revoked{{else}}{{ttlRemain .ExpiresAt}}{{end}}
+            </td>
+            <td>
+                {{if not .Revoked}}
+                <form method="POST" action="/dashboard/sessions/{{.ID}}/revoke" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                    <button type="submit" class="btn btn-revoke btn-sm" data-confirm="Revoke session {{.ID}}?">Revoke</button>
+                </form>
+                {{end}}
+            </td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+</div>
+{{else}}
+<div class="empty-state">
+    <p>No active sessions</p>
+</div>
+{{end}}
+{{end}}

@@ -208,7 +208,35 @@ to the server config, and restart.
 See [Policy and Attestation](policy-and-attestation.md) for the full reference
 on available policy fields and testing with `phoenix policy test`.
 
-## 8. Verify the deployment
+## 8. Enable operator dashboard (optional)
+
+If you want browser-based approval and session management, enable the dashboard.
+Since this is a LAN deployment with the server on `0.0.0.0`, you **must** use
+TLS — either native mTLS (already configured above) or a reverse proxy.
+
+Add to the server config:
+
+```json
+{
+  "dashboard": {
+    "enabled": true,
+    "password": "your-operator-password"
+  }
+}
+```
+
+Restart the server. With mTLS enabled, the `Secure` cookie flag is set
+automatically. Access the dashboard at `https://192.168.1.10:9090/dashboard/`.
+
+If you are using a reverse proxy instead of native mTLS, ensure the proxy
+sets `X-Forwarded-Proto: https` so Phoenix enables the `Secure` flag.
+
+**Do not** enable the dashboard on a LAN deployment without TLS. The session
+cookie would be transmitted in cleartext on the network.
+
+See [Dashboard](dashboard.md) for the full security model and deployment checklist.
+
+## 9. Verify the deployment
 
 From each client machine:
 
@@ -253,6 +281,7 @@ phoenix audit --last 20
 
 - [Getting Started](getting-started.md)
 - [Authentication](authentication.md)
+- [Dashboard](dashboard.md) — browser-based operator UI
 - [Multi-Agent Setup](multi-agent-setup.md) (same-host multi-agent isolation)
 - [Policy and Attestation](policy-and-attestation.md)
 - [Configuration](configuration.md)

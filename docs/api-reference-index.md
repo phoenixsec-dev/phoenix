@@ -144,6 +144,16 @@ All secret-returning responses include `Cache-Control: no-store`.
 
 See [Sealed Responses](sealed-responses.md) for the full guide.
 
+## Operator dashboard
+
+The dashboard is served at `/dashboard/` and is **not** part of the `/v1/` API.
+It uses cookie-based auth (not bearer/mTLS) and returns HTML (not JSON).
+
+Dashboard routes are only registered when `dashboard.enabled` is `true` in
+config. They do not appear in the API mux otherwise.
+
+See [Dashboard](dashboard.md) for the full reference.
+
 ## Common error shape
 
 Most failures return:

@@ -1,0 +1,76 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">Approvals</h1>
+
+{{if .Flash}}<div class="flash flash-info">{{.Flash}}</div>{{end}}
+
+{{if .Pending}}
+<div class="approval-grid">
+{{range .Pending}}
+    <div class="approval-card">
+        <div class="approval-header">
+            <span class="approval-role">{{.Role}}</span>
+            <span class="approval-agent">{{.Agent}}</span>
+        </div>
+        <div class="approval-details">
+            <div class="detail-row"><span class="detail-label">Source IP</span><span class="mono">{{.SourceIP}}</span></div>
+            <div class="detail-row"><span class="detail-label">Bootstrap</span><span>{{.BootstrapMethod}}</span></div>
+            {{if .CertFingerprint}}<div class="detail-row"><span class="detail-label">Cert</span><span class="mono">{{truncate .CertFingerprint 24}}</span></div>{{end}}
+            <div class="detail-row"><span class="detail-label">Namespaces</span><span class="mono">{{join .Namespaces ", "}}</span></div>
+            {{if .RequesterTTY}}<div class="detail-row"><span class="detail-label">TTY</span><span class="mono">{{.RequesterTTY}}</span></div>{{end}}
+            <div class="detail-row"><span class="detail-label">Created</span><span data-time="{{.CreatedAt.Unix}}">{{fmtTime .CreatedAt}}</span></div>
+            <div class="detail-row"><span class="detail-label">Expires</span><span>{{ttlRemain .ExpiresAt}}</span></div>
+        </div>
+        <div class="approval-actions">
+            <form method="POST" action="/dashboard/approvals/{{.ID}}/approve" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                <button type="submit" class="btn btn-approve" data-confirm="Approve session for {{.Agent}} as {{.Role}}?">Approve</button>
+            </form>
+            <form method="POST" action="/dashboard/approvals/{{.ID}}/deny" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                <button type="submit" class="btn btn-deny" data-confirm="Deny approval for {{.Agent}}?">Deny</button>
+            </form>
+        </div>
+        <div class="approval-id mono">{{.ID}}</div>
+    </div>
+{{end}}
+</div>
+{{else}}
+<div class="empty-state">
+    <span class="empty-icon">&#10003;</span>
+    <p>No pending approvals</p>
+</div>
+{{end}}
+
+{{if .Resolved}}
+<details class="resolved-section">
+    <summary class="section-title">Recently Resolved ({{len .Resolved}})</summary>
+    <div class="table-wrap">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Role</th>
+                <th>Agent</th>
+                <th>Status</th>
+                <th>Resolved By</th>
+                <th>Time</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Resolved}}
+            <tr>
+                <td class="mono">{{truncate .ID 16}}</td>
+                <td>{{.Role}}</td>
+                <td>{{.Agent}}</td>
+                <td><span class="status-badge status-{{.Status}}">{{.Status}}</span></td>
+                <td>{{.ApprovedBy}}</td>
+                <td data-time="{{.CreatedAt.Unix}}">{{fmtTime .CreatedAt}}</td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+    </div>
+</details>
+{{end}}
+{{end}}
