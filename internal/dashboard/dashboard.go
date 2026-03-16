@@ -130,20 +130,24 @@ type Deps struct {
 
 // Handler serves the dashboard web UI.
 type Handler struct {
-	deps       Deps
-	tmpl       *template.Template
-	cookieKey  []byte // 32 bytes, HMAC signing
-	passwordH  []byte // bcrypt hash (nil if PIN mode)
-	pin        string // raw PIN (empty if password mode)
-	sessionTTL time.Duration
-	loginRL    *loginRateLimiter
-	mux        *http.ServeMux
+	deps            Deps
+	tmpl            *template.Template
+	cookieKey       []byte // 32 bytes, HMAC signing
+	passwordH       []byte // bcrypt hash (nil if PIN mode)
+	pin             string // raw PIN (empty if password mode)
+	sessionTTL      time.Duration
+	allowMultiLogin bool
+	loginRL         *loginRateLimiter
+	nonceMu         sync.Mutex
+	activeNonce     string // set on login; checked on auth when single-session mode
+	mux             *http.ServeMux
 }
 
 // cookiePayload is the signed cookie content.
 type cookiePayload struct {
-	Exp  int64  `json:"exp"`
-	CSRF string `json:"csrf"`
+	Exp   int64  `json:"exp"`
+	CSRF  string `json:"csrf"`
+	Nonce string `json:"nonce"` // binds cookie to a specific login; verified in single-session mode
 }
 
 // New creates a dashboard handler from config and deps.
@@ -155,11 +159,12 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	}
 
 	h := &Handler{
-		deps:       deps,
-		cookieKey:  key,
-		sessionTTL: 4 * time.Hour,
-		loginRL:    newLoginRateLimiter(),
-		mux:        http.NewServeMux(),
+		deps:            deps,
+		cookieKey:       key,
+		sessionTTL:      4 * time.Hour,
+		allowMultiLogin: cfg.AllowMultiLogin,
+		loginRL:         newLoginRateLimiter(),
+		mux:             http.NewServeMux(),
 	}
 
 	// Parse session TTL
@@ -170,13 +175,9 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		}
 	}
 
-	// Set up auth: password (bcrypt) or PIN
-	if cfg.Password != "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(cfg.Password), bcrypt.DefaultCost)
-		if err != nil {
-			return nil, fmt.Errorf("hashing password: %w", err)
-		}
-		h.passwordH = hash
+	// Set up auth: password hash (bcrypt) or PIN
+	if cfg.PasswordHash != "" {
+		h.passwordH = []byte(cfg.PasswordHash)
 	} else if cfg.PIN != "" {
 		h.pin = cfg.PIN
 	}
@@ -205,6 +206,7 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	// Routes
 	h.mux.HandleFunc("GET /dashboard/login", h.handleLoginPage)
 	h.mux.HandleFunc("POST /dashboard/login", h.handleLogin)
+	h.mux.HandleFunc("POST /dashboard/force-login", h.handleForceLogin)
 	h.mux.HandleFunc("POST /dashboard/logout", h.requireAuth(h.handleLogout))
 	h.mux.HandleFunc("GET /dashboard/", h.requireAuth(h.handleOverview))
 	h.mux.HandleFunc("GET /dashboard/approvals", h.requireAuth(h.handleApprovals))
@@ -228,7 +230,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "login.html", map[string]interface{}{
-		"Error": r.URL.Query().Get("error"),
+		"Error":   r.URL.Query().Get("error"),
+		"Blocked": r.URL.Query().Get("blocked") == "1",
 	})
 }
 
@@ -245,15 +248,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	credential := r.FormValue("credential")
-
-	ok := false
-	if h.passwordH != nil {
-		ok = bcrypt.CompareHashAndPassword(h.passwordH, []byte(credential)) == nil
-	} else if h.pin != "" {
-		ok = len(credential) > 0 && hmac.Equal([]byte(h.pin), []byte(credential))
-	}
-
-	if !ok {
+	if !h.checkCredential(credential) {
 		h.loginRL.recordFailure(clientIP)
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDenied("dashboard", "dashboard.login", "login", clientIP, "invalid_credentials")
@@ -262,17 +257,77 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Single-session enforcement: reject if another session is active
+	if !h.allowMultiLogin {
+		h.nonceMu.Lock()
+		active := h.activeNonce != ""
+		h.nonceMu.Unlock()
+		if active {
+			if h.deps.Audit != nil {
+				h.deps.Audit.LogDenied("dashboard", "dashboard.login", "login", clientIP, "session_already_active")
+			}
+			http.Redirect(w, r, "/dashboard/login?error=another+session+is+active&blocked=1", http.StatusSeeOther)
+			return
+		}
+	}
+
+	h.loginRL.recordSuccess(clientIP)
+	h.mintDashboardSession(w, r, clientIP, "dashboard.login")
+}
+
+// handleForceLogin authenticates and takes over, clearing any existing session.
+// This is the escape hatch when the active session is orphaned (browser closed, etc.).
+func (h *Handler) handleForceLogin(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+
+	if err := h.loginRL.check(clientIP); err != nil {
+		if h.deps.Audit != nil {
+			h.deps.Audit.LogDenied("dashboard", "dashboard.force_login", "rate_limited", clientIP, err.Error())
+		}
+		http.Redirect(w, r, "/dashboard/login?error="+escapeFlash(err.Error()), http.StatusSeeOther)
+		return
+	}
+
+	credential := r.FormValue("credential")
+	if !h.checkCredential(credential) {
+		h.loginRL.recordFailure(clientIP)
+		if h.deps.Audit != nil {
+			h.deps.Audit.LogDenied("dashboard", "dashboard.force_login", "login", clientIP, "invalid_credentials")
+		}
+		http.Redirect(w, r, "/dashboard/login?error=invalid+credentials&blocked=1", http.StatusSeeOther)
+		return
+	}
+
 	h.loginRL.recordSuccess(clientIP)
 
-	// Generate CSRF token
+	// Clear existing session nonce — the old cookie becomes invalid
+	if h.deps.Audit != nil {
+		h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.force_login", "login", clientIP)
+	}
+
+	h.mintDashboardSession(w, r, clientIP, "dashboard.force_login")
+}
+
+// mintDashboardSession creates a new dashboard cookie and sets the active nonce.
+func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, clientIP, auditAction string) {
+	// Generate CSRF token and session nonce
 	csrfBytes := make([]byte, 16)
 	rand.Read(csrfBytes)
 	csrf := hex.EncodeToString(csrfBytes)
 
-	// Create signed cookie
+	nonceBytes := make([]byte, 16)
+	rand.Read(nonceBytes)
+	nonce := hex.EncodeToString(nonceBytes)
+
+	// Set active nonce (invalidates any prior session)
+	h.nonceMu.Lock()
+	h.activeNonce = nonce
+	h.nonceMu.Unlock()
+
 	payload := cookiePayload{
-		Exp:  time.Now().Add(h.sessionTTL).Unix(),
-		CSRF: csrf,
+		Exp:   time.Now().Add(h.sessionTTL).Unix(),
+		CSRF:  csrf,
+		Nonce: nonce,
 	}
 	cookie, err := h.signCookie(payload)
 	if err != nil {
@@ -291,14 +346,31 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if h.deps.Audit != nil {
-		h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.login", "login", clientIP)
+		h.deps.Audit.LogAllowed("dashboard@"+clientIP, auditAction, "login", clientIP)
 	}
 
 	http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
 }
 
+// checkCredential verifies the password hash or PIN.
+func (h *Handler) checkCredential(credential string) bool {
+	if h.passwordH != nil {
+		return bcrypt.CompareHashAndPassword(h.passwordH, []byte(credential)) == nil
+	}
+	if h.pin != "" {
+		return len(credential) > 0 && hmac.Equal([]byte(h.pin), []byte(credential))
+	}
+	return false
+}
+
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
+
+	// Clear active nonce so a new login can proceed
+	h.nonceMu.Lock()
+	h.activeNonce = ""
+	h.nonceMu.Unlock()
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     "phoenix_dash",
 		Value:    "",
@@ -393,7 +465,25 @@ func (h *Handler) verifyCookie(r *http.Request) (*cookiePayload, error) {
 	}
 
 	if time.Now().Unix() > p.Exp {
+		// Clear nonce on expiry so a new login can proceed
+		if !h.allowMultiLogin {
+			h.nonceMu.Lock()
+			if h.activeNonce == p.Nonce {
+				h.activeNonce = ""
+			}
+			h.nonceMu.Unlock()
+		}
 		return nil, fmt.Errorf("cookie expired")
+	}
+
+	// Single-session: verify cookie's nonce matches the active session
+	if !h.allowMultiLogin {
+		h.nonceMu.Lock()
+		active := h.activeNonce
+		h.nonceMu.Unlock()
+		if active != p.Nonce {
+			return nil, fmt.Errorf("session superseded")
+		}
 	}
 
 	return &p, nil

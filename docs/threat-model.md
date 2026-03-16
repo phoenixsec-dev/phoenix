@@ -92,12 +92,14 @@ Approval is the highest-risk action — it mints a session token for an agent.
 
 The dashboard uses a **separate auth surface** from the API:
 
-- Single shared password (bcrypt) or PIN (constant-time compare)
-- Cookie-based sessions with HMAC-SHA256 signed payloads
+- Single shared password (bcrypt hash in config) or PIN (constant-time compare)
+- Cookie-based sessions with HMAC-SHA256 signed payloads and per-session nonce
+- Single active session by default (configurable via `allow_multi_login`)
+- Force Login as escape hatch for orphaned sessions (re-authenticates, invalidates prior)
 - CSRF tokens embedded in the cookie and validated on every POST (including logout)
 - Exponential backoff rate limiting per source IP (5 attempts, then 1s–60s delay)
-- Full audit trail: login success/failure, logout, expired cookie rejection,
-  CSRF failures, and all mutations (approve, deny, revoke)
+- Full audit trail: login success/failure, force login, logout, expired/superseded
+  cookie rejection, CSRF failures, and all mutations (approve, deny, revoke)
 
 This is simpler than the API's auth model by design: the dashboard targets human
 operators, not programmatic access. The trade-off is that all dashboard users share
@@ -114,7 +116,7 @@ one credential and are distinguished only by source IP in the audit trail
 | CSRF | Token-per-session in signed cookie, validated on all POST actions | Relies on `SameSite=Strict` + token check |
 | Unauthorized approval | Same `ValidateForMint` safety checks as the API; role, bootstrap, attestation, and seal key all re-verified | A compromised dashboard session can approve any pending request |
 | Shared credential | All operators share one password/PIN; no per-user identity | Forensic distinction limited to source IP (`dashboard@<ip>`) |
-| Config file contains password | Config must be `chmod 600`; password is bcrypt-hashed at runtime, never stored as hash | If config is readable, password is exposed |
+| Config file credential exposure | Password stored as bcrypt hash in config (`password_hash`); plaintext rejected by validation; agent reading config gets only the hash | PIN mode stores plaintext PIN; use `password_hash` for non-loopback deployments |
 
 ### Deployment requirements
 

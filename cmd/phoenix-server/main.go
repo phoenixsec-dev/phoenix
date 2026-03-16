@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/agent"
 	"github.com/phoenixsec/phoenix/internal/api"
@@ -42,6 +44,7 @@ func main() {
 	passphraseStdin := flag.Bool("passphrase-stdin", false, "Read master key passphrase from stdin")
 	initPassphrase := flag.String("passphrase", "", "Passphrase to protect master key (--init only)")
 	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
+	hashPassword := flag.Bool("hash-password", false, "Generate a bcrypt hash for dashboard password_hash config")
 	flag.Parse()
 
 	if *initPassphrase != "" {
@@ -50,6 +53,13 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("phoenix-server %s\n", version.Version)
+		return
+	}
+
+	if *hashPassword {
+		if err := runHashPassword(); err != nil {
+			log.Fatalf("hash-password failed: %v", err)
+		}
 		return
 	}
 
@@ -492,5 +502,27 @@ func runProtectKey(keyPath string) error {
 		fmt.Println("Master key passphrase updated.")
 	}
 
+	return nil
+}
+
+// runHashPassword prompts for a password and prints its bcrypt hash.
+// The hash can be pasted into config.json as dashboard.password_hash.
+func runHashPassword() error {
+	pass, err := crypto.PromptPassphrase("Enter dashboard password: ")
+	if err != nil {
+		return err
+	}
+	confirm, err := crypto.PromptPassphrase("Confirm dashboard password: ")
+	if err != nil {
+		return err
+	}
+	if pass != confirm {
+		return fmt.Errorf("passwords do not match")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("generating hash: %w", err)
+	}
+	fmt.Println(string(hash))
 	return nil
 }

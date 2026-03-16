@@ -113,13 +113,17 @@ The dashboard provides a browser-based UI for approvals, sessions, audit, and
 roles. It is especially useful for step-up approval workflows where a human
 needs to approve agent access from a phone or browser.
 
-Add to your config:
+Generate a password hash and add to your config:
+
+```bash
+phoenix-server --hash-password
+```
 
 ```json
 {
   "dashboard": {
     "enabled": true,
-    "password": "your-operator-password"
+    "password_hash": "$2a$10$..."
   }
 }
 ```

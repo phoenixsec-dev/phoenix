@@ -214,13 +214,17 @@ If you want browser-based approval and session management, enable the dashboard.
 Since this is a LAN deployment with the server on `0.0.0.0`, you **must** use
 TLS — either native mTLS (already configured above) or a reverse proxy.
 
-Add to the server config:
+Generate a password hash and add to the server config:
+
+```bash
+phoenix-server --hash-password
+```
 
 ```json
 {
   "dashboard": {
     "enabled": true,
-    "password": "your-operator-password"
+    "password_hash": "$2a$10$..."
   }
 }
 ```

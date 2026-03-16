@@ -12,10 +12,18 @@
         <img src="/dashboard/static/phoenix-icon.svg" alt="Phoenix" class="login-icon">
         <h1 class="login-title">Phoenix</h1>
         {{if .Error}}<div class="flash flash-error">{{.Error}}</div>{{end}}
+        {{if .Blocked}}
+        <p class="login-hint">Another dashboard session is active. Log out from that device first, or use Force Login to take over.</p>
+        <form method="POST" action="/dashboard/force-login">
+            <input type="password" name="credential" placeholder="Password or PIN" class="input" autofocus required>
+            <button type="submit" class="btn btn-primary">Force Login</button>
+        </form>
+        {{else}}
         <form method="POST" action="/dashboard/login">
             <input type="password" name="credential" placeholder="Password or PIN" class="input" autofocus required>
             <button type="submit" class="btn btn-primary">Sign In</button>
         </form>
+        {{end}}
     </div>
 </body>
 </html>

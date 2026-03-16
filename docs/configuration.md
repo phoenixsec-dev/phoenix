@@ -67,11 +67,22 @@ requirements, attestation, and step-up approval.
 The operator dashboard provides a browser-based UI for approvals, sessions,
 audit, and role inspection. All assets are embedded — no CDN or build step.
 
+Generate a password hash first:
+
+```bash
+phoenix-server --hash-password
+# Enter dashboard password: ****
+# Confirm dashboard password: ****
+# $2a$10$...
+```
+
+Then add it to config:
+
 ```json
 {
   "dashboard": {
     "enabled": true,
-    "password": "operator-password",
+    "password_hash": "$2a$10$...",
     "session_ttl": "4h"
   }
 }
@@ -80,11 +91,16 @@ audit, and role inspection. All assets are embedded — no CDN or build step.
 | Field | Type | Description |
 |-------|------|-------------|
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
-| `dashboard.password` | `string` | Login password (bcrypt-hashed internally) |
-| `dashboard.pin` | `string` | Alternative: login PIN (constant-time compare) |
+| `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
+| `dashboard.pin` | `string` | Alternative: login PIN (constant-time compare, loopback only) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
+| `dashboard.allow_multi_login` | `bool` | Allow concurrent dashboard sessions (default `false`) |
 
-Either `password` or `pin` is required when the dashboard is enabled.
+Either `password_hash` or `pin` is required when the dashboard is enabled.
+The password is stored as a bcrypt hash — the plaintext never appears in config.
+Validation rejects non-bcrypt values in `password_hash` to prevent accidental
+plaintext storage.
+
 The dashboard uses cookie-based auth with HMAC-signed tokens and CSRF protection.
 Login attempts are rate-limited with exponential backoff (5 failures before lockout,
 up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.

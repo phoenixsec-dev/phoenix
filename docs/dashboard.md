@@ -21,10 +21,14 @@ The dashboard is optional. Everything it does can also be done via the CLI
 The dashboard is a **separate auth surface** from the Phoenix API. It does
 not use bearer tokens, mTLS, or session tokens. Instead:
 
-- **Cookie auth**: HMAC-signed JSON payload with expiry and CSRF token.
-  `HttpOnly`, `SameSite=Strict`, and `Secure` (when TLS detected).
-- **Password or PIN**: Password is bcrypt-hashed at startup. PIN uses
+- **Cookie auth**: HMAC-signed JSON payload with expiry, CSRF token, and
+  session nonce. `HttpOnly`, `SameSite=Strict`, and `Secure` (when TLS detected).
+- **Password or PIN**: Password stored as bcrypt hash in config. PIN uses
   constant-time comparison. Only one is needed.
+- **Single active session**: By default, only one dashboard session exists
+  at a time. A new login is rejected if a session is already active. A
+  Force Login option re-authenticates and invalidates the prior session.
+  Configurable via `allow_multi_login`.
 - **Rate limiting**: Exponential backoff per source IP after 5 failed
   attempts (1s base, 60s cap). Rate-limited and failed attempts are
   logged to the audit trail.
@@ -101,13 +105,22 @@ making session hijacking trivial.
 
 ## Configuration
 
-Add to your server config:
+Generate a password hash:
+
+```bash
+phoenix-server --hash-password
+# Enter dashboard password: ****
+# Confirm dashboard password: ****
+# $2a$10$...
+```
+
+Add the hash to your server config:
 
 ```json
 {
   "dashboard": {
     "enabled": true,
-    "password": "your-operator-password",
+    "password_hash": "$2a$10$...",
     "session_ttl": "4h"
   }
 }
@@ -116,19 +129,26 @@ Add to your server config:
 | Field | Type | Description |
 |-------|------|-------------|
 | `enabled` | `bool` | Enable the dashboard at `/dashboard/` |
-| `password` | `string` | Login password (bcrypt-hashed at startup) |
+| `password_hash` | `string` | bcrypt hash of operator password |
 | `pin` | `string` | Alternative: numeric or short PIN (constant-time compare) |
 | `session_ttl` | `string` | Browser session lifetime (default `4h`) |
+| `allow_multi_login` | `bool` | Allow concurrent dashboard sessions (default `false`) |
 
-Either `password` or `pin` is required. Use `password` for production
-deployments. `pin` is acceptable for local/loopback-only use where
-convenience matters more than brute-force resistance.
+Either `password_hash` or `pin` is required. Use `password_hash` for
+production deployments. `pin` is acceptable for local/loopback-only use
+where convenience matters more than brute-force resistance.
 
-The password is stored in the config file as plaintext. Protect the
-config file with filesystem permissions (`chmod 600`). If this is
-unacceptable, store the password in Phoenix itself and retrieve it at
-startup, or use environment variable substitution in your deployment
-tooling.
+By default, only one dashboard session is active at a time. A second
+login attempt is rejected with a message to log out from the other
+device first. If the other session is orphaned (browser closed without
+logging out), a **Force Login** button appears that re-authenticates
+and takes over, invalidating the old session. Set `allow_multi_login`
+to `true` if concurrent operator sessions are needed.
+
+The password is stored as a bcrypt hash — the plaintext never appears
+in config. Config validation rejects non-bcrypt values in `password_hash`
+to prevent accidental plaintext storage. An agent reading the config file
+sees only the hash, which cannot be used to authenticate.
 
 ## Pages
 
@@ -182,8 +202,11 @@ All dashboard actions are logged to the same audit trail as API actions.
 | `dashboard.login` | allowed | `dashboard@<ip>` | Successful login |
 | `dashboard.login` | denied | `dashboard` | Failed login (invalid credentials) |
 | `dashboard.login` | denied | `dashboard` | Rate-limited login attempt |
+| `dashboard.login` | denied | `dashboard` | Blocked by active session |
+| `dashboard.force_login` | allowed | `dashboard@<ip>` | Force login (took over existing session) |
+| `dashboard.force_login` | denied | `dashboard` | Force login with wrong credentials |
 | `dashboard.logout` | allowed | `dashboard@<ip>` | Explicit logout |
-| `dashboard.auth` | denied | `dashboard` | Expired or invalid cookie on a protected page |
+| `dashboard.auth` | denied | `dashboard` | Expired, invalid, or superseded cookie |
 | `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action |
 | `approval.approved` | allowed | `dashboard@<ip>` | Step-up request approved |
 | `approval.denied` | allowed | `dashboard@<ip>` | Step-up request denied |
@@ -210,28 +233,30 @@ Use this checklist when enabling the dashboard on an existing Phoenix server.
    - [ ] Password (recommended for production)
    - [ ] PIN (acceptable for loopback-only)
 
-3. Add config:
+3. Generate password hash: `phoenix-server --hash-password`
+
+4. Add config:
    ```json
-   { "dashboard": { "enabled": true, "password": "..." } }
+   { "dashboard": { "enabled": true, "password_hash": "$2a$10$..." } }
    ```
 
-4. Protect config file: `chmod 600 /data/phoenix/config.json`
+5. Protect config file: `chmod 600 /data/phoenix/config.json`
 
-5. Restart server, verify log line: `Dashboard: enabled at /dashboard/`
+6. Restart server, verify log line: `Dashboard: enabled at /dashboard/`
 
-6. Open browser, verify login page loads at `/dashboard/login`
+7. Open browser, verify login page loads at `/dashboard/login`
 
-7. Login, verify all pages render (overview, approvals, sessions, audit, roles)
+8. Login, verify all pages render (overview, approvals, sessions, audit, roles)
 
-8. Test approval flow end-to-end if step-up roles are configured:
+9. Test approval flow end-to-end if step-up roles are configured:
    - Trigger a step-up mint (agent sends `POST /v1/session/mint` for a step-up role)
    - Approve from dashboard
    - Verify session appears in sessions list
    - Verify audit entries for the approval
 
-9. Verify audit trail shows `dashboard@<your-ip>` entries
+10. Verify audit trail shows `dashboard@<your-ip>` entries
 
-10. From a different machine, verify the dashboard is **not** reachable
+11. From a different machine, verify the dashboard is **not** reachable
     over plain HTTP (unless you explicitly chose loopback-only)
 
 ## Related docs

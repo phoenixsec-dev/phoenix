@@ -14,6 +14,8 @@ import (
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/session"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func testHandler(t *testing.T) (*Handler, *session.Store, *approval.Store) {
@@ -45,9 +47,14 @@ func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *approval.Sto
 	var auditBuf bytes.Buffer
 	al := audit.NewWriterLogger(&auditBuf)
 
+	hash, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	cfg := config.DashboardConfig{
-		Enabled:  true,
-		Password: "testpass",
+		Enabled:      true,
+		PasswordHash: string(hash),
 	}
 	deps := Deps{
 		Sessions:     ss,
@@ -486,10 +493,18 @@ func TestLogoutAudit(t *testing.T) {
 func TestExpiredCookieAudit(t *testing.T) {
 	h, _, _, buf := testHandlerWithAudit(t)
 
-	// Create a cookie that's already expired
+	// Login first so there's an active nonce, then craft an expired cookie with it
+	login(t, h)
+
+	h.nonceMu.Lock()
+	nonce := h.activeNonce
+	h.nonceMu.Unlock()
+
+	// Create a cookie that's already expired but has the right nonce
 	payload := cookiePayload{
-		Exp:  time.Now().Add(-time.Hour).Unix(), // expired 1h ago
-		CSRF: "deadbeef",
+		Exp:   time.Now().Add(-time.Hour).Unix(), // expired 1h ago
+		CSRF:  "deadbeef",
+		Nonce: nonce,
 	}
 	cookieVal, err := h.signCookie(payload)
 	if err != nil {
@@ -560,5 +575,151 @@ func TestLogoutRequiresAuth(t *testing.T) {
 	loc := w.Header().Get("Location")
 	if !strings.Contains(loc, "/dashboard/login") {
 		t.Fatalf("expected redirect to login, got %s", loc)
+	}
+}
+
+// --- Single-session tests ---
+
+func TestSingleSessionBlocksSecondLogin(t *testing.T) {
+	h, _, _ := testHandler(t) // default: allowMultiLogin=false
+
+	// First login succeeds
+	login(t, h)
+
+	// Second login should be blocked
+	form := url.Values{"credential": {"testpass"}}
+	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "blocked=1") {
+		t.Fatalf("expected blocked redirect, got %s", loc)
+	}
+}
+
+func TestSingleSessionForceLoginTakesOver(t *testing.T) {
+	h, _, _ := testHandler(t)
+
+	// First login
+	cookie1 := login(t, h)
+
+	// Force login from second browser
+	form := url.Values{"credential": {"testpass"}}
+	req := httptest.NewRequest("POST", "/dashboard/force-login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	// Old cookie should now be invalid (session superseded)
+	req2 := httptest.NewRequest("GET", "/dashboard/", nil)
+	req2.AddCookie(cookie1)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusSeeOther {
+		t.Fatalf("expected old cookie to redirect to login, got %d", w2.Code)
+	}
+}
+
+func TestSingleSessionLogoutAllowsNewLogin(t *testing.T) {
+	h, _, _ := testHandler(t)
+
+	cookie := login(t, h)
+	csrf := csrfFromCookie(t, h, cookie)
+
+	// Logout
+	form := url.Values{"_csrf": {csrf}}
+	req := httptest.NewRequest("POST", "/dashboard/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	// New login should succeed
+	cookie2 := login(t, h)
+	if cookie2.Value == "" {
+		t.Fatal("expected new cookie after logout")
+	}
+}
+
+func TestMultiLoginAllowsConcurrentSessions(t *testing.T) {
+	// Create handler with AllowMultiLogin=true
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ss.Stop)
+	as := approval.NewStore(5 * time.Minute)
+	t.Cleanup(as.Stop)
+
+	hash, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DashboardConfig{
+		Enabled:         true,
+		PasswordHash:    string(hash),
+		AllowMultiLogin: true,
+	}
+	deps := Deps{
+		Sessions:     ss,
+		SessionRoles: map[string]config.RoleConfig{},
+		Approvals:    as,
+		StartTime:    time.Now(),
+	}
+	h, err := New(cfg, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First login
+	login(t, h)
+
+	// Second login should also succeed
+	form := url.Values{"credential": {"testpass"}}
+	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if strings.Contains(loc, "blocked") {
+		t.Fatal("multi-login mode should not block second login")
+	}
+}
+
+func TestForceLoginRequiresValidCredential(t *testing.T) {
+	h, _, _ := testHandler(t)
+	login(t, h) // create active session
+
+	form := url.Values{"credential": {"wrongpass"}}
+	req := httptest.NewRequest("POST", "/dashboard/force-login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "error=") {
+		t.Fatalf("expected error redirect, got %s", loc)
 	}
 }

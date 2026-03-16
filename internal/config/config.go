@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -134,10 +135,11 @@ type RoleConfig struct {
 
 // DashboardConfig controls the optional operator dashboard web UI.
 type DashboardConfig struct {
-	Enabled    bool   `json:"enabled"`
-	Password   string `json:"password,omitempty"`
-	PIN        string `json:"pin,omitempty"`
-	SessionTTL string `json:"session_ttl,omitempty"` // default "4h"
+	Enabled          bool   `json:"enabled"`
+	PasswordHash     string `json:"password_hash,omitempty"`     // bcrypt hash (generate with: phoenix-server --hash-password)
+	PIN              string `json:"pin,omitempty"`
+	SessionTTL       string `json:"session_ttl,omitempty"`       // default "4h"
+	AllowMultiLogin  bool   `json:"allow_multi_login,omitempty"` // default false: only one active dashboard session
 }
 
 // validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.
@@ -320,8 +322,17 @@ func (c *Config) Validate() error {
 
 	// Validate dashboard config
 	if c.Dashboard.Enabled {
-		if c.Dashboard.Password == "" && c.Dashboard.PIN == "" {
-			return errors.New("dashboard: password or pin is required when dashboard is enabled")
+		if c.Dashboard.PasswordHash == "" && c.Dashboard.PIN == "" {
+			return errors.New("dashboard: password_hash or pin is required when dashboard is enabled")
+		}
+		if c.Dashboard.PasswordHash != "" {
+			if !strings.HasPrefix(c.Dashboard.PasswordHash, "$2") {
+				return errors.New("dashboard.password_hash: must be a bcrypt hash (generate with: phoenix-server --hash-password)")
+			}
+			// Verify it's a parseable bcrypt hash, not just a $2 prefix
+			if len(c.Dashboard.PasswordHash) < 59 {
+				return errors.New("dashboard.password_hash: truncated bcrypt hash (expected ~60 characters)")
+			}
 		}
 		if c.Dashboard.SessionTTL != "" {
 			if _, err := time.ParseDuration(c.Dashboard.SessionTTL); err != nil {

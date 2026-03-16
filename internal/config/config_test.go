@@ -329,25 +329,39 @@ func TestValidateBootstrapTrustToken(t *testing.T) {
 func TestValidateDashboardEnabledRequiresCredential(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = true
-	cfg.Dashboard.Password = ""
+	cfg.Dashboard.PasswordHash = ""
 	cfg.Dashboard.PIN = ""
 
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("dashboard enabled without password or pin should fail")
+		t.Fatal("dashboard enabled without password_hash or pin should fail")
 	}
-	if !strings.Contains(err.Error(), "password or pin") {
+	if !strings.Contains(err.Error(), "password_hash or pin") {
 		t.Fatalf("error should mention credential requirement: %v", err)
 	}
 }
 
-func TestValidateDashboardWithPassword(t *testing.T) {
+func TestValidateDashboardWithPasswordHash(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = true
-	cfg.Dashboard.Password = "securepass"
+	cfg.Dashboard.PasswordHash = "$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
 
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("dashboard with password should pass: %v", err)
+		t.Fatalf("dashboard with bcrypt hash should pass: %v", err)
+	}
+}
+
+func TestValidateDashboardRejectsPlaintextPassword(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = "plaintext-password"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("plaintext password_hash should fail validation")
+	}
+	if !strings.Contains(err.Error(), "bcrypt hash") {
+		t.Fatalf("error should mention bcrypt: %v", err)
 	}
 }
 
@@ -364,7 +378,7 @@ func TestValidateDashboardWithPIN(t *testing.T) {
 func TestValidateDashboardSessionTTLInvalid(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = true
-	cfg.Dashboard.Password = "pass"
+	cfg.Dashboard.PasswordHash = "$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
 	cfg.Dashboard.SessionTTL = "not-a-duration"
 
 	err := cfg.Validate()
@@ -379,7 +393,7 @@ func TestValidateDashboardSessionTTLInvalid(t *testing.T) {
 func TestValidateDashboardSessionTTLValid(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = true
-	cfg.Dashboard.Password = "pass"
+	cfg.Dashboard.PasswordHash = "$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
 	cfg.Dashboard.SessionTTL = "8h"
 
 	if err := cfg.Validate(); err != nil {
@@ -390,7 +404,7 @@ func TestValidateDashboardSessionTTLValid(t *testing.T) {
 func TestValidateDashboardDisabledIgnoresFields(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = false
-	cfg.Dashboard.Password = ""
+	cfg.Dashboard.PasswordHash = ""
 	cfg.Dashboard.PIN = ""
 	cfg.Dashboard.SessionTTL = "garbage"
 
@@ -402,7 +416,7 @@ func TestValidateDashboardDisabledIgnoresFields(t *testing.T) {
 func TestDashboardConfigJSON(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = true
-	cfg.Dashboard.Password = "operator"
+	cfg.Dashboard.PasswordHash = "$2a$10$testbcrypthashvalue"
 	cfg.Dashboard.SessionTTL = "4h"
 
 	data, err := json.Marshal(cfg)
@@ -418,8 +432,8 @@ func TestDashboardConfigJSON(t *testing.T) {
 	if !parsed.Dashboard.Enabled {
 		t.Error("dashboard.enabled should be true after round-trip")
 	}
-	if parsed.Dashboard.Password != "operator" {
-		t.Errorf("dashboard.password = %q, want %q", parsed.Dashboard.Password, "operator")
+	if parsed.Dashboard.PasswordHash != "$2a$10$testbcrypthashvalue" {
+		t.Errorf("dashboard.password_hash = %q, want %q", parsed.Dashboard.PasswordHash, "$2a$10$testbcrypthashvalue")
 	}
 	if parsed.Dashboard.SessionTTL != "4h" {
 		t.Errorf("dashboard.session_ttl = %q, want %q", parsed.Dashboard.SessionTTL, "4h")
