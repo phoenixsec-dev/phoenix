@@ -7,9 +7,7 @@
   <em>Agents see references. Never raw values.</em>
 </p>
 
-<!-- CI badge: uncomment when GitHub Actions workflow is added
 [![CI](https://github.com/phoenixsec-dev/phoenix/actions/workflows/ci.yml/badge.svg)](https://github.com/phoenixsec-dev/phoenix/actions/workflows/ci.yml)
--->
 
 ---
 
