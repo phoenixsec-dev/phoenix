@@ -146,7 +146,7 @@ func main() {
 		err = cmdAudit(args)
 	case "agent":
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|list>")
+			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|list|delete>")
 			os.Exit(1)
 		}
 		switch args[0] {
@@ -154,6 +154,8 @@ func main() {
 			err = cmdAgentCreate(args[1:])
 		case "list":
 			err = cmdAgentList()
+		case "delete":
+			err = cmdAgentDelete(args[1:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown agent subcommand: %s\n", args[0])
 			os.Exit(1)
@@ -321,6 +323,7 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]
   phoenix agent list                          List agents
+  phoenix agent delete <name>                 Delete an agent
   phoenix resolve [--signed] <ref> [ref...]     Resolve phoenix:// references to values
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
@@ -978,6 +981,30 @@ func cmdAgentList() error {
 	for _, name := range result.Agents {
 		fmt.Println(name)
 	}
+	return nil
+}
+
+func cmdAgentDelete(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix agent delete <name>")
+	}
+	name := args[0]
+
+	resp, err := apiRequest("DELETE", "/v1/agents/"+name, nil)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	fmt.Printf("agent deleted: %s\n", name)
 	return nil
 }
 
@@ -2819,44 +2846,42 @@ func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			if time.Now().After(deadline) {
-				return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window has expired")
-			}
+	for range ticker.C {
+		if time.Now().After(deadline) {
+			return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window has expired")
+		}
 
-			resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  poll error: %v\n", err)
-				continue
-			}
-			respBody, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+		resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  poll error: %v\n", err)
+			continue
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 
-			var status struct {
-				Status        string `json:"status"`
-				SessionToken  string `json:"session_token"`
-				SessionExpiry string `json:"session_expiry"`
-			}
-			if err := json.Unmarshal(respBody, &status); err != nil {
-				continue
-			}
+		var status struct {
+			Status        string `json:"status"`
+			SessionToken  string `json:"session_token"`
+			SessionExpiry string `json:"session_expiry"`
+		}
+		if err := json.Unmarshal(respBody, &status); err != nil {
+			continue
+		}
 
-			switch status.Status {
-			case "approved":
-				fmt.Fprintf(os.Stderr, "Approved.\n")
-				exp, _ := time.Parse(time.RFC3339, status.SessionExpiry)
-				return status.SessionToken, exp, nil
-			case "denied":
-				return "", time.Time{}, fmt.Errorf("[APPROVAL_DENIED] step-up approval was denied")
-			case "expired":
-				return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window expired before human approval")
-			case "pending":
-				// continue polling
-			}
+		switch status.Status {
+		case "approved":
+			fmt.Fprintf(os.Stderr, "Approved.\n")
+			exp, _ := time.Parse(time.RFC3339, status.SessionExpiry)
+			return status.SessionToken, exp, nil
+		case "denied":
+			return "", time.Time{}, fmt.Errorf("[APPROVAL_DENIED] step-up approval was denied")
+		case "expired":
+			return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window expired before human approval")
+		case "pending":
+			// continue polling
 		}
 	}
+	return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval poll ended unexpectedly")
 }
 
 // cmdApprove handles the "phoenix approve <approval-id>" command.

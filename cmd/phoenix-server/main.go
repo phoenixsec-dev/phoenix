@@ -4,6 +4,7 @@
 //
 //	phoenix-server [--config /data/config.json]
 //	phoenix-server --init /data  (first-time setup)
+//	phoenix-server --reissue-cert --san <ip-or-host> [--san ...] --config /data/config.json
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -37,6 +39,15 @@ import (
 	"github.com/phoenixsec/phoenix/internal/version"
 )
 
+// sanList is a flag.Value that collects multiple --san values.
+type sanList []string
+
+func (s *sanList) String() string { return strings.Join(*s, ",") }
+func (s *sanList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
 func main() {
 	configPath := flag.String("config", "", "Path to config file (default: /data/config.json)")
 	initDir := flag.String("init", "", "Initialize a new Phoenix data directory")
@@ -45,6 +56,9 @@ func main() {
 	initPassphrase := flag.String("passphrase", "", "Passphrase to protect master key (--init only)")
 	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
 	hashPassword := flag.Bool("hash-password", false, "Generate a bcrypt hash for dashboard password_hash config")
+	reissueCert := flag.Bool("reissue-cert", false, "Re-issue the server TLS certificate with new SANs")
+	var sans sanList
+	flag.Var(&sans, "san", "Subject Alternative Name for --reissue-cert (repeatable: IPs and hostnames)")
 	flag.Parse()
 
 	if *initPassphrase != "" {
@@ -59,6 +73,27 @@ func main() {
 	if *hashPassword {
 		if err := runHashPassword(); err != nil {
 			log.Fatalf("hash-password failed: %v", err)
+		}
+		return
+	}
+
+	if *reissueCert {
+		if len(sans) == 0 {
+			log.Fatal("--reissue-cert requires at least one --san value")
+		}
+		cfgPath := *configPath
+		if cfgPath == "" {
+			cfgPath = os.Getenv("PHOENIX_CONFIG")
+		}
+		if cfgPath == "" {
+			cfgPath = "/data/config.json"
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			log.Fatalf("loading config: %v", err)
+		}
+		if err := runReissueCert(cfg, sans); err != nil {
+			log.Fatalf("reissue-cert failed: %v", err)
 		}
 		return
 	}
@@ -524,5 +559,36 @@ func runHashPassword() error {
 		return fmt.Errorf("generating hash: %w", err)
 	}
 	fmt.Println(string(hash))
+	return nil
+}
+
+func runReissueCert(cfg *config.Config, sans []string) error {
+	if cfg.Auth.MTLS.CACert == "" || cfg.Auth.MTLS.CAKey == "" {
+		return fmt.Errorf("config is missing auth.mtls.ca_cert and auth.mtls.ca_key paths — run --init first")
+	}
+	if cfg.Auth.MTLS.ServerCert == "" || cfg.Auth.MTLS.ServerKey == "" {
+		return fmt.Errorf("config is missing auth.mtls.server_cert and auth.mtls.server_key paths")
+	}
+
+	// Always include localhost and loopback
+	allSANs := append([]string{"localhost", "127.0.0.1"}, sans...)
+
+	authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
+	if err != nil {
+		return fmt.Errorf("loading CA: %w", err)
+	}
+
+	bundle, err := authority.IssueServerCert(allSANs)
+	if err != nil {
+		return fmt.Errorf("issuing server cert: %w", err)
+	}
+
+	if err := bundle.Save(cfg.Auth.MTLS.ServerCert, cfg.Auth.MTLS.ServerKey, cfg.Auth.MTLS.CACert); err != nil {
+		return fmt.Errorf("saving server cert: %w", err)
+	}
+
+	fmt.Printf("Server certificate reissued: %s\n", cfg.Auth.MTLS.ServerCert)
+	fmt.Printf("SANs: %s\n", strings.Join(allSANs, ", "))
+	fmt.Println("Restart the server for the new certificate to take effect.")
 	return nil
 }

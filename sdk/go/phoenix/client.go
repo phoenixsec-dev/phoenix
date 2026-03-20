@@ -59,10 +59,10 @@ type Client struct {
 	Server     string
 	Token      string
 	HTTPClient *http.Client
-	Role       string     // session role (set after MintSession)
-	sealPubKey string     // base64-encoded public key for sealed requests
-	sealPriv   *[32]byte  // private key for decrypting sealed responses
-	sessionExp time.Time  // token expiry for auto-renewal
+	Role       string    // session role (set after MintSession)
+	sealPubKey string    // base64-encoded public key for sealed requests
+	sealPriv   *[32]byte // private key for decrypting sealed responses
+	sessionExp time.Time // token expiry for auto-renewal
 }
 
 // New creates a new Phoenix client. Server and token default to

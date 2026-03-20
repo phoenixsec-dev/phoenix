@@ -228,6 +228,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/audit", s.handleAuditQuery)
 	s.mux.HandleFunc("POST /v1/agents", s.handleCreateAgent)
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
+	s.mux.HandleFunc("DELETE /v1/agents/", s.handleDeleteAgent)
 	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
 	s.mux.HandleFunc("POST /v1/certs/revoke", s.handleRevokeCert)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
@@ -1017,6 +1018,43 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 	names := s.acl.ListAgents()
 	jsonOK(w, map[string]interface{}{"agents": names})
+}
+
+func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	if err := s.acl.Authorize(agentName, "agents", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	target := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
+	if target == "" {
+		jsonError(w, "agent name required", http.StatusBadRequest)
+		return
+	}
+
+	if target == agentName {
+		jsonError(w, "cannot delete your own agent identity", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.acl.RemoveAgent(target); err != nil {
+		if errors.Is(err, acl.ErrAgentNotFound) {
+			jsonError(w, "agent not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("error deleting agent %q: %v", target, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.logAudit(s.audit.LogAllowed(agentName, "delete-agent", target, clientIP(r)))
+	jsonOK(w, map[string]string{"status": "ok", "agent": target, "action": "deleted"})
 }
 
 // issueCertRequest is the JSON body for certificate issuance.
