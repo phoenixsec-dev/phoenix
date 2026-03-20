@@ -94,7 +94,7 @@ operator access. Use SSH port forwarding for remote browser access:
 
 ```bash
 ssh -L 9090:127.0.0.1:9090 user@phoenix-host
-# Then open http://localhost:9090/dashboard/ in your browser
+# Then open http://127.0.0.1:9090/dashboard/ in your browser
 ```
 
 ### Not acceptable

@@ -45,9 +45,15 @@ Tool identity headers let policy control which MCP tools may access which paths.
 Phoenix includes a reusable skill at `phoenix-skill/SKILL.md` for command-driven
 integration without running MCP mode.
 
-## OpenClaw exec backend
+## OpenClaw
 
-Configure Phoenix as an external secrets provider through OpenClaw's exec backend:
+OpenClaw's own threat model flags plaintext credential storage and credential
+harvesting by skills as open, high-severity risks. Phoenix closes that gap
+through the exec backend: OpenClaw resolves secrets at runtime via `phoenix resolve`,
+so raw values never appear in OpenClaw's environment, config files, or skill
+execution context.
+
+### Exec backend config
 
 ```json
 {
@@ -63,7 +69,7 @@ Configure Phoenix as an external secrets provider through OpenClaw's exec backen
 }
 ```
 
-Use SecretRefs backed by Phoenix:
+Use SecretRefs backed by Phoenix in your agent config:
 
 ```yaml
 api_keys:
@@ -88,6 +94,46 @@ Validate before deploying:
 phoenix verify --dry-run gateway-config.yaml
 phoenix policy test --agent openclaw --ip 10.0.0.5 myapp/openai-key
 ```
+
+### Containerized deployment (Docker Compose)
+
+In a Docker or Compose setup, Phoenix runs as a sidecar or network-adjacent service.
+
+```yaml
+services:
+  phoenix:
+    image: phoenixsecdev/phoenix:latest
+    volumes:
+      - phoenix-data:/data/phoenix
+    # No host port needed — OpenClaw reaches Phoenix via
+    # the Compose network using the service name "phoenix"
+
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    environment:
+      PHOENIX_SERVER: "http://phoenix:9090"
+      PHOENIX_TOKEN: "${OPENCLAW_PHOENIX_TOKEN}"
+    volumes:
+      - ./openclaw-config:/config
+    depends_on:
+      - phoenix
+
+volumes:
+  phoenix-data:
+```
+
+For mTLS instead of bearer tokens, mount certs into the OpenClaw container
+and set `PHOENIX_CA_CERT`, `PHOENIX_CLIENT_CERT`, `PHOENIX_CLIENT_KEY`.
+
+### Current limitations
+
+The exec backend integration works today but requires operator setup:
+the Phoenix CLI binary must be available in the OpenClaw container's PATH, and
+credentials (token or mTLS certs) must be configured for the OpenClaw process.
+A dedicated OpenClaw plugin that handles this automatically is in active
+development. Until then, the exec backend is the supported path — fully
+functional, but requires explicit wiring in your Compose or deployment
+config rather than a one-line plugin install.
 
 ## Go SDK
 
