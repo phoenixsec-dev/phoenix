@@ -52,17 +52,17 @@ This generates:
 
 ### Deploying on a LAN?
 
-The default server cert only covers `localhost` and `127.0.0.1`. If other machines need to reach this server, you need a cert that includes the server's LAN IP or hostname.
+The default config listens on `127.0.0.1` (loopback only) over plain HTTP.
+If other machines need to reach this server:
 
-```bash
-# Edit config.json: set server.listen to "0.0.0.0:9090"
-# Then re-issue a server cert with the correct SANs:
-phoenix cert issue phoenix-server -o /data/phoenix/
-```
+1. Set `server.listen` to `0.0.0.0:9090` and `auth.mtls.enabled` to `true`
+2. Re-issue the server cert with your LAN IP:
+   ```bash
+   phoenix-server --reissue-cert --san 192.168.1.10 --config /data/phoenix/config.json
+   ```
+3. Restart the server
 
-Or put Phoenix behind a reverse proxy that terminates TLS.
-
-For full multi-host deployment, see [LAN Deployment](lan-deployment.md).
+For the full multi-host setup walkthrough, see [LAN Deployment](lan-deployment.md).
 
 ## Verify file permissions
 
@@ -77,32 +77,32 @@ chmod 600 /data/phoenix/master.key /data/phoenix/ca.key /data/phoenix/server.key
 ./bin/phoenix-server --config /data/phoenix/config.json
 ```
 
-Example startup output:
+Example startup output (default config, plain HTTP on loopback):
 
 ```text
 Phoenix server starting on 127.0.0.1:9090
   Store: /data/phoenix/store.json (0 secrets)
-  Key provider: file
   ACL: /data/phoenix/acl.json (1 agents)
   Audit: /data/phoenix/audit.log
-  mTLS: enabled (require=false)
-  Bearer: true
 ```
 
 > **Binding to all interfaces:** The default listen address is `127.0.0.1:9090`.
-> To accept connections from other hosts, set `server.listen` to `0.0.0.0:9090`.
-> Only do this with authentication and network controls in place.
+> To accept connections from other hosts, enable TLS and set `server.listen`
+> to `0.0.0.0:9090`. See [LAN Deployment](lan-deployment.md).
 
 ## First secret operations
 
 ```bash
-export PHOENIX_SERVER="https://localhost:9090"
+export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<your-admin-token>"
-export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 
 phoenix set myapp/api-key -v "sk-live-abc123" -d "Stripe API key"
 phoenix get myapp/api-key
 ```
+
+> **Note:** The default config starts the server on plain HTTP at `127.0.0.1:9090`.
+> This is safe for local-only use — the server is not reachable from the network.
+> For LAN or production deployment, enable TLS first. See [LAN Deployment](lan-deployment.md).
 
 For the full command reference (`set`, `get`, `list`, `delete`, `resolve`, `exec`,
 `import`, `export`, `audit`), see [CLI Usage](cli-usage.md).
@@ -128,13 +128,13 @@ phoenix-server --hash-password
 }
 ```
 
-After restarting, open `http://localhost:9090/dashboard/` (or your server's
-address) in a browser.
+After restarting, open `http://127.0.0.1:9090/dashboard/` in a browser.
 
-**Important:** If the server is reachable over a network, put it behind a TLS
-reverse proxy or use mTLS. Do not serve the dashboard over plain HTTP on a
-network you do not control. See [Dashboard](dashboard.md) for the full
-deployment guide and security model.
+**Important:** The dashboard is safe over plain HTTP only when the server
+listens on loopback (`127.0.0.1`). If the server is reachable over a
+network, put it behind a TLS reverse proxy or enable mTLS first. Do not
+serve the dashboard over plain HTTP on a network you do not control.
+See [Dashboard](dashboard.md) for the full deployment guide and security model.
 
 ## Next steps
 

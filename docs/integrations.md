@@ -89,11 +89,45 @@ phoenix verify --dry-run gateway-config.yaml
 phoenix policy test --agent openclaw --ip 10.0.0.5 myapp/openai-key
 ```
 
+## Go SDK
+
+The Go SDK is included in the repository at `sdk/go/phoenix/`.
+
+```go
+import "github.com/phoenixsec/phoenix/sdk/go/phoenix"
+
+// Basic client
+client := phoenix.New("https://phoenix:9090", "token")
+val, err := client.Resolve("phoenix://myapp/api-key")
+vals, err := client.ResolveBatch([]string{
+    "phoenix://myapp/openai-key",
+    "phoenix://myapp/db-password",
+})
+
+// Session identity
+client, err := phoenix.NewWithRole("https://phoenix:9090", "bootstrap-token", "dev")
+// Auto-mints a session; auto-renews before expiry
+
+// Sealed mode
+client.SetSealKey("/path/to/agent.seal.key")
+
+// Session management
+sessions, _ := client.ListSessions()
+client.RevokeSession("ses_abc123")
+
+// Error classification
+var perr *phoenix.Error
+if errors.As(err, &perr) {
+    if perr.IsSessionExpired()   { /* re-mint */ }
+    if perr.IsScopeExceeded()    { /* wrong role */ }
+    if perr.IsApprovalRequired() { /* needs human */ }
+}
+```
+
 ## Python SDK
 
-```bash
-pip install phoenix-secrets
-```
+> **Note:** The `phoenix-secrets` package is not yet published to PyPI.
+> For now, use the source at `sdk/python/` or call the API directly.
 
 ```python
 from phoenix_secrets import PhoenixClient
@@ -111,12 +145,12 @@ client.health()
 ## Direct API
 
 ```bash
-curl -X POST https://phoenix:9090/v1/resolve \
-  -H "Authorization: Bearer $TOKEN" \
+curl -X POST $PHOENIX_SERVER/v1/resolve \
+  -H "Authorization: Bearer $PHOENIX_TOKEN" \
   -d '{"refs": ["phoenix://myapp/api-key"]}'
 
-curl https://phoenix:9090/v1/secrets/myapp/api-key \
-  -H "Authorization: Bearer $TOKEN"
+curl $PHOENIX_SERVER/v1/secrets/myapp/api-key \
+  -H "Authorization: Bearer $PHOENIX_TOKEN"
 ```
 
 ## Related docs

@@ -248,6 +248,28 @@ All session lifecycle events are logged to the audit trail:
 Session tokens never escalate to admin-level session management, even if
 the underlying agent has admin ACL permissions.
 
+### Role scope vs ACL
+
+Session scope and ACL permissions are both checked on every request. A
+session scoped to `dev/*` cannot access `prod/*` even if the underlying
+agent's ACL grants `prod/*:read`. Access requires passing **both** the
+role's namespace scope and the agent's ACL check.
+
+## Operational notes
+
+### In-memory state
+
+Active sessions and pending approvals are held in server memory. A server
+restart clears all sessions and pending approvals. Agents with `PHOENIX_ROLE`
+set will auto-mint a new session on their next request, so this is
+transparent for most workflows. Step-up approvals that were pending at
+restart time must be re-initiated.
+
+This is a deliberate design choice — it avoids persisting bearer-equivalent
+tokens to disk and keeps the server stateless for simple deployments.
+Persistent session storage may be added in a future release if demand
+warrants it.
+
 ## Related docs
 
 - [Authentication](authentication.md)

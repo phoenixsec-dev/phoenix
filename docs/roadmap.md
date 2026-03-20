@@ -3,44 +3,56 @@
 > This roadmap is directional and may change based on user feedback.
 > It is not a contractual delivery commitment.
 
-## In Progress
+## Shipped (v0.13)
 
-### 1) Reference-Only Enforcement (Agent Context Design Mode)
-
-Primary near-term patch:
-
-- enforce the reference-only design in Agent Context Design mode
-- remove behavior/documentation drift so runtime behavior and docs match
-- preserve explicit, auditable secret-resolution boundaries
-- update examples/skill guidance to prefer `phoenix exec` reference workflows by default
+- Encrypted secret storage (AES-256-GCM envelope encryption)
+- Per-agent ACL with namespace isolation and glob matching
+- Bearer token and mTLS authentication
+- Sealed responses (per-agent X25519 transport encryption)
+- MCP server — stdio and Streamable HTTP transports
+- `phoenix exec` with credential stripping
+- Attestation policy engine (mTLS, IP binding, cert fingerprint, sealed requirements)
+- Session identity — role-based, short-lived session tokens with auto-renewal
+- Step-up approval — human-in-the-loop gating for sensitive roles
+- Operator dashboard — browser-based approval, session, audit, and role management
+- Go SDK with session support
+- 1Password broker backend (read-only)
+- Import from `.env` files and 1Password
+- Emergency offline access (break-glass)
+- Master key passphrase protection and rotation
+- Internal CA with agent certificate lifecycle and CRL
 
 ## Planned (Near-Term)
 
-### 2) HTTP MCP Server Integration
+### Reference-Only Enforcement
 
-Planned for the upcoming release cycle:
+Policy-driven controls to restrict plaintext-return paths per identity and path.
+Operators will be able to deny `get` and `resolve` operations for selected
+namespaces, pushing agents toward `phoenix exec` as the only consumption path.
 
-- merge the completed HTTP MCP server patch
-- include docs and release notes for the new MCP transport path
-- keep existing local MCP workflows supported
+See `docs/reference-only-enforcement-design.md` for the design RFC.
 
-### 3) Web UI (Read-Only First)
+### Server Certificate SAN Management
 
-Initial direction for UI work:
+CLI support for re-issuing the server TLS certificate with custom SANs
+(LAN IPs, hostnames), simplifying multi-host deployment without external
+certificate tooling.
 
-- start with read-only visibility (inventory, audit timeline, status)
-- keep secret mutation flows in CLI/API paths for strong auditability
-- expand capabilities after validating user demand and threat model fit
+### SDK Publishing
+
+Python (`phoenix-secrets`) and TypeScript (`phoenix-secrets`) SDK packages
+on PyPI and npm respectively.
 
 ## Exploring (Post-Launch)
 
 These are under consideration and will be prioritized by real-world usage:
 
-- multi-user/team workflows
-- advanced policy controls and simulation
-- rotation automation and lifecycle UX improvements
-- enterprise deployment/distribution options
+- Multi-user/team workflows with per-operator identity
+- Rotation automation and lifecycle UX improvements
+- Advanced policy simulation and dry-run tooling
+- Additional secret backends (Bitwarden, AWS Secrets Manager)
+- Enterprise deployment and distribution options
 
 ---
 
-Last updated: 2026-03-02
+Last updated: 2026-03-19

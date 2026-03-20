@@ -44,10 +44,11 @@ Query params:
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/v1/agents` | Create agent + permissions (admin-only) |
+| POST | `/v1/agents` | Create or update agent + permissions (admin-only) |
 | GET | `/v1/agents` | List agent names (admin-only) |
+| DELETE | `/v1/agents/{name}` | Delete an agent (admin-only) |
 
-`POST /v1/agents` body:
+`POST /v1/agents` body (use `?force=true` to update an existing agent):
 - `name` (required)
 - `token` (required)
 - `permissions` (array of `{path, actions[]}`; validated server-side)

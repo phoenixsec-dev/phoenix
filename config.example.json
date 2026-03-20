@@ -1,11 +1,11 @@
 {
   "server": {
-    "listen": "0.0.0.0:9090"
+    "listen": "127.0.0.1:9090"
   },
   "store": {
     "backend": "file",
-    "path": "/data/store.json",
-    "master_key": "/data/master.key"
+    "path": "/data/phoenix/store.json",
+    "master_key": "/data/phoenix/master.key"
   },
   "crypto": {
     "provider": "file"
@@ -20,13 +20,13 @@
     }
   },
   "acl": {
-    "path": "/data/acl.json"
+    "path": "/data/phoenix/acl.json"
   },
   "audit": {
-    "path": "/data/audit.log"
+    "path": "/data/phoenix/audit.log"
   },
   "policy": {
-    "path": "/data/policy.json"
+    "path": "/data/phoenix/policy.json"
   },
   "attestation": {
     "nonce": {
@@ -78,6 +78,7 @@
   },
   "dashboard": {
     "enabled": false,
+    "password_hash": "",
     "session_ttl": "4h"
   },
   "onepassword": {

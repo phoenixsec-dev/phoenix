@@ -1,8 +1,8 @@
-# Release Notes (Draft)
+# Release Notes
 
-## Unreleased
+## v0.13.3 (2026-03-20)
 
-### Session Identity (v1)
+### Session Identity
 
 Role-based session tokens replace static bearer tokens for agent access.
 
@@ -27,6 +27,17 @@ Role-based session tokens replace static bearer tokens for agent access.
   failures with session context, step-up approval workflow events
 - **Access isolation** — session tokens can only inspect/revoke their own
   exact session; no ACL escalation from scoped credentials
+
+### MCP Streamable HTTP Transport
+
+The MCP server now supports Streamable HTTP in addition to stdio:
+
+```bash
+phoenix mcp-server --http 127.0.0.1:8080 --mcp-token <token>
+```
+
+Endpoint: `/mcp`. Auth via `Authorization: Bearer <mcp-token>`. Tool identity
+headers carry through for policy evaluation.
 
 ### Operator Dashboard
 

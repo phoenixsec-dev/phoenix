@@ -106,9 +106,9 @@ val, err := client.Resolve("phoenix://myapp/api-key")
 ```
 
 **Python:**
-```bash
-pip install phoenix-secrets[sealed]  # installs PyNaCl
-```
+
+> `phoenix-secrets` is not yet published to PyPI. Use the source SDK
+> at `sdk/python/` or the API directly for now.
 
 ```python
 from phoenix_secrets import PhoenixClient
@@ -120,9 +120,9 @@ val = client.resolve("phoenix://myapp/api-key")
 ```
 
 **TypeScript:**
-```bash
-npm install phoenix-secrets  # tweetnacl is an optional dependency
-```
+
+> `phoenix-secrets` is not yet published to npm. Use the source SDK
+> at `sdk/typescript/` or the API directly for now.
 
 ```javascript
 const { PhoenixClient } = require("phoenix-secrets");

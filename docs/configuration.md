@@ -137,6 +137,26 @@ Behavior:
 - `set/delete` are blocked
 - path mapping: `phoenix://myapp/api-key` -> `op://Engineering/myapp/api-key`
 
+## Transport security
+
+The default configuration starts the server on plain HTTP at `127.0.0.1:9090`.
+This is safe for local-only use — the server is not reachable from the network.
+
+`phoenix-server --init` generates a CA and server certificate, but does **not**
+enable TLS by default. To enable TLS, set `auth.mtls.enabled: true` in the
+config. This activates server-side TLS using the generated certificate. You can
+set `auth.mtls.require: false` to accept TLS connections without requiring
+client certificates (agents can still use bearer tokens).
+
+| Deployment | Config | Result |
+|-----------|--------|--------|
+| Local only | Default (`127.0.0.1`, mTLS disabled) | Plain HTTP on loopback — safe |
+| LAN / remote | `0.0.0.0`, `auth.mtls.enabled: true` | TLS with optional client certs |
+| Production | `0.0.0.0`, `auth.mtls.enabled: true`, `require: true` | Full mTLS required |
+| Behind reverse proxy | `127.0.0.1`, proxy terminates TLS | Plain HTTP on loopback, TLS to clients |
+
+See [LAN Deployment](lan-deployment.md) for the full multi-host setup.
+
 ## Architecture summary
 
 ```text
@@ -161,11 +181,9 @@ Authentication flow:
 - secret access
 - audit log write
 
-## Docker (planned)
+## Docker
 
-> Docker images are not yet published. The examples below show the intended usage
-> for when `phoenixsecdev/phoenix` is available on Docker Hub. For now, build from
-> source or use the install script.
+Docker images are published to Docker Hub as `phoenixsecdev/phoenix`.
 
 ```bash
 docker pull phoenixsecdev/phoenix:latest

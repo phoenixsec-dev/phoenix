@@ -1,6 +1,7 @@
-# Reference-Only Enforcement Design (WIP)
+# Reference-Only Enforcement Design (RFC)
 
-Status: draft design for policy-driven controls that restrict plaintext-return paths.
+Status: design RFC for planned policy-driven controls that restrict plaintext-return paths.
+This feature is not yet implemented. See [Roadmap](roadmap.md) for timeline.
 
 ## Problem
 

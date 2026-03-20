@@ -102,13 +102,16 @@ phoenix-server --config /data/phoenix/config.json
 ### 4. Store and use a secret
 
 ```bash
-export PHOENIX_SERVER="https://localhost:9090"
+export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<your-admin-token>"
-export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 
 phoenix set myapp/api-key -v "sk-live-abc123" -d "API key"
 phoenix exec --env API_KEY=phoenix://myapp/api-key -- env | grep API_KEY
 ```
+
+> The default server config listens on `127.0.0.1:9090` over plain HTTP.
+> This is safe for local-only use. For LAN or production deployment,
+> enable TLS — see [LAN Deployment](docs/lan-deployment.md).
 
 For the full first-run walkthrough, see [Getting Started](docs/getting-started.md).
 
@@ -121,6 +124,8 @@ For the full first-run walkthrough, see [Getting Started](docs/getting-started.m
 | First install and setup | [Getting Started](docs/getting-started.md) |
 | CLI commands and workflows | [CLI Usage](docs/cli-usage.md) |
 | Auth, mTLS, and identity | [Authentication](docs/authentication.md) |
+| Session tokens and role-based access | [Session Identity](docs/session-identity.md) |
+| Operator dashboard (browser UI) | [Dashboard](docs/dashboard.md) |
 | Per-path policy and attestation | [Policy and Attestation](docs/policy-and-attestation.md) |
 | Sealed responses and multi-agent | [Sealed Responses](docs/sealed-responses.md) / [Multi-Agent Setup](docs/multi-agent-setup.md) |
 | MCP, SDKs, OpenClaw, API | [Integrations](docs/integrations.md) |

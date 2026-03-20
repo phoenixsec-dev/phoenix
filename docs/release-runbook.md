@@ -5,7 +5,7 @@
 - Clean working tree on `main`
 - CI passing
 - Version string correct (`internal/version/version.go`)
-- Confirm release tag (example: `v0.10.3`)
+- Confirm release tag (example: `v0.13.3`)
 
 ## 2) Tag and Push
 
