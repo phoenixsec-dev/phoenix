@@ -1,0 +1,56 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">Audit Log</h1>
+
+<form class="filter-bar" method="GET" action="/dashboard/audit">
+    <input type="text" name="agent" class="input input-sm" placeholder="Agent..." value="{{.AgentFilter}}">
+    <select name="status" class="input input-sm">
+        <option value="">All Status</option>
+        <option value="allowed"{{if eq .StatusFilter "allowed"}} selected{{end}}>Allowed</option>
+        <option value="denied"{{if eq .StatusFilter "denied"}} selected{{end}}>Denied</option>
+    </select>
+    <select name="limit" class="input input-sm">
+        <option value="50"{{if eq .Limit 50}} selected{{end}}>50</option>
+        <option value="100"{{if eq .Limit 100}} selected{{end}}>100</option>
+        <option value="500"{{if eq .Limit 500}} selected{{end}}>500</option>
+    </select>
+    <button type="submit" class="btn btn-sm">Filter</button>
+</form>
+
+{{if .Entries}}
+<div class="table-wrap" id="audit-table">
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>Agent</th>
+            <th>Action</th>
+            <th>Path</th>
+            <th>Status</th>
+            <th>IP</th>
+            <th>Session</th>
+            <th>Reason</th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Entries}}
+        <tr>
+            <td class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
+            <td>{{.Agent}}</td>
+            <td class="mono">{{.Action}}</td>
+            <td class="mono">{{truncate .Path 30}}</td>
+            <td><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
+            <td class="mono">{{.IP}}</td>
+            <td class="mono">{{truncate .SessionID 12}}</td>
+            <td>{{truncate .Reason 40}}</td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+</div>
+{{else}}
+<div class="empty-state">
+    <p>No audit entries</p>
+</div>
+{{end}}
+{{end}}

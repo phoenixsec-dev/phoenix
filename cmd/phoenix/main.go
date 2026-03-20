@@ -44,6 +44,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,6 +58,7 @@ import (
 var (
 	serverURL  string
 	token      string
+	tokenMu    sync.RWMutex // guards token in concurrent MCP mode
 	httpClient *http.Client
 )
 
@@ -144,7 +146,7 @@ func main() {
 		err = cmdAudit(args)
 	case "agent":
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|list>")
+			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|list|delete>")
 			os.Exit(1)
 		}
 		switch args[0] {
@@ -152,6 +154,8 @@ func main() {
 			err = cmdAgentCreate(args[1:])
 		case "list":
 			err = cmdAgentList()
+		case "delete":
+			err = cmdAgentDelete(args[1:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown agent subcommand: %s\n", args[0])
 			os.Exit(1)
@@ -232,6 +236,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "unknown agent-sock subcommand: %s\n", args[0])
 			os.Exit(1)
 		}
+	case "sessions":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix sessions <list|info|revoke>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "list":
+			err = cmdSessionList(args[1:])
+		case "info":
+			err = cmdSessionInfo(args[1:])
+		case "revoke":
+			err = cmdSessionRevoke(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown sessions subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
+	case "approve":
+		err = cmdApprove(args)
 	case "mcp-server":
 		httpAddr := ""
 		mcpToken := os.Getenv("PHOENIX_MCP_TOKEN")
@@ -301,6 +323,7 @@ Usage:
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]
   phoenix agent list                          List agents
+  phoenix agent delete <name>                 Delete an agent
   phoenix resolve [--signed] <ref> [ref...]     Resolve phoenix:// references to values
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
@@ -319,6 +342,10 @@ Usage:
   phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
   phoenix keypair generate <name> [-o dir]     Generate X25519 seal key pair
   phoenix keypair show <name>                 Show public key for a seal key pair
+  phoenix sessions list [--role R] [--agent A]  List active sessions
+  phoenix sessions info <session-id>            Show session details
+  phoenix sessions revoke <session-id>          Revoke a session
+  phoenix approve <approval-id>                Approve a step-up session request
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix mcp-server --http :8080             Run MCP server (Streamable HTTP)
   phoenix init <dir>                          Initialize data directory
@@ -332,20 +359,36 @@ Environment:
   PHOENIX_SEAL_KEY     Seal private key file (enables sealed mode)
   PHOENIX_POLICY       Path to attestation policy file (JSON)
   PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)
+  PHOENIX_ROLE         Role name for auto-mint session identity
   PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)`)
 }
 
 // requireAuth checks that at least one auth method is configured
 // (bearer token or mTLS client cert).
 func requireAuth() error {
-	if token != "" {
+	// PHOENIX_ROLE takes precedence: always mint a scoped session token,
+	// even when PHOENIX_TOKEN is set (the broad token is used only for bootstrap).
+	if os.Getenv("PHOENIX_ROLE") != "" {
+		if err := autoMintSession(); err != nil {
+			return fmt.Errorf("session auto-mint: %w", err)
+		}
+		renewSessionIfNeeded()
 		return nil
 	}
+
+	// Already have a token (bootstrap bearer or session from env)
+	if token != "" {
+		if strings.HasPrefix(token, "phxs_") {
+			renewSessionIfNeeded()
+		}
+		return nil
+	}
+
 	// Check if mTLS client cert is configured
 	if os.Getenv("PHOENIX_CLIENT_CERT") != "" && os.Getenv("PHOENIX_CLIENT_KEY") != "" {
 		return nil
 	}
-	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN or PHOENIX_CLIENT_CERT + PHOENIX_CLIENT_KEY")
+	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN, PHOENIX_ROLE, or PHOENIX_CLIENT_CERT + PHOENIX_CLIENT_KEY")
 }
 
 func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
@@ -358,8 +401,11 @@ func apiRequestWithHeaders(method, path string, body io.Reader, headers map[stri
 	if err != nil {
 		return nil, err
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	tokenMu.RLock()
+	tok := token
+	tokenMu.RUnlock()
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -935,6 +981,30 @@ func cmdAgentList() error {
 	for _, name := range result.Agents {
 		fmt.Println(name)
 	}
+	return nil
+}
+
+func cmdAgentDelete(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix agent delete <name>")
+	}
+	name := args[0]
+
+	resp, err := apiRequest("DELETE", "/v1/agents/"+name, nil)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	fmt.Printf("agent deleted: %s\n", name)
 	return nil
 }
 
@@ -2035,6 +2105,257 @@ func getCachedToken(agentName string, ttlBuffer time.Duration) string {
 	return entry.Token
 }
 
+// sessionCacheKey returns a cache key scoped to both role and server URL,
+// preventing collisions when the same role name is used across different servers.
+func sessionCacheKey(role string) string {
+	h := sha256pkg.Sum256([]byte(serverURL))
+	return fmt.Sprintf("session:%s@%.8x", role, h[:4])
+}
+
+// getCachedSessionToken returns a valid cached session token for the role, or empty string.
+func getCachedSessionToken(role string, ttlBuffer time.Duration) string {
+	return getCachedToken(sessionCacheKey(role), ttlBuffer)
+}
+
+// cacheSessionToken stores a session token in the cache.
+func cacheSessionToken(role, tok string, expiresAt time.Time) {
+	cache, _ := loadTokenCache()
+	key := sessionCacheKey(role)
+	cache[key] = &tokenCacheEntry{
+		Token:     tok,
+		Agent:     "session:" + role,
+		ExpiresAt: expiresAt,
+	}
+	if err := saveTokenCache(cache); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not cache session token: %v\n", err)
+	}
+}
+
+// ensureSealKey loads or generates a seal key for session use.
+// Priority: PHOENIX_SEAL_KEY env > ~/.phoenix/session-seal-<role>.key > generate new.
+func ensureSealKey(role string) (*[32]byte, string, error) {
+	// Check env first
+	envPath := os.Getenv("PHOENIX_SEAL_KEY")
+	if envPath != "" {
+		priv, err := crypto.LoadSealPrivateKey(envPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("loading PHOENIX_SEAL_KEY: %w", err)
+		}
+		pub := crypto.DeriveSealPublicKey(priv)
+		return priv, crypto.EncodeSealKey(pub), nil
+	}
+
+	// Check per-role key file
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	keyDir := filepath.Join(home, ".phoenix")
+	keyPath := filepath.Join(keyDir, "session-seal-"+role+".key")
+
+	if _, statErr := os.Stat(keyPath); statErr == nil {
+		priv, loadErr := crypto.LoadSealPrivateKey(keyPath)
+		if loadErr != nil {
+			return nil, "", fmt.Errorf("loading seal key %s: %w", keyPath, loadErr)
+		}
+		pub := crypto.DeriveSealPublicKey(priv)
+		return priv, crypto.EncodeSealKey(pub), nil
+	}
+
+	// Generate new key
+	if err := os.MkdirAll(keyDir, 0700); err != nil {
+		return nil, "", fmt.Errorf("creating key directory: %w", err)
+	}
+	kp, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		return nil, "", fmt.Errorf("generating seal key: %w", err)
+	}
+	privKey := kp.PrivateKey
+	pubKey := kp.PublicKey
+	encoded := crypto.EncodeSealKey(&privKey)
+	if err := os.WriteFile(keyPath, []byte(encoded+"\n"), 0600); err != nil {
+		return nil, "", fmt.Errorf("saving seal key: %w", err)
+	}
+	return &privKey, crypto.EncodeSealKey(&pubKey), nil
+}
+
+// mintSessionViaAPI calls POST /v1/session/mint and returns the session token.
+func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
+	body := map[string]string{"role": role}
+	if sealPubKeyB64 != "" {
+		body["seal_public_key"] = sealPubKeyB64
+	}
+	if tty := detectTTY(); tty != "" {
+		body["requester_tty"] = tty
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	resp, err := apiRequest("POST", "/v1/session/mint", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("session mint request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Step-up approval: 202 means approval required
+	if resp.StatusCode == http.StatusAccepted {
+		var pending struct {
+			Status     string `json:"status"`
+			ApprovalID string `json:"approval_id"`
+			ApproveCmd string `json:"approve_command"`
+			ExpiresAt  string `json:"expires_at"`
+		}
+		if err := json.Unmarshal(respBody, &pending); err == nil && pending.Status == "approval_required" {
+			return pollForApproval(pending.ApprovalID, pending.ExpiresAt, pending.ApproveCmd)
+		}
+	}
+
+	if resp.StatusCode != 200 {
+		var errResp struct {
+			Error       string `json:"error"`
+			Code        string `json:"code"`
+			Detail      string `json:"detail"`
+			Remediation string `json:"remediation"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
+			return "", time.Time{}, fmt.Errorf("[%s] %s\n  hint: %s", errResp.Code, errResp.Detail, errResp.Remediation)
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
+			return "", time.Time{}, fmt.Errorf("session mint: %s", errResp.Error)
+		}
+		return "", time.Time{}, fmt.Errorf("session mint: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		SessionToken string `json:"session_token"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing mint response: %w", err)
+	}
+	exp, err := time.Parse(time.RFC3339, result.ExpiresAt)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing expires_at: %w", err)
+	}
+	return result.SessionToken, exp, nil
+}
+
+// autoMintSession checks PHOENIX_ROLE and auto-mints a session token.
+func autoMintSession() error {
+	role := os.Getenv("PHOENIX_ROLE")
+	if role == "" {
+		return fmt.Errorf("PHOENIX_ROLE not set")
+	}
+
+	// Check cache first
+	if cached := getCachedSessionToken(role, 5*time.Minute); cached != "" {
+		tokenMu.Lock()
+		token = cached
+		tokenMu.Unlock()
+		return nil
+	}
+
+	// Need bootstrap auth to mint
+	tokenMu.RLock()
+	noToken := token == ""
+	tokenMu.RUnlock()
+	if noToken {
+		if os.Getenv("PHOENIX_CLIENT_CERT") == "" || os.Getenv("PHOENIX_CLIENT_KEY") == "" {
+			return fmt.Errorf("PHOENIX_ROLE=%s set but no bootstrap auth available (set PHOENIX_TOKEN or mTLS certs)", role)
+		}
+	}
+
+	// Load or generate seal key
+	_, sealPubB64, err := ensureSealKey(role)
+	if err != nil {
+		// Non-fatal: mint without seal key
+		fmt.Fprintf(os.Stderr, "warning: seal key unavailable: %v\n", err)
+		sealPubB64 = ""
+	}
+
+	sessionToken, expiresAt, err := mintSessionViaAPI(role, sealPubB64)
+	if err != nil {
+		return err
+	}
+
+	cacheSessionToken(role, sessionToken, expiresAt)
+	tokenMu.Lock()
+	token = sessionToken
+	tokenMu.Unlock()
+	return nil
+}
+
+// renewSessionViaAPI calls POST /v1/session/renew with the current session token.
+func renewSessionViaAPI() (string, time.Time, error) {
+	resp, err := apiRequest("POST", "/v1/session/renew", strings.NewReader("{}"))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("session renew request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		var errResp struct {
+			Error       string `json:"error"`
+			Code        string `json:"code"`
+			Detail      string `json:"detail"`
+			Remediation string `json:"remediation"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
+			return "", time.Time{}, fmt.Errorf("[%s] %s", errResp.Code, errResp.Detail)
+		}
+		return "", time.Time{}, fmt.Errorf("session renew: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		SessionToken string `json:"session_token"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing renew response: %w", err)
+	}
+	exp, err := time.Parse(time.RFC3339, result.ExpiresAt)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("parsing expires_at: %w", err)
+	}
+	return result.SessionToken, exp, nil
+}
+
+// renewSessionIfNeeded checks if the current session token is nearing expiry
+// and renews it if so (within 10 minutes of expiry).
+func renewSessionIfNeeded() {
+	if !strings.HasPrefix(token, "phxs_") {
+		return
+	}
+	role := os.Getenv("PHOENIX_ROLE")
+	if role == "" {
+		return
+	}
+
+	// Check if cached token is nearing expiry
+	cache, _ := loadTokenCache()
+	entry, ok := cache[sessionCacheKey(role)]
+	if !ok {
+		return
+	}
+	if time.Until(entry.ExpiresAt) > 10*time.Minute {
+		return // still plenty of time
+	}
+
+	newToken, newExpiry, err := renewSessionViaAPI()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session renewal failed: %v\n", err)
+		return
+	}
+
+	cacheSessionToken(role, newToken, newExpiry)
+	tokenMu.Lock()
+	token = newToken
+	tokenMu.Unlock()
+}
+
 // attestViaSocket connects to the agent socket and returns peer info.
 func attestViaSocket(socketPath string, agentName string) (peerUID int, binaryHash string, err error) {
 	conn, err := net.Dial("unix", socketPath)
@@ -2479,12 +2800,335 @@ func cmdEmergencyGet(args []string) error {
 }
 
 func handleError(resp *http.Response) error {
-	var errResp struct {
-		Error string `json:"error"`
+	body, _ := io.ReadAll(resp.Body)
+
+	var structured struct {
+		Error       string `json:"error"`
+		Code        string `json:"code"`
+		Detail      string `json:"detail"`
+		Remediation string `json:"remediation"`
 	}
-	json.NewDecoder(resp.Body).Decode(&errResp)
-	if errResp.Error != "" {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	if json.Unmarshal(body, &structured) == nil && structured.Code != "" {
+		msg := fmt.Sprintf("HTTP %d [%s]: %s", resp.StatusCode, structured.Code, structured.Detail)
+		if structured.Remediation != "" {
+			msg += "\n  hint: " + structured.Remediation
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
+	if json.Unmarshal(body, &structured) == nil && structured.Error != "" {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, structured.Error)
 	}
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
+}
+
+// detectTTY returns the TTY path for the current process, or empty string.
+func detectTTY() string {
+	link, err := os.Readlink("/proc/self/fd/0")
+	if err != nil {
+		return ""
+	}
+	if strings.HasPrefix(link, "/dev/pts/") || strings.HasPrefix(link, "/dev/tty") {
+		return link
+	}
+	return ""
+}
+
+// pollForApproval polls an approval status endpoint until approved, denied, or expired.
+func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.Time, error) {
+	fmt.Fprintf(os.Stderr, "Step-up approval required. Run:\n  %s\n\nWaiting for approval...\n", approveCmd)
+
+	deadline := time.Now().Add(10 * time.Minute) // fallback
+	if exp, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
+		deadline = exp.Add(5 * time.Second) // small grace past server expiry
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if time.Now().After(deadline) {
+			return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window has expired")
+		}
+
+		resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  poll error: %v\n", err)
+			continue
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var status struct {
+			Status        string `json:"status"`
+			SessionToken  string `json:"session_token"`
+			SessionExpiry string `json:"session_expiry"`
+		}
+		if err := json.Unmarshal(respBody, &status); err != nil {
+			continue
+		}
+
+		switch status.Status {
+		case "approved":
+			fmt.Fprintf(os.Stderr, "Approved.\n")
+			exp, _ := time.Parse(time.RFC3339, status.SessionExpiry)
+			return status.SessionToken, exp, nil
+		case "denied":
+			return "", time.Time{}, fmt.Errorf("[APPROVAL_DENIED] step-up approval was denied")
+		case "expired":
+			return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window expired before human approval")
+		case "pending":
+			// continue polling
+		}
+	}
+	return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval poll ended unexpectedly")
+}
+
+// cmdApprove handles the "phoenix approve <approval-id>" command.
+func cmdSessionList(args []string) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	queryParams := ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "--role" || args[i] == "-r") && i+1 < len(args):
+			if queryParams == "" {
+				queryParams = "?"
+			} else {
+				queryParams += "&"
+			}
+			queryParams += "role=" + url.QueryEscape(args[i+1])
+			i++
+		case (args[i] == "--agent" || args[i] == "-a") && i+1 < len(args):
+			if queryParams == "" {
+				queryParams = "?"
+			} else {
+				queryParams += "&"
+			}
+			queryParams += "agent=" + url.QueryEscape(args[i+1])
+			i++
+		}
+	}
+
+	resp, err := apiRequest("GET", "/v1/sessions"+queryParams, nil)
+	if err != nil {
+		return fmt.Errorf("listing sessions: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Sessions []struct {
+			SessionID       string `json:"session_id"`
+			Role            string `json:"role"`
+			Agent           string `json:"agent"`
+			BootstrapMethod string `json:"bootstrap_method"`
+			SourceIP        string `json:"source_ip"`
+			CreatedAt       string `json:"created_at"`
+			ExpiresAt       string `json:"expires_at"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	if len(result.Sessions) == 0 {
+		fmt.Println("No active sessions.")
+		return nil
+	}
+
+	fmt.Printf("%-36s  %-10s  %-12s  %-20s  %-20s  %-15s\n",
+		"SESSION_ID", "ROLE", "AGENT", "CREATED", "EXPIRES", "SOURCE_IP")
+	for _, s := range result.Sessions {
+		fmt.Printf("%-36s  %-10s  %-12s  %-20s  %-20s  %-15s\n",
+			s.SessionID, s.Role, s.Agent, s.CreatedAt, s.ExpiresAt, s.SourceIP)
+	}
+	return nil
+}
+
+func cmdSessionInfo(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix sessions info <session-id>")
+	}
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	sessionID := args[0]
+	resp, err := apiRequest("GET", "/v1/sessions/"+sessionID, nil)
+	if err != nil {
+		return fmt.Errorf("fetching session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var sess struct {
+		SessionID       string   `json:"session_id"`
+		Role            string   `json:"role"`
+		Agent           string   `json:"agent"`
+		Namespaces      []string `json:"namespaces"`
+		Actions         []string `json:"actions"`
+		BootstrapMethod string   `json:"bootstrap_method"`
+		SourceIP        string   `json:"source_ip"`
+		CreatedAt       string   `json:"created_at"`
+		ExpiresAt       string   `json:"expires_at"`
+		Revoked         bool     `json:"revoked"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	fmt.Printf("Session ID:       %s\n", sess.SessionID)
+	fmt.Printf("Role:             %s\n", sess.Role)
+	fmt.Printf("Agent:            %s\n", sess.Agent)
+	fmt.Printf("Namespaces:       %s\n", strings.Join(sess.Namespaces, ", "))
+	fmt.Printf("Actions:          %s\n", strings.Join(sess.Actions, ", "))
+	fmt.Printf("Bootstrap Method: %s\n", sess.BootstrapMethod)
+	fmt.Printf("Source IP:        %s\n", sess.SourceIP)
+	fmt.Printf("Created At:       %s\n", sess.CreatedAt)
+	fmt.Printf("Expires At:       %s\n", sess.ExpiresAt)
+	fmt.Printf("Revoked:          %v\n", sess.Revoked)
+	return nil
+}
+
+func cmdSessionRevoke(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix sessions revoke <session-id>")
+	}
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	sessionID := args[0]
+	resp, err := apiRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	if err != nil {
+		return fmt.Errorf("revoking session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var result struct {
+		Status    string `json:"status"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+
+	fmt.Printf("Session %s revoked.\n", result.SessionID)
+	return nil
+}
+
+func cmdApprove(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: phoenix approve <approval-id>")
+	}
+	approvalID := args[0]
+
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	// Fetch approval details
+	resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
+	if err != nil {
+		return fmt.Errorf("fetching approval: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	var details struct {
+		ID        string `json:"id"`
+		Role      string `json:"role"`
+		Agent     string `json:"agent"`
+		Status    string `json:"status"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+		return fmt.Errorf("decoding approval: %w", err)
+	}
+
+	if details.Status != "pending" {
+		return fmt.Errorf("approval %s is already %s", approvalID, details.Status)
+	}
+
+	// Prompt for confirmation via /dev/tty
+	fmt.Fprintf(os.Stderr, "\nApprove session for role '%s'?\n", details.Role)
+	fmt.Fprintf(os.Stderr, "  Requested by: agent %q\n", details.Agent)
+	fmt.Fprintf(os.Stderr, "  Expires at: %s\n", details.ExpiresAt)
+	fmt.Fprintf(os.Stderr, "\nApprove? [y/N]: ")
+
+	answer, err := readFromTTY()
+	if err != nil {
+		return fmt.Errorf("reading confirmation: %w", err)
+	}
+
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	myTTY := detectTTY()
+
+	if answer == "y" || answer == "yes" {
+		body, _ := json.Marshal(map[string]string{"approver_tty": myTTY})
+		resp, err := apiRequest("POST", "/v1/approval/"+approvalID+"/approve", strings.NewReader(string(body)))
+		if err != nil {
+			return fmt.Errorf("approve request: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			return handleError(resp)
+		}
+
+		var result struct {
+			SameTTYWarning bool `json:"same_tty_warning"`
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		json.Unmarshal(respBody, &result)
+
+		if result.SameTTYWarning {
+			fmt.Fprintf(os.Stderr, "WARNING: approver and requester are on the same TTY — this may indicate the same operator is both requesting and approving.\n")
+		}
+		fmt.Fprintln(os.Stderr, "Session approved.")
+		return nil
+	}
+
+	// Deny
+	resp2, err := apiRequest("POST", "/v1/approval/"+approvalID+"/deny", strings.NewReader("{}"))
+	if err != nil {
+		return fmt.Errorf("deny request: %w", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		return handleError(resp2)
+	}
+	fmt.Fprintln(os.Stderr, "Session denied.")
+	return nil
+}
+
+// readFromTTY reads a line from /dev/tty (works even when stdin is piped).
+func readFromTTY() (string, error) {
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		// Fallback to stdin
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			return scanner.Text(), nil
+		}
+		return "", fmt.Errorf("no input available")
+	}
+	defer tty.Close()
+	scanner := bufio.NewScanner(tty)
+	if scanner.Scan() {
+		return scanner.Text(), nil
+	}
+	return "", fmt.Errorf("no input from /dev/tty")
 }

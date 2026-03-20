@@ -120,6 +120,10 @@ type RequestContext struct {
 
 	// Seal key validation (set when X-Phoenix-Seal-Key is present and validated)
 	SealKeyPresented bool
+
+	// Session identity (set when authenticated via session token)
+	SessionID   string
+	SessionRole string
 }
 
 // Engine loads and evaluates attestation policies.

@@ -1,11 +1,11 @@
 {
   "server": {
-    "listen": "0.0.0.0:9090"
+    "listen": "127.0.0.1:9090"
   },
   "store": {
     "backend": "file",
-    "path": "/data/store.json",
-    "master_key": "/data/master.key"
+    "path": "/data/phoenix/store.json",
+    "master_key": "/data/phoenix/master.key"
   },
   "crypto": {
     "provider": "file"
@@ -20,13 +20,13 @@
     }
   },
   "acl": {
-    "path": "/data/acl.json"
+    "path": "/data/phoenix/acl.json"
   },
   "audit": {
-    "path": "/data/audit.log"
+    "path": "/data/phoenix/audit.log"
   },
   "policy": {
-    "path": "/data/policy.json"
+    "path": "/data/phoenix/policy.json"
   },
   "attestation": {
     "nonce": {
@@ -42,8 +42,48 @@
       "socket_path": "/tmp/phoenix-agent.sock"
     }
   },
+  "session": {
+    "enabled": false,
+    "ttl": "1h",
+    "roles": {
+      "dev": {
+        "namespaces": [
+          "dev/*",
+          "staging/*"
+        ],
+        "actions": [
+          "list",
+          "read_value"
+        ],
+        "bootstrap_trust": [
+          "bearer"
+        ]
+      },
+      "deploy": {
+        "namespaces": [
+          "prod/*"
+        ],
+        "actions": [
+          "list",
+          "read_value"
+        ],
+        "bootstrap_trust": [
+          "mtls"
+        ],
+        "require_seal_key": true,
+        "step_up": true,
+        "step_up_ttl": "15m"
+      }
+    }
+  },
+  "dashboard": {
+    "enabled": false,
+    "password_hash": "",
+    "session_ttl": "4h"
+  },
   "onepassword": {
     "vault": "Engineering",
-    "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN"
+    "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN",
+    "cache_ttl": "60s"
   }
 }

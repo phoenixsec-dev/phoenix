@@ -1,0 +1,57 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">Overview</h1>
+
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{.SecretCount}}</div>
+        <div class="stat-label">Secrets</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{.AgentCount}}</div>
+        <div class="stat-label">Agents</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{.SessionCount}}</div>
+        <div class="stat-label">Active Sessions</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{.PendingApprovals}}</div>
+        <div class="stat-label">Pending Approvals</div>
+    </div>
+</div>
+
+<div class="info-card">
+    <h2>Server</h2>
+    <div class="info-row"><span class="info-label">Uptime</span><span>{{.Uptime}}</span></div>
+    <div class="info-row"><span class="info-label">Sessions</span><span>{{if .SessionsEnabled}}enabled{{else}}disabled{{end}}</span></div>
+</div>
+
+{{if .RecentAudit}}
+<h2 class="section-title">Recent Activity</h2>
+<div class="table-wrap">
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Time</th>
+            <th>Agent</th>
+            <th>Action</th>
+            <th>Path</th>
+            <th>Status</th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .RecentAudit}}
+        <tr>
+            <td class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
+            <td>{{.Agent}}</td>
+            <td class="mono">{{.Action}}</td>
+            <td class="mono">{{truncate .Path 40}}</td>
+            <td><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+</div>
+{{end}}
+{{end}}

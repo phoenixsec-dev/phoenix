@@ -83,7 +83,7 @@ phoenix exec \
 If your agent platform uses MCP over HTTP instead of local stdio, run Phoenix MCP in Streamable HTTP mode:
 
 ```bash
-export PHOENIX_SERVER="https://localhost:9090"
+export PHOENIX_SERVER="https://phoenix:9090"
 export PHOENIX_TOKEN="<phoenix-agent-token>"
 export PHOENIX_MCP_TOKEN="<mcp-client-token>"
 phoenix mcp-server --http 127.0.0.1:8080

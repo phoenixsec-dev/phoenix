@@ -33,15 +33,21 @@ Use the admin token only for setup tasks:
 - issue mTLS certs (`phoenix cert issue ...`)
 - configure policy/attestation
 
-Example bootstrap flow:
+Example bootstrap flow (local server, default config):
 
 ```bash
-export PHOENIX_SERVER="https://localhost:9090"
+export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<admin-token>"
-export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 
 phoenix agent create app-runtime -t "runtime-token" --acl "myapp/*:read"
 phoenix agent create app-deployer -t "deploy-token" --acl "myapp/*:read,write"
+```
+
+If mTLS is enabled (required for `phoenix cert issue`):
+
+```bash
+export PHOENIX_SERVER="https://phoenix.home:9090"
+export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 phoenix cert issue app-runtime -o /etc/phoenix/certs
 ```
 

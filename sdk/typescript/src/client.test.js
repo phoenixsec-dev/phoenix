@@ -130,8 +130,16 @@ describe("PhoenixClient", () => {
   });
 
   it("defaults to standard server URL", () => {
-    const c = new PhoenixClient();
-    assert.equal(c.server, "http://127.0.0.1:9090");
+    const orig = process.env.PHOENIX_SERVER;
+    delete process.env.PHOENIX_SERVER;
+    try {
+      const c = new PhoenixClient();
+      assert.equal(c.server, "http://127.0.0.1:9090");
+    } finally {
+      if (orig !== undefined) {
+        process.env.PHOENIX_SERVER = orig;
+      }
+    }
   });
 });
 

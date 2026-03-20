@@ -2,8 +2,10 @@ package phoenix
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -236,8 +238,123 @@ func TestResolveNoValueReturned(t *testing.T) {
 }
 
 func TestNewDefaults(t *testing.T) {
+	t.Setenv("PHOENIX_SERVER", "")
+	t.Setenv("PHOENIX_TOKEN", "")
 	c := New("", "")
 	if c.Server != "http://127.0.0.1:9090" {
 		t.Fatalf("expected default server, got %q", c.Server)
+	}
+}
+
+func TestNewWithRoleFailsClosedOnMintError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/session/mint" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "mint denied",
+			"code":  "BOOTSTRAP_FAILED",
+		})
+	}))
+	defer srv.Close()
+
+	c, err := NewWithRole(srv.URL, "bootstrap-token", "dev")
+	if err == nil {
+		t.Fatal("expected mint failure")
+	}
+	if c != nil {
+		t.Fatal("expected nil client on mint failure")
+	}
+	if got := fmt.Sprint(err); got == "" || !strings.Contains(got, "session mint for role") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestErrorHelpers(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    Error
+		check  func(*Error) bool
+		expect bool
+	}{
+		{"approval required true", Error{Code: "APPROVAL_REQUIRED"}, (*Error).IsApprovalRequired, true},
+		{"approval required false", Error{Code: "OTHER"}, (*Error).IsApprovalRequired, false},
+		{"session expired true", Error{Code: "SESSION_EXPIRED"}, (*Error).IsSessionExpired, true},
+		{"session expired false", Error{Code: "OTHER"}, (*Error).IsSessionExpired, false},
+		{"scope exceeded true", Error{Code: "SCOPE_EXCEEDED"}, (*Error).IsScopeExceeded, true},
+		{"scope exceeded false", Error{Code: "OTHER"}, (*Error).IsScopeExceeded, false},
+		{"action denied true", Error{Code: "ACTION_DENIED"}, (*Error).IsActionDenied, true},
+		{"action denied false", Error{Code: "OTHER"}, (*Error).IsActionDenied, false},
+		{"session revoked true", Error{Code: "SESSION_REVOKED"}, (*Error).IsSessionRevoked, true},
+		{"session revoked false", Error{Code: "OTHER"}, (*Error).IsSessionRevoked, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.check(&tt.err)
+			if got != tt.expect {
+				t.Errorf("got %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestListSessions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != "GET" {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"sessions": []map[string]interface{}{
+				{
+					"session_id": "ses_abc123",
+					"role":       "dev",
+					"agent":      "test-agent",
+					"created_at": "2026-01-01T00:00:00Z",
+					"expires_at": "2026-01-01T01:00:00Z",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	sessions, err := c.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].SessionID != "ses_abc123" {
+		t.Errorf("session_id = %q, want ses_abc123", sessions[0].SessionID)
+	}
+	if sessions[0].Role != "dev" {
+		t.Errorf("role = %q, want dev", sessions[0].Role)
+	}
+}
+
+func TestRevokeSession(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions/ses_abc123/revoke" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != "POST" {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":     "revoked",
+			"session_id": "ses_abc123",
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	err := c.RevokeSession("ses_abc123")
+	if err != nil {
+		t.Fatalf("RevokeSession: %v", err)
 	}
 }

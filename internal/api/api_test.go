@@ -20,11 +20,14 @@ import (
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
+	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/policy"
+	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
 )
@@ -3435,5 +3438,1616 @@ func TestPolicyCheckUnsupportedCheck(t *testing.T) {
 
 	if w.Code != 400 {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// setupTestServerWithSessions creates a test server with session identity enabled.
+func setupTestServerWithSessions(t *testing.T) (*Server, string) {
+	t.Helper()
+	srv, adminToken := setupTestServer(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"writer": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value", "write"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	})
+	return srv, adminToken
+}
+
+func mintTestSession(t *testing.T, srv *Server, adminToken, role string) string {
+	t.Helper()
+	body := `{"role":"` + role + `"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("session mint: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		SessionToken string `json:"session_token"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	return result.SessionToken
+}
+
+func TestHandleSessionRenew(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	req := httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("renew: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		SessionToken string `json:"session_token"`
+		Renewed      bool   `json:"renewed"`
+		Role         string `json:"role"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+
+	if !result.Renewed {
+		t.Error("expected renewed=true")
+	}
+	if result.Role != "dev" {
+		t.Errorf("role = %q, want %q", result.Role, "dev")
+	}
+	if result.SessionToken == "" {
+		t.Error("expected non-empty session_token")
+	}
+	if result.SessionToken == sessionToken {
+		t.Error("expected new token to differ from original")
+	}
+
+	// Verify Cache-Control header
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "no-store")
+	}
+}
+
+func TestHandleSessionRenewNonSession(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Try to renew using a bearer token (not a session token)
+	req := httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "SESSION_REQUIRED" {
+		t.Errorf("code = %q, want SESSION_REQUIRED", result.Code)
+	}
+}
+
+func TestSessionActionDeniedCode(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Store a secret
+	body := `{"value":"secret123"}`
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/mysecret", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("set secret: status %d", w.Code)
+	}
+
+	// Mint a read-only session
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Try to write using session (should fail with ACTION_DENIED)
+	req = httptest.NewRequest("PUT", "/v1/secrets/test/newsecret", strings.NewReader(`{"value":"nope"}`))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "ACTION_DENIED" {
+		t.Errorf("code = %q, want ACTION_DENIED", result.Code)
+	}
+}
+
+func TestSessionMintCacheControl(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	body := `{"role":"dev"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", cc, "no-store")
+	}
+}
+
+func TestSessionMintAttestationEnforced(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"secure": {
+			Namespaces:     []string{"prod/*"},
+			BootstrapTrust: []string{"bearer"},
+			Attestation:    []string{"require_mtls"},
+		},
+	})
+
+	// Try to mint with bearer auth (should fail because role requires mTLS)
+	body := `{"role":"secure"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "ATTESTATION_FAILED" {
+		t.Errorf("code = %q, want ATTESTATION_FAILED", result.Code)
+	}
+}
+
+func TestSessionRenewLocalityRecheck(t *testing.T) {
+	// This test verifies that renewal checks the CURRENT request's locality,
+	// not the original mint-time source IP.
+	srv, adminToken := setupTestServer(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"local-only": {
+			Namespaces:     []string{"dev/*"},
+			BootstrapTrust: []string{"local"},
+		},
+	})
+
+	// Mint a session from loopback (simulated via httptest which uses 192.0.2.1)
+	// This will fail because httptest uses non-loopback, showing the local check works
+	body := `{"role":"local-only"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// httptest uses 192.0.2.1 (non-loopback), so "local" bootstrap should fail
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for non-local mint with local-only trust, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "BOOTSTRAP_FAILED" {
+		t.Errorf("code = %q, want BOOTSTRAP_FAILED", result.Code)
+	}
+}
+
+func TestSessionRenewCertFingerprintContinuity(t *testing.T) {
+	srv, authority, _ := setupTestServerWithCA(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"secure": {
+			Namespaces:     []string{"test/*"},
+			BootstrapTrust: []string{"mtls"},
+			Attestation:    []string{"cert_fingerprint"},
+		},
+	})
+
+	bundle1, err := authority.IssueAgentCert("admin")
+	if err != nil {
+		t.Fatalf("issuing cert1: %v", err)
+	}
+	bundle2, err := authority.IssueAgentCert("reader")
+	if err != nil {
+		t.Fatalf("issuing cert2: %v", err)
+	}
+
+	// Mint with cert1.
+	req := makeMTLSRequest("POST", "/v1/session/mint", []byte(`{"role":"secure"}`), bundle1.CertPEM)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("mint: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var mint struct {
+		SessionToken string `json:"session_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &mint); err != nil {
+		t.Fatalf("unmarshal mint: %v", err)
+	}
+
+	// Renew with a different cert: should fail continuity check.
+	req = makeMTLSRequest("POST", "/v1/session/renew", []byte(`{}`), bundle2.CertPEM)
+	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("renew with wrong cert: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var denied struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &denied)
+	if denied.Code != "ATTESTATION_FAILED" {
+		t.Fatalf("code = %q, want ATTESTATION_FAILED", denied.Code)
+	}
+
+	// Renew with the original cert: should succeed.
+	req = makeMTLSRequest("POST", "/v1/session/renew", []byte(`{}`), bundle1.CertPEM)
+	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("renew with original cert: status %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSessionRenewExpired(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	ss, err := session.NewStore(5 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	})
+
+	// Mint with short TTL
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Wait for session to expire
+	time.Sleep(10 * time.Millisecond)
+
+	// Try to renew expired session
+	req := httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Should fail with 401 (token expired during auth)
+	if w.Code != 401 {
+		t.Fatalf("status = %d, want 401, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Step-up approval tests ---
+
+func setupTestServerWithStepUp(t *testing.T) (*Server, string) {
+	t.Helper()
+	srv, adminToken := setupTestServer(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+
+	as := approval.NewStore(5 * time.Minute)
+	t.Cleanup(as.Stop)
+	srv.SetApprovalStore(as)
+
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"deploy": {
+			Namespaces:     []string{"prod/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+			StepUp:         true,
+			StepUpTTL:      "2m",
+		},
+	})
+	return srv, adminToken
+}
+
+func TestSessionMintStepUp(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 202 {
+		t.Fatalf("status = %d, want 202, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Status     string `json:"status"`
+		ApprovalID string `json:"approval_id"`
+		Code       string `json:"code"`
+		ApproveCmd string `json:"approve_command"`
+		ExpiresAt  string `json:"expires_at"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+
+	if result.Status != "approval_required" {
+		t.Errorf("status = %q, want approval_required", result.Status)
+	}
+	if result.Code != "APPROVAL_REQUIRED" {
+		t.Errorf("code = %q, want APPROVAL_REQUIRED", result.Code)
+	}
+	if result.ApprovalID == "" || result.ApprovalID[:4] != "apr_" {
+		t.Errorf("approval_id = %q, want apr_ prefix", result.ApprovalID)
+	}
+	if result.ApproveCmd == "" {
+		t.Error("approve_command should not be empty")
+	}
+	if result.ExpiresAt == "" {
+		t.Error("expires_at should not be empty")
+	}
+}
+
+func TestSessionMintNoStepUp(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Non-step-up role should still mint directly
+	body := `{"role":"dev"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		SessionToken string `json:"session_token"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.SessionToken == "" {
+		t.Error("expected session_token for non-step-up role")
+	}
+}
+
+func TestApprovalApproveFullFlow(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// 1. Mint → 202 approval_required
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 202 {
+		t.Fatalf("mint: status %d, want 202", w.Code)
+	}
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// 2. Check status → pending
+	req = httptest.NewRequest("GET", "/v1/approval/"+mintResult.ApprovalID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status check: %d, body: %s", w.Code, w.Body.String())
+	}
+	var statusResult struct {
+		Status string `json:"status"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &statusResult)
+	if statusResult.Status != "pending" {
+		t.Errorf("status = %q, want pending", statusResult.Status)
+	}
+
+	// 3. Approve
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("approve: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var approveResult struct {
+		Status    string `json:"status"`
+		SessionID string `json:"session_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &approveResult)
+	if approveResult.Status != "approved" {
+		t.Errorf("approve status = %q, want approved", approveResult.Status)
+	}
+	if approveResult.SessionID == "" {
+		t.Error("expected session_id after approval")
+	}
+
+	// 4. Poll → approved with token
+	req = httptest.NewRequest("GET", "/v1/approval/"+mintResult.ApprovalID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("poll: status %d", w.Code)
+	}
+	var pollResult struct {
+		Status       string `json:"status"`
+		SessionToken string `json:"session_token"`
+		SessionID    string `json:"session_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &pollResult)
+	if pollResult.Status != "approved" {
+		t.Errorf("poll status = %q, want approved", pollResult.Status)
+	}
+	if pollResult.SessionToken == "" {
+		t.Error("expected session_token in poll after approval")
+	}
+	if !strings.HasPrefix(pollResult.SessionToken, "phxs_") {
+		t.Errorf("session_token = %q, want phxs_ prefix", pollResult.SessionToken)
+	}
+}
+
+func TestApprovalDeny(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Deny
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/deny", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("deny: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// Poll → denied
+	req = httptest.NewRequest("GET", "/v1/approval/"+mintResult.ApprovalID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var pollResult struct {
+		Status string `json:"status"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &pollResult)
+	if pollResult.Status != "denied" {
+		t.Errorf("status = %q, want denied", pollResult.Status)
+	}
+}
+
+func TestApprovalExpired(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+
+	// Use a very short step-up TTL
+	as := approval.NewStore(50 * time.Millisecond)
+	t.Cleanup(as.Stop)
+	srv.SetApprovalStore(as)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"deploy": {
+			Namespaces:     []string{"prod/*"},
+			BootstrapTrust: []string{"bearer"},
+			StepUp:         true,
+			StepUpTTL:      "50ms",
+		},
+	})
+
+	// Mint → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 202 {
+		t.Fatalf("status = %d, want 202", w.Code)
+	}
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Wait for expiry
+	time.Sleep(60 * time.Millisecond)
+
+	// Poll → expired
+	req = httptest.NewRequest("GET", "/v1/approval/"+mintResult.ApprovalID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var pollResult struct {
+		Status string `json:"status"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &pollResult)
+	if pollResult.Status != "expired" {
+		t.Errorf("status = %q, want expired", pollResult.Status)
+	}
+}
+
+func TestApprovalApproveRequiresAdmin(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Mint a session token (non-step-up role)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Try to approve with session token — should be rejected
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "ADMIN_AUTH_REQUIRED" {
+		t.Errorf("code = %q, want ADMIN_AUTH_REQUIRED", result.Code)
+	}
+}
+
+func TestApprovalSameTTYWarning(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint with requester_tty
+	body := `{"role":"deploy","requester_tty":"/dev/pts/0"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 202 {
+		t.Fatalf("status = %d, want 202", w.Code)
+	}
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Approve with same TTY
+	approveBody := `{"approver_tty":"/dev/pts/0"}`
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader(approveBody))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("approve: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		SameTTYWarning bool `json:"same_tty_warning"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if !result.SameTTYWarning {
+		t.Error("expected same_tty_warning=true when TTYs match")
+	}
+}
+
+func TestApprovalListPending(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Create two pending approvals
+	for i := 0; i < 2; i++ {
+		body := `{"role":"deploy"}`
+		req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != 202 {
+			t.Fatalf("mint %d: status %d", i, w.Code)
+		}
+	}
+
+	// List
+	req := httptest.NewRequest("GET", "/v1/approvals", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("list: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Approvals []struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+		} `json:"approvals"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Approvals) != 2 {
+		t.Errorf("pending count = %d, want 2", len(result.Approvals))
+	}
+}
+
+// --- Blocker fix tests: ACL admin required, status token gating, stale role re-check ---
+
+func TestApprovalApproveRejectsNonAdmin(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Try to approve with reader token (non-admin) — should be rejected
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "admin required") {
+		t.Errorf("expected 'admin required' in body, got: %s", w.Body.String())
+	}
+}
+
+func TestApprovalDenyRejectsNonAdmin(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Reader tries to deny
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/deny", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApprovalListRejectsNonAdmin(t *testing.T) {
+	srv, _ := setupTestServerWithStepUp(t)
+
+	req := httptest.NewRequest("GET", "/v1/approvals", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApprovalStatusHidesTokenFromNonRequester(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up with admin (who becomes the "requester" agent "admin")
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Approve it
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("approve: %d", w.Code)
+	}
+
+	// Reader (non-admin, not the requester) tries to poll — should be rejected
+	req = httptest.NewRequest("GET", "/v1/approval/"+mintResult.ApprovalID, nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApprovalRejectsStaleRole(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Remove the deploy role from config while approval is pending
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		// deploy role is gone
+	})
+
+	// Try to approve — should fail because role no longer exists
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "ROLE_NOT_FOUND" {
+		t.Errorf("code = %q, want ROLE_NOT_FOUND", result.Code)
+	}
+}
+
+func TestApprovalRejectsRoleNoLongerStepUp(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Change deploy role to no longer require step-up
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"deploy": {
+			Namespaces:     []string{"prod/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+			StepUp:         false, // no longer step-up
+		},
+	})
+
+	// Try to approve — should fail because role no longer requires step-up
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 409 {
+		t.Fatalf("status = %d, want 409, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "ROLE_CHANGED" {
+		t.Errorf("code = %q, want ROLE_CHANGED", result.Code)
+	}
+}
+
+func TestApprovalRejectsBootstrapTrustTightened(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up with bearer auth → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 202 {
+		t.Fatalf("status = %d, want 202", w.Code)
+	}
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Tighten bootstrap trust to mTLS only
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"deploy": {
+			Namespaces:     []string{"prod/*"},
+			BootstrapTrust: []string{"mtls"}, // was "bearer", now "mtls"
+			StepUp:         true,
+			StepUpTTL:      "2m",
+		},
+	})
+
+	// Approve — should fail because original bootstrap "bearer" no longer allowed
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "BOOTSTRAP_FAILED" {
+		t.Errorf("code = %q, want BOOTSTRAP_FAILED", result.Code)
+	}
+}
+
+func TestApprovalRejectsAttestationTightened(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up → 202 (no attestation required at request time)
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Add mTLS attestation requirement to deploy role
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"deploy": {
+			Namespaces:     []string{"prod/*"},
+			BootstrapTrust: []string{"bearer"},
+			Attestation:    []string{"require_mtls"}, // new requirement
+			StepUp:         true,
+			StepUpTTL:      "2m",
+		},
+	})
+
+	// Approve — should fail because original request was bearer, not mTLS
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "ATTESTATION_FAILED" {
+		t.Errorf("code = %q, want ATTESTATION_FAILED", result.Code)
+	}
+}
+
+func TestApprovalRejectsSealKeyTightened(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	// Mint step-up without seal key → 202
+	body := `{"role":"deploy"}`
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &mintResult)
+
+	// Add seal key requirement
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"deploy": {
+			Namespaces:     []string{"prod/*"},
+			BootstrapTrust: []string{"bearer"},
+			RequireSealKey: true, // new requirement
+			StepUp:         true,
+			StepUpTTL:      "2m",
+		},
+	})
+
+	// Approve — should fail because no seal key was provided at request time
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "SEAL_KEY_REQUIRED" {
+		t.Errorf("code = %q, want SEAL_KEY_REQUIRED", result.Code)
+	}
+}
+
+func TestSessionListAdmin(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	// Mint two sessions for different roles
+	mintTestSession(t, srv, adminToken, "dev")
+	mintTestSession(t, srv, adminToken, "writer")
+
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(result.Sessions))
+	}
+}
+
+func TestSessionListSelfOnly(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Add a non-admin agent that can mint sessions but has no admin on sessions
+	srv.acl = acl.NewFromConfig(&acl.ACLConfig{
+		Agents: map[string]acl.Agent{
+			"admin": {
+				Name:      "admin",
+				TokenHash: crypto.HashToken("admin-token"),
+				Permissions: []acl.Permission{
+					{Path: "*", Actions: []acl.Action{acl.ActionAdmin}},
+				},
+			},
+			"reader": {
+				Name:      "reader",
+				TokenHash: crypto.HashToken("reader-token"),
+				Permissions: []acl.Permission{
+					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+				},
+			},
+		},
+	})
+
+	// Mint sessions as different agents
+	mintTestSession(t, srv, adminToken, "dev")     // admin's session
+	mintTestSession(t, srv, "reader-token", "dev") // reader's session
+
+	// Reader should only see their own
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 1 {
+		t.Fatalf("expected 1 session (own only), got %d", len(result.Sessions))
+	}
+	if result.Sessions[0]["agent"] != "reader" {
+		t.Errorf("expected agent=reader, got %v", result.Sessions[0]["agent"])
+	}
+}
+
+func TestSessionListSessionToken(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Mint another session to ensure it's not visible
+	mintTestSession(t, srv, adminToken, "writer")
+
+	// Session token caller should only see their own session
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 1 {
+		t.Fatalf("expected 1 session (own only), got %d", len(result.Sessions))
+	}
+}
+
+func TestSessionRevokeAdmin(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Extract session ID from the session list
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) == 0 {
+		t.Fatal("no sessions to revoke")
+	}
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Admin revokes the session
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("revoke: status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var revokeResult struct {
+		Status    string `json:"status"`
+		SessionID string `json:"session_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &revokeResult)
+	if revokeResult.Status != "revoked" {
+		t.Errorf("status = %q, want 'revoked'", revokeResult.Status)
+	}
+
+	// Verify the revoked session token is rejected
+	_ = sessionToken
+	req = httptest.NewRequest("GET", "/v1/secrets/test/secret1", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("expected 401 for revoked session, got %d", w.Code)
+	}
+}
+
+func TestSessionRevokeSelf(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// List to get session ID via the session token itself
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) == 0 {
+		t.Fatal("no sessions found")
+	}
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Session token revokes itself
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("self-revoke: status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionRevokeOtherDenied(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Reconfigure ACL with a non-admin reader
+	srv.acl = acl.NewFromConfig(&acl.ACLConfig{
+		Agents: map[string]acl.Agent{
+			"admin": {
+				Name:      "admin",
+				TokenHash: crypto.HashToken("admin-token"),
+				Permissions: []acl.Permission{
+					{Path: "*", Actions: []acl.Action{acl.ActionAdmin}},
+				},
+			},
+			"reader": {
+				Name:      "reader",
+				TokenHash: crypto.HashToken("reader-token"),
+				Permissions: []acl.Permission{
+					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+				},
+			},
+		},
+	})
+
+	// Admin mints a session
+	mintTestSession(t, srv, adminToken, "dev")
+
+	// Get admin's session ID
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) == 0 {
+		t.Fatal("no sessions found")
+	}
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Reader tries to revoke admin's session - should fail
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionInfo(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	mintTestSession(t, srv, adminToken, "dev")
+
+	// Get session ID
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	sessionID := listResult.Sessions[0].SessionID
+
+	// Get session info
+	req = httptest.NewRequest("GET", "/v1/sessions/"+sessionID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("info: status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var info struct {
+		SessionID string `json:"session_id"`
+		Role      string `json:"role"`
+		Agent     string `json:"agent"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &info)
+	if info.SessionID != sessionID {
+		t.Errorf("session_id = %q, want %q", info.SessionID, sessionID)
+	}
+	if info.Role != "dev" {
+		t.Errorf("role = %q, want 'dev'", info.Role)
+	}
+	if info.Agent != "admin" {
+		t.Errorf("agent = %q, want 'admin'", info.Agent)
+	}
+}
+
+func TestSessionRevokedDeniesAccess(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Store a test secret first
+	body := `{"value":"secret123"}`
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/mysecret", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 && w.Code != 201 {
+		t.Fatalf("set secret: status %d", w.Code)
+	}
+
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Use session to read secret - should work
+	req = httptest.NewRequest("GET", "/v1/secrets/test/mysecret", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("get before revoke: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// Get session ID and revoke
+	req = httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	// Find the session we minted (most recent)
+	sessionID := listResult.Sessions[len(listResult.Sessions)-1].SessionID
+
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("revoke: status %d", w.Code)
+	}
+
+	// Try to use revoked session - should fail
+	req = httptest.NewRequest("GET", "/v1/secrets/test/mysecret", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401 for revoked session, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionListRoleFilter(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	mintTestSession(t, srv, adminToken, "dev")
+	mintTestSession(t, srv, adminToken, "writer")
+
+	// Filter by role=dev
+	req := httptest.NewRequest("GET", "/v1/sessions?role=dev", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var result struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if len(result.Sessions) != 1 {
+		t.Fatalf("expected 1 session with role=dev, got %d", len(result.Sessions))
+	}
+	if result.Sessions[0]["role"] != "dev" {
+		t.Errorf("expected role=dev, got %v", result.Sessions[0]["role"])
+	}
+}
+
+func TestSessionTokenCannotInspectSiblingSession(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+
+	// Mint two sessions for the same agent (admin)
+	sessionToken1 := mintTestSession(t, srv, adminToken, "dev")
+	mintTestSession(t, srv, adminToken, "writer")
+
+	// Get session IDs via admin bearer
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+			Role      string `json:"role"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	if len(listResult.Sessions) < 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(listResult.Sessions))
+	}
+
+	// Find the "writer" session (the sibling)
+	var siblingID string
+	for _, s := range listResult.Sessions {
+		if s.Role == "writer" {
+			siblingID = s.SessionID
+			break
+		}
+	}
+	if siblingID == "" {
+		t.Fatal("could not find writer session")
+	}
+
+	// Session token 1 (dev) tries to inspect the writer session — should be denied
+	req = httptest.NewRequest("GET", "/v1/sessions/"+siblingID, nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken1)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for sibling session info, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// Session token 1 (dev) tries to revoke the writer session — should be denied
+	req = httptest.NewRequest("POST", "/v1/sessions/"+siblingID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken1)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for sibling session revoke, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionExpiredStructuredDenial(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	// Create a session store with a very short TTL
+	ss, err := session.NewStore(1 * time.Second)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"dev": {
+			Namespaces:     []string{"test/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	})
+
+	// Mint a session with the short TTL
+	sessionToken := mintTestSession(t, srv, "admin-token", "dev")
+
+	// Wait for it to expire
+	time.Sleep(2 * time.Second)
+
+	// Try to use the expired session
+	req := httptest.NewRequest("GET", "/v1/secrets/test/secret1", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "SESSION_EXPIRED" {
+		t.Errorf("code = %q, want SESSION_EXPIRED", result.Code)
+	}
+}
+
+func TestSessionRevokedStructuredDenial(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Get session ID and revoke it
+	req := httptest.NewRequest("GET", "/v1/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+		} `json:"sessions"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &listResult)
+	sessionID := listResult.Sessions[len(listResult.Sessions)-1].SessionID
+
+	// Revoke
+	req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// Try to use the revoked session
+	req = httptest.NewRequest("GET", "/v1/secrets/test/secret1", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Code != "SESSION_REVOKED" {
+		t.Errorf("code = %q, want SESSION_REVOKED", result.Code)
+	}
+}
+
+func TestSessionTokenBlockedOnAdminEndpoints(t *testing.T) {
+	srv, adminToken := setupTestServerWithSessions(t)
+	sessionToken := mintTestSession(t, srv, adminToken, "dev")
+
+	// Admin endpoints that use authenticate() should all reject session tokens
+	adminEndpoints := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{"GET", "/v1/audit", ""},
+		{"GET", "/v1/agents", ""},
+		{"POST", "/v1/agents", `{"name":"x","token":"y","permissions":[]}`},
+		{"GET", "/v1/status", ""},
+		{"POST", "/v1/rotate-master", ""},
+		{"GET", "/v1/policy/check?path=test/x&check=allow_unseal", ""},
+	}
+
+	for _, ep := range adminEndpoints {
+		var req *http.Request
+		if ep.body != "" {
+			req = httptest.NewRequest(ep.method, ep.path, strings.NewReader(ep.body))
+		} else {
+			req = httptest.NewRequest(ep.method, ep.path, nil)
+		}
+		req.Header.Set("Authorization", "Bearer "+sessionToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+
+		if w.Code != 401 {
+			t.Errorf("%s %s: expected 401, got %d, body: %s", ep.method, ep.path, w.Code, w.Body.String())
+			continue
+		}
+
+		var result struct {
+			Code string `json:"code"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &result)
+		if result.Code != "ADMIN_AUTH_REQUIRED" {
+			t.Errorf("%s %s: code = %q, want ADMIN_AUTH_REQUIRED", ep.method, ep.path, result.Code)
+		}
 	}
 }

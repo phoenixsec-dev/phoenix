@@ -15,13 +15,15 @@
 
 # Phoenix Secrets
 
-Phoenix Secrets is a self-hosted secrets manager purpose-built for AI agent workflows.
+Phoenix Secrets is a self-hosted secrets manager built for AI agent workflows.
 
-When a secret enters an LLM's context — through a prompt, tool response, or log — you are trusting the model provider's entire infrastructure with that value: logging, caching, training pipelines, retention policies. You have no visibility into that chain of custody and no way to revoke it after the fact.
+Agents are taking on real work — running tools, installing skills from marketplaces, calling APIs with keys that cost real money. But the security story hasn't caught up. Frameworks like OpenClaw give agents serious capabilities while their credentials sit in plaintext environment variables and config files, readable by every skill and tool in the stack. Making agents smarter does not make them security-conscious. That gap is what Phoenix was built to close.
 
-Phoenix keeps secrets out of model context entirely. That is what **context-safe** means: an agent can use a secret to do its job without the raw value ever appearing in prompts, tool responses, logs, or the model's context window.
+Phoenix introduces what we call **context-safe** secrets management: an agent can use a secret to do its job without the raw value ever appearing in prompts, tool responses, logs, or the model's context window. When a secret enters an LLM's context — through any of those paths — you are trusting the model provider's entire infrastructure with that value. You have no visibility into that chain of custody and no way to revoke it after the fact. No other secrets tool treats keeping values out of model context as a design goal.
 
-No other secrets tool treats this as a design goal. Traditional managers like Vault and SOPS assume the consumer is a trusted process. Framework secret-reference features (like OpenClaw's SecretRef) solve config hygiene — they keep values out of config files, but not out of model context. Phoenix provides the actual security layer underneath all of them.
+Traditional managers like Vault and SOPS assume the consumer is a trusted process. Framework features like OpenClaw's SecretRef solve config hygiene — keeping values out of config files — but not out of model context. Phoenix is the security layer underneath.
+
+**The OpenClaw problem:** OpenClaw came out of nowhere and changed the way the world thinks about using agents in their daily lives. But it also introduced significant security risks. Skills run with the same privileges as the agent — any skill, including ones downloaded from a marketplace, can read your environment variables and config files. If your API keys are in the environment, every skill you install has access to all of them. OpenClaw's own threat model calls this out as a critical open risk, and there is no sandboxing or credential isolation for skills today. Phoenix was built to close that gap — not just context-safety, but encrypted storage, per-agent access control, audit logging, and credential isolation that OpenClaw doesn't have on its own. See [Integrations](docs/integrations.md) for the full OpenClaw setup.
 
 ```bash
 # Store a secret
@@ -38,9 +40,9 @@ phoenix resolve phoenix://myapp/api-key
 
 ## Why Phoenix Secrets?
 
-You know your setup is sketchy. Raw API keys in `.env` files, pasted into prompts, passed through scripts, scattered across agent configs. But secret management shouldn't become a full-time job, and enterprise platforms like Vault are overkill for a team of five.
+You know your setup is sketchy. Raw API keys in `.env` files, pasted into prompts, passed through scripts, scattered across agent configs. If you're running an agent framework like OpenClaw, every skill you install gets the same access to those credentials that your agent has — and the ecosystem is moving fast enough that nobody has stopped to fix that yet. Secret management shouldn't become a full-time job, but ignoring it isn't an option anymore either. Enterprise platforms like Vault are overkill for a team of five.
 
-Phoenix is built for self-hosted, homelab, small-team, and internal deployments where you want real controls without the overhead. No database, no cloud account, no external service required — and your agent can help you set the whole thing up:
+Phoenix is built for the people actually running agents today — self-hosted, homelab, small-team, and internal deployments where you want real controls without the overhead. No database, no cloud account, no external service required — and your agent can help you set the whole thing up:
 
 - **Context-safe delivery** — secrets stay out of agent prompts, tool output, and logs
 - **Encrypted storage** — AES-256-GCM envelope encryption with per-namespace keys
@@ -56,20 +58,20 @@ Phoenix is built for self-hosted, homelab, small-team, and internal deployments 
 
 Two binaries (`phoenix` client + `phoenix-server`), single codebase, no external runtime dependencies.
 
-**Sealed responses** use per-agent key pairs (X25519) so the server encrypts each response to a specific agent. Even on a shared host, one agent cannot read another's secrets. In MCP mode, tool output contains opaque tokens instead of plaintext — the raw value never enters the model's context. See [Sealed Responses](docs/sealed-responses.md).
+**Sealed responses** mean one agent cannot read another agent's secrets, even on the same machine. The server encrypts each response to a specific agent's key pair, so intercepting the response is useless without the matching private key. In MCP mode, tool output contains opaque tokens instead of plaintext — the raw value never enters the model's context. Under the hood this is X25519 key agreement with per-response encryption. See [Sealed Responses](docs/sealed-responses.md).
 
 Because "just trust the model stack with your secrets" is not a serious security plan.
 
-|  | `.env` / framework refs | Phoenix Secrets |
-|---|---|---|
-| Plaintext out of configs | Yes | Yes |
-| Plaintext out of model context | No | Yes — sealed responses + exec isolation |
-| Encrypted at rest | No | AES-256-GCM envelope encryption |
-| Per-agent access control | No | Glob-pattern ACL per agent |
-| Identity attestation | No | mTLS + policy + optional local attestation |
-| Runtime audit trail | No | Every access logged with identity |
-| Credential stripping | No | `phoenix exec` strips broker creds |
-| Key rotation | No | Two-phase commit KEK rotation |
+|  | `.env` files | OpenClaw SecretRef | Phoenix Secrets |
+|---|---|---|---|
+| Secrets out of config files | No | Yes | Yes |
+| Secrets out of model context | No | No | Yes |
+| Encrypted at rest | No | No | Yes (AES-256-GCM) |
+| Per-agent access control | No | No | Yes |
+| Identity attestation | No | No | Yes (mTLS + policy) |
+| Runtime audit trail | No | No | Yes |
+| Credential stripping | No | No | Yes |
+| Key rotation | No | No | Yes |
 
 ---
 
@@ -102,13 +104,16 @@ phoenix-server --config /data/phoenix/config.json
 ### 4. Store and use a secret
 
 ```bash
-export PHOENIX_SERVER="https://localhost:9090"
+export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<your-admin-token>"
-export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 
 phoenix set myapp/api-key -v "sk-live-abc123" -d "API key"
 phoenix exec --env API_KEY=phoenix://myapp/api-key -- env | grep API_KEY
 ```
+
+> The default server config listens on `127.0.0.1:9090` over plain HTTP.
+> This is safe for local-only use. For LAN or production deployment,
+> enable TLS — see [LAN Deployment](docs/lan-deployment.md).
 
 For the full first-run walkthrough, see [Getting Started](docs/getting-started.md).
 
@@ -121,6 +126,8 @@ For the full first-run walkthrough, see [Getting Started](docs/getting-started.m
 | First install and setup | [Getting Started](docs/getting-started.md) |
 | CLI commands and workflows | [CLI Usage](docs/cli-usage.md) |
 | Auth, mTLS, and identity | [Authentication](docs/authentication.md) |
+| Session tokens and role-based access | [Session Identity](docs/session-identity.md) |
+| Operator dashboard (browser UI) | [Dashboard](docs/dashboard.md) |
 | Per-path policy and attestation | [Policy and Attestation](docs/policy-and-attestation.md) |
 | Sealed responses and multi-agent | [Sealed Responses](docs/sealed-responses.md) / [Multi-Agent Setup](docs/multi-agent-setup.md) |
 | MCP, SDKs, OpenClaw, API | [Integrations](docs/integrations.md) |

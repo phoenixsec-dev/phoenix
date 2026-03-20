@@ -17,11 +17,20 @@ import (
 
 // Error represents a Phoenix API error.
 type Error struct {
-	Message string
-	Status  int
+	Message     string
+	Status      int
+	Code        string // structured denial code (e.g., SCOPE_EXCEEDED, ACTION_DENIED)
+	Remediation string // hint for resolving the error
 }
 
 func (e *Error) Error() string {
+	if e.Code != "" {
+		msg := fmt.Sprintf("phoenix: HTTP %d [%s]: %s", e.Status, e.Code, e.Message)
+		if e.Remediation != "" {
+			msg += "\n  hint: " + e.Remediation
+		}
+		return msg
+	}
 	if e.Status > 0 {
 		return fmt.Sprintf("phoenix: HTTP %d: %s", e.Status, e.Message)
 	}
@@ -50,8 +59,10 @@ type Client struct {
 	Server     string
 	Token      string
 	HTTPClient *http.Client
+	Role       string    // session role (set after MintSession)
 	sealPubKey string    // base64-encoded public key for sealed requests
 	sealPriv   *[32]byte // private key for decrypting sealed responses
+	sessionExp time.Time // token expiry for auto-renewal
 }
 
 // New creates a new Phoenix client. Server and token default to
@@ -69,13 +80,33 @@ func New(server, token string) *Client {
 		token = os.Getenv("PHOENIX_TOKEN")
 	}
 
-	return &Client{
+	c := &Client{
 		Server: server,
 		Token:  token,
 		HTTPClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
+
+	return c
+}
+
+// NewWithRole creates a client and mints a scoped session for the given role.
+// The bootstrap token (from token param or PHOENIX_TOKEN env) is used only for
+// the mint request and then replaced with the scoped session token.
+// Returns an error if minting fails (fail-closed: no fallback to bootstrap token).
+func NewWithRole(server, token, role string) (*Client, error) {
+	c := New(server, token)
+	if role == "" {
+		role = os.Getenv("PHOENIX_ROLE")
+	}
+	if role == "" {
+		return c, nil
+	}
+	if err := c.MintSession(role); err != nil {
+		return nil, fmt.Errorf("session mint for role %q: %w", role, err)
+	}
+	return c, nil
 }
 
 // SetSealKey loads a seal private key from a file, enabling sealed mode.
@@ -172,7 +203,99 @@ func (c *Client) ResolveBatch(refs []string) (*ResolveResult, error) {
 	return &result, nil
 }
 
+// MintSession mints a session token for the given role using the current
+// token as bootstrap auth. On success, replaces c.Token with the session token.
+func (c *Client) MintSession(role string) error {
+	mintBody := map[string]string{"role": role}
+	if c.sealPubKey != "" {
+		mintBody["seal_public_key"] = c.sealPubKey
+	}
+
+	var result struct {
+		SessionToken string `json:"session_token"`
+		ExpiresAt    string `json:"expires_at"`
+		Role         string `json:"role"`
+	}
+	if err := c.doRequest("POST", "/v1/session/mint", mintBody, &result); err != nil {
+		return err
+	}
+
+	c.Token = result.SessionToken
+	c.Role = result.Role
+	if exp, err := time.Parse(time.RFC3339, result.ExpiresAt); err == nil {
+		c.sessionExp = exp
+	}
+	return nil
+}
+
+// RenewSession renews the current session token.
+// Only works if the client holds a session token (from MintSession).
+func (c *Client) RenewSession() error {
+	var result struct {
+		SessionToken string `json:"session_token"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := c.doRequest("POST", "/v1/session/renew", map[string]string{}, &result); err != nil {
+		return err
+	}
+	c.Token = result.SessionToken
+	if exp, err := time.Parse(time.RFC3339, result.ExpiresAt); err == nil {
+		c.sessionExp = exp
+	}
+	return nil
+}
+
+// SessionInfo contains details about an active session.
+type SessionInfo struct {
+	SessionID       string   `json:"session_id"`
+	Role            string   `json:"role"`
+	Agent           string   `json:"agent"`
+	Namespaces      []string `json:"namespaces"`
+	Actions         []string `json:"actions"`
+	BootstrapMethod string   `json:"bootstrap_method"`
+	SourceIP        string   `json:"source_ip"`
+	CreatedAt       string   `json:"created_at"`
+	ExpiresAt       string   `json:"expires_at"`
+	Revoked         bool     `json:"revoked"`
+}
+
+// ListSessions returns sessions visible to the caller.
+func (c *Client) ListSessions() ([]SessionInfo, error) {
+	var result struct {
+		Sessions []SessionInfo `json:"sessions"`
+	}
+	if err := c.doRequest("GET", "/v1/sessions", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Sessions, nil
+}
+
+// RevokeSession revokes a session by ID.
+func (c *Client) RevokeSession(sessionID string) error {
+	return c.doRequest("POST", "/v1/sessions/"+sessionID+"/revoke", map[string]string{}, nil)
+}
+
+// IsApprovalRequired returns true if the error indicates approval is needed.
+func (e *Error) IsApprovalRequired() bool { return e.Code == "APPROVAL_REQUIRED" }
+
+// IsSessionExpired returns true if the error indicates the session has expired.
+func (e *Error) IsSessionExpired() bool { return e.Code == "SESSION_EXPIRED" }
+
+// IsScopeExceeded returns true if the error indicates the request is outside session scope.
+func (e *Error) IsScopeExceeded() bool { return e.Code == "SCOPE_EXCEEDED" }
+
+// IsActionDenied returns true if the error indicates the action is not permitted.
+func (e *Error) IsActionDenied() bool { return e.Code == "ACTION_DENIED" }
+
+// IsSessionRevoked returns true if the error indicates the session was revoked.
+func (e *Error) IsSessionRevoked() bool { return e.Code == "SESSION_REVOKED" }
+
 func (c *Client) doRequest(method, path string, body interface{}, out interface{}) error {
+	// Auto-renew session if nearing expiry (within 5 min)
+	if c.Role != "" && !c.sessionExp.IsZero() && time.Until(c.sessionExp) < 5*time.Minute {
+		_ = c.RenewSession() // best-effort
+	}
+
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -208,11 +331,22 @@ func (c *Client) doRequest(method, path string, body interface{}, out interface{
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Error string `json:"error"`
+		var structured struct {
+			Error       string `json:"error"`
+			Code        string `json:"code"`
+			Detail      string `json:"detail"`
+			Remediation string `json:"remediation"`
 		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			return &Error{Message: errResp.Error, Status: resp.StatusCode}
+		if json.Unmarshal(respBody, &structured) == nil && structured.Code != "" {
+			return &Error{
+				Message:     structured.Detail,
+				Status:      resp.StatusCode,
+				Code:        structured.Code,
+				Remediation: structured.Remediation,
+			}
+		}
+		if json.Unmarshal(respBody, &structured) == nil && structured.Error != "" {
+			return &Error{Message: structured.Error, Status: resp.StatusCode}
 		}
 		return &Error{Message: fmt.Sprintf("HTTP %d", resp.StatusCode), Status: resp.StatusCode}
 	}

@@ -19,12 +19,15 @@ import (
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
+	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/ref"
+	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
 )
@@ -119,6 +122,9 @@ type Server struct {
 	tokens        *token.Issuer  // nil when short-lived tokens are not configured
 	startTime     time.Time      // server start time for uptime reporting
 	authRL        *rateLimiter
+	sessions      *session.Store               // nil when sessions are not configured
+	sessionRoles  map[string]config.RoleConfig // nil when sessions are not configured
+	approvals     *approval.Store              // nil when step-up not configured
 	mux           *http.ServeMux
 }
 
@@ -186,6 +192,29 @@ func (s *Server) SetTokenIssuer(ti *token.Issuer) {
 	s.tokens = ti
 }
 
+// SetSessionStore configures the session identity store.
+func (s *Server) SetSessionStore(ss *session.Store) {
+	s.sessions = ss
+}
+
+// SetSessionRoles configures the role definitions for session minting.
+func (s *Server) SetSessionRoles(roles map[string]config.RoleConfig) {
+	s.sessionRoles = roles
+}
+
+// SetApprovalStore configures the step-up approval store.
+func (s *Server) SetApprovalStore(as *approval.Store) {
+	s.approvals = as
+}
+
+// SetDashboard registers the dashboard handler under /dashboard/.
+func (s *Server) SetDashboard(h http.Handler) {
+	s.mux.Handle("/dashboard/", h)
+	s.mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
+	})
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -199,6 +228,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/audit", s.handleAuditQuery)
 	s.mux.HandleFunc("POST /v1/agents", s.handleCreateAgent)
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
+	s.mux.HandleFunc("DELETE /v1/agents/", s.handleDeleteAgent)
 	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
 	s.mux.HandleFunc("POST /v1/certs/revoke", s.handleRevokeCert)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
@@ -210,6 +240,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
 	s.mux.HandleFunc("GET /v1/policy/check", s.handlePolicyCheck)
+	s.mux.HandleFunc("POST /v1/session/mint", s.handleSessionMint)
+	s.mux.HandleFunc("POST /v1/session/renew", s.handleSessionRenew)
+	s.mux.HandleFunc("GET /v1/approvals", s.handleApprovalList)
+	s.mux.HandleFunc("/v1/approval/", s.handleApprovalRouter)
+	s.mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
+	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -217,30 +253,93 @@ type authInfo struct {
 	Agent           string
 	UsedMTLS        bool
 	UsedBearer      bool
+	IsLocal         bool                   // true when client IP is loopback
 	CertFingerprint string                 // "sha256:<hex>" or empty
 	TokenIssuedAt   *time.Time             // set when authenticated via short-lived token
 	Process         *policy.ProcessContext // set when token carries process attestation claims
+
+	// Session identity (set when authenticated via session token)
+	UsedSession       bool
+	SessionID         string
+	SessionRole       string
+	SessionNamespaces []string
+	SessionActions    []string
 }
 
-// authenticate identifies the calling agent from the request.
-// It tries mTLS client certificate first (if CA is configured and client
-// presented a cert), then falls back to bearer token authentication.
-// Both paths are gated by their respective feature flags.
-// Returns the agent name or an error.
+// authenticate identifies the calling agent for admin/control-plane handlers.
+// Session tokens are rejected here — scoped session credentials must not
+// reach admin endpoints even if the underlying agent has admin ACL.
+// Data-plane handlers use authenticateInfo() directly and enforce session
+// scope/action checks themselves.
 func (s *Server) authenticate(r *http.Request) (string, error) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
 		return "", err
+	}
+	if info.UsedSession {
+		return "", &sessionAuthError{
+			code: "ADMIN_AUTH_REQUIRED",
+			err:  fmt.Errorf("session tokens cannot access admin endpoints"),
+		}
 	}
 	return info.Agent, nil
 }
 
 // authenticateInfo identifies the calling agent and collects attestation
 // evidence from the request (auth method, cert fingerprint, etc.).
+//
+// Auth priority: session token > mTLS > short-lived token > bearer.
+// Session tokens are checked first so that a renewal request carrying both
+// a phxs_ token and a client certificate authenticates via the session.
+// When a session is authenticated and a verified client cert is also present,
+// the cert evidence (UsedMTLS, CertFingerprint) is layered onto the authInfo
+// so that role attestation checks can inspect the current TLS state.
 func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	ip := clientIP(r)
+	local := session.IsLoopback(ip)
 
-	// Try mTLS first: check for verified client certificate
+	tok := extractToken(r)
+
+	// --- Session token authentication (phxs_ prefix) ---
+	// Checked first: session tokens are scoped credentials that agents use
+	// for all operations after bootstrap. If present, session auth is
+	// authoritative for identity; mTLS evidence is layered on as attestation.
+	if s.sessions != nil && tok != "" && strings.HasPrefix(tok, session.TokenPrefix) {
+		sess, err := s.sessions.Validate(tok)
+		if err != nil {
+			code := "SESSION_INVALID"
+			if errors.Is(err, session.ErrTokenExpired) {
+				code = "SESSION_EXPIRED"
+			} else if errors.Is(err, session.ErrSessionRevoked) {
+				code = "SESSION_REVOKED"
+			}
+			// Extract identity for audit even from expired/revoked tokens
+			if agent, sessID, known := s.sessions.ParseClaimsInsecure(tok); known {
+				s.logAudit(s.audit.LogSessionDenied(agent, "session.auth", "", ip, code, sessID))
+			}
+			return nil, &sessionAuthError{code: code, err: err}
+		}
+		info := &authInfo{
+			Agent:             sess.Agent,
+			IsLocal:           local,
+			UsedSession:       true,
+			SessionID:         sess.ID,
+			SessionRole:       sess.Role,
+			SessionNamespaces: sess.Namespaces,
+			SessionActions:    sess.Actions,
+		}
+		// Layer on mTLS attestation evidence from the current TLS connection.
+		// The session token is the auth method; the cert is attestation context.
+		if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			if _, verifyErr := s.ca.VerifyClientCert(r.TLS.PeerCertificates); verifyErr == nil {
+				info.UsedMTLS = true
+				info.CertFingerprint = certFingerprint(r.TLS.PeerCertificates[0].Raw)
+			}
+		}
+		return info, nil
+	}
+
+	// --- mTLS authentication ---
 	// Rate limiting is NOT applied to mTLS — it uses cryptographic auth, not secrets.
 	if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		agentName, err := s.ca.VerifyClientCert(r.TLS.PeerCertificates)
@@ -250,6 +349,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			return &authInfo{
 				Agent:           agentName,
 				UsedMTLS:        true,
+				IsLocal:         local,
 				CertFingerprint: fp,
 			}, nil
 		}
@@ -257,14 +357,14 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
 	}
 
-	// Try short-lived token authentication
-	tok := extractToken(r)
+	// --- Short-lived token authentication ---
 	if s.tokens != nil && tok != "" {
 		claims, err := s.tokens.Validate(tok)
 		if err == nil {
 			iat := claims.IssuedAt
 			info := &authInfo{
 				Agent:         claims.Agent,
+				IsLocal:       local,
 				TokenIssuedAt: &iat,
 			}
 			// Propagate process attestation claims from the token
@@ -282,7 +382,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		// Not a valid short-lived token — fall through to bearer
 	}
 
-	// Fall back to bearer token if enabled — rate limit applies here
+	// --- Bearer token authentication ---
 	if err := s.authRL.check(ip); err != nil {
 		return nil, err
 	}
@@ -301,6 +401,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	return &authInfo{
 		Agent:      agent,
 		UsedBearer: true,
+		IsLocal:    local,
 	}, nil
 }
 
@@ -332,6 +433,8 @@ func (s *Server) attestFull(r *http.Request, path string, info *authInfo, nonceV
 		SignatureVerified: signatureVerified,
 		TokenIssuedAt:     info.TokenIssuedAt,
 		SealKeyPresented:  sealKeyValidated,
+		SessionID:         info.SessionID,
+		SessionRole:       info.SessionRole,
 	}
 	return s.policy.Evaluate(path, ctx)
 }
@@ -384,6 +487,143 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// jsonDenied sends a structured denial response with a machine-readable code.
+func jsonDenied(w http.ResponseWriter, errMsg, code, detail, remediation string, httpCode int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpCode)
+	resp := map[string]string{
+		"error":  errMsg,
+		"code":   code,
+		"detail": detail,
+	}
+	if remediation != "" {
+		resp["remediation"] = remediation
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// sessionAuthError is returned by authenticateInfo when a session token is
+// present but invalid (expired, revoked, etc.). It carries a structured
+// denial code so handlers can return machine-readable errors.
+type sessionAuthError struct {
+	code string // SESSION_EXPIRED, SESSION_REVOKED, SESSION_INVALID
+	err  error
+}
+
+func (e *sessionAuthError) Error() string { return e.err.Error() }
+
+// handleAuthError writes an appropriate error response for authentication failures.
+// If the error is a session auth error, it returns a structured denial with the
+// machine-readable code. Otherwise, it returns a generic 401.
+func handleAuthError(w http.ResponseWriter, err error) {
+	var sae *sessionAuthError
+	if errors.As(err, &sae) {
+		jsonDenied(w, "access_denied", sae.code,
+			sae.err.Error(),
+			"mint a new session",
+			http.StatusUnauthorized)
+		return
+	}
+	jsonError(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// auditAllowed logs an allowed action, including session ID when a session was used.
+func (s *Server) auditAllowed(info *authInfo, action, path, ip string) {
+	if info != nil && info.UsedSession {
+		s.logAudit(s.audit.LogSessionAllowed(info.Agent, action, path, ip, info.SessionID))
+	} else {
+		agent := ""
+		if info != nil {
+			agent = info.Agent
+		}
+		s.logAudit(s.audit.LogAllowed(agent, action, path, ip))
+	}
+}
+
+// auditDenied logs a denied action, including session ID when a session was used.
+func (s *Server) auditDenied(info *authInfo, action, path, ip, reason string) {
+	if info != nil && info.UsedSession {
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, action, path, ip, reason, info.SessionID))
+	} else {
+		agent := ""
+		if info != nil {
+			agent = info.Agent
+		}
+		s.logAudit(s.audit.LogDenied(agent, action, path, ip, reason))
+	}
+}
+
+// checkSessionScope verifies the request path is within session namespace scope.
+// Returns true if access is allowed, false if denied (and writes the error response).
+func (s *Server) checkSessionScope(w http.ResponseWriter, info *authInfo, path, ip string) bool {
+	if !info.UsedSession {
+		return true
+	}
+	if !session.PathInScope(path, info.SessionNamespaces) {
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
+			"request a session with a role that includes this namespace",
+			http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// checkSessionAction verifies the requested action is allowed by the session role.
+// Returns true if access is allowed, false if denied (and writes the error response).
+func (s *Server) checkSessionAction(w http.ResponseWriter, info *authInfo, action, path, ip string) bool {
+	if !info.UsedSession {
+		return true
+	}
+	for _, a := range info.SessionActions {
+		if a == action || a == "admin" {
+			return true
+		}
+	}
+	s.logAudit(s.audit.LogSessionDenied(info.Agent, action, path, ip, "session_action", info.SessionID))
+	jsonDenied(w, "access_denied", "ACTION_DENIED",
+		fmt.Sprintf("action %q is not permitted by session role %q", action, info.SessionRole),
+		"request a session with a role that includes this action",
+		http.StatusForbidden)
+	return false
+}
+
+// checkSessionSealKey verifies the request seal key matches the session binding.
+// Returns true if check passes, false if denied.
+func (s *Server) checkSessionSealKey(w http.ResponseWriter, r *http.Request, info *authInfo) bool {
+	if !info.UsedSession || info.SessionID == "" {
+		return true
+	}
+	sess := s.sessions.Get(info.SessionID)
+	if sess == nil || sess.SealKeyFingerprint == "" {
+		return true
+	}
+	header := r.Header.Get("X-Phoenix-Seal-Key")
+	if header == "" {
+		// Seal key is bound but not presented -- deny
+		jsonDenied(w, "access_denied", "SEAL_KEY_MISMATCH",
+			"session has a bound seal key but no X-Phoenix-Seal-Key header was provided",
+			"include the seal key that was used when minting this session",
+			http.StatusBadRequest)
+		return false
+	}
+	pubKey, err := crypto.DecodeSealKey(header)
+	if err != nil {
+		jsonError(w, "malformed seal key header: "+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	fp := session.SealKeyFingerprint(pubKey[:])
+	if fp != sess.SealKeyFingerprint {
+		jsonDenied(w, "access_denied", "SEAL_KEY_MISMATCH",
+			"request seal key does not match session binding",
+			"use the same seal key that was provided at session mint",
+			http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // jsonOK sends a JSON success response.
 func jsonOK(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -408,7 +648,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -416,9 +656,21 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Session scope enforcement (before ACL)
+	if path != "" && !strings.HasSuffix(path, "/") {
+		if !s.checkSessionScope(w, info, path, ip) {
+			return
+		}
+	}
+
+	// Session seal key binding check
+	if !s.checkSessionSealKey(w, r, info) {
+		return
+	}
+
 	// Validate seal header early so attestation gets the correct state
 	// for both list mode and single-secret reads.
-	sealKey, sealErr := s.validateSealHeader(r, agentName)
+	sealKey, sealErr := s.validateSealHeader(r, info)
 	if sealErr != nil {
 		jsonError(w, sealErr.Error(), http.StatusBadRequest)
 		return
@@ -427,6 +679,10 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// List mode: path is empty or ends with /
 	if path == "" || strings.HasSuffix(path, "/") {
+		// Session action enforcement: list
+		if !s.checkSessionAction(w, info, "list", path, ip) {
+			return
+		}
 		allPaths, err := s.backend.List(path)
 		if err != nil {
 			log.Printf("error listing secrets with prefix %q: %v", path, err)
@@ -435,6 +691,10 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		var visible []string
 		for _, p := range allPaths {
+			// Session scope filter: hide paths outside session namespace
+			if info.UsedSession && !session.PathInScope(p, info.SessionNamespaces) {
+				continue
+			}
 			if s.acl.Authorize(agentName, p, acl.ActionList) != nil {
 				continue
 			}
@@ -444,21 +704,26 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 			}
 			visible = append(visible, p)
 		}
-		s.logAudit(s.audit.LogAllowed(agentName, "list", path, ip))
+		s.auditAllowed(info, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"paths": visible})
+		return
+	}
+
+	// Session action enforcement: read_value
+	if !s.checkSessionAction(w, info, "read_value", path, ip) {
 		return
 	}
 
 	// Single secret read — requires read_value permission
 	if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "read_value", path, ip, "acl"))
+		s.auditDenied(info, "read_value", path, ip, "acl")
 		jsonError(w, "access denied: read_value permission required (use phoenix exec for context-free secret injection)", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check (with validated seal key state)
 	if err := s.attestFull(r, path, info, false, false, sealKeyValidated); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "read_value", path, ip, "attestation"))
+		s.auditDenied(info, "read_value", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -478,7 +743,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "read_value", path, ip))
+	s.auditAllowed(info, "read_value", path, ip)
 	if sealKey != nil {
 		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
 		if err != nil {
@@ -509,7 +774,7 @@ type setSecretRequest struct {
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -517,15 +782,23 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Session scope and action enforcement
+	if !s.checkSessionScope(w, info, path, ip) {
+		return
+	}
+	if !s.checkSessionAction(w, info, "write", path, ip) {
+		return
+	}
+
 	if err := s.acl.Authorize(agentName, path, acl.ActionWrite); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "write", path, ip, "acl"))
+		s.auditDenied(info, "write", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "write", path, ip, "attestation"))
+		s.auditDenied(info, "write", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -557,14 +830,14 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "write", path, ip))
+	s.auditAllowed(info, "write", path, ip)
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -572,15 +845,23 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Session scope and action enforcement
+	if !s.checkSessionScope(w, info, path, ip) {
+		return
+	}
+	if !s.checkSessionAction(w, info, "delete", path, ip) {
+		return
+	}
+
 	if err := s.acl.Authorize(agentName, path, acl.ActionDelete); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "delete", path, ip, "acl"))
+		s.auditDenied(info, "delete", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.logAudit(s.audit.LogDenied(agentName, "delete", path, ip, "attestation"))
+		s.auditDenied(info, "delete", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -604,14 +885,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "delete", path, ip))
+	s.auditAllowed(info, "delete", path, ip)
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -664,7 +945,7 @@ type createAgentRequest struct {
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -726,7 +1007,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -737,6 +1018,43 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 	names := s.acl.ListAgents()
 	jsonOK(w, map[string]interface{}{"agents": names})
+}
+
+func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	agentName, err := s.authenticate(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	if err := s.acl.Authorize(agentName, "agents", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	target := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
+	if target == "" {
+		jsonError(w, "agent name required", http.StatusBadRequest)
+		return
+	}
+
+	if target == agentName {
+		jsonError(w, "cannot delete your own agent identity", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.acl.RemoveAgent(target); err != nil {
+		if errors.Is(err, acl.ErrAgentNotFound) {
+			jsonError(w, "agent not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("error deleting agent %q: %v", target, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.logAudit(s.audit.LogAllowed(agentName, "delete-agent", target, clientIP(r)))
+	jsonOK(w, map[string]string{"status": "ok", "agent": target, "action": "deleted"})
 }
 
 // issueCertRequest is the JSON body for certificate issuance.
@@ -752,7 +1070,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -794,7 +1112,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -881,7 +1199,7 @@ const signedResolveMaxSkew = 60 * time.Second
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	agentName := info.Agent
@@ -891,7 +1209,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	dryRun := r.URL.Query().Get("dry_run") == "true"
 
 	// Validate seal key header early (before processing refs)
-	sealKey, sealErr := s.validateSealHeader(r, agentName)
+	sealKey, sealErr := s.validateSealHeader(r, info)
 	if sealErr != nil {
 		jsonError(w, sealErr.Error(), http.StatusBadRequest)
 		return
@@ -976,23 +1294,51 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	sealedValues := make(map[string]*crypto.SealedEnvelope)
 	errors := make(map[string]string)
 
+	// Session seal key binding check (once, before processing refs)
+	if !s.checkSessionSealKey(w, r, info) {
+		return
+	}
+
 	for _, refStr := range req.Refs {
 		path, err := ref.Parse(refStr)
 		if err != nil {
-			s.logAudit(s.audit.LogDenied(agentName, "resolve", refStr, ip, "malformed_ref"))
+			s.auditDenied(info, "resolve", refStr, ip, "malformed_ref")
 			errors[refStr] = err.Error()
 			continue
 		}
 
+		// Session scope enforcement (per-ref)
+		if info.UsedSession && !session.PathInScope(path, info.SessionNamespaces) {
+			s.auditDenied(info, "resolve", path, ip, "session_scope")
+			errors[refStr] = "path outside session scope"
+			continue
+		}
+
+		// Session action enforcement (per-ref)
+		if info.UsedSession {
+			allowed := false
+			for _, a := range info.SessionActions {
+				if a == "read_value" || a == "admin" {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				s.auditDenied(info, "resolve", path, ip, "session_action")
+				errors[refStr] = "action read_value not permitted by session role"
+				continue
+			}
+		}
+
 		if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
-			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "acl"))
+			s.auditDenied(info, "resolve", path, ip, "acl")
 			errors[refStr] = "access denied: read_value permission required"
 			continue
 		}
 
 		// Attestation policy check (per-ref)
 		if err := s.attestFull(r, path, info, nonceValidated, signatureVerified, sealKey != nil); err != nil {
-			s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "attestation"))
+			s.auditDenied(info, "resolve", path, ip, "attestation")
 			errors[refStr] = "attestation required"
 			continue
 		}
@@ -1001,19 +1347,19 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			// Dry-run: verify path exists without returning the secret value.
 			if _, err := s.backend.Get(path); err != nil {
 				if err == store.ErrSecretNotFound {
-					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "not_found"))
+					s.auditDenied(info, "dry-resolve", path, ip, "not_found")
 					errors[refStr] = "secret not found"
 				} else if err == store.ErrInvalidPath {
-					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "invalid_path"))
+					s.auditDenied(info, "dry-resolve", path, ip, "invalid_path")
 					errors[refStr] = "invalid path"
 				} else {
-					s.logAudit(s.audit.LogDenied(agentName, "dry-resolve", path, ip, "internal_error"))
+					s.auditDenied(info, "dry-resolve", path, ip, "internal_error")
 					log.Printf("error dry-resolving %q for %s: %v", path, agentName, err)
 					errors[refStr] = "internal error"
 				}
 				continue
 			}
-			s.logAudit(s.audit.LogAllowed(agentName, "dry-resolve", path, ip))
+			s.auditAllowed(info, "dry-resolve", path, ip)
 			values[refStr] = "ok"
 			continue
 		}
@@ -1021,20 +1367,20 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		secret, err := s.backend.Get(path)
 		if err != nil {
 			if err == store.ErrSecretNotFound {
-				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "not_found"))
+				s.auditDenied(info, "resolve", path, ip, "not_found")
 				errors[refStr] = "secret not found"
 			} else if err == store.ErrInvalidPath {
-				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "invalid_path"))
+				s.auditDenied(info, "resolve", path, ip, "invalid_path")
 				errors[refStr] = "invalid path"
 			} else {
-				s.logAudit(s.audit.LogDenied(agentName, "resolve", path, ip, "internal_error"))
+				s.auditDenied(info, "resolve", path, ip, "internal_error")
 				log.Printf("error resolving %q for %s: %v", path, agentName, err)
 				errors[refStr] = "internal error"
 			}
 			continue
 		}
 
-		s.logAudit(s.audit.LogAllowed(agentName, "resolve", path, ip))
+		s.auditAllowed(info, "resolve", path, ip)
 
 		if sealKey != nil {
 			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
@@ -1074,7 +1420,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	// Authentication required to get a challenge
 	_, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1106,7 +1452,7 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1157,7 +1503,7 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1255,7 +1601,7 @@ type mintTokenRequest struct {
 func (s *Server) handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
 	_, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1296,7 +1642,7 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1339,7 +1685,11 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 // registered public seal key. Returns the decoded 32-byte public key if valid,
 // or nil if no header is present. Returns an error if the header is present but
 // invalid or mismatched.
-func (s *Server) validateSealHeader(r *http.Request, agentName string) (*[32]byte, error) {
+//
+// For session-authenticated requests, the ACL-registered seal key check is
+// skipped. Session seal key binding is handled separately by checkSessionSealKey,
+// which validates the header against the fingerprint bound at session mint time.
+func (s *Server) validateSealHeader(r *http.Request, info *authInfo) (*[32]byte, error) {
 	header := r.Header.Get("X-Phoenix-Seal-Key")
 	if header == "" {
 		return nil, nil
@@ -1350,7 +1700,13 @@ func (s *Server) validateSealHeader(r *http.Request, agentName string) (*[32]byt
 		return nil, fmt.Errorf("malformed seal key header: %w", err)
 	}
 
-	registered, err := s.acl.GetAgentSealKey(agentName)
+	// Session-authenticated requests: seal key was already validated against
+	// the session's bound fingerprint by checkSessionSealKey. Skip ACL check.
+	if info.UsedSession {
+		return pubKey, nil
+	}
+
+	registered, err := s.acl.GetAgentSealKey(info.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("agent lookup failed: %w", err)
 	}
@@ -1376,7 +1732,7 @@ type generateKeyPairRequest struct {
 func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1464,7 +1820,7 @@ func (s *Server) handleAgentSubresource(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetSealKey(w http.ResponseWriter, r *http.Request, agentTarget string) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 
@@ -1505,8 +1861,804 @@ func (s *Server) handleGetSealKey(w http.ResponseWriter, r *http.Request, agentT
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	_, err := s.authenticateInfo(r)
 	if err != nil {
-		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		handleAuthError(w, err)
 		return
 	}
 	jsonError(w, "proxy endpoint not yet implemented", http.StatusNotImplemented)
+}
+
+// sessionMintRequest is the JSON body for minting a session token.
+type sessionMintRequest struct {
+	Role          string `json:"role"`
+	SealPublicKey string `json:"seal_public_key,omitempty"` // base64-encoded 32-byte X25519 key
+	RequesterTTY  string `json:"requester_tty,omitempty"`   // best-effort TTY path for step-up warning
+}
+
+func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil || s.sessionRoles == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	// Authenticate the bootstrap request using existing auth channels
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	ip := clientIP(r)
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	var req sessionMintRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Role == "" {
+		jsonError(w, "role is required", http.StatusBadRequest)
+		return
+	}
+
+	// Look up role
+	role, ok := s.sessionRoles[req.Role]
+	if !ok {
+		jsonDenied(w, "access_denied", "ROLE_NOT_FOUND",
+			fmt.Sprintf("role %q does not exist", req.Role),
+			"check available roles in server config",
+			http.StatusNotFound)
+		s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "role_not_found"))
+		return
+	}
+
+	// Determine bootstrap method from auth info
+	bootstrapMethod := s.bootstrapMethod(info)
+
+	// Check bootstrap trust
+	if !s.bootstrapAllowed(role.BootstrapTrust, bootstrapMethod, info.IsLocal) {
+		jsonDenied(w, "access_denied", "BOOTSTRAP_FAILED",
+			fmt.Sprintf("auth method %q is not in role's bootstrap_trust list", bootstrapMethod),
+			fmt.Sprintf("role %q accepts: %v", req.Role, role.BootstrapTrust),
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "bootstrap_failed"))
+		return
+	}
+
+	// Check role attestation requirements
+	if len(role.Attestation) > 0 {
+		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
+			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+				reason,
+				fmt.Sprintf("role %q requires attestation: %v", req.Role, role.Attestation),
+				http.StatusForbidden)
+			s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "attestation_failed"))
+			return
+		}
+	}
+
+	// Validate seal key if required
+	var sealPubKey []byte
+	if role.RequireSealKey {
+		if req.SealPublicKey == "" {
+			jsonDenied(w, "bad_request", "SEAL_KEY_REQUIRED",
+				fmt.Sprintf("role %q requires a seal public key", req.Role),
+				"include seal_public_key in the mint request",
+				http.StatusBadRequest)
+			return
+		}
+	}
+	if req.SealPublicKey != "" {
+		decoded, err := crypto.DecodeSealKey(req.SealPublicKey)
+		if err != nil {
+			jsonError(w, "invalid seal_public_key: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		sealPubKey = decoded[:]
+	}
+
+	// Compute effective TTL
+	ttl := s.sessionTTL(role.MaxTTL)
+
+	// Step-up approval: if the role requires it, create a pending approval instead of minting
+	if role.StepUp {
+		if s.approvals == nil {
+			jsonError(w, "step-up approval not configured", http.StatusNotImplemented)
+			return
+		}
+		approvalTimeout := s.parseStepUpTTL(role.StepUpTTL)
+		apr, aprErr := s.approvals.Create(
+			req.Role, info.Agent, sealPubKey,
+			role.Namespaces, role.Actions,
+			bootstrapMethod, info.CertFingerprint, ip, req.RequesterTTY,
+			ttl, approvalTimeout,
+		)
+		if aprErr != nil {
+			log.Printf("approval create error: %v", aprErr)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		s.logAudit(s.audit.LogAllowed(info.Agent, "approval.created", req.Role, ip))
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted) // 202
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":          "approval_required",
+			"approval_id":     apr.ID,
+			"code":            "APPROVAL_REQUIRED",
+			"reason":          fmt.Sprintf("role %q requires human approval", req.Role),
+			"approve_command": fmt.Sprintf("phoenix approve %s", apr.ID),
+			"expires_at":      apr.ExpiresAt.Format(time.RFC3339),
+		})
+		return
+	}
+
+	namespaces := role.Namespaces
+	actions := role.Actions // nil -> store defaults to ["list", "read_value"]
+
+	// Mint session
+	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, info.CertFingerprint, ip, ttl)
+	if err != nil {
+		log.Printf("session mint error: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Audit log
+	s.logAudit(s.audit.LogAllowed(info.Agent, "session.mint.approved", req.Role, ip))
+
+	w.Header().Set("Cache-Control", "no-store")
+	jsonOK(w, map[string]interface{}{
+		"session_id":           sess.ID,
+		"session_token":        tokenStr,
+		"role":                 sess.Role,
+		"expires_at":           sess.ExpiresAt.Format(time.RFC3339),
+		"namespaces":           sess.Namespaces,
+		"seal_key_fingerprint": sess.SealKeyFingerprint,
+	})
+}
+
+func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil || s.sessionRoles == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	if !info.UsedSession {
+		jsonDenied(w, "bad_request", "SESSION_REQUIRED",
+			"only session tokens can be renewed",
+			"authenticate with a session token (phxs_ prefix)",
+			http.StatusBadRequest)
+		return
+	}
+
+	ip := clientIP(r)
+
+	// Re-check that the role still exists in config
+	role, ok := s.sessionRoles[info.SessionRole]
+	if !ok {
+		jsonDenied(w, "access_denied", "ROLE_NOT_FOUND",
+			fmt.Sprintf("role %q no longer exists in server config", info.SessionRole),
+			"contact your administrator",
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "role_not_found", info.SessionID))
+		return
+	}
+
+	// Re-check bootstrap trust: look up the original bootstrap method from the session
+	sess := s.sessions.Get(info.SessionID)
+	if sess == nil {
+		jsonDenied(w, "access_denied", "SESSION_EXPIRED",
+			"session no longer exists",
+			"mint a new session",
+			http.StatusUnauthorized)
+		return
+	}
+
+	if !s.bootstrapAllowed(role.BootstrapTrust, sess.BootstrapMethod, session.IsLoopback(ip)) {
+		jsonDenied(w, "access_denied", "BOOTSTRAP_FAILED",
+			fmt.Sprintf("original bootstrap method %q is no longer trusted for role %q", sess.BootstrapMethod, info.SessionRole),
+			"mint a new session with a currently trusted auth method",
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "bootstrap_failed", info.SessionID))
+		return
+	}
+
+	// Re-check role attestation requirements against the CURRENT request.
+	// authenticateInfo() layers mTLS evidence onto session authInfo when a
+	// verified client cert is present on the TLS connection, so info already
+	// carries the real current-request attestation state.
+	if len(role.Attestation) > 0 {
+		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
+			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+				reason,
+				fmt.Sprintf("role %q requires attestation: %v", info.SessionRole, role.Attestation),
+				http.StatusForbidden)
+			s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID))
+			return
+		}
+		if slicesContains(role.Attestation, "cert_fingerprint") && sess.CertFingerprint != "" && info.CertFingerprint != sess.CertFingerprint {
+			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+				"role requires the same client certificate fingerprint used when the session was minted",
+				"renew using the original client certificate or mint a new session",
+				http.StatusForbidden)
+			s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "cert_continuity_failed", info.SessionID))
+			return
+		}
+	}
+
+	ttl := s.sessionTTL(role.MaxTTL)
+
+	tokenStr, renewedSess, err := s.sessions.Renew(info.SessionID, ttl)
+	if err != nil {
+		switch err {
+		case session.ErrSessionRevoked:
+			jsonDenied(w, "access_denied", "SESSION_REVOKED",
+				"session has been revoked",
+				"mint a new session",
+				http.StatusForbidden)
+		case session.ErrTokenExpired:
+			jsonDenied(w, "access_denied", "SESSION_EXPIRED",
+				"session has expired",
+				"mint a new session",
+				http.StatusUnauthorized)
+		default:
+			log.Printf("session renew error: %v", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	s.logAudit(s.audit.LogSessionAllowed(info.Agent, "session.renewed", info.SessionRole, ip, info.SessionID))
+
+	w.Header().Set("Cache-Control", "no-store")
+	jsonOK(w, map[string]interface{}{
+		"session_id":    renewedSess.ID,
+		"session_token": tokenStr,
+		"role":          renewedSess.Role,
+		"expires_at":    renewedSess.ExpiresAt.Format(time.RFC3339),
+		"renewed":       true,
+	})
+}
+
+// checkRoleAttestation verifies that the request satisfies the role's attestation
+// requirements. Returns a non-empty reason string if any check fails.
+func (s *Server) checkRoleAttestation(attestation []string, info *authInfo, ip string) string {
+	for _, req := range attestation {
+		switch req {
+		case "require_mtls":
+			if !info.UsedMTLS {
+				return "role requires mTLS authentication"
+			}
+		case "source_ip":
+			// source_ip attestation on a role means the caller must be local
+			if !info.IsLocal {
+				return "role requires local (loopback) access"
+			}
+		case "cert_fingerprint":
+			if info.CertFingerprint == "" {
+				return "role requires client certificate fingerprint"
+			}
+		case "require_sealed":
+			// Seal key is checked separately at mint time
+		}
+	}
+	return ""
+}
+
+func slicesContains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+// bootstrapMethod returns the primary auth method string from authInfo.
+func (s *Server) bootstrapMethod(info *authInfo) string {
+	if info.UsedMTLS {
+		return "mtls"
+	}
+	if info.UsedBearer {
+		return "bearer"
+	}
+	if info.TokenIssuedAt != nil {
+		return "token"
+	}
+	return "unknown"
+}
+
+// bootstrapAllowed checks if the auth method satisfies the role's bootstrap trust.
+// "local" is additive -- a bearer+local request matches both "bearer" and "local".
+func (s *Server) bootstrapAllowed(trustMethods []string, method string, isLocal bool) bool {
+	for _, allowed := range trustMethods {
+		if allowed == method {
+			return true
+		}
+		if allowed == "local" && isLocal {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionTTL computes the effective TTL for a session, respecting the role's max_ttl.
+func (s *Server) sessionTTL(maxTTL string) time.Duration {
+	if maxTTL == "" {
+		return 0 // use store default
+	}
+	d, err := time.ParseDuration(maxTTL)
+	if err != nil {
+		return 0 // validated at config load, shouldn't happen
+	}
+	return d
+}
+
+// parseStepUpTTL parses the step-up approval window duration from a role config string.
+func (s *Server) parseStepUpTTL(ttlStr string) time.Duration {
+	if ttlStr == "" {
+		return approval.DefaultTimeout
+	}
+	d, err := time.ParseDuration(ttlStr)
+	if err != nil {
+		return approval.DefaultTimeout
+	}
+	return d
+}
+
+// handleApprovalRouter dispatches /v1/approval/{id}[/approve|/deny] requests.
+func (s *Server) handleApprovalRouter(w http.ResponseWriter, r *http.Request) {
+	if s.approvals == nil {
+		jsonError(w, "step-up approval not configured", http.StatusNotImplemented)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/v1/approval/")
+	parts := strings.SplitN(path, "/", 2)
+	id := parts[0]
+	if id == "" {
+		jsonError(w, "approval ID required", http.StatusBadRequest)
+		return
+	}
+
+	if len(parts) == 1 {
+		if r.Method != "GET" {
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleApprovalStatus(w, r, id)
+	} else if parts[1] == "approve" && r.Method == "POST" {
+		s.handleApprovalApprove(w, r, id)
+	} else if parts[1] == "deny" && r.Method == "POST" {
+		s.handleApprovalDeny(w, r, id)
+	} else {
+		jsonError(w, "not found", http.StatusNotFound)
+	}
+}
+
+// handleApprovalStatus returns the current status of an approval request.
+// The requesting agent (the one who triggered step-up) can poll for their own approval.
+// Admins can poll for any approval. Session token includes the token only for the
+// original requester or admins.
+func (s *Server) handleApprovalStatus(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	apr := s.approvals.Get(id)
+	if apr == nil {
+		jsonError(w, "approval not found", http.StatusNotFound)
+		return
+	}
+
+	// Authorization: requester can poll their own, admins can poll any
+	isRequester := info.Agent == apr.Agent
+	isAdmin := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin) == nil
+	if !isRequester && !isAdmin {
+		jsonError(w, "access denied: not the requester or admin", http.StatusForbidden)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"id":         apr.ID,
+		"role":       apr.Role,
+		"agent":      apr.Agent,
+		"status":     string(apr.Status),
+		"created_at": apr.CreatedAt.Format(time.RFC3339),
+		"expires_at": apr.ExpiresAt.Format(time.RFC3339),
+	}
+	// Only include session token for the original requester or admins
+	if apr.Status == approval.StatusApproved && (isRequester || isAdmin) {
+		resp["session_token"] = apr.SessionToken
+		resp["session_id"] = apr.SessionID
+		resp["session_expiry"] = apr.SessionExpiry.Format(time.RFC3339)
+	}
+	jsonOK(w, resp)
+}
+
+// handleApprovalApprove approves a pending step-up request and mints a session.
+func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	// Approvers must NOT use session auth — require admin bearer or mTLS
+	if info.UsedSession {
+		jsonDenied(w, "access_denied", "ADMIN_AUTH_REQUIRED",
+			"session tokens cannot approve step-up requests",
+			"use a bearer token or mTLS certificate to approve",
+			http.StatusForbidden)
+		return
+	}
+
+	// Require ACL admin permission
+	if err := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	ip := clientIP(r)
+
+	apr := s.approvals.Get(id)
+	if apr == nil {
+		jsonError(w, "approval not found", http.StatusNotFound)
+		return
+	}
+	if apr.Status != approval.StatusPending {
+		jsonOK(w, map[string]interface{}{
+			"id":     apr.ID,
+			"status": string(apr.Status),
+			"detail": fmt.Sprintf("approval is already %s", apr.Status),
+		})
+		return
+	}
+
+	// Shared safety checks: role exists, step-up enabled, bootstrap, attestation, seal key
+	role, valErr := approval.ValidateForMint(apr, s.sessionRoles)
+	if valErr != nil {
+		code := "VALIDATION_FAILED"
+		status := http.StatusForbidden
+		if ve, ok := valErr.(*approval.ValidationError); ok {
+			code = ve.Code
+			if code == "ROLE_CHANGED" {
+				status = http.StatusConflict
+			}
+		}
+		jsonDenied(w, "access_denied", code,
+			valErr.Error(),
+			"role config changed while approval was pending",
+			status)
+		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, valErr.Error()))
+		return
+	}
+
+	// Parse optional approver_tty from request body
+	var body struct {
+		ApproverTTY string `json:"approver_tty"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	json.NewDecoder(r.Body).Decode(&body) // best-effort
+
+	// Mint session using CURRENT role config, not stale stored data
+	ttl := s.sessionTTL(role.MaxTTL)
+	tokenStr, sess, mintErr := s.sessions.Create(
+		apr.Role, apr.Agent, apr.SealPubKey,
+		role.Namespaces, role.Actions,
+		apr.BootstrapMethod, apr.CertFingerprint, apr.SourceIP, ttl,
+	)
+	if mintErr != nil {
+		log.Printf("session mint on approval error: %v", mintErr)
+		jsonError(w, "internal error minting session", http.StatusInternalServerError)
+		return
+	}
+
+	// Record approval
+	if aprErr := s.approvals.Approve(id, info.Agent, ip, body.ApproverTTY, tokenStr, sess.ID, sess.ExpiresAt); aprErr != nil {
+		jsonError(w, "approval failed: "+aprErr.Error(), http.StatusConflict)
+		return
+	}
+
+	s.logAudit(s.audit.LogAllowed(info.Agent, "approval.approved", apr.Role, ip))
+
+	// TTY warning: compare requester and approver TTYs
+	sameTTYWarning := false
+	if apr.RequesterTTY != "" && body.ApproverTTY != "" && apr.RequesterTTY == body.ApproverTTY {
+		sameTTYWarning = true
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"id":               apr.ID,
+		"status":           "approved",
+		"session_id":       sess.ID,
+		"session_expiry":   sess.ExpiresAt.Format(time.RFC3339),
+		"same_tty_warning": sameTTYWarning,
+	})
+}
+
+// handleApprovalDeny denies a pending step-up request.
+func (s *Server) handleApprovalDeny(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	if info.UsedSession {
+		jsonDenied(w, "access_denied", "ADMIN_AUTH_REQUIRED",
+			"session tokens cannot deny step-up requests",
+			"use a bearer token or mTLS certificate to deny",
+			http.StatusForbidden)
+		return
+	}
+
+	// Require ACL admin permission
+	if err := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	ip := clientIP(r)
+
+	if denyErr := s.approvals.Deny(id, info.Agent, ip); denyErr != nil {
+		if denyErr == approval.ErrNotFound {
+			jsonError(w, "approval not found", http.StatusNotFound)
+		} else {
+			jsonError(w, "deny failed: "+denyErr.Error(), http.StatusConflict)
+		}
+		return
+	}
+
+	s.logAudit(s.audit.LogAllowed(info.Agent, "approval.denied", id, ip))
+
+	jsonOK(w, map[string]interface{}{
+		"id":     id,
+		"status": "denied",
+	})
+}
+
+// handleApprovalList returns all pending approval requests.
+func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
+	if s.approvals == nil {
+		jsonError(w, "step-up approval not configured", http.StatusNotImplemented)
+		return
+	}
+
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	if info.UsedSession {
+		jsonDenied(w, "access_denied", "ADMIN_AUTH_REQUIRED",
+			"session tokens cannot list approvals",
+			"use a bearer token or mTLS certificate",
+			http.StatusForbidden)
+		return
+	}
+
+	// Require ACL admin permission
+	if err := s.acl.Authorize(info.Agent, "approvals", acl.ActionAdmin); err != nil {
+		jsonError(w, "access denied: admin required", http.StatusForbidden)
+		return
+	}
+
+	pending := s.approvals.ListPending()
+	items := make([]map[string]interface{}, 0, len(pending))
+	for _, apr := range pending {
+		items = append(items, map[string]interface{}{
+			"id":               apr.ID,
+			"role":             apr.Role,
+			"agent":            apr.Agent,
+			"source_ip":        apr.SourceIP,
+			"bootstrap_method": apr.BootstrapMethod,
+			"created_at":       apr.CreatedAt.Format(time.RFC3339),
+			"expires_at":       apr.ExpiresAt.Format(time.RFC3339),
+		})
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"approvals": items,
+	})
+}
+
+// handleSessionList returns sessions visible to the caller.
+// Session-token callers see only their own session. Admins see all.
+// Non-admin bearer/mTLS callers see sessions belonging to their agent.
+func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	ip := clientIP(r)
+
+	// Session-token callers: can only see their own session
+	if info.UsedSession {
+		sess := s.sessions.Get(info.SessionID)
+		if sess == nil {
+			jsonOK(w, map[string]interface{}{"sessions": []interface{}{}})
+			return
+		}
+		jsonOK(w, map[string]interface{}{"sessions": []interface{}{sessionToMap(sess)}})
+		s.auditAllowed(info, "session.list", "self", ip)
+		return
+	}
+
+	isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+
+	// Query filters
+	roleFilter := r.URL.Query().Get("role")
+	agentFilter := r.URL.Query().Get("agent")
+
+	// Non-admin cannot filter by another agent
+	if agentFilter != "" && agentFilter != info.Agent && !isAdmin {
+		jsonError(w, "access denied: admin required to filter by agent", http.StatusForbidden)
+		return
+	}
+
+	all := s.sessions.List()
+
+	var result []*session.Session
+	for _, sess := range all {
+		// Non-admin: only own sessions
+		if !isAdmin && sess.Agent != info.Agent {
+			continue
+		}
+		if roleFilter != "" && sess.Role != roleFilter {
+			continue
+		}
+		if agentFilter != "" && sess.Agent != agentFilter {
+			continue
+		}
+		result = append(result, sess)
+	}
+
+	items := make([]map[string]interface{}, 0, len(result))
+	for _, sess := range result {
+		items = append(items, sessionToMap(sess))
+	}
+
+	jsonOK(w, map[string]interface{}{"sessions": items})
+	s.auditAllowed(info, "session.list", "", ip)
+}
+
+// handleSessionRouter dispatches /v1/sessions/{id} and /v1/sessions/{id}/revoke.
+func (s *Server) handleSessionRouter(w http.ResponseWriter, r *http.Request) {
+	if s.sessions == nil {
+		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
+	parts := strings.SplitN(path, "/", 2)
+	id := parts[0]
+	if id == "" {
+		jsonError(w, "session ID required", http.StatusBadRequest)
+		return
+	}
+
+	if len(parts) == 1 {
+		if r.Method != "GET" {
+			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleSessionInfo(w, r, id)
+	} else if parts[1] == "revoke" && r.Method == "POST" {
+		s.handleSessionRevoke(w, r, id)
+	} else {
+		jsonError(w, "not found", http.StatusNotFound)
+	}
+}
+
+// handleSessionInfo returns details of a single session.
+func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	ip := clientIP(r)
+
+	sess := s.sessions.Get(id)
+	if sess == nil {
+		jsonError(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	// Authorization: session-token callers can only see their exact session
+	// (scoped credentials never escalate to admin). Bearer/mTLS callers can
+	// see sessions belonging to their agent, or all sessions if admin.
+	if info.UsedSession {
+		if info.SessionID != id {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	} else {
+		isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+		if info.Agent != sess.Agent && !isAdmin {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	}
+
+	jsonOK(w, sessionToMap(sess))
+	s.auditAllowed(info, "session.info", id, ip)
+}
+
+// handleSessionRevoke revokes a session by ID.
+func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id string) {
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	ip := clientIP(r)
+
+	sess := s.sessions.Get(id)
+	if sess == nil {
+		jsonError(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	// Authorization: session-token callers can only revoke their exact session
+	// (scoped credentials never escalate to admin). Bearer/mTLS callers can
+	// revoke sessions belonging to their agent, or all sessions if admin.
+	if info.UsedSession {
+		if info.SessionID != id {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	} else {
+		isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+		if info.Agent != sess.Agent && !isAdmin {
+			jsonError(w, "access denied", http.StatusForbidden)
+			return
+		}
+	}
+
+	if err := s.sessions.Revoke(id); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.auditAllowed(info, "session.revoke", id, ip)
+	jsonOK(w, map[string]string{
+		"status":     "revoked",
+		"session_id": id,
+	})
+}
+
+// sessionToMap converts a session to a JSON-friendly map (no token).
+func sessionToMap(sess *session.Session) map[string]interface{} {
+	return map[string]interface{}{
+		"session_id":       sess.ID,
+		"role":             sess.Role,
+		"agent":            sess.Agent,
+		"namespaces":       sess.Namespaces,
+		"actions":          sess.Actions,
+		"bootstrap_method": sess.BootstrapMethod,
+		"source_ip":        sess.SourceIP,
+		"created_at":       sess.CreatedAt.Format(time.RFC3339),
+		"expires_at":       sess.ExpiresAt.Format(time.RFC3339),
+		"revoked":          sess.Revoked,
+	}
 }

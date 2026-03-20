@@ -4,6 +4,7 @@
 //
 //	phoenix-server [--config /data/config.json]
 //	phoenix-server --init /data  (first-time setup)
+//	phoenix-server --reissue-cert --san <ip-or-host> [--san ...] --config /data/config.json
 package main
 
 import (
@@ -15,22 +16,37 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/agent"
 	"github.com/phoenixsec/phoenix/internal/api"
+	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/dashboard"
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
+	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
 	"github.com/phoenixsec/phoenix/internal/version"
 )
+
+// sanList is a flag.Value that collects multiple --san values.
+type sanList []string
+
+func (s *sanList) String() string { return strings.Join(*s, ",") }
+func (s *sanList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 func main() {
 	configPath := flag.String("config", "", "Path to config file (default: /data/config.json)")
@@ -39,6 +55,10 @@ func main() {
 	passphraseStdin := flag.Bool("passphrase-stdin", false, "Read master key passphrase from stdin")
 	initPassphrase := flag.String("passphrase", "", "Passphrase to protect master key (--init only)")
 	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
+	hashPassword := flag.Bool("hash-password", false, "Generate a bcrypt hash for dashboard password_hash config")
+	reissueCert := flag.Bool("reissue-cert", false, "Re-issue the server TLS certificate with new SANs")
+	var sans sanList
+	flag.Var(&sans, "san", "Subject Alternative Name for --reissue-cert (repeatable: IPs and hostnames)")
 	flag.Parse()
 
 	if *initPassphrase != "" {
@@ -47,6 +67,34 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("phoenix-server %s\n", version.Version)
+		return
+	}
+
+	if *hashPassword {
+		if err := runHashPassword(); err != nil {
+			log.Fatalf("hash-password failed: %v", err)
+		}
+		return
+	}
+
+	if *reissueCert {
+		if len(sans) == 0 {
+			log.Fatal("--reissue-cert requires at least one --san value")
+		}
+		cfgPath := *configPath
+		if cfgPath == "" {
+			cfgPath = os.Getenv("PHOENIX_CONFIG")
+		}
+		if cfgPath == "" {
+			cfgPath = "/data/config.json"
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			log.Fatalf("loading config: %v", err)
+		}
+		if err := runReissueCert(cfg, sans); err != nil {
+			log.Fatalf("reissue-cert failed: %v", err)
+		}
 		return
 	}
 
@@ -210,6 +258,67 @@ func main() {
 		log.Printf("  Short-lived tokens: enabled (ttl=%s)", ttl)
 	} else {
 		log.Printf("  Short-lived tokens: disabled")
+	}
+
+	// Initialize session identity if enabled
+	var sessionStore *session.Store
+	var approvalStore *approval.Store
+	if cfg.Session.Enabled {
+		sessionTTL := session.DefaultTTL
+		if cfg.Session.TTL != "" {
+			sessionTTL, _ = time.ParseDuration(cfg.Session.TTL) // validated above
+		}
+		var err error
+		sessionStore, err = session.NewStore(sessionTTL)
+		if err != nil {
+			log.Fatalf("initializing session store: %v", err)
+		}
+		srv.SetSessionStore(sessionStore)
+		srv.SetSessionRoles(cfg.Session.Roles)
+		defer sessionStore.Stop()
+		log.Printf("  Sessions: enabled (roles=%d, ttl=%s)", len(cfg.Session.Roles), sessionTTL)
+
+		// Check if any role requires step-up approval
+		hasStepUp := false
+		var stepUpTimeout time.Duration
+		for _, role := range cfg.Session.Roles {
+			if role.StepUp {
+				hasStepUp = true
+				if role.StepUpTTL != "" {
+					if d, err := time.ParseDuration(role.StepUpTTL); err == nil && stepUpTimeout == 0 {
+						stepUpTimeout = d
+					}
+				}
+			}
+		}
+		if hasStepUp {
+			approvalStore = approval.NewStore(stepUpTimeout)
+			srv.SetApprovalStore(approvalStore)
+			defer approvalStore.Stop()
+			log.Printf("  Step-up approvals: enabled (timeout=%s)", stepUpTimeout)
+		}
+	} else {
+		log.Printf("  Sessions: disabled")
+	}
+
+	// Initialize dashboard if enabled
+	if cfg.Dashboard.Enabled {
+		deps := dashboard.Deps{
+			Sessions:     sessionStore,
+			SessionRoles: cfg.Session.Roles,
+			Approvals:    approvalStore,
+			AuditPath:    cfg.Audit.Path,
+			Backend:      backend,
+			ACL:          a,
+			StartTime:    time.Now(),
+			Audit:        al,
+		}
+		dash, err := dashboard.New(cfg.Dashboard, deps)
+		if err != nil {
+			log.Fatalf("initializing dashboard: %v", err)
+		}
+		srv.SetDashboard(dash)
+		log.Printf("  Dashboard: enabled at /dashboard/")
 	}
 
 	// Start local attestation agent if enabled
@@ -428,5 +537,58 @@ func runProtectKey(keyPath string) error {
 		fmt.Println("Master key passphrase updated.")
 	}
 
+	return nil
+}
+
+// runHashPassword prompts for a password and prints its bcrypt hash.
+// The hash can be pasted into config.json as dashboard.password_hash.
+func runHashPassword() error {
+	pass, err := crypto.PromptPassphrase("Enter dashboard password: ")
+	if err != nil {
+		return err
+	}
+	confirm, err := crypto.PromptPassphrase("Confirm dashboard password: ")
+	if err != nil {
+		return err
+	}
+	if pass != confirm {
+		return fmt.Errorf("passwords do not match")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("generating hash: %w", err)
+	}
+	fmt.Println(string(hash))
+	return nil
+}
+
+func runReissueCert(cfg *config.Config, sans []string) error {
+	if cfg.Auth.MTLS.CACert == "" || cfg.Auth.MTLS.CAKey == "" {
+		return fmt.Errorf("config is missing auth.mtls.ca_cert and auth.mtls.ca_key paths — run --init first")
+	}
+	if cfg.Auth.MTLS.ServerCert == "" || cfg.Auth.MTLS.ServerKey == "" {
+		return fmt.Errorf("config is missing auth.mtls.server_cert and auth.mtls.server_key paths")
+	}
+
+	// Always include localhost and loopback
+	allSANs := append([]string{"localhost", "127.0.0.1"}, sans...)
+
+	authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
+	if err != nil {
+		return fmt.Errorf("loading CA: %w", err)
+	}
+
+	bundle, err := authority.IssueServerCert(allSANs)
+	if err != nil {
+		return fmt.Errorf("issuing server cert: %w", err)
+	}
+
+	if err := bundle.Save(cfg.Auth.MTLS.ServerCert, cfg.Auth.MTLS.ServerKey, cfg.Auth.MTLS.CACert); err != nil {
+		return fmt.Errorf("saving server cert: %w", err)
+	}
+
+	fmt.Printf("Server certificate reissued: %s\n", cfg.Auth.MTLS.ServerCert)
+	fmt.Printf("SANs: %s\n", strings.Join(allSANs, ", "))
+	fmt.Println("Restart the server for the new certificate to take effect.")
 	return nil
 }

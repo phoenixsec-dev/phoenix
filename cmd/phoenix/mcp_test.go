@@ -139,8 +139,8 @@ func TestMCPToolsList(t *testing.T) {
 		t.Fatalf("failed to decode result: %v", err)
 	}
 
-	if len(result.Tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 5 {
+		t.Fatalf("expected 5 tools, got %d", len(result.Tools))
 	}
 
 	names := map[string]bool{}

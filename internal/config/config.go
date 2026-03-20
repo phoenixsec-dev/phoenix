@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,8 @@ type Config struct {
 	Policy      PolicyConfig      `json:"policy,omitempty"`
 	Attestation AttestationConfig `json:"attestation,omitempty"`
 	OnePassword OPConfig          `json:"onepassword,omitempty"`
+	Session     SessionConfig     `json:"session,omitempty"`
+	Dashboard   DashboardConfig   `json:"dashboard,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -111,6 +114,51 @@ type OPConfig struct {
 	CacheTTL               string `json:"cache_ttl,omitempty"`                 // duration string, e.g. "60s" (default)
 }
 
+// SessionConfig controls the v1 session identity system.
+type SessionConfig struct {
+	Enabled bool                  `json:"enabled"`
+	TTL     string                `json:"ttl,omitempty"` // default "1h"
+	Roles   map[string]RoleConfig `json:"roles,omitempty"`
+}
+
+// RoleConfig defines a named role that agents assume via session tokens.
+type RoleConfig struct {
+	Namespaces     []string `json:"namespaces"`
+	Actions        []string `json:"actions,omitempty"`     // default: ["list", "read_value"]
+	BootstrapTrust []string `json:"bootstrap_trust"`       // allowed auth methods: "mtls", "bearer", "local"
+	RequireSealKey bool     `json:"require_seal_key"`      // must present seal pubkey at mint
+	MaxTTL         string   `json:"max_ttl,omitempty"`     // per-role session TTL override
+	Attestation    []string `json:"attestation,omitempty"` // declared, enforcement deferred to Phase 2
+	StepUp         bool     `json:"step_up,omitempty"`     // declared, enforcement deferred to Phase 3
+	StepUpTTL      string   `json:"step_up_ttl,omitempty"` // declared, enforcement deferred to Phase 3
+}
+
+// DashboardConfig controls the optional operator dashboard web UI.
+type DashboardConfig struct {
+	Enabled         bool   `json:"enabled"`
+	PasswordHash    string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
+	PIN             string `json:"pin,omitempty"`
+	SessionTTL      string `json:"session_ttl,omitempty"`       // default "4h"
+	AllowMultiLogin bool   `json:"allow_multi_login,omitempty"` // default false: only one active dashboard session
+}
+
+// validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.
+var validBootstrapMethods = map[string]bool{
+	"mtls":   true,
+	"bearer": true,
+	"local":  true,
+	"token":  true,
+}
+
+// validSessionActions lists the allowed values for RoleConfig.Actions.
+var validSessionActions = map[string]bool{
+	"list":       true,
+	"read_value": true,
+	"write":      true,
+	"delete":     true,
+	"admin":      true,
+}
+
 // DefaultConfig returns a config with sensible defaults for /data volume mount.
 func DefaultConfig() *Config {
 	return &Config{
@@ -139,6 +187,48 @@ func DefaultConfig() *Config {
 			ServiceAccountTokenEnv: "OP_SERVICE_ACCOUNT_TOKEN",
 		},
 	}
+}
+
+// ExampleConfig returns a fuller reference config for config.example.json and
+// other human-facing examples. Unlike DefaultConfig, it includes optional
+// sections in disabled/sample form so operators can see the current surface
+// area without having to cross-reference multiple docs.
+func ExampleConfig() *Config {
+	cfg := DefaultConfig()
+	cfg.Server.Listen = "0.0.0.0:9090"
+	cfg.Store.Backend = "file"
+	cfg.Attestation.Nonce.Enabled = false
+	cfg.Attestation.Nonce.MaxAge = "30s"
+	cfg.Attestation.Token.Enabled = false
+	cfg.Attestation.Token.TTL = "15m"
+	cfg.Attestation.LocalAgent.Enabled = false
+	cfg.Attestation.LocalAgent.SocketPath = "/tmp/phoenix-agent.sock"
+	cfg.OnePassword.Vault = "Engineering"
+	cfg.OnePassword.CacheTTL = "60s"
+	cfg.Session = SessionConfig{
+		Enabled: false,
+		TTL:     "1h",
+		Roles: map[string]RoleConfig{
+			"dev": {
+				Namespaces:     []string{"dev/*", "staging/*"},
+				Actions:        []string{"list", "read_value"},
+				BootstrapTrust: []string{"bearer"},
+			},
+			"deploy": {
+				Namespaces:     []string{"prod/*"},
+				Actions:        []string{"list", "read_value"},
+				BootstrapTrust: []string{"mtls"},
+				RequireSealKey: true,
+				StepUp:         true,
+				StepUpTTL:      "15m",
+			},
+		},
+	}
+	cfg.Dashboard = DashboardConfig{
+		Enabled:    false,
+		SessionTTL: "4h",
+	}
+	return cfg
 }
 
 // Load reads a config file from disk. Missing file returns defaults.
@@ -230,12 +320,73 @@ func (c *Config) Validate() error {
 		return errors.New("attestation.local_agent.socket_path is required when local_agent is enabled")
 	}
 
+	// Validate dashboard config
+	if c.Dashboard.Enabled {
+		if c.Dashboard.PasswordHash == "" && c.Dashboard.PIN == "" {
+			return errors.New("dashboard: password_hash or pin is required when dashboard is enabled")
+		}
+		if c.Dashboard.PasswordHash != "" {
+			if !strings.HasPrefix(c.Dashboard.PasswordHash, "$2") {
+				return errors.New("dashboard.password_hash: must be a bcrypt hash (generate with: phoenix-server --hash-password)")
+			}
+			// Verify it's a parseable bcrypt hash, not just a $2 prefix
+			if len(c.Dashboard.PasswordHash) < 59 {
+				return errors.New("dashboard.password_hash: truncated bcrypt hash (expected ~60 characters)")
+			}
+		}
+		if c.Dashboard.SessionTTL != "" {
+			if _, err := time.ParseDuration(c.Dashboard.SessionTTL); err != nil {
+				return fmt.Errorf("dashboard.session_ttl: invalid duration %q: %w", c.Dashboard.SessionTTL, err)
+			}
+		}
+	}
+
+	// Validate session config
+	if c.Session.Enabled {
+		if c.Session.TTL != "" {
+			if _, err := time.ParseDuration(c.Session.TTL); err != nil {
+				return fmt.Errorf("session.ttl: invalid duration %q: %w", c.Session.TTL, err)
+			}
+		}
+		if len(c.Session.Roles) == 0 {
+			return errors.New("session.roles: at least one role must be defined when sessions are enabled")
+		}
+		for name, role := range c.Session.Roles {
+			if len(role.Namespaces) == 0 {
+				return fmt.Errorf("session.roles.%s: at least one namespace is required", name)
+			}
+			if len(role.BootstrapTrust) == 0 {
+				return fmt.Errorf("session.roles.%s: at least one bootstrap_trust method is required", name)
+			}
+			for _, method := range role.BootstrapTrust {
+				if !validBootstrapMethods[method] {
+					return fmt.Errorf("session.roles.%s: unknown bootstrap_trust method %q (valid: mtls, bearer, local)", name, method)
+				}
+			}
+			for _, action := range role.Actions {
+				if !validSessionActions[action] {
+					return fmt.Errorf("session.roles.%s: unknown action %q (valid: list, read_value, write, delete, admin)", name, action)
+				}
+			}
+			if role.MaxTTL != "" {
+				if _, err := time.ParseDuration(role.MaxTTL); err != nil {
+					return fmt.Errorf("session.roles.%s.max_ttl: invalid duration %q: %w", name, role.MaxTTL, err)
+				}
+			}
+			if role.StepUpTTL != "" {
+				if _, err := time.ParseDuration(role.StepUpTTL); err != nil {
+					return fmt.Errorf("session.roles.%s.step_up_ttl: invalid duration %q: %w", name, role.StepUpTTL, err)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
 // SaveExample writes a default config to disk as a reference.
 func SaveExample(path string) error {
-	cfg := DefaultConfig()
+	cfg := ExampleConfig()
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

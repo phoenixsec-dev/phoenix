@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -272,6 +273,184 @@ func TestDefaultConfigNoLocalAgent(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Attestation.LocalAgent.Enabled {
 		t.Error("local_agent should be disabled by default")
+	}
+}
+
+func TestValidateSessionActionNames(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"bad": {
+			Namespaces:     []string{"dev/*"},
+			Actions:        []string{"list", "explode"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid action name")
+	}
+	if !strings.Contains(err.Error(), "explode") {
+		t.Fatalf("error should mention invalid action: %v", err)
+	}
+}
+
+func TestValidateSessionActionNamesValid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"good": {
+			Namespaces:     []string{"dev/*"},
+			Actions:        []string{"list", "read_value", "write"},
+			BootstrapTrust: []string{"bearer"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid actions should pass: %v", err)
+	}
+}
+
+func TestValidateBootstrapTrustToken(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"via-token": {
+			Namespaces:     []string{"dev/*"},
+			BootstrapTrust: []string{"token"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("bootstrap_trust 'token' should be valid: %v", err)
+	}
+}
+
+// --- Dashboard config validation ---
+
+func TestValidateDashboardEnabledRequiresCredential(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = ""
+	cfg.Dashboard.PIN = ""
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("dashboard enabled without password_hash or pin should fail")
+	}
+	if !strings.Contains(err.Error(), "password_hash or pin") {
+		t.Fatalf("error should mention credential requirement: %v", err)
+	}
+}
+
+func TestValidateDashboardWithPasswordHash(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = "$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("dashboard with bcrypt hash should pass: %v", err)
+	}
+}
+
+func TestValidateDashboardRejectsPlaintextPassword(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = "plaintext-password"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("plaintext password_hash should fail validation")
+	}
+	if !strings.Contains(err.Error(), "bcrypt hash") {
+		t.Fatalf("error should mention bcrypt: %v", err)
+	}
+}
+
+func TestValidateDashboardWithPIN(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PIN = "1234"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("dashboard with PIN should pass: %v", err)
+	}
+}
+
+func TestValidateDashboardSessionTTLInvalid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = "$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
+	cfg.Dashboard.SessionTTL = "not-a-duration"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("invalid session_ttl should fail validation")
+	}
+	if !strings.Contains(err.Error(), "session_ttl") {
+		t.Fatalf("error should mention session_ttl: %v", err)
+	}
+}
+
+func TestValidateDashboardSessionTTLValid(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = "$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234"
+	cfg.Dashboard.SessionTTL = "8h"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid session_ttl should pass: %v", err)
+	}
+}
+
+func TestValidateDashboardDisabledIgnoresFields(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = false
+	cfg.Dashboard.PasswordHash = ""
+	cfg.Dashboard.PIN = ""
+	cfg.Dashboard.SessionTTL = "garbage"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disabled dashboard should not validate fields: %v", err)
+	}
+}
+
+func TestDashboardConfigJSON(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = "$2a$10$testbcrypthashvalue"
+	cfg.Dashboard.SessionTTL = "4h"
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var parsed Config
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !parsed.Dashboard.Enabled {
+		t.Error("dashboard.enabled should be true after round-trip")
+	}
+	if parsed.Dashboard.PasswordHash != "$2a$10$testbcrypthashvalue" {
+		t.Errorf("dashboard.password_hash = %q, want %q", parsed.Dashboard.PasswordHash, "$2a$10$testbcrypthashvalue")
+	}
+	if parsed.Dashboard.SessionTTL != "4h" {
+		t.Errorf("dashboard.session_ttl = %q, want %q", parsed.Dashboard.SessionTTL, "4h")
+	}
+}
+
+func TestExampleConfigIncludesSessionAndDashboard(t *testing.T) {
+	cfg := ExampleConfig()
+
+	if cfg.Session.TTL != "1h" {
+		t.Fatalf("session.ttl = %q, want 1h", cfg.Session.TTL)
+	}
+	if len(cfg.Session.Roles) == 0 {
+		t.Fatal("expected example session roles")
+	}
+	if cfg.Dashboard.SessionTTL != "4h" {
+		t.Fatalf("dashboard.session_ttl = %q, want 4h", cfg.Dashboard.SessionTTL)
 	}
 }
 

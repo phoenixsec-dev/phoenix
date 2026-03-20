@@ -1,0 +1,44 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Phoenix Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/static/style.css">
+    <link rel="icon" href="/dashboard/static/phoenix-icon.svg" type="image/svg+xml">
+</head>
+<body>
+    <nav class="sidebar" id="sidebar">
+        <div class="sidebar-brand">
+            <img src="/dashboard/static/phoenix-icon.svg" alt="Phoenix" class="sidebar-icon">
+            <span class="sidebar-title">Phoenix</span>
+        </div>
+        <a href="/dashboard/" class="nav-link{{if eq .Active "overview"}} active{{end}}">
+            <span class="nav-icon">&#9632;</span> Overview
+        </a>
+        <a href="/dashboard/approvals" class="nav-link{{if eq .Active "approvals"}} active{{end}}">
+            <span class="nav-icon">&#10003;</span> Approvals
+            {{if and .PendingCount (gt .PendingCount 0)}}<span class="badge">{{.PendingCount}}</span>{{end}}
+        </a>
+        <a href="/dashboard/sessions" class="nav-link{{if eq .Active "sessions"}} active{{end}}">
+            <span class="nav-icon">&#9679;</span> Sessions
+        </a>
+        <a href="/dashboard/audit" class="nav-link{{if eq .Active "audit"}} active{{end}}">
+            <span class="nav-icon">&#9776;</span> Audit
+        </a>
+        <a href="/dashboard/roles" class="nav-link{{if eq .Active "roles"}} active{{end}}">
+            <span class="nav-icon">&#9881;</span> Roles
+        </a>
+        <div class="sidebar-footer">
+            <form method="POST" action="/dashboard/logout">
+                <input type="hidden" name="_csrf" value="{{.CSRF}}">
+                <button type="submit" class="nav-link logout-btn">Logout</button>
+            </form>
+        </div>
+    </nav>
+    <main class="content">
+        {{template "content" .}}
+    </main>
+    <script src="/dashboard/static/dashboard.js"></script>
+</body>
+</html>{{end}}
