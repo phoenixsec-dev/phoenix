@@ -23,6 +23,7 @@ type Entry struct {
 	IP        string    `json:"ip,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
 	SessionID string    `json:"session_id,omitempty"`
+	Sealed    bool      `json:"sealed"`
 }
 
 // Logger writes audit entries to a file.
@@ -53,8 +54,8 @@ func NewWriterLogger(w io.Writer) *Logger {
 	}
 }
 
-// Log records an audit entry.
-func (l *Logger) Log(agent, action, path, status, ip, reason string) error {
+// log writes a low-level audit entry.
+func (l *Logger) log(agent, action, path, status, ip, reason, sessionID string, sealed bool) error {
 	entry := Entry{
 		Timestamp: time.Now().UTC(),
 		Agent:     agent,
@@ -63,6 +64,8 @@ func (l *Logger) Log(agent, action, path, status, ip, reason string) error {
 		Status:    status,
 		IP:        ip,
 		Reason:    reason,
+		SessionID: sessionID,
+		Sealed:    sealed,
 	}
 
 	l.mu.Lock()
@@ -77,59 +80,36 @@ func (l *Logger) Log(agent, action, path, status, ip, reason string) error {
 	return nil
 }
 
-// LogAllowed is a convenience for logging permitted actions.
+// LogAllowed is a convenience for logging permitted plaintext actions.
 func (l *Logger) LogAllowed(agent, action, path, ip string) error {
-	return l.Log(agent, action, path, "allowed", ip, "")
+	return l.log(agent, action, path, "allowed", ip, "", "", false)
+}
+
+// LogAllowedSealed is a convenience for logging permitted actions with response
+// seal state (true when the response was sealed).
+func (l *Logger) LogAllowedSealed(agent, action, path, ip string, sealed bool) error {
+	return l.log(agent, action, path, "allowed", ip, "", "", sealed)
 }
 
 // LogDenied is a convenience for logging denied actions.
 func (l *Logger) LogDenied(agent, action, path, ip, reason string) error {
-	return l.Log(agent, action, path, "denied", ip, reason)
+	return l.log(agent, action, path, "denied", ip, reason, "", false)
 }
 
 // LogSessionAllowed logs a permitted action with session context.
 func (l *Logger) LogSessionAllowed(agent, action, path, ip, sessionID string) error {
-	entry := Entry{
-		Timestamp: time.Now().UTC(),
-		Agent:     agent,
-		Action:    action,
-		Path:      path,
-		Status:    "allowed",
-		IP:        ip,
-		SessionID: sessionID,
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if err := l.enc.Encode(entry); err != nil {
-		return err
-	}
-	if l.file != nil {
-		return l.file.Sync()
-	}
-	return nil
+	return l.log(agent, action, path, "allowed", ip, "", sessionID, false)
+}
+
+// LogSessionAllowedSealed logs a permitted action with session context and response
+// seal state (true when the response was sealed).
+func (l *Logger) LogSessionAllowedSealed(agent, action, path, ip, sessionID string, sealed bool) error {
+	return l.log(agent, action, path, "allowed", ip, "", sessionID, sealed)
 }
 
 // LogSessionDenied logs a denied action with session context.
 func (l *Logger) LogSessionDenied(agent, action, path, ip, reason, sessionID string) error {
-	entry := Entry{
-		Timestamp: time.Now().UTC(),
-		Agent:     agent,
-		Action:    action,
-		Path:      path,
-		Status:    "denied",
-		IP:        ip,
-		Reason:    reason,
-		SessionID: sessionID,
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if err := l.enc.Encode(entry); err != nil {
-		return err
-	}
-	if l.file != nil {
-		return l.file.Sync()
-	}
-	return nil
+	return l.log(agent, action, path, "denied", ip, reason, sessionID, false)
 }
 
 // Close flushes and closes the audit log file.

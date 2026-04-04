@@ -340,7 +340,7 @@ Usage:
   phoenix agent-sock attest [--socket <path>]  Attest via local Unix socket agent
   phoenix agent-sock token --agent <name>      Mint/cache short-lived token via socket
   phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
-  phoenix keypair generate <name> [-o dir]     Generate X25519 seal key pair
+  phoenix keypair generate <name> [-o path]    Generate X25519 seal key pair
   phoenix keypair show <name>                 Show public key for a seal key pair
   phoenix sessions list [--role R] [--agent A]  List active sessions
   phoenix sessions info <session-id>            Show session details
@@ -428,7 +428,7 @@ func cmdGet(args []string) error {
 		return fmt.Errorf("usage: phoenix get <path>")
 	}
 
-	sealPrivKey, err := loadSealKey()
+	sealPrivKey, err := loadSealKeyForRequest()
 	if err != nil {
 		return fmt.Errorf("loading seal key: %w", err)
 	}
@@ -578,12 +578,17 @@ func cmdList(args []string) error {
 		return err
 	}
 
+	sealPrivKey, err := loadSealKeyForRequest()
+	if err != nil {
+		return fmt.Errorf("loading seal key: %w", err)
+	}
+
 	prefix := ""
 	if len(args) > 0 {
 		prefix = args[0]
 	}
 
-	resp, err := apiRequest("GET", "/v1/secrets/"+prefix, nil)
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+prefix, nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -609,6 +614,11 @@ func cmdExport(args []string) error {
 		return err
 	}
 
+	sealPrivKey, err := loadSealKeyForRequest()
+	if err != nil {
+		return fmt.Errorf("loading seal key: %w", err)
+	}
+
 	var prefix, format string
 	i := 0
 	if i < len(args) && !strings.HasPrefix(args[i], "-") {
@@ -631,7 +641,7 @@ func cmdExport(args []string) error {
 	}
 
 	// Get list of paths
-	resp, err := apiRequest("GET", "/v1/secrets/"+prefix, nil)
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+prefix, nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -648,7 +658,7 @@ func cmdExport(args []string) error {
 	}
 
 	for _, path := range listResult.Paths {
-		resp, err := apiRequest("GET", "/v1/secrets/"+path, nil)
+		resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+path, nil, sealHeaders(sealPrivKey))
 		if err != nil {
 			return fmt.Errorf("request failed for %q: %w", path, err)
 		}
@@ -1028,7 +1038,7 @@ func cmdResolve(args []string) error {
 		return fmt.Errorf("usage: phoenix resolve [--signed] <phoenix://ns/secret> [ref...]")
 	}
 
-	sealPrivKey, err := loadSealKey()
+	sealPrivKey, err := loadSealKeyForRequest()
 	if err != nil {
 		return fmt.Errorf("loading seal key: %w", err)
 	}
@@ -1222,7 +1232,7 @@ func cmdExec(args []string) error {
 		return err
 	}
 
-	sealPrivKey, sealErr := loadSealKey()
+	sealPrivKey, sealErr := loadSealKeyForRequest()
 	if sealErr != nil {
 		return fmt.Errorf("loading seal key: %w", sealErr)
 	}
@@ -1543,6 +1553,21 @@ func loadSealKey() (*[32]byte, error) {
 	return crypto.LoadSealPrivateKey(keyPath)
 }
 
+// loadSealKeyForRequest loads the seal private key for normal CLI requests.
+//
+// For role-bound sessions, this includes the per-role session key location
+// (~/.phoenix/session-seal-<role>.key) so request headers match session binding.
+func loadSealKeyForRequest() (*[32]byte, error) {
+	if role := os.Getenv("PHOENIX_ROLE"); role != "" {
+		priv, _, err := ensureSealKey(role)
+		if err != nil {
+			return nil, err
+		}
+		return priv, nil
+	}
+	return loadSealKey()
+}
+
 // sealHeaders returns HTTP headers for sealed requests.
 // Returns nil if no seal key is loaded.
 func sealHeaders(privKey *[32]byte) map[string]string {
@@ -1575,10 +1600,6 @@ func decryptSealedValue(raw interface{}, privKey *[32]byte) (string, error) {
 // --- Keypair commands ---
 
 func cmdKeypairGenerate(args []string) error {
-	if err := requireAuth(); err != nil {
-		return err
-	}
-
 	var name, output string
 	force := false
 	i := 0
@@ -1592,6 +1613,8 @@ func cmdKeypairGenerate(args []string) error {
 			i++
 			if i < len(args) {
 				output = args[i]
+			} else {
+				return fmt.Errorf("usage: phoenix keypair generate <agent-name> [--output <path>] [--force]")
 			}
 		case "--force":
 			force = true
@@ -1601,6 +1624,18 @@ func cmdKeypairGenerate(args []string) error {
 
 	if name == "" {
 		return fmt.Errorf("usage: phoenix keypair generate <agent-name> [--output <path>] [--force]")
+	}
+	if output != "" {
+		if output == string(os.PathSeparator) || strings.HasSuffix(output, string(os.PathSeparator)) {
+			return fmt.Errorf("usage: output must be a file path, not a directory: %q", output)
+		}
+		if fi, err := os.Stat(output); err == nil && fi.IsDir() {
+			return fmt.Errorf("usage: output must be a file path, not a directory: %q", output)
+		}
+	}
+
+	if err := requireAuth(); err != nil {
+		return err
 	}
 
 	urlPath := "/v1/keypair"
@@ -1781,6 +1816,9 @@ func printPolicyRule(rule *policy.Rule) {
 	}
 	if rule.RequireSigned {
 		fmt.Printf("  require_signed: true\n")
+	}
+	if rule.RequireSealed {
+		fmt.Printf("  require_sealed: true\n")
 	}
 }
 
@@ -2131,8 +2169,8 @@ func cacheSessionToken(role, tok string, expiresAt time.Time) {
 	}
 }
 
-// ensureSealKey loads or generates a seal key for session use.
-// Priority: PHOENIX_SEAL_KEY env > ~/.phoenix/session-seal-<role>.key > generate new.
+// ensureSealKey resolves the seal key for session binding.
+// Priority: PHOENIX_SEAL_KEY env > ~/.phoenix/session-seal-<role>.key > none.
 func ensureSealKey(role string) (*[32]byte, string, error) {
 	// Check env first
 	envPath := os.Getenv("PHOENIX_SEAL_KEY")
@@ -2162,21 +2200,10 @@ func ensureSealKey(role string) (*[32]byte, string, error) {
 		return priv, crypto.EncodeSealKey(pub), nil
 	}
 
-	// Generate new key
-	if err := os.MkdirAll(keyDir, 0700); err != nil {
-		return nil, "", fmt.Errorf("creating key directory: %w", err)
-	}
-	kp, err := crypto.GenerateSealKeyPair()
-	if err != nil {
-		return nil, "", fmt.Errorf("generating seal key: %w", err)
-	}
-	privKey := kp.PrivateKey
-	pubKey := kp.PublicKey
-	encoded := crypto.EncodeSealKey(&privKey)
-	if err := os.WriteFile(keyPath, []byte(encoded+"\n"), 0600); err != nil {
-		return nil, "", fmt.Errorf("saving seal key: %w", err)
-	}
-	return &privKey, crypto.EncodeSealKey(&pubKey), nil
+	// No explicit key configured — mint without seal binding.
+	// To enable sealed sessions, set PHOENIX_SEAL_KEY or place a key at
+	// ~/.phoenix/session-seal-<role>.key.
+	return nil, "", nil
 }
 
 // mintSessionViaAPI calls POST /v1/session/mint and returns the session token.
@@ -2248,8 +2275,9 @@ func autoMintSession() error {
 		return fmt.Errorf("PHOENIX_ROLE not set")
 	}
 
-	// Check cache first
-	if cached := getCachedSessionToken(role, 5*time.Minute); cached != "" {
+	// Check cache first. Keep a valid cached session token as long as it is still
+	// valid; renewal is handled separately when remaining lifetime is low.
+	if cached := getCachedSessionToken(role, 0); cached != "" {
 		tokenMu.Lock()
 		token = cached
 		tokenMu.Unlock()

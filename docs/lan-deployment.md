@@ -186,18 +186,18 @@ For context-safe delivery, generate a seal key pair per agent:
 
 ```bash
 # On the server or admin machine
-phoenix keypair generate host-a-builder -o /tmp/keys/host-a/
-phoenix keypair generate host-b-deployer -o /tmp/keys/host-b/
+phoenix keypair generate host-a-builder -o /tmp/keys/host-a.seal.key
+phoenix keypair generate host-b-deployer -o /tmp/keys/host-b.seal.key
 
 # Distribute seal keys to each host
-scp /tmp/keys/host-a/host-a-builder.seal.key user@192.168.1.20:/etc/phoenix/keys/
-scp /tmp/keys/host-b/host-b-deployer.seal.key user@192.168.1.21:/etc/phoenix/keys/
+scp /tmp/keys/host-a.seal.key user@192.168.1.20:/etc/phoenix/keys/host-a.seal.key
+scp /tmp/keys/host-b.seal.key user@192.168.1.21:/etc/phoenix/keys/host-b.seal.key
 ```
 
 Then add to each agent's environment:
 
 ```bash
-export PHOENIX_SEAL_KEY="/etc/phoenix/keys/host-a-builder.seal.key"
+export PHOENIX_SEAL_KEY="/etc/phoenix/keys/host-a.seal.key"
 ```
 
 ## 7. Apply attestation policy (optional)

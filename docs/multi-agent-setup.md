@@ -29,8 +29,8 @@ Generate a key pair per agent so each gets encrypted responses only it can
 decrypt. See [Sealed Responses](sealed-responses.md) for how this works.
 
 ```bash
-phoenix keypair generate builder -o /etc/phoenix/keys/
-phoenix keypair generate deployer -o /etc/phoenix/keys/
+phoenix keypair generate builder -o /etc/phoenix/keys/builder.seal.key
+phoenix keypair generate deployer -o /etc/phoenix/keys/deployer.seal.key
 ```
 
 ### 3. Configure policy

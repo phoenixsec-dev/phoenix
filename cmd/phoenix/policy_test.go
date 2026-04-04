@@ -155,6 +155,37 @@ func TestCmdPolicyShowLegacyRulesFormat(t *testing.T) {
 	}
 }
 
+func TestCmdPolicyShowIncludesRequireSealed(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.json")
+	policyData := `{
+		"attestation": {
+			"secure/*": {
+				"require_sealed": true
+			}
+		}
+	}`
+	if err := os.WriteFile(policyPath, []byte(policyData), 0644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+
+	origPolicy := os.Getenv("PHOENIX_POLICY")
+	os.Setenv("PHOENIX_POLICY", policyPath)
+	defer os.Setenv("PHOENIX_POLICY", origPolicy)
+
+	out := captureStdout(t, func() {
+		if err := cmdPolicyShow([]string{"secure/db"}); err != nil {
+			t.Fatalf("cmdPolicyShow: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Pattern: secure/*") {
+		t.Fatalf("expected matched pattern in output, got: %s", out)
+	}
+	if !strings.Contains(out, "require_sealed: true") {
+		t.Fatalf("expected require_sealed in output, got: %s", out)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

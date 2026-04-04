@@ -245,8 +245,8 @@ func cmdMCP(args []string) error {
 		return err
 	}
 
-	// Load seal key if configured.
-	sealKey, err := loadSealKey()
+	// Load seal key if configured (supports role-bound session keys).
+	sealKey, err := loadSealKeyForRequest()
 	if err != nil {
 		return fmt.Errorf("loading seal key: %w", err)
 	}

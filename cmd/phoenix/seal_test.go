@@ -48,6 +48,39 @@ func TestLoadSealKeyFromFile(t *testing.T) {
 	}
 }
 
+func TestLoadSealKeyForRequestUsesRoleSessionKey(t *testing.T) {
+	kp, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".phoenix"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	role := "deploy-role"
+	keyPath := filepath.Join(home, ".phoenix", "session-seal-"+role+".key")
+	if err := os.WriteFile(keyPath, []byte(crypto.EncodeSealKey(&kp.PrivateKey)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("PHOENIX_ROLE", role)
+	t.Setenv("PHOENIX_SEAL_KEY", "")
+
+	key, err := loadSealKeyForRequest()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if key == nil {
+		t.Fatal("expected non-nil key from role session file")
+	}
+	if *key != kp.PrivateKey {
+		t.Fatal("loaded key does not match role session key")
+	}
+}
+
 func TestSealHeadersNilKey(t *testing.T) {
 	hdrs := sealHeaders(nil)
 	if hdrs != nil {
@@ -446,6 +479,28 @@ func TestCmdKeypairGenerateDefaultPath(t *testing.T) {
 		// Suppress unused import warning
 		_ = fmt.Sprintf("PHOENIX_SEAL_KEY=%s", expectedPath)
 	})
+}
+
+func TestCmdKeypairGenerateRejectsDirectoryOutput(t *testing.T) {
+	outDir := t.TempDir()
+
+	err := cmdKeypairGenerate([]string{"test-agent", "-o", outDir})
+	if err == nil {
+		t.Fatal("expected usage error for directory output path")
+	}
+	if !strings.Contains(err.Error(), "output must be a file path") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCmdKeypairGenerateMissingOutputArg(t *testing.T) {
+	err := cmdKeypairGenerate([]string{"test-agent", "-o"})
+	if err == nil {
+		t.Fatal("expected usage error when --output is missing a value")
+	}
+	if !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 // --- cmdExec env stripping test ---

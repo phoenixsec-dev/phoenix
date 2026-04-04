@@ -155,7 +155,7 @@ phoenix cert revoke <serial-number>
 
 ```bash
 # Generate a seal key pair for an agent
-phoenix keypair generate myagent -o /etc/phoenix/keys/
+phoenix keypair generate myagent -o /etc/phoenix/keys/myagent.seal.key
 
 # The private key is written to <name>.seal.key
 # The public key is printed to stdout

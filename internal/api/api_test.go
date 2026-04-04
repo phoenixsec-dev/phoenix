@@ -3117,6 +3117,95 @@ func TestSealedGetResponse(t *testing.T) {
 	}
 }
 
+func TestSealedGetResponseLogsSealedSuccess(t *testing.T) {
+	srv, adminToken, kp := setupSealedTestServer(t)
+
+	req := httptest.NewRequest("GET", "/v1/secrets/test/sealed-secret", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&kp.PublicKey))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit query: expected 200, got %d", w.Code)
+	}
+
+	var auditResp struct {
+		Entries []struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Sealed bool   `json:"sealed"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	var found bool
+	for _, e := range auditResp.Entries {
+		if e.Action == "read_value" && e.Path == "test/sealed-secret" && e.Status == "allowed" {
+			found = true
+			if !e.Sealed {
+				t.Fatalf("read_value allowed entry should have sealed=true: %+v", e)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected allowed sealed read_value audit entry for test/sealed-secret; entries: %+v", auditResp.Entries)
+	}
+}
+
+func TestGetResponseWithoutSealLogsUnsealedSuccess(t *testing.T) {
+	srv, adminToken, _ := setupSealedTestServer(t)
+
+	req := httptest.NewRequest("GET", "/v1/secrets/test/sealed-secret", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit query: expected 200, got %d", w.Code)
+	}
+
+	var auditResp struct {
+		Entries []struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Sealed bool   `json:"sealed"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	var found bool
+	for _, e := range auditResp.Entries {
+		if e.Action == "read_value" && e.Path == "test/sealed-secret" && e.Status == "allowed" {
+			found = true
+			if e.Sealed {
+				t.Fatalf("read_value allowed entry should have sealed=false: %+v", e)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected allowed unsealed read_value audit entry for test/sealed-secret; entries: %+v", auditResp.Entries)
+	}
+}
+
 func TestSealedResolveResponse(t *testing.T) {
 	srv, _, kp := setupSealedTestServer(t)
 
@@ -3162,6 +3251,101 @@ func TestSealedResolveResponse(t *testing.T) {
 	}
 	if payload.Ref != "phoenix://test/sealed-secret" {
 		t.Errorf("ref = %q, want %q", payload.Ref, "phoenix://test/sealed-secret")
+	}
+}
+
+func TestSealedResolveResponseLogsSealedSuccess(t *testing.T) {
+	srv, adminToken, kp := setupSealedTestServer(t)
+
+	body, _ := json.Marshal(resolveRequest{
+		Refs: []string{"phoenix://test/sealed-secret"},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&kp.PublicKey))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit query: expected 200, got %d", w.Code)
+	}
+
+	var auditResp struct {
+		Entries []struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Sealed bool   `json:"sealed"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	var found bool
+	for _, e := range auditResp.Entries {
+		if e.Action == "resolve" && e.Path == "test/sealed-secret" && e.Status == "allowed" {
+			found = true
+			if !e.Sealed {
+				t.Fatalf("resolve allowed entry should have sealed=true: %+v", e)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected allowed sealed resolve audit entry for test/sealed-secret; entries: %+v", auditResp.Entries)
+	}
+}
+
+func TestResolveResponseWithoutSealLogsUnsealedSuccess(t *testing.T) {
+	srv, adminToken, _ := setupSealedTestServer(t)
+
+	body, _ := json.Marshal(resolveRequest{
+		Refs: []string{"phoenix://test/sealed-secret"},
+	})
+	req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("audit query: expected 200, got %d", w.Code)
+	}
+
+	var auditResp struct {
+		Entries []struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Status string `json:"status"`
+			Sealed bool   `json:"sealed"`
+		} `json:"entries"`
+	}
+	json.NewDecoder(w.Body).Decode(&auditResp)
+
+	var found bool
+	for _, e := range auditResp.Entries {
+		if e.Action == "resolve" && e.Path == "test/sealed-secret" && e.Status == "allowed" {
+			found = true
+			if e.Sealed {
+				t.Fatalf("resolve allowed entry should have sealed=false: %+v", e)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected allowed unsealed resolve audit entry for test/sealed-secret; entries: %+v", auditResp.Entries)
 	}
 }
 

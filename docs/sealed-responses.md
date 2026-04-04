@@ -40,10 +40,10 @@ This writes one file:
 The derived public key is printed to stdout for reference (e.g., for
 server-side registration). It is not written to a file.
 
-Override the output directory:
+Override the output file path:
 
 ```bash
-phoenix keypair generate myagent -o /etc/phoenix/keys/
+phoenix keypair generate myagent -o /etc/phoenix/keys/myagent.seal.key
 ```
 
 ### Rotation

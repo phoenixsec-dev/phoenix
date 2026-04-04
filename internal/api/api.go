@@ -540,6 +540,20 @@ func (s *Server) auditAllowed(info *authInfo, action, path, ip string) {
 	}
 }
 
+// auditAllowedWithSeal logs an allowed action and includes sealed-response state.
+func (s *Server) auditAllowedWithSeal(info *authInfo, action, path, ip string, sealed bool) {
+	if info != nil && info.UsedSession {
+		s.logAudit(s.audit.LogSessionAllowedSealed(info.Agent, action, path, ip, info.SessionID, sealed))
+		return
+	}
+
+	agent := ""
+	if info != nil {
+		agent = info.Agent
+	}
+	s.logAudit(s.audit.LogAllowedSealed(agent, action, path, ip, sealed))
+}
+
 // auditDenied logs a denied action, including session ID when a session was used.
 func (s *Server) auditDenied(info *authInfo, action, path, ip, reason string) {
 	if info != nil && info.UsedSession {
@@ -743,7 +757,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAllowed(info, "read_value", path, ip)
+	s.auditAllowedWithSeal(info, "read_value", path, ip, sealKey != nil)
 	if sealKey != nil {
 		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
 		if err != nil {
@@ -1380,7 +1394,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		s.auditAllowed(info, "resolve", path, ip)
+		s.auditAllowedWithSeal(info, "resolve", path, ip, sealKey != nil)
 
 		if sealKey != nil {
 			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)

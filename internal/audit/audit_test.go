@@ -77,6 +77,22 @@ func TestLogFormat(t *testing.T) {
 	}
 }
 
+func TestLogFormatIncludesSealedField(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewWriterLogger(&buf)
+
+	logger.LogAllowedSealed("vector", "read", "test/key", "10.0.0.1", true)
+
+	line := strings.TrimSpace(buf.String())
+	var entry Entry
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("unmarshal log line: %v", err)
+	}
+	if !entry.Sealed {
+		t.Fatal("expected sealed field to be true")
+	}
+}
+
 func TestQueryByPath(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")
