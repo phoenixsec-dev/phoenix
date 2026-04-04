@@ -4,4 +4,4 @@
 //	go build -ldflags "-X github.com/phoenixsec/phoenix/internal/version.Version=1.0.0"
 package version
 
-var Version = "0.13.3"
+var Version = "0.13.4"

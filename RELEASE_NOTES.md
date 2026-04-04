@@ -1,5 +1,25 @@
 # Release Notes
 
+## v0.13.4 (2026-04-04)
+
+### Stabilization Fixes
+
+- Fixed CLI role-session cache reuse so repeated `PHOENIX_ROLE` invocations
+  reuse valid cached sessions and only renew near expiry instead of minting
+  fresh sessions unnecessarily.
+- Fixed role-bound sealed sessions so requests consistently use the same seal
+  key resolution path as session minting, including
+  `~/.phoenix/session-seal-<role>.key`.
+- Fixed `phoenix list` and adjacent sealed request paths to send
+  `X-Phoenix-Seal-Key` when using sealed role sessions.
+- Added sealed-success audit metadata so allowed sealed reads and resolves are
+  distinguishable from plaintext success paths.
+- `phoenix policy show` now displays `require_sealed`.
+- Clarified `phoenix keypair generate -o` as a file path, with fast failure for
+  directory-style output values.
+- Fixed dashboard template rendering so page-specific `content` blocks do not
+  collide across pages.
+
 ## v0.13.3 (2026-03-20)
 
 ### Session Identity
