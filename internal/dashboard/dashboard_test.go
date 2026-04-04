@@ -165,6 +165,41 @@ func TestRequireAuth(t *testing.T) {
 	}
 }
 
+func TestPagesRenderOwnContentTemplate(t *testing.T) {
+	h, _, _ := testHandler(t)
+	cookie := login(t, h)
+
+	req := httptest.NewRequest("GET", "/dashboard/", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("overview: expected 200, got %d", w.Code)
+	}
+	overview := w.Body.String()
+	if !strings.Contains(overview, "Overview") {
+		t.Fatalf("overview page missing overview content: %s", overview)
+	}
+	if strings.Contains(overview, "Audit Log") {
+		t.Fatalf("overview page rendered audit content: %s", overview)
+	}
+
+	req = httptest.NewRequest("GET", "/dashboard/audit", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("audit: expected 200, got %d", w.Code)
+	}
+	auditPage := w.Body.String()
+	if !strings.Contains(auditPage, "Audit Log") {
+		t.Fatalf("audit page missing audit content: %s", auditPage)
+	}
+	if strings.Contains(auditPage, "Recent Activity") {
+		t.Fatalf("audit page rendered overview content: %s", auditPage)
+	}
+}
+
 func TestCSRFValidation(t *testing.T) {
 	h, _, as := testHandler(t)
 	cookie := login(t, h)

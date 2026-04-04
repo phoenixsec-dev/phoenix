@@ -131,7 +131,7 @@ type Deps struct {
 // Handler serves the dashboard web UI.
 type Handler struct {
 	deps            Deps
-	tmpl            *template.Template
+	tmpls           map[string]*template.Template
 	cookieKey       []byte // 32 bytes, HMAC signing
 	passwordH       []byte // bcrypt hash (nil if PIN mode)
 	pin             string // raw PIN (empty if password mode)
@@ -182,7 +182,8 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		h.pin = cfg.PIN
 	}
 
-	// Parse templates with functions
+	// Parse templates: each page gets its own template set so that
+	// {{define "content"}} blocks don't collide across pages.
 	funcMap := template.FuncMap{
 		"truncate":  truncate,
 		"fmtTime":   fmtTime,
@@ -193,11 +194,24 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		"hasPrefix": strings.HasPrefix,
 	}
 
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templateFS, "templates/*.html")
-	if err != nil {
-		return nil, fmt.Errorf("parsing templates: %w", err)
+	pageTemplates := []string{
+		"templates/approvals.html",
+		"templates/audit.html",
+		"templates/login.html",
+		"templates/overview.html",
+		"templates/roles.html",
+		"templates/sessions.html",
 	}
-	h.tmpl = tmpl
+	h.tmpls = make(map[string]*template.Template, len(pageTemplates))
+	for _, page := range pageTemplates {
+		t, err := template.New("").Funcs(funcMap).ParseFS(templateFS, "templates/layout.html", page)
+		if err != nil {
+			return nil, fmt.Errorf("parsing template %s: %w", page, err)
+		}
+		// Key by filename: "approvals.html", "sessions.html", etc.
+		name := page[len("templates/"):]
+		h.tmpls[name] = t
+	}
 
 	// Static file server (strip /dashboard/static/ prefix)
 	staticSub, _ := fs.Sub(staticFS, "static")
@@ -791,8 +805,14 @@ func (h *Handler) render(w http.ResponseWriter, name string, data map[string]int
 	if h.deps.Approvals != nil {
 		data["PendingCount"] = len(h.deps.Approvals.ListPending())
 	}
+	t, ok := h.tmpls[name]
+	if !ok {
+		log.Printf("dashboard: unknown template %q", name)
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.tmpl.ExecuteTemplate(w, name, data); err != nil {
+	if err := t.ExecuteTemplate(w, name, data); err != nil {
 		log.Printf("dashboard: template error: %v", err)
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
