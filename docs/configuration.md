@@ -51,7 +51,8 @@ See [Session Identity](session-identity.md) for the full guide.
         "bootstrap_trust": ["mtls"],
         "require_seal_key": true,
         "step_up": true,
-        "step_up_ttl": "15m"
+        "step_up_ttl": "15m",
+        "elevates_acl": true
       }
     }
   }

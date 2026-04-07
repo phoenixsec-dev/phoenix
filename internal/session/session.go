@@ -49,6 +49,7 @@ type Session struct {
 	Agent              string    `json:"agent"`
 	SealKeyFingerprint string    `json:"seal_key_fingerprint,omitempty"`
 	CertFingerprint    string    `json:"-"`
+	ElevatesACL        bool      `json:"elevates_acl,omitempty"`
 	Namespaces         []string  `json:"namespaces"`
 	Actions            []string  `json:"actions"`
 	BootstrapMethod    string    `json:"bootstrap_method"`
@@ -78,6 +79,7 @@ type Claims struct {
 	Role               string    `json:"role"`
 	Agent              string    `json:"agent"`
 	SealKeyFingerprint string    `json:"skfp,omitempty"`
+	ElevatesACL        bool      `json:"eacl,omitempty"`
 	ExpiresAt          time.Time `json:"exp"`
 	IssuedAt           time.Time `json:"iat"`
 }

@@ -152,7 +152,7 @@ vals, err := client.ResolveBatch([]string{
 
 // Session identity
 client, err := phoenix.NewWithRole("https://phoenix:9090", "bootstrap-token", "dev")
-// Auto-mints a session; auto-renews before expiry
+// Auto-mints a session; non-elevated sessions auto-renew before expiry
 
 // Sealed mode
 client.SetSealKey("/path/to/agent.seal.key")

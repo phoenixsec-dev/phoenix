@@ -1,5 +1,23 @@
 # Release Notes
 
+## v0.13.5 (2026-04-07)
+
+### Step-Up Authorization Hygiene
+
+- Fixed step-up authorization semantics so approved step-up sessions can
+  temporarily grant access beyond the base agent ACL when the role is
+  explicitly configured with `elevates_acl: true`.
+- Fixed elevated step-up session renewal so temporary ACL elevation cannot be
+  extended transparently; elevated sessions now require a fresh mint and human
+  approval to continue.
+- Preserved path policy, attestation, seal-key binding, expiry, and revocation
+  enforcement for elevated step-up sessions.
+- Added targeted API/session tests covering elevated access, revocation,
+  expiry, non-step-up ACL behavior, policy/seal-key enforcement, and
+  reapproval-required renewal behavior.
+- Updated session/auth/API docs and SDK approval classification for the new
+  `STEP_UP_REAPPROVAL_REQUIRED` denial path.
+
 ## v0.13.4 (2026-04-04)
 
 ### Stabilization Fixes

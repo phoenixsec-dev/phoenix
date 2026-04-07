@@ -619,7 +619,7 @@ func (h *Handler) handleApprove(w http.ResponseWriter, r *http.Request) {
 	tokenStr, sess, mintErr := h.deps.Sessions.Create(
 		apr.Role, apr.Agent, apr.SealPubKey,
 		role.Namespaces, role.Actions,
-		apr.BootstrapMethod, apr.CertFingerprint, apr.SourceIP, ttl,
+		apr.BootstrapMethod, apr.CertFingerprint, apr.SourceIP, role.StepUp && role.ElevatesACL, ttl,
 	)
 	if mintErr != nil {
 		log.Printf("dashboard: session mint error: %v", mintErr)

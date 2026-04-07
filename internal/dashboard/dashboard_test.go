@@ -293,7 +293,7 @@ func TestSessionRevoke(t *testing.T) {
 	csrf := csrfFromCookie(t, h, cookie)
 
 	// Create a session directly
-	_, sess, err := ss.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "", "10.0.0.1", time.Hour)
+	_, sess, err := ss.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "", "10.0.0.1", false, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

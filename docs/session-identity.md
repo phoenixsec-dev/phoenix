@@ -14,7 +14,9 @@ token bound to a named role, and use that token for all subsequent requests.
 
 **Sessions** are server-issued credentials with a fixed lifetime (default 1h).
 They carry the role's scope and are bound to the minting agent's identity.
-Sessions auto-renew if attestation still holds and can be explicitly revoked.
+Sessions can be explicitly revoked. Non-elevated sessions auto-renew if
+attestation still holds. Elevated step-up sessions require fresh approval
+instead of transparent renewal.
 
 **Bootstrap trust** determines which authentication methods can mint sessions
 for a given role. Options: `bearer`, `mtls`, `local` (loopback), `token`
@@ -41,7 +43,8 @@ Enable sessions in your server config:
         "bootstrap_trust": ["mtls", "bearer"],
         "require_seal_key": true,
         "step_up": true,
-        "step_up_ttl": "15m"
+        "step_up_ttl": "15m",
+        "elevates_acl": true
       }
     }
   }
@@ -60,6 +63,7 @@ Enable sessions in your server config:
 | `attestation` | `[]string` | Attestation requirements (e.g. `["source_ip", "cert_fingerprint"]`) |
 | `step_up` | `bool` | Require human approval before minting |
 | `step_up_ttl` | `string` | TTL for step-up sessions (e.g. `"15m"`) |
+| `elevates_acl` | `bool` | For approved `step_up` sessions, allow temporary access within role scope even when the base agent ACL would normally deny it |
 
 ## Agent bootstrap
 
@@ -73,7 +77,8 @@ phoenix get dev/api-key  # auto-mints session, then reads secret
 
 The bootstrap token is used once for minting. All subsequent requests use
 the scoped session token. The CLI caches the session token locally and
-auto-renews before expiry.
+auto-renews before expiry for non-elevated sessions. Elevated step-up
+sessions must be re-minted and re-approved when they expire.
 
 ## Session lifecycle
 
@@ -88,9 +93,11 @@ Returns a session token (`phxs_...` prefix) with role scope and expiry.
 
 ### Renewal
 
-Sessions auto-renew when nearing expiry. On renewal, the server rechecks
-bootstrap trust and attestation. If anything changed (cert expired, role
-config updated), renewal fails and the agent must re-mint.
+Non-elevated sessions auto-renew when nearing expiry. On renewal, the
+server rechecks bootstrap trust and attestation. If anything changed
+(cert expired, role config updated), renewal fails and the agent must
+re-mint. Elevated step-up sessions do **not** auto-renew; they require a
+fresh step-up request and approval to extend access.
 
 ### Revocation
 
@@ -119,6 +126,10 @@ phoenix approve apr_xyz789
 
 The approval request includes role, agent identity, and expiry. The human
 sees full context before approving. Approvals expire if not acted on.
+When `elevates_acl: true` is set on that step-up role, the approved session
+temporarily uses the role's namespaces/actions as the access grant for the
+session lifetime instead of treating the base agent ACL as a hard ceiling.
+Path policy, attestation, and seal-key checks still apply after approval.
 
 ### Dashboard approval
 
@@ -170,7 +181,9 @@ if errors.As(err, &perr) {
 }
 ```
 
-Auto-renewal happens transparently when the session is within 5 minutes of expiry.
+Auto-renewal happens transparently when the session is within 5 minutes of
+expiry for non-elevated sessions. Elevated step-up sessions return
+`STEP_UP_REAPPROVAL_REQUIRED` and must be re-approved.
 
 ## MCP integration
 
@@ -192,7 +205,9 @@ Set `PHOENIX_ROLE` in your MCP server config:
 }
 ```
 
-The MCP server auto-mints a session on startup and renews in the background.
+The MCP server auto-mints a session on startup and renews in the
+background for non-elevated sessions. Elevated step-up sessions require a
+fresh approval flow when they expire.
 
 Available MCP tools:
 - `phoenix_session_list` — list active sessions
@@ -214,6 +229,7 @@ machine-readable code:
 | `SCOPE_EXCEEDED` | Path is outside the role's namespace scope |
 | `ACTION_DENIED` | Action not permitted by the role |
 | `APPROVAL_REQUIRED` | Step-up approval needed |
+| `STEP_UP_REAPPROVAL_REQUIRED` | Elevated step-up session cannot renew without fresh approval |
 | `BOOTSTRAP_FAILED` | Auth method not in role's bootstrap_trust |
 | `ROLE_NOT_FOUND` | Requested role does not exist |
 | `ATTESTATION_FAILED` | Missing or insufficient attestation |
@@ -250,10 +266,11 @@ the underlying agent has admin ACL permissions.
 
 ### Role scope vs ACL
 
-Session scope and ACL permissions are both checked on every request. A
-session scoped to `dev/*` cannot access `prod/*` even if the underlying
-agent's ACL grants `prod/*:read`. Access requires passing **both** the
-role's namespace scope and the agent's ACL check.
+Session scope is always enforced on every request. By default, the base
+agent ACL is also enforced. For approved step-up roles with
+`elevates_acl: true`, the session can temporarily access paths/actions
+inside the approved role scope even if the base agent ACL would normally
+deny them. Policy, attestation, and seal-key requirements still apply.
 
 ## Operational notes
 

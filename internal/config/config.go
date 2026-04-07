@@ -129,8 +129,9 @@ type RoleConfig struct {
 	RequireSealKey bool     `json:"require_seal_key"`      // must present seal pubkey at mint
 	MaxTTL         string   `json:"max_ttl,omitempty"`     // per-role session TTL override
 	Attestation    []string `json:"attestation,omitempty"` // declared, enforcement deferred to Phase 2
-	StepUp         bool     `json:"step_up,omitempty"`     // declared, enforcement deferred to Phase 3
-	StepUpTTL      string   `json:"step_up_ttl,omitempty"` // declared, enforcement deferred to Phase 3
+	StepUp         bool     `json:"step_up,omitempty"`     // require human approval before minting
+	StepUpTTL      string   `json:"step_up_ttl,omitempty"` // approval window duration
+	ElevatesACL    bool     `json:"elevates_acl,omitempty"`
 }
 
 // DashboardConfig controls the optional operator dashboard web UI.
@@ -221,6 +222,7 @@ func ExampleConfig() *Config {
 				RequireSealKey: true,
 				StepUp:         true,
 				StepUpTTL:      "15m",
+				ElevatesACL:    true,
 			},
 		},
 	}
@@ -377,6 +379,9 @@ func (c *Config) Validate() error {
 				if _, err := time.ParseDuration(role.StepUpTTL); err != nil {
 					return fmt.Errorf("session.roles.%s.step_up_ttl: invalid duration %q: %w", name, role.StepUpTTL, err)
 				}
+			}
+			if role.ElevatesACL && !role.StepUp {
+				return fmt.Errorf("session.roles.%s.elevates_acl requires step_up=true", name)
 			}
 		}
 	}

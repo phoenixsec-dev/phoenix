@@ -324,6 +324,26 @@ func TestValidateBootstrapTrustToken(t *testing.T) {
 	}
 }
 
+func TestValidateElevatesACLRequiresStepUp(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"bad": {
+			Namespaces:     []string{"prod/*"},
+			BootstrapTrust: []string{"bearer"},
+			ElevatesACL:    true,
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when elevates_acl is set without step_up")
+	}
+	if !strings.Contains(err.Error(), "elevates_acl") {
+		t.Fatalf("error should mention elevates_acl: %v", err)
+	}
+}
+
 // --- Dashboard config validation ---
 
 func TestValidateDashboardEnabledRequiresCredential(t *testing.T) {

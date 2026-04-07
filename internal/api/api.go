@@ -259,11 +259,12 @@ type authInfo struct {
 	Process         *policy.ProcessContext // set when token carries process attestation claims
 
 	// Session identity (set when authenticated via session token)
-	UsedSession       bool
-	SessionID         string
-	SessionRole       string
-	SessionNamespaces []string
-	SessionActions    []string
+	UsedSession        bool
+	SessionID          string
+	SessionRole        string
+	SessionElevatesACL bool
+	SessionNamespaces  []string
+	SessionActions     []string
 }
 
 // authenticate identifies the calling agent for admin/control-plane handlers.
@@ -320,13 +321,14 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			return nil, &sessionAuthError{code: code, err: err}
 		}
 		info := &authInfo{
-			Agent:             sess.Agent,
-			IsLocal:           local,
-			UsedSession:       true,
-			SessionID:         sess.ID,
-			SessionRole:       sess.Role,
-			SessionNamespaces: sess.Namespaces,
-			SessionActions:    sess.Actions,
+			Agent:              sess.Agent,
+			IsLocal:            local,
+			UsedSession:        true,
+			SessionID:          sess.ID,
+			SessionRole:        sess.Role,
+			SessionElevatesACL: sess.ElevatesACL,
+			SessionNamespaces:  sess.Namespaces,
+			SessionActions:     sess.Actions,
 		}
 		// Layer on mTLS attestation evidence from the current TLS connection.
 		// The session token is the auth method; the cert is attestation context.
@@ -567,6 +569,15 @@ func (s *Server) auditDenied(info *authInfo, action, path, ip, reason string) {
 	}
 }
 
+func sessionActionAllowed(actions []string, action string) bool {
+	for _, a := range actions {
+		if a == action || a == "admin" {
+			return true
+		}
+	}
+	return false
+}
+
 // checkSessionScope verifies the request path is within session namespace scope.
 // Returns true if access is allowed, false if denied (and writes the error response).
 func (s *Server) checkSessionScope(w http.ResponseWriter, info *authInfo, path, ip string) bool {
@@ -590,10 +601,8 @@ func (s *Server) checkSessionAction(w http.ResponseWriter, info *authInfo, actio
 	if !info.UsedSession {
 		return true
 	}
-	for _, a := range info.SessionActions {
-		if a == action || a == "admin" {
-			return true
-		}
+	if sessionActionAllowed(info.SessionActions, action) {
+		return true
 	}
 	s.logAudit(s.audit.LogSessionDenied(info.Agent, action, path, ip, "session_action", info.SessionID))
 	jsonDenied(w, "access_denied", "ACTION_DENIED",
@@ -601,6 +610,24 @@ func (s *Server) checkSessionAction(w http.ResponseWriter, info *authInfo, actio
 		"request a session with a role that includes this action",
 		http.StatusForbidden)
 	return false
+}
+
+func (s *Server) dataAccessReason(info *authInfo, path, sessionAction string, aclAction acl.Action) string {
+	if info.UsedSession {
+		if !session.PathInScope(path, info.SessionNamespaces) {
+			return "session_scope"
+		}
+		if !sessionActionAllowed(info.SessionActions, sessionAction) {
+			return "session_action"
+		}
+		if info.SessionElevatesACL {
+			return ""
+		}
+	}
+	if err := s.acl.Authorize(info.Agent, path, aclAction); err != nil {
+		return "acl"
+	}
+	return ""
 }
 
 // checkSessionSealKey verifies the request seal key matches the session binding.
@@ -665,7 +692,6 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		handleAuthError(w, err)
 		return
 	}
-	agentName := info.Agent
 
 	path := secretPath(r)
 	ip := clientIP(r)
@@ -705,11 +731,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		var visible []string
 		for _, p := range allPaths {
-			// Session scope filter: hide paths outside session namespace
-			if info.UsedSession && !session.PathInScope(p, info.SessionNamespaces) {
-				continue
-			}
-			if s.acl.Authorize(agentName, p, acl.ActionList) != nil {
+			if s.dataAccessReason(info, p, "list", acl.ActionList) != "" {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
@@ -724,12 +746,23 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Session action enforcement: read_value
-	if !s.checkSessionAction(w, info, "read_value", path, ip) {
+	switch reason := s.dataAccessReason(info, path, "read_value", acl.ActionReadValue); reason {
+	case "":
+	case "session_scope":
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
+			"request a session with a role that includes this namespace",
+			http.StatusForbidden)
 		return
-	}
-
-	// Single secret read — requires read_value permission
-	if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
+	case "session_action":
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "read_value", path, ip, "session_action", info.SessionID))
+		jsonDenied(w, "access_denied", "ACTION_DENIED",
+			fmt.Sprintf("action %q is not permitted by session role %q", "read_value", info.SessionRole),
+			"request a session with a role that includes this action",
+			http.StatusForbidden)
+		return
+	default:
 		s.auditDenied(info, "read_value", path, ip, "acl")
 		jsonError(w, "access denied: read_value permission required (use phoenix exec for context-free secret injection)", http.StatusForbidden)
 		return
@@ -791,20 +824,26 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		handleAuthError(w, err)
 		return
 	}
-	agentName := info.Agent
-
 	path := secretPath(r)
 	ip := clientIP(r)
 
-	// Session scope and action enforcement
-	if !s.checkSessionScope(w, info, path, ip) {
+	switch reason := s.dataAccessReason(info, path, "write", acl.ActionWrite); reason {
+	case "":
+	case "session_scope":
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
+			"request a session with a role that includes this namespace",
+			http.StatusForbidden)
 		return
-	}
-	if !s.checkSessionAction(w, info, "write", path, ip) {
+	case "session_action":
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "write", path, ip, "session_action", info.SessionID))
+		jsonDenied(w, "access_denied", "ACTION_DENIED",
+			fmt.Sprintf("action %q is not permitted by session role %q", "write", info.SessionRole),
+			"request a session with a role that includes this action",
+			http.StatusForbidden)
 		return
-	}
-
-	if err := s.acl.Authorize(agentName, path, acl.ActionWrite); err != nil {
+	default:
 		s.auditDenied(info, "write", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
@@ -834,7 +873,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.backend.Set(path, req.Value, agentName, req.Description, req.Tags); err != nil {
+	if err := s.backend.Set(path, req.Value, info.Agent, req.Description, req.Tags); err != nil {
 		if err == store.ErrInvalidPath {
 			jsonError(w, "invalid secret path", http.StatusBadRequest)
 			return
@@ -854,20 +893,26 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		handleAuthError(w, err)
 		return
 	}
-	agentName := info.Agent
-
 	path := secretPath(r)
 	ip := clientIP(r)
 
-	// Session scope and action enforcement
-	if !s.checkSessionScope(w, info, path, ip) {
+	switch reason := s.dataAccessReason(info, path, "delete", acl.ActionDelete); reason {
+	case "":
+	case "session_scope":
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
+			"request a session with a role that includes this namespace",
+			http.StatusForbidden)
 		return
-	}
-	if !s.checkSessionAction(w, info, "delete", path, ip) {
+	case "session_action":
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "delete", path, ip, "session_action", info.SessionID))
+		jsonDenied(w, "access_denied", "ACTION_DENIED",
+			fmt.Sprintf("action %q is not permitted by session role %q", "delete", info.SessionRole),
+			"request a session with a role that includes this action",
+			http.StatusForbidden)
 		return
-	}
-
-	if err := s.acl.Authorize(agentName, path, acl.ActionDelete); err != nil {
+	default:
 		s.auditDenied(info, "delete", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
@@ -1322,29 +1367,17 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Session scope enforcement (per-ref)
-		if info.UsedSession && !session.PathInScope(path, info.SessionNamespaces) {
+		switch reason := s.dataAccessReason(info, path, "read_value", acl.ActionReadValue); reason {
+		case "":
+		case "session_scope":
 			s.auditDenied(info, "resolve", path, ip, "session_scope")
 			errors[refStr] = "path outside session scope"
 			continue
-		}
-
-		// Session action enforcement (per-ref)
-		if info.UsedSession {
-			allowed := false
-			for _, a := range info.SessionActions {
-				if a == "read_value" || a == "admin" {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				s.auditDenied(info, "resolve", path, ip, "session_action")
-				errors[refStr] = "action read_value not permitted by session role"
-				continue
-			}
-		}
-
-		if err := s.acl.Authorize(agentName, path, acl.ActionReadValue); err != nil {
+		case "session_action":
+			s.auditDenied(info, "resolve", path, ip, "session_action")
+			errors[refStr] = "action read_value not permitted by session role"
+			continue
+		default:
 			s.auditDenied(info, "resolve", path, ip, "acl")
 			errors[refStr] = "access denied: read_value permission required"
 			continue
@@ -2010,7 +2043,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	actions := role.Actions // nil -> store defaults to ["list", "read_value"]
 
 	// Mint session
-	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, info.CertFingerprint, ip, ttl)
+	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, info.CertFingerprint, ip, false, ttl)
 	if err != nil {
 		log.Printf("session mint error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -2071,6 +2104,14 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 			"session no longer exists",
 			"mint a new session",
 			http.StatusUnauthorized)
+		return
+	}
+	if sess.ElevatesACL {
+		jsonDenied(w, "access_denied", "STEP_UP_REAPPROVAL_REQUIRED",
+			fmt.Sprintf("elevated step-up session for role %q cannot be renewed without fresh approval", info.SessionRole),
+			"mint a new session and complete step-up approval again",
+			http.StatusForbidden)
+		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "step_up_reapproval_required", info.SessionID))
 		return
 	}
 
@@ -2368,7 +2409,7 @@ func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, i
 	tokenStr, sess, mintErr := s.sessions.Create(
 		apr.Role, apr.Agent, apr.SealPubKey,
 		role.Namespaces, role.Actions,
-		apr.BootstrapMethod, apr.CertFingerprint, apr.SourceIP, ttl,
+		apr.BootstrapMethod, apr.CertFingerprint, apr.SourceIP, role.StepUp && role.ElevatesACL, ttl,
 	)
 	if mintErr != nil {
 		log.Printf("session mint on approval error: %v", mintErr)
@@ -2667,6 +2708,7 @@ func sessionToMap(sess *session.Session) map[string]interface{} {
 		"session_id":       sess.ID,
 		"role":             sess.Role,
 		"agent":            sess.Agent,
+		"elevates_acl":     sess.ElevatesACL,
 		"namespaces":       sess.Namespaces,
 		"actions":          sess.Actions,
 		"bootstrap_method": sess.BootstrapMethod,

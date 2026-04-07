@@ -60,7 +60,8 @@ phoenix get dev/api-key  # auto-mints session, then reads secret
 ```
 
 Session tokens use a `phxs_` prefix and are scoped to specific namespaces and
-actions. They auto-renew and can be revoked individually.
+actions. Non-elevated sessions auto-renew, and sessions can be revoked
+individually. Elevated step-up sessions require fresh approval to extend.
 
 Auth priority order: session token > mTLS > short-lived token > bearer.
 

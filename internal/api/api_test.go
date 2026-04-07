@@ -3993,6 +3993,101 @@ func setupTestServerWithStepUp(t *testing.T) (*Server, string) {
 	return srv, adminToken
 }
 
+func setupTestServerWithElevatedStepUp(t *testing.T) (*Server, string) {
+	t.Helper()
+	srv, adminToken := setupTestServer(t)
+
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	t.Cleanup(ss.Stop)
+	srv.SetSessionStore(ss)
+
+	as := approval.NewStore(5 * time.Minute)
+	t.Cleanup(as.Stop)
+	srv.SetApprovalStore(as)
+
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"prod-direct": {
+			Namespaces:     []string{"prod/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"prod-stepup": {
+			Namespaces:     []string{"prod/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+			StepUp:         true,
+			StepUpTTL:      "2m",
+			ElevatesACL:    true,
+		},
+	})
+
+	return srv, adminToken
+}
+
+func mintApprovedStepUpSession(t *testing.T, srv *Server, requesterToken, approverToken, body string) (string, string, string) {
+	t.Helper()
+
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+requesterToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("step-up mint: status %d, want 202, body: %s", w.Code, w.Body.String())
+	}
+
+	var mintResult struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &mintResult); err != nil {
+		t.Fatalf("decode mint result: %v", err)
+	}
+	if mintResult.ApprovalID == "" {
+		t.Fatal("expected approval_id")
+	}
+
+	req = httptest.NewRequest("POST", "/v1/approval/"+mintResult.ApprovalID+"/approve", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+approverToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("step-up approve: status %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var approveResult struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &approveResult); err != nil {
+		t.Fatalf("decode approve result: %v", err)
+	}
+	if approveResult.SessionID == "" {
+		t.Fatal("expected session_id after approval")
+	}
+
+	req = httptest.NewRequest("GET", "/v1/approval/"+mintResult.ApprovalID, nil)
+	req.Header.Set("Authorization", "Bearer "+requesterToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("step-up poll: status %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var pollResult struct {
+		SessionToken string `json:"session_token"`
+		SessionID    string `json:"session_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &pollResult); err != nil {
+		t.Fatalf("decode poll result: %v", err)
+	}
+	if pollResult.SessionToken == "" {
+		t.Fatal("expected session_token after approval")
+	}
+
+	return mintResult.ApprovalID, pollResult.SessionToken, pollResult.SessionID
+}
+
 func TestSessionMintStepUp(t *testing.T) {
 	srv, adminToken := setupTestServerWithStepUp(t)
 
@@ -4680,6 +4775,334 @@ func TestApprovalRejectsSealKeyTightened(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &result)
 	if result.Code != "SEAL_KEY_REQUIRED" {
 		t.Errorf("code = %q, want SEAL_KEY_REQUIRED", result.Code)
+	}
+}
+
+func TestStepUpElevatedSessionAllowsTemporaryAccessBeyondBaseACL(t *testing.T) {
+	srv, adminToken := setupTestServerWithElevatedStepUp(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "prod-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/prod/db-pass", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup secret: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("base ACL deny: status %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+
+	_, sessionToken, _ := mintApprovedStepUpSession(t, srv, "reader-token", adminToken, `{"role":"prod-stepup"}`)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("elevated step-up read: status %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var secret struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &secret); err != nil {
+		t.Fatalf("decode secret: %v", err)
+	}
+	if secret.Value != "prod-secret" {
+		t.Fatalf("value = %q, want %q", secret.Value, "prod-secret")
+	}
+}
+
+func TestStepUpElevatedSessionRevocationAndExpiryRemoveAccess(t *testing.T) {
+	t.Run("revoked", func(t *testing.T) {
+		srv, adminToken := setupTestServerWithElevatedStepUp(t)
+
+		body, _ := json.Marshal(setSecretRequest{Value: "prod-secret"})
+		req := httptest.NewRequest("PUT", "/v1/secrets/prod/db-pass", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("setup secret: status %d, body: %s", w.Code, w.Body.String())
+		}
+
+		_, sessionToken, sessionID := mintApprovedStepUpSession(t, srv, "reader-token", adminToken, `{"role":"prod-stepup"}`)
+
+		req = httptest.NewRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w = httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("revoke: status %d, body: %s", w.Code, w.Body.String())
+		}
+
+		req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+		req.Header.Set("Authorization", "Bearer "+sessionToken)
+		w = httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("revoked session read: status %d, want 401, body: %s", w.Code, w.Body.String())
+		}
+
+		var denied struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &denied); err != nil {
+			t.Fatalf("decode revoked denial: %v", err)
+		}
+		if denied.Code != "SESSION_REVOKED" {
+			t.Fatalf("code = %q, want SESSION_REVOKED", denied.Code)
+		}
+	})
+
+	t.Run("expired", func(t *testing.T) {
+		srv, adminToken := setupTestServerWithElevatedStepUp(t)
+		srv.SetSessionRoles(map[string]config.RoleConfig{
+			"prod-direct": {
+				Namespaces:     []string{"prod/*"},
+				Actions:        []string{"list", "read_value"},
+				BootstrapTrust: []string{"bearer"},
+			},
+			"prod-stepup": {
+				Namespaces:     []string{"prod/*"},
+				Actions:        []string{"list", "read_value"},
+				BootstrapTrust: []string{"bearer"},
+				StepUp:         true,
+				StepUpTTL:      "2m",
+				MaxTTL:         "25ms",
+				ElevatesACL:    true,
+			},
+		})
+
+		body, _ := json.Marshal(setSecretRequest{Value: "prod-secret"})
+		req := httptest.NewRequest("PUT", "/v1/secrets/prod/db-pass", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("setup secret: status %d, body: %s", w.Code, w.Body.String())
+		}
+
+		_, sessionToken, _ := mintApprovedStepUpSession(t, srv, "reader-token", adminToken, `{"role":"prod-stepup"}`)
+		time.Sleep(40 * time.Millisecond)
+
+		req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+		req.Header.Set("Authorization", "Bearer "+sessionToken)
+		w = httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expired session read: status %d, want 401, body: %s", w.Code, w.Body.String())
+		}
+
+		var denied struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &denied); err != nil {
+			t.Fatalf("decode expiry denial: %v", err)
+		}
+		if denied.Code != "SESSION_EXPIRED" {
+			t.Fatalf("code = %q, want SESSION_EXPIRED", denied.Code)
+		}
+	})
+}
+
+func TestNonStepUpSessionStillCannotBypassBaseACL(t *testing.T) {
+	srv, adminToken := setupTestServerWithElevatedStepUp(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "prod-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/prod/db-pass", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup secret: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(`{"role":"prod-direct"}`))
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("non-step-up mint: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var mintResult struct {
+		SessionToken string `json:"session_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &mintResult); err != nil {
+		t.Fatalf("decode mint result: %v", err)
+	}
+
+	req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+	req.Header.Set("Authorization", "Bearer "+mintResult.SessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-step-up read: status %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "access denied") {
+		t.Fatalf("expected ACL denial, body: %s", w.Body.String())
+	}
+}
+
+func TestStepUpElevatedSessionStillEnforcesPolicy(t *testing.T) {
+	srv, adminToken := setupTestServerWithElevatedStepUp(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "prod-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/prod/db-pass", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup secret: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	p, err := policy.Load([]byte(`{"attestation":{"prod/*":{"require_sealed":true}}}`))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	srv.SetPolicy(p)
+
+	_, sessionToken, _ := mintApprovedStepUpSession(t, srv, "reader-token", adminToken, `{"role":"prod-stepup"}`)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("policy-enforced read: status %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "sealed response required") {
+		t.Fatalf("expected require_sealed policy denial, body: %s", w.Body.String())
+	}
+}
+
+func TestStepUpElevatedSessionSealKeyBindingStillWorks(t *testing.T) {
+	srv, adminToken := setupTestServerWithElevatedStepUp(t)
+	srv.SetSessionRoles(map[string]config.RoleConfig{
+		"prod-direct": {
+			Namespaces:     []string{"prod/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+		},
+		"prod-stepup": {
+			Namespaces:     []string{"prod/*"},
+			Actions:        []string{"list", "read_value"},
+			BootstrapTrust: []string{"bearer"},
+			RequireSealKey: true,
+			StepUp:         true,
+			StepUpTTL:      "2m",
+			ElevatesACL:    true,
+		},
+	})
+
+	body, _ := json.Marshal(setSecretRequest{Value: "prod-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/prod/db-pass", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup secret: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	validKP, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		t.Fatalf("generate valid seal key: %v", err)
+	}
+	wrongKP, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		t.Fatalf("generate wrong seal key: %v", err)
+	}
+
+	_, sessionToken, _ := mintApprovedStepUpSession(t, srv, "reader-token", adminToken,
+		`{"role":"prod-stepup","seal_public_key":"`+crypto.EncodeSealKey(&validKP.PublicKey)+`"}`)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&wrongKP.PublicKey))
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("wrong seal key read: status %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+
+	var denied struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &denied); err != nil {
+		t.Fatalf("decode wrong-key denial: %v", err)
+	}
+	if denied.Code != "SEAL_KEY_MISMATCH" {
+		t.Fatalf("code = %q, want SEAL_KEY_MISMATCH", denied.Code)
+	}
+
+	req = httptest.NewRequest("GET", "/v1/secrets/prod/db-pass", nil)
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	req.Header.Set("X-Phoenix-Seal-Key", crypto.EncodeSealKey(&validKP.PublicKey))
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("correct seal key read: status %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestElevatedStepUpSessionRenewRequiresReapproval(t *testing.T) {
+	srv, adminToken := setupTestServerWithElevatedStepUp(t)
+
+	_, sessionToken, _ := mintApprovedStepUpSession(t, srv, "reader-token", adminToken, `{"role":"prod-stepup"}`)
+
+	req := httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("renew: status %d, want 403, body: %s", w.Code, w.Body.String())
+	}
+
+	var denied struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &denied); err != nil {
+		t.Fatalf("decode renewal denial: %v", err)
+	}
+	if denied.Code != "STEP_UP_REAPPROVAL_REQUIRED" {
+		t.Fatalf("code = %q, want STEP_UP_REAPPROVAL_REQUIRED", denied.Code)
+	}
+}
+
+func TestNonElevatedStepUpSessionCanRenew(t *testing.T) {
+	srv, adminToken := setupTestServerWithStepUp(t)
+
+	_, sessionToken, _ := mintApprovedStepUpSession(t, srv, adminToken, adminToken, `{"role":"deploy"}`)
+
+	req := httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("renew: status %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		Renewed bool   `json:"renewed"`
+		Role    string `json:"role"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode renew result: %v", err)
+	}
+	if !result.Renewed {
+		t.Fatal("expected renewed=true")
+	}
+	if result.Role != "deploy" {
+		t.Fatalf("role = %q, want deploy", result.Role)
 	}
 }
 

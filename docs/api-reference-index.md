@@ -188,6 +188,7 @@ Denial codes:
 | `SCOPE_EXCEEDED` | 403 | Path outside role's namespace scope |
 | `ACTION_DENIED` | 403 | Action not permitted by role |
 | `APPROVAL_REQUIRED` | 202 | Step-up approval needed |
+| `STEP_UP_REAPPROVAL_REQUIRED` | 403 | Elevated step-up session cannot renew without fresh approval |
 | `BOOTSTRAP_FAILED` | 403 | Auth method not accepted for this role |
 | `ROLE_NOT_FOUND` | 404 | Requested role does not exist |
 | `ATTESTATION_FAILED` | 403 | Attestation requirements not met |
@@ -195,4 +196,3 @@ Denial codes:
 | `SEAL_KEY_MISMATCH` | 403 | Seal key doesn't match session binding |
 | `SESSION_REQUIRED` | 400 | Operation requires a session token |
 | `ADMIN_AUTH_REQUIRED` | 403 | Session tokens cannot perform this action |
-
