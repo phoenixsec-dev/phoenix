@@ -1,5 +1,15 @@
 # Release Notes
 
+## v0.14.0 (2026-04-27)
+
+### OpenClaw SecretRef Exec Provider
+
+- Added `phoenix openclaw-exec-provider` for OpenClaw's built-in exec SecretRef provider protocol.
+- Added `phoenix secret-provider openclaw` and `phoenix resolve --stdin-json` aliases for compatibility with OpenClaw exec-provider configuration.
+- The provider reads OpenClaw's stdin JSON request, resolves requested ids through Phoenix using the existing auth/session/mTLS/sealed-response paths, and writes OpenClaw-compatible `values`/`errors` JSON to stdout.
+- Added tests for request parsing, stdout response shape, id normalization, and partial per-id failures.
+- Updated OpenClaw integration docs to distinguish bootstrap/config SecretRefs from runtime `openclaw-phoenix` plugin tools, and to stop claiming plain `phoenix resolve <ref>` is the exec-provider protocol.
+
 ## v0.13.5 (2026-04-07)
 
 ### Step-Up Authorization Hygiene

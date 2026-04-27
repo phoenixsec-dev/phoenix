@@ -13,6 +13,8 @@
 //	phoenix agent create <name> --token <token> --acl <path:actions,...> [--force]
 //	phoenix agent list
 //	phoenix resolve <ref> [ref...]
+//	phoenix resolve --stdin-json
+//	phoenix openclaw-exec-provider
 //	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <dur>] [--mask-env] -- <command> [args...]
 //	phoenix verify <file> [--dry-run]
 //	phoenix status
@@ -162,6 +164,20 @@ func main() {
 		}
 	case "resolve":
 		err = cmdResolve(args)
+	case "openclaw-exec-provider":
+		err = cmdOpenClawExecProvider(args)
+	case "secret-provider":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: phoenix secret-provider <openclaw>")
+			os.Exit(1)
+		}
+		switch args[0] {
+		case "openclaw":
+			err = cmdOpenClawExecProvider(args[1:])
+		default:
+			fmt.Fprintf(os.Stderr, "unknown secret-provider subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	case "exec":
 		err = cmdExec(args)
 	case "verify":
@@ -325,6 +341,9 @@ Usage:
   phoenix agent list                          List agents
   phoenix agent delete <name>                 Delete an agent
   phoenix resolve [--signed] <ref> [ref...]     Resolve phoenix:// references to values
+  phoenix resolve --stdin-json                  OpenClaw SecretRef exec provider (stdin/stdout JSON)
+  phoenix openclaw-exec-provider               OpenClaw SecretRef exec provider (stdin/stdout JSON)
+  phoenix secret-provider openclaw             Alias for openclaw-exec-provider
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
   phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
@@ -1018,7 +1037,164 @@ func cmdAgentDelete(args []string) error {
 	return nil
 }
 
+type openClawExecProviderRequest struct {
+	ProtocolVersion int      `json:"protocolVersion"`
+	Provider        string   `json:"provider"`
+	IDs             []string `json:"ids"`
+}
+
+type openClawExecProviderError struct {
+	Message string `json:"message"`
+}
+
+type openClawExecProviderResponse struct {
+	ProtocolVersion int                                  `json:"protocolVersion"`
+	Values          map[string]string                    `json:"values"`
+	Errors          map[string]openClawExecProviderError `json:"errors,omitempty"`
+}
+
+func parseOpenClawExecProviderRequest(r io.Reader) (*openClawExecProviderRequest, error) {
+	var req openClawExecProviderRequest
+	dec := json.NewDecoder(r)
+	if err := dec.Decode(&req); err != nil {
+		return nil, fmt.Errorf("decoding OpenClaw exec provider request: %w", err)
+	}
+	if req.ProtocolVersion != 1 {
+		return nil, fmt.Errorf("OpenClaw exec provider protocolVersion must be 1")
+	}
+	if req.Provider == "" {
+		return nil, fmt.Errorf("OpenClaw exec provider request missing provider")
+	}
+	if req.IDs == nil {
+		return nil, fmt.Errorf("OpenClaw exec provider request missing ids")
+	}
+	for _, id := range req.IDs {
+		if strings.TrimSpace(id) == "" {
+			return nil, fmt.Errorf("OpenClaw exec provider request contains empty id")
+		}
+	}
+	return &req, nil
+}
+
+func openClawIDToPhoenixRef(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if strings.HasPrefix(trimmed, "phoenix://") {
+		return trimmed
+	}
+	return "phoenix://" + strings.TrimPrefix(trimmed, "/")
+}
+
+func cmdOpenClawExecProvider(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: phoenix openclaw-exec-provider")
+	}
+	if err := requireAuth(); err != nil {
+		return err
+	}
+
+	req, err := parseOpenClawExecProviderRequest(os.Stdin)
+	if err != nil {
+		return err
+	}
+
+	refs := make([]string, 0, len(req.IDs))
+	seenRefs := make(map[string]bool, len(req.IDs))
+	for _, id := range req.IDs {
+		ref := openClawIDToPhoenixRef(id)
+		if !seenRefs[ref] {
+			refs = append(refs, ref)
+			seenRefs[ref] = true
+		}
+	}
+
+	sealPrivKey, err := loadSealKeyForRequest()
+	if err != nil {
+		return fmt.Errorf("loading seal key: %w", err)
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
+	resp, err := apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), sealHeaders(sealPrivKey))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+
+	values := make(map[string]string)
+	errs := make(map[string]string)
+	if sealPrivKey != nil {
+		var result struct {
+			SealedValues map[string]interface{} `json:"sealed_values"`
+			Errors       map[string]string      `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		errs = result.Errors
+		for ref, raw := range result.SealedValues {
+			if envMap, ok := raw.(map[string]interface{}); ok {
+				if envRef, _ := envMap["ref"].(string); envRef != ref {
+					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
+				}
+			}
+			val, err := decryptSealedValue(raw, sealPrivKey)
+			if err != nil {
+				return fmt.Errorf("decrypting %s: %w", ref, err)
+			}
+			values[ref] = val
+		}
+	} else {
+		var result struct {
+			Values map[string]string `json:"values"`
+			Errors map[string]string `json:"errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		values = result.Values
+		errs = result.Errors
+	}
+
+	out := openClawExecProviderResponse{
+		ProtocolVersion: 1,
+		Values:          make(map[string]string),
+	}
+	for _, id := range req.IDs {
+		ref := openClawIDToPhoenixRef(id)
+		if errMsg, ok := errs[ref]; ok {
+			if out.Errors == nil {
+				out.Errors = make(map[string]openClawExecProviderError)
+			}
+			out.Errors[id] = openClawExecProviderError{Message: errMsg}
+			continue
+		}
+		val, ok := values[ref]
+		if !ok {
+			if out.Errors == nil {
+				out.Errors = make(map[string]openClawExecProviderError)
+			}
+			out.Errors[id] = openClawExecProviderError{Message: "no value returned by Phoenix"}
+			continue
+		}
+		out.Values[id] = val
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	return enc.Encode(out)
+}
+
 func cmdResolve(args []string) error {
+	if len(args) == 1 && args[0] == "--stdin-json" {
+		return cmdOpenClawExecProvider(nil)
+	}
+	for _, arg := range args {
+		if arg == "--stdin-json" {
+			return fmt.Errorf("usage: phoenix resolve --stdin-json")
+		}
+	}
+
 	if err := requireAuth(); err != nil {
 		return err
 	}

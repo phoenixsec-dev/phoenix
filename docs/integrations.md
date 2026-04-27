@@ -47,57 +47,141 @@ integration without running MCP mode.
 
 ## OpenClaw
 
-OpenClaw's own threat model flags plaintext credential storage and credential
-harvesting by skills as open, high-severity risks. Phoenix closes that gap
-through the exec backend: OpenClaw resolves secrets at runtime via `phoenix resolve`,
-so raw values never appear in OpenClaw's environment, config files, or skill
-execution context.
+Phoenix supports two complementary OpenClaw integration paths. They solve different
+problems and should be used together for a production deployment.
 
-### Exec backend config
+### 1. Built-in SecretRefs for bootstrap/config secrets
+
+Use OpenClaw's built-in `{ source: "exec", provider, id }` SecretRefs for secrets
+that OpenClaw must resolve while loading gateway/runtime configuration: gateway auth
+tokens, model provider API keys, channel bot tokens, webhook secrets, and similar
+startup configuration.
+
+Phoenix provides an OpenClaw-compatible exec provider command:
+
+```bash
+phoenix resolve --stdin-json
+# equivalent aliases:
+phoenix openclaw-exec-provider
+phoenix secret-provider openclaw
+```
+
+This command reads OpenClaw's exec-provider JSON request from stdin:
 
 ```json
+{"protocolVersion":1,"provider":"phoenix","ids":["openclaw/shared/openai-api-key"]}
+```
+
+and writes OpenClaw's expected JSON response to stdout:
+
+```json
+{"protocolVersion":1,"values":{"openclaw/shared/openai-api-key":"..."}}
+```
+
+Per-id failures are returned under `errors` without logging or printing secret
+values.
+
+Configure the provider in OpenClaw with the Phoenix binary path available to the
+OpenClaw process:
+
+```json5
 {
-  "secrets": {
-    "providers": {
-      "phoenix": {
-        "type": "exec",
-        "command": "phoenix",
-        "args": ["resolve"]
+  secrets: {
+    providers: {
+      phoenix: {
+        source: "exec",
+        command: "/usr/local/bin/phoenix",
+        args: ["resolve", "--stdin-json"],
+        passEnv: [
+          "PHOENIX_SERVER",
+          "PHOENIX_TOKEN",
+          "PHOENIX_ROLE",
+          "PHOENIX_CA_CERT",
+          "PHOENIX_CLIENT_CERT",
+          "PHOENIX_CLIENT_KEY",
+          "PHOENIX_SEAL_KEY",
+          "PHOENIX_TOOL"
+        ],
+        timeoutMs: 10000
       }
+    },
+    defaults: {
+      exec: "phoenix"
     }
   }
 }
 ```
 
-Use SecretRefs backed by Phoenix in your agent config:
+Then use OpenClaw SecretRef objects in fields that support secrets:
 
-```yaml
-api_keys:
-  openai: ${{ secrets.phoenix.phoenix://myapp/openai-key }}
-  anthropic: ${{ secrets.phoenix.phoenix://myapp/anthropic-key }}
+```json5
+{
+  providers: {
+    openai: {
+      apiKey: { source: "exec", provider: "phoenix", id: "openclaw/shared/openai-api-key" }
+    }
+  },
+  gateway: {
+    auth: {
+      token: { source: "exec", provider: "phoenix", id: "openclaw/gateway/auth-token" }
+    }
+  }
+}
 ```
 
-Set Phoenix credentials for the OpenClaw process:
+The exec provider accepts ids either as Phoenix paths (`openclaw/shared/key`) or as
+full refs (`phoenix://openclaw/shared/key`). It normalizes paths to Phoenix refs for
+resolution, but the stdout `values`/`errors` keys match OpenClaw's input ids.
+
+Set Phoenix credentials for the OpenClaw process. Prefer scoped role/session or
+mTLS credentials over a broad admin token:
 
 ```bash
 export PHOENIX_SERVER=https://phoenix:9090
-export PHOENIX_TOKEN=openclaw-agent-token
+export PHOENIX_TOKEN=<bootstrap-or-session-token>
+export PHOENIX_ROLE=openclaw-gateway
 # Or use mTLS:
 export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
 export PHOENIX_CLIENT_CERT=/etc/phoenix/openclaw.crt
 export PHOENIX_CLIENT_KEY=/etc/phoenix/openclaw.key
 ```
 
-Validate before deploying:
+`PHOENIX_ROLE`, mTLS, sealed responses, session auto-mint/renewal, and Phoenix
+attestation headers are handled by the same CLI auth paths as `phoenix resolve`.
+Plain `phoenix resolve <ref>` remains the general human/script command; use
+`phoenix resolve --stdin-json` for OpenClaw's stdin/stdout provider protocol.
 
-```bash
-phoenix verify --dry-run gateway-config.yaml
-phoenix policy test --agent openclaw --ip 10.0.0.5 myapp/openai-key
-```
+### 2. Plugin tools for agent/tool runtime access
+
+Use the separate `openclaw-phoenix` plugin for agent/tool-time workflows:
+
+- `phoenix_resolve` for Phoenix-aware runtime resolution
+- `phoenix_list` for listing visible paths
+- `phoenix_status` for health/connectivity checks
+- sealed-response and approval-aware UX as the plugin evolves
+
+The plugin enhances OpenClaw runtime capabilities, but it does not replace built-in
+SecretRef resolution for bootstrap/core config. Installing the plugin alone does not
+make startup fields resolve through Phoenix; configure the exec provider above for
+that.
+
+### Migration from `.env` or plaintext OpenClaw config
+
+1. Import or set secrets in Phoenix under a stable namespace, for example
+   `openclaw/shared/openai-api-key` and `openclaw/gateway/auth-token`.
+2. Create a scoped Phoenix identity for OpenClaw with read access only to the paths
+   it needs.
+3. Add the OpenClaw `secrets.providers.phoenix` exec provider config shown above.
+4. Replace plaintext strings in OpenClaw config with `{ source: "exec", provider:
+   "phoenix", id: "..." }` SecretRefs where OpenClaw supports secret inputs.
+5. Restart or reload OpenClaw and verify resolution. Keep plaintext fallback values
+   out of committed config.
 
 ### Containerized deployment (Docker Compose)
 
-In a Docker or Compose setup, Phoenix runs as a sidecar or network-adjacent service.
+In Docker or Compose, Phoenix can run as a sidecar or network-adjacent service.
+Mount or install the `phoenix` binary into the OpenClaw container and pass only the
+Phoenix environment variables needed by the exec provider.
 
 ```yaml
 services:
@@ -105,16 +189,16 @@ services:
     image: phoenixsecdev/phoenix:latest
     volumes:
       - phoenix-data:/data/phoenix
-    # No host port needed — OpenClaw reaches Phoenix via
-    # the Compose network using the service name "phoenix"
 
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     environment:
       PHOENIX_SERVER: "http://phoenix:9090"
       PHOENIX_TOKEN: "${OPENCLAW_PHOENIX_TOKEN}"
+      PHOENIX_ROLE: "openclaw-gateway"
     volumes:
       - ./openclaw-config:/config
+      - /usr/local/bin/phoenix:/usr/local/bin/phoenix:ro
     depends_on:
       - phoenix
 
@@ -122,18 +206,8 @@ volumes:
   phoenix-data:
 ```
 
-For mTLS instead of bearer tokens, mount certs into the OpenClaw container
-and set `PHOENIX_CA_CERT`, `PHOENIX_CLIENT_CERT`, `PHOENIX_CLIENT_KEY`.
-
-### Current limitations
-
-The exec backend integration works today but requires operator setup:
-the Phoenix CLI binary must be available in the OpenClaw container's PATH, and
-credentials (token or mTLS certs) must be configured for the OpenClaw process.
-A dedicated OpenClaw plugin that handles this automatically is in active
-development. Until then, the exec backend is the supported path — fully
-functional, but requires explicit wiring in your Compose or deployment
-config rather than a one-line plugin install.
+For mTLS instead of bearer tokens, mount certs into the OpenClaw container and set
+`PHOENIX_CA_CERT`, `PHOENIX_CLIENT_CERT`, and `PHOENIX_CLIENT_KEY`.
 
 ## Go SDK
 

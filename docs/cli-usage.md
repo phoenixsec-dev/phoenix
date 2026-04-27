@@ -29,6 +29,18 @@ phoenix resolve phoenix://myapp/db-password
 phoenix resolve phoenix://myapp/db-password phoenix://myapp/api-key
 ```
 
+`phoenix resolve` is the general CLI/script command. For OpenClaw built-in
+SecretRefs, use the stdin/stdout provider command instead:
+
+```bash
+phoenix resolve --stdin-json
+# aliases:
+phoenix openclaw-exec-provider
+phoenix secret-provider openclaw
+```
+
+See [Integrations](integrations.md#openclaw) for the OpenClaw config shape.
+
 ## Exec wrapper
 
 ```bash
