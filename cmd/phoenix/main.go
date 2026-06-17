@@ -1065,6 +1065,9 @@ func parseOpenClawExecProviderRequest(r io.Reader) (*openClawExecProviderRequest
 	if req.Provider == "" {
 		return nil, fmt.Errorf("OpenClaw exec provider request missing provider")
 	}
+	if req.Provider != "phoenix" {
+		return nil, fmt.Errorf("OpenClaw exec provider request provider must be phoenix")
+	}
 	if req.IDs == nil {
 		return nil, fmt.Errorf("OpenClaw exec provider request missing ids")
 	}

@@ -33,6 +33,16 @@ func TestParseOpenClawExecProviderRequestRejectsBadProtocol(t *testing.T) {
 	}
 }
 
+func TestParseOpenClawExecProviderRequestRejectsNonPhoenixProvider(t *testing.T) {
+	_, err := parseOpenClawExecProviderRequest(strings.NewReader(`{"protocolVersion":1,"provider":"other","ids":["api/key"]}`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "provider must be phoenix") {
+		t.Fatalf("error = %v, want provider message", err)
+	}
+}
+
 func TestCmdOpenClawExecProviderStdoutShape(t *testing.T) {
 	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/resolve" {

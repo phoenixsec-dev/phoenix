@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.14.0 (2026-04-27)
+## v0.15.0 (2026-04-27)
 
 ### OpenClaw SecretRef Exec Provider
 
