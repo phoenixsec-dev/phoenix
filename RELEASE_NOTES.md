@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.15.1 (2026-06-17)
+
+### OpenClaw Audit Metadata
+
+- Captures sanitized allowlisted `X-OpenClaw-*` metadata headers on server audit entries as audit hints only.
+- Omits raw `X-OpenClaw-Session-Key` from audit records.
+- Added tests proving spoofed OpenClaw headers do not affect Phoenix authorization, attestation policy identity, or sealed-response policy decisions.
+
 ## v0.15.0 (2026-04-27)
 
 ### OpenClaw SecretRef Exec Provider

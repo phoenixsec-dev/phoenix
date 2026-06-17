@@ -35,6 +35,19 @@ import (
 // MaxRequestBodyBytes limits the size of request bodies to prevent DoS.
 const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
+const openClawAuditMetadataMaxValueLen = 256
+
+var openClawAuditHeaders = []struct {
+	header string
+	key    string
+}{
+	{header: "X-OpenClaw-Agent", key: "openclaw.agent"},
+	{header: "X-OpenClaw-Session-Id", key: "openclaw.session_id"},
+	{header: "X-OpenClaw-Channel", key: "openclaw.channel"},
+	{header: "X-OpenClaw-Requester-Sender", key: "openclaw.requester_sender"},
+	{header: "X-OpenClaw-Sender-Is-Owner", key: "openclaw.sender_is_owner"},
+}
+
 // Rate limiting constants for authentication attempts.
 const (
 	rateLimitMaxFailures = 5
@@ -316,7 +329,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			}
 			// Extract identity for audit even from expired/revoked tokens
 			if agent, sessID, known := s.sessions.ParseClaimsInsecure(tok); known {
-				s.logAudit(s.audit.LogSessionDenied(agent, "session.auth", "", ip, code, sessID))
+				s.auditLogSessionDenied(r, agent, "session.auth", "", ip, code, sessID)
 			}
 			return nil, &sessionAuthError{code: code, err: err}
 		}
@@ -466,6 +479,54 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
+// openClawAuditMetadata returns sanitized audit-only OpenClaw metadata hints.
+// These headers must never participate in authentication, ACL, policy,
+// session identity, role mapping, or sealed-response decisions.
+func openClawAuditMetadata(r *http.Request) map[string]string {
+	if r == nil {
+		return nil
+	}
+	metadata := make(map[string]string, len(openClawAuditHeaders))
+	for _, h := range openClawAuditHeaders {
+		value := sanitizeOpenClawAuditMetadataValue(r.Header.Get(h.header))
+		if value != "" {
+			metadata[h.key] = value
+		}
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func sanitizeOpenClawAuditMetadataValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= openClawAuditMetadataMaxValueLen {
+		return value
+	}
+	last := 0
+	for i := range value {
+		if i > openClawAuditMetadataMaxValueLen {
+			break
+		}
+		last = i
+	}
+	if last == 0 {
+		return ""
+	}
+	return strings.TrimSpace(value[:last])
+}
+
 // clientIP extracts the client IP from the request.
 // X-Forwarded-For is intentionally ignored — Phoenix is not behind a
 // reverse proxy, and trusting XFF allows audit log IP spoofing.
@@ -529,23 +590,47 @@ func handleAuthError(w http.ResponseWriter, err error) {
 	jsonError(w, "unauthorized", http.StatusUnauthorized)
 }
 
+func (s *Server) auditLogAllowed(r *http.Request, agent, action, path, ip string) {
+	s.logAudit(s.audit.LogAllowedWithMetadata(agent, action, path, ip, openClawAuditMetadata(r)))
+}
+
+func (s *Server) auditLogAllowedSealed(r *http.Request, agent, action, path, ip string, sealed bool) {
+	s.logAudit(s.audit.LogAllowedSealedWithMetadata(agent, action, path, ip, sealed, openClawAuditMetadata(r)))
+}
+
+func (s *Server) auditLogDenied(r *http.Request, agent, action, path, ip, reason string) {
+	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, openClawAuditMetadata(r)))
+}
+
+func (s *Server) auditLogSessionAllowed(r *http.Request, agent, action, path, ip, sessionID string) {
+	s.logAudit(s.audit.LogSessionAllowedWithMetadata(agent, action, path, ip, sessionID, openClawAuditMetadata(r)))
+}
+
+func (s *Server) auditLogSessionAllowedSealed(r *http.Request, agent, action, path, ip, sessionID string, sealed bool) {
+	s.logAudit(s.audit.LogSessionAllowedSealedWithMetadata(agent, action, path, ip, sessionID, sealed, openClawAuditMetadata(r)))
+}
+
+func (s *Server) auditLogSessionDenied(r *http.Request, agent, action, path, ip, reason, sessionID string) {
+	s.logAudit(s.audit.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, sessionID, openClawAuditMetadata(r)))
+}
+
 // auditAllowed logs an allowed action, including session ID when a session was used.
-func (s *Server) auditAllowed(info *authInfo, action, path, ip string) {
+func (s *Server) auditAllowed(r *http.Request, info *authInfo, action, path, ip string) {
 	if info != nil && info.UsedSession {
-		s.logAudit(s.audit.LogSessionAllowed(info.Agent, action, path, ip, info.SessionID))
+		s.auditLogSessionAllowed(r, info.Agent, action, path, ip, info.SessionID)
 	} else {
 		agent := ""
 		if info != nil {
 			agent = info.Agent
 		}
-		s.logAudit(s.audit.LogAllowed(agent, action, path, ip))
+		s.auditLogAllowed(r, agent, action, path, ip)
 	}
 }
 
 // auditAllowedWithSeal logs an allowed action and includes sealed-response state.
-func (s *Server) auditAllowedWithSeal(info *authInfo, action, path, ip string, sealed bool) {
+func (s *Server) auditAllowedWithSeal(r *http.Request, info *authInfo, action, path, ip string, sealed bool) {
 	if info != nil && info.UsedSession {
-		s.logAudit(s.audit.LogSessionAllowedSealed(info.Agent, action, path, ip, info.SessionID, sealed))
+		s.auditLogSessionAllowedSealed(r, info.Agent, action, path, ip, info.SessionID, sealed)
 		return
 	}
 
@@ -553,19 +638,19 @@ func (s *Server) auditAllowedWithSeal(info *authInfo, action, path, ip string, s
 	if info != nil {
 		agent = info.Agent
 	}
-	s.logAudit(s.audit.LogAllowedSealed(agent, action, path, ip, sealed))
+	s.auditLogAllowedSealed(r, agent, action, path, ip, sealed)
 }
 
 // auditDenied logs a denied action, including session ID when a session was used.
-func (s *Server) auditDenied(info *authInfo, action, path, ip, reason string) {
+func (s *Server) auditDenied(r *http.Request, info *authInfo, action, path, ip, reason string) {
 	if info != nil && info.UsedSession {
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, action, path, ip, reason, info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, action, path, ip, reason, info.SessionID)
 	} else {
 		agent := ""
 		if info != nil {
 			agent = info.Agent
 		}
-		s.logAudit(s.audit.LogDenied(agent, action, path, ip, reason))
+		s.auditLogDenied(r, agent, action, path, ip, reason)
 	}
 }
 
@@ -580,12 +665,12 @@ func sessionActionAllowed(actions []string, action string) bool {
 
 // checkSessionScope verifies the request path is within session namespace scope.
 // Returns true if access is allowed, false if denied (and writes the error response).
-func (s *Server) checkSessionScope(w http.ResponseWriter, info *authInfo, path, ip string) bool {
+func (s *Server) checkSessionScope(w http.ResponseWriter, r *http.Request, info *authInfo, path, ip string) bool {
 	if !info.UsedSession {
 		return true
 	}
 	if !session.PathInScope(path, info.SessionNamespaces) {
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
 		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
 			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
 			"request a session with a role that includes this namespace",
@@ -597,14 +682,14 @@ func (s *Server) checkSessionScope(w http.ResponseWriter, info *authInfo, path, 
 
 // checkSessionAction verifies the requested action is allowed by the session role.
 // Returns true if access is allowed, false if denied (and writes the error response).
-func (s *Server) checkSessionAction(w http.ResponseWriter, info *authInfo, action, path, ip string) bool {
+func (s *Server) checkSessionAction(w http.ResponseWriter, r *http.Request, info *authInfo, action, path, ip string) bool {
 	if !info.UsedSession {
 		return true
 	}
 	if sessionActionAllowed(info.SessionActions, action) {
 		return true
 	}
-	s.logAudit(s.audit.LogSessionDenied(info.Agent, action, path, ip, "session_action", info.SessionID))
+	s.auditLogSessionDenied(r, info.Agent, action, path, ip, "session_action", info.SessionID)
 	jsonDenied(w, "access_denied", "ACTION_DENIED",
 		fmt.Sprintf("action %q is not permitted by session role %q", action, info.SessionRole),
 		"request a session with a role that includes this action",
@@ -698,7 +783,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	// Session scope enforcement (before ACL)
 	if path != "" && !strings.HasSuffix(path, "/") {
-		if !s.checkSessionScope(w, info, path, ip) {
+		if !s.checkSessionScope(w, r, info, path, ip) {
 			return
 		}
 	}
@@ -720,7 +805,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	// List mode: path is empty or ends with /
 	if path == "" || strings.HasSuffix(path, "/") {
 		// Session action enforcement: list
-		if !s.checkSessionAction(w, info, "list", path, ip) {
+		if !s.checkSessionAction(w, r, info, "list", path, ip) {
 			return
 		}
 		allPaths, err := s.backend.List(path)
@@ -740,7 +825,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 			}
 			visible = append(visible, p)
 		}
-		s.auditAllowed(info, "list", path, ip)
+		s.auditAllowed(r, info, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"paths": visible})
 		return
 	}
@@ -749,28 +834,28 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	switch reason := s.dataAccessReason(info, path, "read_value", acl.ActionReadValue); reason {
 	case "":
 	case "session_scope":
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
 		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
 			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
 			"request a session with a role that includes this namespace",
 			http.StatusForbidden)
 		return
 	case "session_action":
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "read_value", path, ip, "session_action", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "read_value", path, ip, "session_action", info.SessionID)
 		jsonDenied(w, "access_denied", "ACTION_DENIED",
 			fmt.Sprintf("action %q is not permitted by session role %q", "read_value", info.SessionRole),
 			"request a session with a role that includes this action",
 			http.StatusForbidden)
 		return
 	default:
-		s.auditDenied(info, "read_value", path, ip, "acl")
+		s.auditDenied(r, info, "read_value", path, ip, "acl")
 		jsonError(w, "access denied: read_value permission required (use phoenix exec for context-free secret injection)", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check (with validated seal key state)
 	if err := s.attestFull(r, path, info, false, false, sealKeyValidated); err != nil {
-		s.auditDenied(info, "read_value", path, ip, "attestation")
+		s.auditDenied(r, info, "read_value", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -790,7 +875,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAllowedWithSeal(info, "read_value", path, ip, sealKey != nil)
+	s.auditAllowedWithSeal(r, info, "read_value", path, ip, sealKey != nil)
 	if sealKey != nil {
 		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
 		if err != nil {
@@ -830,28 +915,28 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	switch reason := s.dataAccessReason(info, path, "write", acl.ActionWrite); reason {
 	case "":
 	case "session_scope":
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
 		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
 			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
 			"request a session with a role that includes this namespace",
 			http.StatusForbidden)
 		return
 	case "session_action":
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "write", path, ip, "session_action", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "write", path, ip, "session_action", info.SessionID)
 		jsonDenied(w, "access_denied", "ACTION_DENIED",
 			fmt.Sprintf("action %q is not permitted by session role %q", "write", info.SessionRole),
 			"request a session with a role that includes this action",
 			http.StatusForbidden)
 		return
 	default:
-		s.auditDenied(info, "write", path, ip, "acl")
+		s.auditDenied(r, info, "write", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.auditDenied(info, "write", path, ip, "attestation")
+		s.auditDenied(r, info, "write", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -883,7 +968,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAllowed(info, "write", path, ip)
+	s.auditAllowed(r, info, "write", path, ip)
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
@@ -899,28 +984,28 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	switch reason := s.dataAccessReason(info, path, "delete", acl.ActionDelete); reason {
 	case "":
 	case "session_scope":
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "scope_check", path, ip, "session_scope", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
 		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
 			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
 			"request a session with a role that includes this namespace",
 			http.StatusForbidden)
 		return
 	case "session_action":
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "delete", path, ip, "session_action", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "delete", path, ip, "session_action", info.SessionID)
 		jsonDenied(w, "access_denied", "ACTION_DENIED",
 			fmt.Sprintf("action %q is not permitted by session role %q", "delete", info.SessionRole),
 			"request a session with a role that includes this action",
 			http.StatusForbidden)
 		return
 	default:
-		s.auditDenied(info, "delete", path, ip, "acl")
+		s.auditDenied(r, info, "delete", path, ip, "acl")
 		jsonError(w, "access denied", http.StatusForbidden)
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.auditDenied(info, "delete", path, ip, "attestation")
+		s.auditDenied(r, info, "delete", path, ip, "attestation")
 		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -944,7 +1029,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAllowed(info, "delete", path, ip)
+	s.auditAllowed(r, info, "delete", path, ip)
 	jsonOK(w, map[string]string{"status": "ok", "path": path})
 }
 
@@ -1037,7 +1122,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		// Try update first; if agent doesn't exist, fall through to add
 		err := s.acl.UpdateAgent(req.Name, req.Token, req.Permissions)
 		if err == nil {
-			s.logAudit(s.audit.LogAllowed(agentName, "update-agent", req.Name, clientIP(r)))
+			s.auditLogAllowed(r, agentName, "update-agent", req.Name, clientIP(r))
 			jsonOK(w, map[string]string{"status": "ok", "agent": req.Name, "action": "updated"})
 			return
 		}
@@ -1059,7 +1144,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "create-agent", req.Name, clientIP(r)))
+	s.auditLogAllowed(r, agentName, "create-agent", req.Name, clientIP(r))
 	jsonOK(w, map[string]string{"status": "ok", "agent": req.Name})
 }
 
@@ -1112,7 +1197,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "delete-agent", target, clientIP(r)))
+	s.auditLogAllowed(r, agentName, "delete-agent", target, clientIP(r))
 	jsonOK(w, map[string]string{"status": "ok", "agent": target, "action": "deleted"})
 }
 
@@ -1158,7 +1243,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "issue-cert", req.AgentName, clientIP(r)))
+	s.auditLogAllowed(r, agentName, "issue-cert", req.AgentName, clientIP(r))
 	jsonOK(w, map[string]interface{}{
 		"status":  "ok",
 		"agent":   req.AgentName,
@@ -1234,7 +1319,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip))
+	s.auditLogAllowed(r, agentName, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip)
 	log.Printf("master key rotated by %s: %d namespaces re-wrapped", agentName, rotated)
 
 	jsonOK(w, map[string]interface{}{
@@ -1361,7 +1446,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	for _, refStr := range req.Refs {
 		path, err := ref.Parse(refStr)
 		if err != nil {
-			s.auditDenied(info, "resolve", refStr, ip, "malformed_ref")
+			s.auditDenied(r, info, "resolve", refStr, ip, "malformed_ref")
 			errors[refStr] = err.Error()
 			continue
 		}
@@ -1370,22 +1455,22 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		switch reason := s.dataAccessReason(info, path, "read_value", acl.ActionReadValue); reason {
 		case "":
 		case "session_scope":
-			s.auditDenied(info, "resolve", path, ip, "session_scope")
+			s.auditDenied(r, info, "resolve", path, ip, "session_scope")
 			errors[refStr] = "path outside session scope"
 			continue
 		case "session_action":
-			s.auditDenied(info, "resolve", path, ip, "session_action")
+			s.auditDenied(r, info, "resolve", path, ip, "session_action")
 			errors[refStr] = "action read_value not permitted by session role"
 			continue
 		default:
-			s.auditDenied(info, "resolve", path, ip, "acl")
+			s.auditDenied(r, info, "resolve", path, ip, "acl")
 			errors[refStr] = "access denied: read_value permission required"
 			continue
 		}
 
 		// Attestation policy check (per-ref)
 		if err := s.attestFull(r, path, info, nonceValidated, signatureVerified, sealKey != nil); err != nil {
-			s.auditDenied(info, "resolve", path, ip, "attestation")
+			s.auditDenied(r, info, "resolve", path, ip, "attestation")
 			errors[refStr] = "attestation required"
 			continue
 		}
@@ -1394,19 +1479,19 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			// Dry-run: verify path exists without returning the secret value.
 			if _, err := s.backend.Get(path); err != nil {
 				if err == store.ErrSecretNotFound {
-					s.auditDenied(info, "dry-resolve", path, ip, "not_found")
+					s.auditDenied(r, info, "dry-resolve", path, ip, "not_found")
 					errors[refStr] = "secret not found"
 				} else if err == store.ErrInvalidPath {
-					s.auditDenied(info, "dry-resolve", path, ip, "invalid_path")
+					s.auditDenied(r, info, "dry-resolve", path, ip, "invalid_path")
 					errors[refStr] = "invalid path"
 				} else {
-					s.auditDenied(info, "dry-resolve", path, ip, "internal_error")
+					s.auditDenied(r, info, "dry-resolve", path, ip, "internal_error")
 					log.Printf("error dry-resolving %q for %s: %v", path, agentName, err)
 					errors[refStr] = "internal error"
 				}
 				continue
 			}
-			s.auditAllowed(info, "dry-resolve", path, ip)
+			s.auditAllowed(r, info, "dry-resolve", path, ip)
 			values[refStr] = "ok"
 			continue
 		}
@@ -1414,20 +1499,20 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		secret, err := s.backend.Get(path)
 		if err != nil {
 			if err == store.ErrSecretNotFound {
-				s.auditDenied(info, "resolve", path, ip, "not_found")
+				s.auditDenied(r, info, "resolve", path, ip, "not_found")
 				errors[refStr] = "secret not found"
 			} else if err == store.ErrInvalidPath {
-				s.auditDenied(info, "resolve", path, ip, "invalid_path")
+				s.auditDenied(r, info, "resolve", path, ip, "invalid_path")
 				errors[refStr] = "invalid path"
 			} else {
-				s.auditDenied(info, "resolve", path, ip, "internal_error")
+				s.auditDenied(r, info, "resolve", path, ip, "internal_error")
 				log.Printf("error resolving %q for %s: %v", path, agentName, err)
 				errors[refStr] = "internal error"
 			}
 			continue
 		}
 
-		s.auditAllowedWithSeal(info, "resolve", path, ip, sealKey != nil)
+		s.auditAllowedWithSeal(r, info, "resolve", path, ip, sealKey != nil)
 
 		if sealKey != nil {
 			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
@@ -1538,7 +1623,7 @@ func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "revoke-cert", req.SerialNumber, clientIP(r)))
+	s.auditLogAllowed(r, agentName, "revoke-cert", req.SerialNumber, clientIP(r))
 	jsonOK(w, map[string]string{
 		"status":        "ok",
 		"serial_number": req.SerialNumber,
@@ -1718,7 +1803,7 @@ func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(agentName, "mint-token", req.Agent, clientIP(r)))
+	s.auditLogAllowed(r, agentName, "mint-token", req.Agent, clientIP(r))
 	jsonOK(w, map[string]interface{}{
 		"token":      tok,
 		"agent":      claims.Agent,
@@ -1836,7 +1921,7 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 	if existing != "" {
 		auditAction = "rotate-keypair"
 	}
-	s.logAudit(s.audit.LogAllowed(agentName, auditAction, req.AgentName, ip))
+	s.auditLogAllowed(r, agentName, auditAction, req.AgentName, ip)
 
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]string{
@@ -1955,7 +2040,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("role %q does not exist", req.Role),
 			"check available roles in server config",
 			http.StatusNotFound)
-		s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "role_not_found"))
+		s.auditLogDenied(r, info.Agent, "session.mint", req.Role, ip, "role_not_found")
 		return
 	}
 
@@ -1968,7 +2053,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("auth method %q is not in role's bootstrap_trust list", bootstrapMethod),
 			fmt.Sprintf("role %q accepts: %v", req.Role, role.BootstrapTrust),
 			http.StatusForbidden)
-		s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "bootstrap_failed"))
+		s.auditLogDenied(r, info.Agent, "session.mint", req.Role, ip, "bootstrap_failed")
 		return
 	}
 
@@ -1979,7 +2064,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 				reason,
 				fmt.Sprintf("role %q requires attestation: %v", req.Role, role.Attestation),
 				http.StatusForbidden)
-			s.logAudit(s.audit.LogDenied(info.Agent, "session.mint", req.Role, ip, "attestation_failed"))
+			s.auditLogDenied(r, info.Agent, "session.mint", req.Role, ip, "attestation_failed")
 			return
 		}
 	}
@@ -2025,7 +2110,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		s.logAudit(s.audit.LogAllowed(info.Agent, "approval.created", req.Role, ip))
+		s.auditLogAllowed(r, info.Agent, "approval.created", req.Role, ip)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusAccepted) // 202
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2051,7 +2136,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Audit log
-	s.logAudit(s.audit.LogAllowed(info.Agent, "session.mint.approved", req.Role, ip))
+	s.auditLogAllowed(r, info.Agent, "session.mint.approved", req.Role, ip)
 
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]interface{}{
@@ -2093,7 +2178,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("role %q no longer exists in server config", info.SessionRole),
 			"contact your administrator",
 			http.StatusForbidden)
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "role_not_found", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "role_not_found", info.SessionID)
 		return
 	}
 
@@ -2111,7 +2196,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("elevated step-up session for role %q cannot be renewed without fresh approval", info.SessionRole),
 			"mint a new session and complete step-up approval again",
 			http.StatusForbidden)
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "step_up_reapproval_required", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "step_up_reapproval_required", info.SessionID)
 		return
 	}
 
@@ -2120,7 +2205,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("original bootstrap method %q is no longer trusted for role %q", sess.BootstrapMethod, info.SessionRole),
 			"mint a new session with a currently trusted auth method",
 			http.StatusForbidden)
-		s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "bootstrap_failed", info.SessionID))
+		s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "bootstrap_failed", info.SessionID)
 		return
 	}
 
@@ -2134,7 +2219,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 				reason,
 				fmt.Sprintf("role %q requires attestation: %v", info.SessionRole, role.Attestation),
 				http.StatusForbidden)
-			s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID))
+			s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID)
 			return
 		}
 		if slicesContains(role.Attestation, "cert_fingerprint") && sess.CertFingerprint != "" && info.CertFingerprint != sess.CertFingerprint {
@@ -2142,7 +2227,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 				"role requires the same client certificate fingerprint used when the session was minted",
 				"renew using the original client certificate or mint a new session",
 				http.StatusForbidden)
-			s.logAudit(s.audit.LogSessionDenied(info.Agent, "session.renew", info.SessionRole, ip, "cert_continuity_failed", info.SessionID))
+			s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "cert_continuity_failed", info.SessionID)
 			return
 		}
 	}
@@ -2169,7 +2254,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logAudit(s.audit.LogSessionAllowed(info.Agent, "session.renewed", info.SessionRole, ip, info.SessionID))
+	s.auditLogSessionAllowed(r, info.Agent, "session.renewed", info.SessionRole, ip, info.SessionID)
 
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]interface{}{
@@ -2393,7 +2478,7 @@ func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, i
 			valErr.Error(),
 			"role config changed while approval was pending",
 			status)
-		s.logAudit(s.audit.LogDenied(info.Agent, "approval.approve", apr.Role, ip, valErr.Error()))
+		s.auditLogDenied(r, info.Agent, "approval.approve", apr.Role, ip, valErr.Error())
 		return
 	}
 
@@ -2423,7 +2508,7 @@ func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(info.Agent, "approval.approved", apr.Role, ip))
+	s.auditLogAllowed(r, info.Agent, "approval.approved", apr.Role, ip)
 
 	// TTY warning: compare requester and approver TTYs
 	sameTTYWarning := false
@@ -2473,7 +2558,7 @@ func (s *Server) handleApprovalDeny(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	s.logAudit(s.audit.LogAllowed(info.Agent, "approval.denied", id, ip))
+	s.auditLogAllowed(r, info.Agent, "approval.denied", id, ip)
 
 	jsonOK(w, map[string]interface{}{
 		"id":     id,
@@ -2552,7 +2637,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]interface{}{"sessions": []interface{}{sessionToMap(sess)}})
-		s.auditAllowed(info, "session.list", "self", ip)
+		s.auditAllowed(r, info, "session.list", "self", ip)
 		return
 	}
 
@@ -2591,7 +2676,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, map[string]interface{}{"sessions": items})
-	s.auditAllowed(info, "session.list", "", ip)
+	s.auditAllowed(r, info, "session.list", "", ip)
 }
 
 // handleSessionRouter dispatches /v1/sessions/{id} and /v1/sessions/{id}/revoke.
@@ -2655,7 +2740,7 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	jsonOK(w, sessionToMap(sess))
-	s.auditAllowed(info, "session.info", id, ip)
+	s.auditAllowed(r, info, "session.info", id, ip)
 }
 
 // handleSessionRevoke revokes a session by ID.
@@ -2695,7 +2780,7 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	s.auditAllowed(info, "session.revoke", id, ip)
+	s.auditAllowed(r, info, "session.revoke", id, ip)
 	jsonOK(w, map[string]string{
 		"status":     "revoked",
 		"session_id": id,

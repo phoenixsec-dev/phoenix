@@ -93,6 +93,27 @@ func TestLogFormatIncludesSealedField(t *testing.T) {
 	}
 }
 
+func TestLogFormatIncludesMetadataWhenPresent(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewWriterLogger(&buf)
+
+	metadata := map[string]string{"openclaw.agent": "claw", "empty": ""}
+	logger.LogAllowedWithMetadata("vector", "read", "test/key", "10.0.0.1", metadata)
+	metadata["openclaw.agent"] = "mutated"
+
+	line := strings.TrimSpace(buf.String())
+	var entry Entry
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("unmarshal log line: %v", err)
+	}
+	if entry.Metadata["openclaw.agent"] != "claw" {
+		t.Fatalf("metadata openclaw.agent = %q, want %q", entry.Metadata["openclaw.agent"], "claw")
+	}
+	if _, ok := entry.Metadata["empty"]; ok {
+		t.Fatal("empty metadata value should be omitted")
+	}
+}
+
 func TestQueryByPath(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.log")

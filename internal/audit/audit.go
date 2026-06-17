@@ -15,15 +15,16 @@ import (
 
 // Entry is a single audit log record.
 type Entry struct {
-	Timestamp time.Time `json:"ts"`
-	Agent     string    `json:"agent"`
-	Action    string    `json:"action"`
-	Path      string    `json:"path"`
-	Status    string    `json:"status"` // "allowed" or "denied"
-	IP        string    `json:"ip,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	Sealed    bool      `json:"sealed"`
+	Timestamp time.Time         `json:"ts"`
+	Agent     string            `json:"agent"`
+	Action    string            `json:"action"`
+	Path      string            `json:"path"`
+	Status    string            `json:"status"` // "allowed" or "denied"
+	IP        string            `json:"ip,omitempty"`
+	Reason    string            `json:"reason,omitempty"`
+	SessionID string            `json:"session_id,omitempty"`
+	Sealed    bool              `json:"sealed"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 // Logger writes audit entries to a file.
@@ -56,6 +57,11 @@ func NewWriterLogger(w io.Writer) *Logger {
 
 // log writes a low-level audit entry.
 func (l *Logger) log(agent, action, path, status, ip, reason, sessionID string, sealed bool) error {
+	return l.logWithMetadata(agent, action, path, status, ip, reason, sessionID, sealed, nil)
+}
+
+// logWithMetadata writes a low-level audit entry with optional sanitized metadata.
+func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessionID string, sealed bool, metadata map[string]string) error {
 	entry := Entry{
 		Timestamp: time.Now().UTC(),
 		Agent:     agent,
@@ -66,6 +72,7 @@ func (l *Logger) log(agent, action, path, status, ip, reason, sessionID string, 
 		Reason:    reason,
 		SessionID: sessionID,
 		Sealed:    sealed,
+		Metadata:  cloneMetadata(metadata),
 	}
 
 	l.mu.Lock()
@@ -80,36 +87,87 @@ func (l *Logger) log(agent, action, path, status, ip, reason, sessionID string, 
 	return nil
 }
 
+func cloneMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		if k == "" || v == "" {
+			continue
+		}
+		cloned[k] = v
+	}
+	if len(cloned) == 0 {
+		return nil
+	}
+	return cloned
+}
+
 // LogAllowed is a convenience for logging permitted plaintext actions.
 func (l *Logger) LogAllowed(agent, action, path, ip string) error {
-	return l.log(agent, action, path, "allowed", ip, "", "", false)
+	return l.LogAllowedWithMetadata(agent, action, path, ip, nil)
+}
+
+// LogAllowedWithMetadata logs a permitted plaintext action with optional sanitized metadata.
+func (l *Logger) LogAllowedWithMetadata(agent, action, path, ip string, metadata map[string]string) error {
+	return l.logWithMetadata(agent, action, path, "allowed", ip, "", "", false, metadata)
 }
 
 // LogAllowedSealed is a convenience for logging permitted actions with response
 // seal state (true when the response was sealed).
 func (l *Logger) LogAllowedSealed(agent, action, path, ip string, sealed bool) error {
-	return l.log(agent, action, path, "allowed", ip, "", "", sealed)
+	return l.LogAllowedSealedWithMetadata(agent, action, path, ip, sealed, nil)
+}
+
+// LogAllowedSealedWithMetadata logs a permitted action with response seal state
+// and optional sanitized metadata.
+func (l *Logger) LogAllowedSealedWithMetadata(agent, action, path, ip string, sealed bool, metadata map[string]string) error {
+	return l.logWithMetadata(agent, action, path, "allowed", ip, "", "", sealed, metadata)
 }
 
 // LogDenied is a convenience for logging denied actions.
 func (l *Logger) LogDenied(agent, action, path, ip, reason string) error {
-	return l.log(agent, action, path, "denied", ip, reason, "", false)
+	return l.LogDeniedWithMetadata(agent, action, path, ip, reason, nil)
+}
+
+// LogDeniedWithMetadata logs a denied action with optional sanitized metadata.
+func (l *Logger) LogDeniedWithMetadata(agent, action, path, ip, reason string, metadata map[string]string) error {
+	return l.logWithMetadata(agent, action, path, "denied", ip, reason, "", false, metadata)
 }
 
 // LogSessionAllowed logs a permitted action with session context.
 func (l *Logger) LogSessionAllowed(agent, action, path, ip, sessionID string) error {
-	return l.log(agent, action, path, "allowed", ip, "", sessionID, false)
+	return l.LogSessionAllowedWithMetadata(agent, action, path, ip, sessionID, nil)
+}
+
+// LogSessionAllowedWithMetadata logs a permitted action with session context
+// and optional sanitized metadata.
+func (l *Logger) LogSessionAllowedWithMetadata(agent, action, path, ip, sessionID string, metadata map[string]string) error {
+	return l.logWithMetadata(agent, action, path, "allowed", ip, "", sessionID, false, metadata)
 }
 
 // LogSessionAllowedSealed logs a permitted action with session context and response
 // seal state (true when the response was sealed).
 func (l *Logger) LogSessionAllowedSealed(agent, action, path, ip, sessionID string, sealed bool) error {
-	return l.log(agent, action, path, "allowed", ip, "", sessionID, sealed)
+	return l.LogSessionAllowedSealedWithMetadata(agent, action, path, ip, sessionID, sealed, nil)
+}
+
+// LogSessionAllowedSealedWithMetadata logs a permitted action with session context,
+// response seal state, and optional sanitized metadata.
+func (l *Logger) LogSessionAllowedSealedWithMetadata(agent, action, path, ip, sessionID string, sealed bool, metadata map[string]string) error {
+	return l.logWithMetadata(agent, action, path, "allowed", ip, "", sessionID, sealed, metadata)
 }
 
 // LogSessionDenied logs a denied action with session context.
 func (l *Logger) LogSessionDenied(agent, action, path, ip, reason, sessionID string) error {
-	return l.log(agent, action, path, "denied", ip, reason, sessionID, false)
+	return l.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, sessionID, nil)
+}
+
+// LogSessionDeniedWithMetadata logs a denied action with session context and
+// optional sanitized metadata.
+func (l *Logger) LogSessionDeniedWithMetadata(agent, action, path, ip, reason, sessionID string, metadata map[string]string) error {
+	return l.logWithMetadata(agent, action, path, "denied", ip, reason, sessionID, false, metadata)
 }
 
 // Close flushes and closes the audit log file.
