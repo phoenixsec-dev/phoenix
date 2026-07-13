@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/approval"
@@ -507,6 +508,9 @@ func sanitizeOpenClawAuditMetadataValue(value string) string {
 	value = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return ' '
+		}
+		if unicode.Is(unicode.Cf, r) {
+			return -1
 		}
 		return r
 	}, value)

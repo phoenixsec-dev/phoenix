@@ -114,6 +114,57 @@ func TestAutoMintSessionRenewsNearExpiryTokenInsteadOfMinting(t *testing.T) {
 	})
 }
 
+func TestAutoMintSessionSucceedsUnsealedWithoutHome(t *testing.T) {
+	role := "deploy-role"
+
+	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/session/mint" {
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode mint body: %v", err)
+		}
+		if _, ok := body["seal_public_key"]; ok {
+			t.Errorf("expected no seal_public_key without HOME, got %q", body["seal_public_key"])
+		}
+		resp := map[string]string{
+			"session_token": "phxs_unsealed",
+			"expires_at":    time.Now().Add(30 * time.Minute).Format(time.RFC3339),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}, func() {
+		t.Setenv("PHOENIX_ROLE", role)
+		t.Setenv("PHOENIX_SEAL_KEY", "")
+		t.Setenv("HOME", "")
+		t.Setenv("PHOENIX_TOKEN", "bootstrap-token")
+		token = "bootstrap-token"
+
+		if err := requireAuth(); err != nil {
+			t.Fatalf("requireAuth without HOME: %v", err)
+		}
+		if token != "phxs_unsealed" {
+			t.Fatalf("token = %q, want minted session token", token)
+		}
+	})
+}
+
+func TestEnsureSealKeyMissingHomeReturnsUnsealed(t *testing.T) {
+	t.Setenv("PHOENIX_SEAL_KEY", "")
+	t.Setenv("HOME", "")
+
+	priv, pub, err := ensureSealKey("deploy-role")
+	if err != nil {
+		t.Fatalf("ensureSealKey without HOME: %v", err)
+	}
+	if priv != nil || pub != "" {
+		t.Fatalf("expected unsealed result, got priv=%v pub=%q", priv, pub)
+	}
+}
+
 func TestCmdGetUsesRoleSessionSealKey(t *testing.T) {
 	role := "deploy-role"
 	kp, err := crypto.GenerateSealKeyPair()

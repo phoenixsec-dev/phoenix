@@ -1059,6 +1059,9 @@ func parseOpenClawExecProviderRequest(r io.Reader) (*openClawExecProviderRequest
 	if err := dec.Decode(&req); err != nil {
 		return nil, fmt.Errorf("decoding OpenClaw exec provider request: %w", err)
 	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("OpenClaw exec provider request contains trailing data")
+	}
 	if req.ProtocolVersion != 1 {
 		return nil, fmt.Errorf("OpenClaw exec provider protocolVersion must be 1")
 	}
@@ -1098,6 +1101,14 @@ func cmdOpenClawExecProvider(args []string) error {
 	req, err := parseOpenClawExecProviderRequest(os.Stdin)
 	if err != nil {
 		return err
+	}
+
+	if len(req.IDs) == 0 {
+		enc := json.NewEncoder(os.Stdout)
+		return enc.Encode(openClawExecProviderResponse{
+			ProtocolVersion: 1,
+			Values:          make(map[string]string),
+		})
 	}
 
 	refs := make([]string, 0, len(req.IDs))
@@ -2362,10 +2373,11 @@ func ensureSealKey(role string) (*[32]byte, string, error) {
 		return priv, crypto.EncodeSealKey(pub), nil
 	}
 
-	// Check per-role key file
+	// Check per-role key file. If the home directory cannot be determined,
+	// treat it the same as no key file: mint without seal binding.
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot determine home directory: %w", err)
+		return nil, "", nil
 	}
 	keyDir := filepath.Join(home, ".phoenix")
 	keyPath := filepath.Join(keyDir, "session-seal-"+role+".key")

@@ -1130,6 +1130,25 @@ func addSpoofedOpenClawHeaders(req *http.Request, rawSessionKey string) {
 	req.Header.Set("X-OpenClaw-Role", "admin")
 }
 
+func TestSanitizeOpenClawAuditMetadataValueStripsFormatControls(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "rtl-override", in: "admin‮nimda", want: "adminnimda"},
+		{name: "zero-width-space-joiner", in: "ag​ent‍", want: "agent"},
+		{name: "bidi-isolates", in: "⁦spoof⁩", want: "spoof"},
+		{name: "only-format-chars", in: "‮​", want: ""},
+		{name: "plain", in: "openclaw-agent", want: "openclaw-agent"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeOpenClawAuditMetadataValue(tc.in); got != tc.want {
+			t.Errorf("%s: sanitize(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestOpenClawHeadersCapturedAsSanitizedAuditMetadataOnly(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 

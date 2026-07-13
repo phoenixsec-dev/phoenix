@@ -1,5 +1,28 @@
 # Release Notes
 
+## v0.15.2 (2026-07-12)
+
+### OpenClaw Exec Provider Merge-Review Fixes
+
+- Session mint with `PHOENIX_ROLE` no longer fails when the home directory
+  cannot be determined and no `PHOENIX_SEAL_KEY` is set; the CLI now mints an
+  unsealed session, matching the missing-key-file behavior.
+- The exec provider short-circuits an empty `ids` list to an empty response
+  without calling the resolve API.
+- The exec provider rejects trailing non-whitespace data after the stdin JSON
+  request object.
+- Audit metadata sanitization now strips Unicode format/bidi control
+  characters (category Cf, e.g. U+202E) from `X-OpenClaw-*` header values.
+- Added tests for the sealed-envelope decrypt branch, non-200 server
+  responses in the exec-provider path, missing-HOME session mint, and
+  format-control sanitization.
+- Documented the three exec-provider auth modes (bootstrap token + role,
+  mTLS + role, pre-minted session token) and the invalid combinations,
+  added `HOME` to the recommended `passEnv` example, documented the
+  audit-only `X-OpenClaw-*` metadata headers, and noted that signed resolve
+  is not supported in the exec-provider path. `phoenix openclaw-exec-provider`
+  is now documented as the canonical command form.
+
 ## v0.15.1 (2026-06-17)
 
 ### OpenClaw Audit Metadata
