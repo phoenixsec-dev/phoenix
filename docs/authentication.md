@@ -63,6 +63,11 @@ Session tokens use a `phxs_` prefix and are scoped to specific namespaces and
 actions. Non-elevated sessions auto-renew, and sessions can be revoked
 individually. Elevated step-up sessions require fresh approval to extend.
 
+Do not combine `PHOENIX_ROLE` with a pre-minted `phxs_` session token in
+`PHOENIX_TOKEN`: role mode always re-mints a session, and a session token is
+rejected as bootstrap auth. Use a bootstrap token (or mTLS) with
+`PHOENIX_ROLE`, or a `phxs_` token alone without `PHOENIX_ROLE`.
+
 Auth priority order: session token > mTLS > short-lived token > bearer.
 
 See [Session Identity](session-identity.md) for full details on roles,

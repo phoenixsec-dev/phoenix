@@ -60,10 +60,10 @@ startup configuration.
 Phoenix provides an OpenClaw-compatible exec provider command:
 
 ```bash
-phoenix resolve --stdin-json
-# equivalent aliases:
 phoenix openclaw-exec-provider
+# equivalent aliases:
 phoenix secret-provider openclaw
+phoenix resolve --stdin-json
 ```
 
 This command reads OpenClaw's exec-provider JSON request from stdin:
@@ -91,8 +91,9 @@ OpenClaw process:
       phoenix: {
         source: "exec",
         command: "/usr/local/bin/phoenix",
-        args: ["resolve", "--stdin-json"],
+        args: ["openclaw-exec-provider"],
         passEnv: [
+          "HOME",
           "PHOENIX_SERVER",
           "PHOENIX_TOKEN",
           "PHOENIX_ROLE",
@@ -111,6 +112,9 @@ OpenClaw process:
   }
 }
 ```
+
+Passing `HOME` lets the CLI find per-role session seal keys under `~/.phoenix/`
+(optional — without it the CLI mints unsealed sessions — but recommended).
 
 Then use OpenClaw SecretRef objects in fields that support secrets:
 
@@ -133,23 +137,69 @@ The exec provider accepts ids either as Phoenix paths (`openclaw/shared/key`) or
 full refs (`phoenix://openclaw/shared/key`). It normalizes paths to Phoenix refs for
 resolution, but the stdout `values`/`errors` keys match OpenClaw's input ids.
 
-Set Phoenix credentials for the OpenClaw process. Prefer scoped role/session or
-mTLS credentials over a broad admin token:
+Set Phoenix credentials for the OpenClaw process. There are three valid auth
+modes — pick exactly one:
+
+**(a) Role auto-mint with a bootstrap token** — the CLI uses the bootstrap token
+to mint a short-lived session for the role:
 
 ```bash
 export PHOENIX_SERVER=https://phoenix:9090
-export PHOENIX_TOKEN=<bootstrap-or-session-token>
+export PHOENIX_TOKEN=<bootstrap-token>   # NOT a phxs_... session token
 export PHOENIX_ROLE=openclaw-gateway
-# Or use mTLS:
+```
+
+**(b) Role auto-mint with mTLS** — the client certificate is the bootstrap
+identity; no bearer token needed:
+
+```bash
+export PHOENIX_SERVER=https://phoenix:9090
+export PHOENIX_ROLE=openclaw-gateway
 export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
 export PHOENIX_CLIENT_CERT=/etc/phoenix/openclaw.crt
 export PHOENIX_CLIENT_KEY=/etc/phoenix/openclaw.key
 ```
 
-`PHOENIX_ROLE`, mTLS, sealed responses, session auto-mint/renewal, and Phoenix
-attestation headers are handled by the same CLI auth paths as `phoenix resolve`.
-Plain `phoenix resolve <ref>` remains the general human/script command; use
-`phoenix resolve --stdin-json` for OpenClaw's stdin/stdout provider protocol.
+**(c) Pre-minted session token** — mint a session out of band and hand the
+`phxs_...` token to the process directly:
+
+```bash
+export PHOENIX_SERVER=https://phoenix:9090
+export PHOENIX_TOKEN=<phxs_session-token>
+# Do NOT set PHOENIX_ROLE in this mode.
+```
+
+Combinations that do not work:
+
+- `PHOENIX_ROLE` + `PHOENIX_TOKEN=phxs_...` — role mode always re-mints a
+  session, and a session token is rejected as bootstrap auth.
+- A `phxs_...` session token past its expiry — pre-minted tokens are not
+  renewed by the exec provider; use role auto-mint for long-running processes.
+
+Sealed responses, session auto-mint/renewal, and Phoenix attestation headers are
+handled by the same CLI auth paths as `phoenix resolve`. Plain
+`phoenix resolve <ref>` remains the general human/script command; use
+`phoenix openclaw-exec-provider` for OpenClaw's stdin/stdout provider protocol.
+Signed resolve (`phoenix resolve --signed` challenge/response) is a CLI-path
+feature and is not supported in the exec-provider path — bootstrap attestation
+there relies on mTLS/role identity instead.
+
+### Audit-only OpenClaw metadata headers
+
+The Phoenix server captures the following request headers as audit-only,
+untrusted metadata hints (each value sanitized and capped at 256 characters):
+
+- `X-OpenClaw-Agent`
+- `X-OpenClaw-Session-Id`
+- `X-OpenClaw-Channel`
+- `X-OpenClaw-Requester-Sender`
+- `X-OpenClaw-Sender-Is-Owner`
+
+They exist purely for audit-log correlation with OpenClaw sessions. They have
+zero effect on authorization, attestation, or sealed-response decisions —
+spoofing them cannot elevate access; the audited identity is always the
+authenticated Phoenix agent. `X-OpenClaw-Session-Key` is deliberately not
+captured and is never written to audit logs.
 
 ### 2. Plugin tools for agent/tool runtime access
 

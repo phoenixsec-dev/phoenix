@@ -3,7 +3,7 @@
 > This roadmap is directional and may change based on user feedback.
 > It is not a contractual delivery commitment.
 
-## Shipped (v0.13)
+## Shipped (through v0.15)
 
 - Encrypted secret storage (AES-256-GCM envelope encryption)
 - Per-agent ACL with namespace isolation and glob matching
