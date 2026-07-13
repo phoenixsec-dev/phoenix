@@ -116,6 +116,9 @@ OpenClaw process:
 Passing `HOME` lets the CLI find per-role session seal keys under `~/.phoenix/`
 (optional — without it the CLI mints unsealed sessions — but recommended).
 
+The provider config key must be named exactly `phoenix` — the Phoenix CLI
+validates the `provider` field it receives and rejects any other name.
+
 Then use OpenClaw SecretRef objects in fields that support secrets:
 
 ```json5
@@ -175,6 +178,10 @@ Combinations that do not work:
   session, and a session token is rejected as bootstrap auth.
 - A `phxs_...` session token past its expiry — pre-minted tokens are not
   renewed by the exec provider; use role auto-mint for long-running processes.
+
+Do not point the exec provider at a role that requires step-up approval — the
+CLI will block waiting for approval until OpenClaw's `timeoutMs` kills the
+process; use a non-step-up role for bootstrap secrets.
 
 Sealed responses, session auto-mint/renewal, and Phoenix attestation headers are
 handled by the same CLI auth paths as `phoenix resolve`. Plain
