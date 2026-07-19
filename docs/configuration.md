@@ -3,6 +3,9 @@
 ## Configuration reference
 
 The server reads a JSON config file. `config.example.json` is a starter template.
+The example binds to loopback (`127.0.0.1`): binding to a non-loopback address
+requires enabling TLS/mTLS — never expose the plaintext HTTP listener beyond
+localhost.
 
 | Field | Description | Default |
 |-------|-------------|---------|

@@ -463,6 +463,9 @@ func TestDashboardConfigJSON(t *testing.T) {
 func TestExampleConfigIncludesSessionAndDashboard(t *testing.T) {
 	cfg := ExampleConfig()
 
+	if cfg.Server.Listen != "127.0.0.1:9090" {
+		t.Fatalf("server.listen = %q, want loopback 127.0.0.1:9090", cfg.Server.Listen)
+	}
 	if cfg.Session.TTL != "1h" {
 		t.Fatalf("session.ttl = %q, want 1h", cfg.Session.TTL)
 	}
