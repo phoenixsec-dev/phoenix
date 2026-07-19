@@ -10,7 +10,7 @@ The canonical Phoenix e2e suite. It runs only throwaway state, localhost-bound s
 ./tests/e2e/run-all.sh --format jsonl   # or: --format tap
 ```
 
-The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PATH Go executable, `E2E_BIN_DIR` to reuse prebuilt binaries, or `E2E_REBUILD=1` to force a rebuild. Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run project and free localhost port. Manual `stack.sh` use can override `COMPOSE_PROJECT_NAME` and the `E2E_*_PORT` variables. Scenario 18 builds Git commit `21a6ca4` (v0.13.5) and the current checkout.
+The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PATH Go executable, `E2E_BIN_DIR` to reuse prebuilt binaries, or `E2E_REBUILD=1` to force a rebuild. Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run project and free localhost port. Scenario 12 is opt-in: it needs the `op` CLI, `OP_SERVICE_ACCOUNT_TOKEN`, and a read-only synthetic vault selected by `PHOENIX_E2E_OP_VAULT` (default `phoenix-test`). Manual `stack.sh` use can override `COMPOSE_PROJECT_NAME` and the `E2E_*_PORT` variables. Scenario 18 builds Git commit `21a6ca4` (v0.13.5) and the current checkout.
 
 ## Add a scenario
 
@@ -37,7 +37,7 @@ The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PA
 | 01–04 | lifecycle, ACL isolation, attestation, exec stripping | implemented |
 | 05–08 | rotation under load, cert lifecycle, time/nonce, short-lived tokens | implemented |
 | 09–11 | PostgreSQL rotation, MCP stdio, zero-plaintext config | implemented |
-| 12 | 1Password bridge | deferred: requires a separately authorized synthetic vault; exits 77 |
+| 12 | 1Password read-only backend: resolve, write rejection, missing item | implemented; opt-in, exits 77 when `OP_SERVICE_ACCOUNT_TOKEN` is unset |
 | 13 | OpenClaw exec-provider protocol and edge cases | implemented |
 | 14 | bearer-role, mTLS-role, pre-minted session, invalid auth combinations | implemented |
 | 15 | sanitized audit metadata and spoof resistance | implemented |
