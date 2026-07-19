@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: synthetic-pg-fixture
+    ports: ["127.0.0.1:15432:5432"]
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--requirepass", "synthetic-redis-fixture"]
+    ports: ["127.0.0.1:16379:6379"]
+
+  miniflux:
+    image: miniflux/miniflux:2.2.13
+    environment:
+      DATABASE_URL: postgres://testuser:synthetic-pg-fixture@postgres/testdb?sslmode=disable
+      RUN_MIGRATIONS: "1"
+      CREATE_ADMIN: "1"
+      ADMIN_USERNAME: synthetic-admin
+      ADMIN_PASSWORD: synthetic-miniflux-fixture
+    depends_on: [postgres]
+    ports: ["127.0.0.1:18090:8080"]

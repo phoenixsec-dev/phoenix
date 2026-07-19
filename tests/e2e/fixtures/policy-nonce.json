@@ -1,0 +1,8 @@
+{
+  "attestation": {
+    "high-security/*": {
+      "require_nonce": true,
+      "nonce_max_age": "30s"
+    }
+  }
+}
