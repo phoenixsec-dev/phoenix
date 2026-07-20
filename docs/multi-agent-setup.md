@@ -16,11 +16,11 @@ should be encrypted per-agent even in transit.
 ```bash
 phoenix agent create builder \
   -t "$(openssl rand -hex 32)" \
-  --acl "build/*:read"
+  --acl "build/**:read"
 
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "deploy/*:read;infra/*:read"
+  --acl "deploy/**:read;infra/**:read"
 ```
 
 ### 2. Generate sealed key pairs
@@ -38,15 +38,15 @@ phoenix keypair generate deployer -o /etc/phoenix/keys/deployer.seal.key
 ```json
 {
   "attestation": {
-    "build/*": {
+    "build/**": {
       "require_sealed": true,
       "allow_unseal": true
     },
-    "deploy/*": {
+    "deploy/**": {
       "require_sealed": true,
       "allow_unseal": false
     },
-    "infra/*": {
+    "infra/**": {
       "require_sealed": true,
       "allow_unseal": false
     }
@@ -54,8 +54,8 @@ phoenix keypair generate deployer -o /etc/phoenix/keys/deployer.seal.key
 }
 ```
 
-- `build/*` allows MCP unseal (builder may need values in tool output)
-- `deploy/*` and `infra/*` deny unseal — values can only be consumed via
+- `build/**` allows MCP unseal (builder may need values in tool output)
+- `deploy/**` and `infra/**` deny unseal — values can only be consumed via
   `phoenix exec`
 
 See [Policy and Attestation](policy-and-attestation.md) for the full policy

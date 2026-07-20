@@ -11,10 +11,30 @@ Create an agent with scoped permissions:
 ```bash
 phoenix agent create deployer \
   -t "deploy-token-abc" \
-  --acl "myapp/*:read;staging/*:read,write"
+  --acl "myapp/**:read;staging/**:read,write"
 ```
 
-The `deployer` agent can read anything under `myapp/` and read/write under `staging/`.
+The `deployer` agent can read anything under `myapp/` and read/write under `staging/`,
+including nested paths.
+
+### ACL path patterns
+
+ACL paths are glob patterns matched against secret paths:
+
+| Pattern | Matches |
+|---------|---------|
+| `myapp/db-password` | exactly that path |
+| `myapp/*` | one level under `myapp/` (`myapp/db-password`, but **not** `myapp/gateway/auth-token`) |
+| `myapp/**` | everything under `myapp/`, at any depth |
+| `*` | every path |
+
+`/*` is single-level by design — it grants the top of a namespace without
+exposing nested sub-trees. If an agent with `ns/*:read` is denied on
+`ns/sub/key`, that is why: use `ns/**:read` for namespace-wide access.
+
+The same pattern semantics apply to policy path patterns
+([Policy and Attestation](policy-and-attestation.md)) and session role
+namespaces ([Session Identity](session-identity.md)).
 
 ## Mutual TLS (recommended)
 

@@ -148,7 +148,7 @@ valid `X-Phoenix-Seal-Key` header are denied:
 ```json
 {
   "attestation": {
-    "production/*": {
+    "production/**": {
       "require_sealed": true
     }
   }
@@ -164,11 +164,11 @@ the agent must pass them to `phoenix exec` for injection:
 ```json
 {
   "attestation": {
-    "production/*": {
+    "production/**": {
       "require_sealed": true,
       "allow_unseal": false
     },
-    "dev/*": {
+    "dev/**": {
       "allow_unseal": true
     }
   }

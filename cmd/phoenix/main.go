@@ -338,6 +338,7 @@ Usage:
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
   phoenix audit [-n N] [-a agent] [-s time]   Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]
+                                              ACL path globs: ns/* = one level, ns/** = recursive
   phoenix agent list                          List agents
   phoenix agent delete <name>                 Delete an agent
   phoenix resolve [--signed] <ref> [ref...]     Resolve phoenix:// references to values

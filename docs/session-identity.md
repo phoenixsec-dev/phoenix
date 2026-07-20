@@ -33,12 +33,12 @@ Enable sessions in your server config:
     "ttl": "1h",
     "roles": {
       "dev": {
-        "namespaces": ["dev/*", "staging/*"],
+        "namespaces": ["dev/**", "staging/**"],
         "actions": ["list", "read_value"],
         "bootstrap_trust": ["bearer"]
       },
       "deploy": {
-        "namespaces": ["prod/*"],
+        "namespaces": ["prod/**"],
         "actions": ["list", "read_value"],
         "bootstrap_trust": ["mtls", "bearer"],
         "require_seal_key": true,

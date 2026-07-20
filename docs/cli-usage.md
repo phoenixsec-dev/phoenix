@@ -137,12 +137,12 @@ See [Session Identity](session-identity.md) for full details.
 # Create an agent with scoped ACL (admin only)
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "myapp/*:read;staging/*:read,write"
+  --acl "myapp/**:read;staging/**:read,write"
 
 # Update an existing agent (re-create with --force)
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "myapp/*:read,write" --force
+  --acl "myapp/**:read,write" --force
 
 # List all agents (admin only)
 phoenix agent list
@@ -150,6 +150,9 @@ phoenix agent list
 # Delete an agent (admin only)
 phoenix agent delete deployer
 ```
+
+ACL paths are glob patterns: `ns/*` matches one level, `ns/**` matches
+recursively. See [ACL path patterns](authentication.md#acl-path-patterns).
 
 ## Certificate management
 
