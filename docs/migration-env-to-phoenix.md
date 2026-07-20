@@ -11,7 +11,7 @@ Identify secrets currently in:
 - Docker Compose env blocks
 - framework config files
 
-Group by namespace you want in Phoenix (for example `myapp/*`, `staging/*`, `production/*`).
+Group by namespace you want in Phoenix (for example `myapp/`, `staging/`, `production/`).
 
 ## 2) Initialize Phoenix
 
@@ -39,9 +39,13 @@ See [CLI Usage](cli-usage.md) for import options including 1Password migration
 ## 4) Create least-privilege agent identities
 
 ```bash
-phoenix agent create myapp-runtime -t "runtime-token" --acl "myapp/*:read"
-phoenix agent create myapp-deployer -t "deploy-token" --acl "myapp/*:read,write"
+phoenix agent create myapp-runtime -t "runtime-token" --acl "myapp/**:read"
+phoenix agent create myapp-deployer -t "deploy-token" --acl "myapp/**:read,write"
 ```
+
+`myapp/**` grants access to everything under `myapp/`, including nested paths;
+`myapp/*` would match one level only. See
+[ACL path patterns](authentication.md#acl-path-patterns).
 
 For production, prefer mTLS certs over bearer tokens.
 See [Authentication](authentication.md) for mTLS setup.

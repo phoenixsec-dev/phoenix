@@ -196,7 +196,9 @@ func DefaultConfig() *Config {
 // area without having to cross-reference multiple docs.
 func ExampleConfig() *Config {
 	cfg := DefaultConfig()
-	cfg.Server.Listen = "0.0.0.0:9090"
+	// Loopback by default: binding to a non-loopback address requires enabling
+	// TLS/mTLS — never expose the plaintext HTTP listener beyond localhost.
+	cfg.Server.Listen = "127.0.0.1:9090"
 	cfg.Store.Backend = "file"
 	cfg.Attestation.Nonce.Enabled = false
 	cfg.Attestation.Nonce.MaxAge = "30s"

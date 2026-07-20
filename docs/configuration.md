@@ -3,6 +3,9 @@
 ## Configuration reference
 
 The server reads a JSON config file. `config.example.json` is a starter template.
+The example binds to loopback (`127.0.0.1`): binding to a non-loopback address
+requires enabling TLS/mTLS — never expose the plaintext HTTP listener beyond
+localhost.
 
 | Field | Description | Default |
 |-------|-------------|---------|
@@ -41,12 +44,12 @@ See [Session Identity](session-identity.md) for the full guide.
     "ttl": "1h",
     "roles": {
       "dev": {
-        "namespaces": ["dev/*", "staging/*"],
+        "namespaces": ["dev/**", "staging/**"],
         "actions": ["list", "read_value"],
         "bootstrap_trust": ["bearer"]
       },
       "deploy": {
-        "namespaces": ["prod/*"],
+        "namespaces": ["prod/**"],
         "actions": ["list", "read_value"],
         "bootstrap_trust": ["mtls"],
         "require_seal_key": true,

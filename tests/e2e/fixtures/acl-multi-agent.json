@@ -1,0 +1,14 @@
+{
+  "agents": {
+    "fixture-reader": {
+      "name": "fixture-reader",
+      "token_hash": "sha256:5ooACvB0FsN+N9FP4HliWeRKeXy9nC5eEzqEAblgkZw=",
+      "permissions": [
+        {
+          "path": "fixture/*",
+          "actions": ["list", "read_value"]
+        }
+      ]
+    }
+  }
+}

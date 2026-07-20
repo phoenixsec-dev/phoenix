@@ -25,7 +25,7 @@ Within each `attestation` path rule:
 ```json
 {
   "attestation": {
-    "production/*": {
+    "production/**": {
       "deny_operations": ["get", "resolve"]
     }
   }
@@ -37,7 +37,7 @@ Alternative form (mutually exclusive with `deny_operations`):
 ```json
 {
   "attestation": {
-    "production/*": {
+    "production/**": {
       "allow_operations": ["resolve"]
     }
   }

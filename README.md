@@ -51,7 +51,7 @@ Phoenix is built for the people actually running agents today — self-hosted, h
 - **Reference-first workflows** — `phoenix://` URIs replace raw values in configs and scripts
 - **Exec credential stripping** — `phoenix exec` injects secrets and strips broker credentials from the child process
 - **Works with existing setups** — `phoenix import` pulls from `.env` files in one command; 1Password users can migrate secrets or broker reads at runtime without moving anything
-- **Agent-native integrations** — built-in MCP server for Claude Code / Claude Desktop, Python/Go/TypeScript SDKs, OpenClaw exec backend, direct HTTP API
+- **Agent-native integrations** — built-in MCP server for Claude Code / Claude Desktop, Python/Go/TypeScript SDKs, OpenClaw SecretRef exec provider and plugin-tool path, direct HTTP API
 - **Emergency offline access** — break-glass secret retrieval directly from disk when the server is down
 
 Two binaries (`phoenix` client + `phoenix-server`), single codebase, no external runtime dependencies.

@@ -35,6 +35,16 @@ __pycache__/
 # Node
 node_modules/
 
+# E2E runtime artifacts
+/tests/e2e/.bin/
+/tests/e2e/logs/
+/tests/e2e/results/
+/tests/e2e/*.jsonl
+/tests/e2e/*.log
+/tests/e2e/*.out
+/tests/e2e/*.pid
+/tests/e2e/*.tap
+
 # Local agent guidance (private)
 /AGENTS.md
 /CLAUDE.md

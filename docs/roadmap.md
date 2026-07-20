@@ -3,7 +3,7 @@
 > This roadmap is directional and may change based on user feedback.
 > It is not a contractual delivery commitment.
 
-## Shipped (v0.13)
+## Shipped (through v0.15)
 
 - Encrypted secret storage (AES-256-GCM envelope encryption)
 - Per-agent ACL with namespace isolation and glob matching
@@ -21,6 +21,7 @@
 - Emergency offline access (break-glass)
 - Master key passphrase protection and rotation
 - Internal CA with agent certificate lifecycle and CRL
+- OpenClaw SecretRef exec provider (`phoenix openclaw-exec-provider`)
 
 ## Planned (Near-Term)
 
@@ -55,4 +56,4 @@ These are under consideration and will be prioritized by real-world usage:
 
 ---
 
-Last updated: 2026-03-19
+Last updated: 2026-06-14

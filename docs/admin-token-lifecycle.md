@@ -39,8 +39,8 @@ Example bootstrap flow (local server, default config):
 export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<admin-token>"
 
-phoenix agent create app-runtime -t "runtime-token" --acl "myapp/*:read"
-phoenix agent create app-deployer -t "deploy-token" --acl "myapp/*:read,write"
+phoenix agent create app-runtime -t "runtime-token" --acl "myapp/**:read"
+phoenix agent create app-deployer -t "deploy-token" --acl "myapp/**:read,write"
 ```
 
 If mTLS is enabled (required for `phoenix cert issue`):
@@ -63,7 +63,9 @@ unset PHOENIX_TOKEN
 - App runtime: read-only runtime identity
 - Human operator workflows: use named admin identities with mTLS where possible
 
-Keep ACL scopes narrow (`namespace/*`) and action-specific (`read`, `write`, `delete`, `admin`).
+Keep ACL scopes narrow (`namespace/**`, or `namespace/*` for a single level —
+see [ACL path patterns](authentication.md#acl-path-patterns)) and
+action-specific (`read`, `write`, `delete`, `admin`).
 
 ## 4) Short-lived tokens (optional hardening)
 

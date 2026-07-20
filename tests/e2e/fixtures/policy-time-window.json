@@ -1,0 +1,8 @@
+{
+  "attestation": {
+    "business-hours/*": {
+      "time_window": "09:00-17:00",
+      "time_zone": "UTC"
+    }
+  }
+}

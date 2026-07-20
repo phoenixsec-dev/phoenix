@@ -1078,6 +1078,254 @@ func TestResolveAuditsAllPaths(t *testing.T) {
 	}
 }
 
+type apiAuditEntry struct {
+	Agent    string            `json:"agent"`
+	Action   string            `json:"action"`
+	Path     string            `json:"path"`
+	Status   string            `json:"status"`
+	Reason   string            `json:"reason"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+func queryAPIAuditEntries(t *testing.T, srv *Server, adminToken string) ([]apiAuditEntry, string) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/v1/audit", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("audit query: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	raw := w.Body.String()
+	var auditResp struct {
+		Entries []apiAuditEntry `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(raw), &auditResp); err != nil {
+		t.Fatalf("decode audit response: %v", err)
+	}
+	return auditResp.Entries, raw
+}
+
+func findAPIAuditEntry(entries []apiAuditEntry, action, path, status, reason string) *apiAuditEntry {
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := &entries[i]
+		if e.Action != action || e.Path != path || e.Status != status {
+			continue
+		}
+		if reason != "" && e.Reason != reason {
+			continue
+		}
+		return e
+	}
+	return nil
+}
+
+func addSpoofedOpenClawHeaders(req *http.Request, rawSessionKey string) {
+	req.Header.Set("X-OpenClaw-Agent", "admin\nspoof")
+	req.Header.Set("X-OpenClaw-Session-Id", " session-123 ")
+	req.Header.Set("X-OpenClaw-Channel", "growth\tops")
+	req.Header.Set("X-OpenClaw-Requester-Sender", "aaron@example")
+	req.Header.Set("X-OpenClaw-Sender-Is-Owner", "true")
+	req.Header.Set("X-OpenClaw-Session-Key", rawSessionKey)
+	req.Header.Set("X-OpenClaw-Role", "admin")
+}
+
+func TestSanitizeOpenClawAuditMetadataValueStripsFormatControls(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "rtl-override", in: "admin\u202enimda", want: "adminnimda"},
+		{name: "zero-width-space-joiner", in: "ag\u200bent\u200d", want: "agent"},
+		{name: "bidi-isolates", in: "\u2066spoof\u2069", want: "spoof"},
+		{name: "only-format-chars", in: "\u202e\u200b", want: ""},
+		{name: "plain", in: "openclaw-agent", want: "openclaw-agent"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeOpenClawAuditMetadataValue(tc.in); got != tc.want {
+			t.Errorf("%s: sanitize(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestOpenClawHeadersCapturedAsSanitizedAuditMetadataOnly(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/openclaw-meta", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	rawSessionKey := "ocsk_DO_NOT_LOG_12345"
+	req = httptest.NewRequest("GET", "/v1/secrets/test/openclaw-meta", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	addSpoofedOpenClawHeaders(req, rawSessionKey)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("read: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, rawAudit := queryAPIAuditEntries(t, srv, adminToken)
+	if strings.Contains(rawAudit, rawSessionKey) {
+		t.Fatal("raw X-OpenClaw-Session-Key appeared in audit output")
+	}
+
+	entry := findAPIAuditEntry(entries, "read_value", "test/openclaw-meta", "allowed", "")
+	if entry == nil {
+		t.Fatalf("missing read_value audit entry; got: %+v", entries)
+	}
+	if entry.Agent != "reader" {
+		t.Fatalf("audit agent = %q, want authenticated Phoenix agent %q", entry.Agent, "reader")
+	}
+	expected := map[string]string{
+		"openclaw.agent":            "admin spoof",
+		"openclaw.session_id":       "session-123",
+		"openclaw.channel":          "growth ops",
+		"openclaw.requester_sender": "aaron@example",
+		"openclaw.sender_is_owner":  "true",
+	}
+	if len(entry.Metadata) != len(expected) {
+		t.Fatalf("metadata keys = %+v, want exactly %+v", entry.Metadata, expected)
+	}
+	for k, want := range expected {
+		if got := entry.Metadata[k]; got != want {
+			t.Fatalf("metadata[%s] = %q, want %q", k, got, want)
+		}
+	}
+	if _, ok := entry.Metadata["openclaw.session_key"]; ok {
+		t.Fatal("session key metadata must not be present")
+	}
+}
+
+func TestOpenClawAgentHeaderDoesNotBypassACL(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "admin-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/proxmox/admin-token", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/secrets/proxmox/admin-token", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-OpenClaw-Agent", "admin")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("spoofed OpenClaw agent should not bypass ACL: got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	entry := findAPIAuditEntry(entries, "read_value", "proxmox/admin-token", "denied", "acl")
+	if entry == nil {
+		t.Fatalf("missing denied ACL audit entry; got: %+v", entries)
+	}
+	if entry.Agent != "reader" {
+		t.Fatalf("audit agent = %q, want authenticated Phoenix agent %q", entry.Agent, "reader")
+	}
+	if got := entry.Metadata["openclaw.agent"]; got != "admin" {
+		t.Fatalf("metadata openclaw.agent = %q, want spoofed hint %q", got, "admin")
+	}
+}
+
+func TestOpenClawHeadersDoNotSatisfyAttestationPolicy(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "guarded"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/locked/openclaw", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	p, err := policy.Load([]byte(`{"attestation":{"locked/*":{"deny_bearer":true}}}`))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	srv.SetPolicy(p)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/locked/openclaw", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-OpenClaw-Agent", "mtls-agent")
+	req.Header.Set("X-OpenClaw-Sender-Is-Owner", "true")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("OpenClaw headers should not satisfy deny_bearer policy: got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	entry := findAPIAuditEntry(entries, "read_value", "locked/openclaw", "denied", "attestation")
+	if entry == nil {
+		t.Fatalf("missing attestation denial audit entry; got: %+v", entries)
+	}
+	if entry.Agent != "admin" {
+		t.Fatalf("audit agent = %q, want authenticated Phoenix agent %q", entry.Agent, "admin")
+	}
+	if got := entry.Metadata["openclaw.agent"]; got != "mtls-agent" {
+		t.Fatalf("metadata openclaw.agent = %q, want %q", got, "mtls-agent")
+	}
+}
+
+func TestOpenClawSessionKeyDoesNotSatisfySealedPolicyOrLeak(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "sealed-required"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/sealed/openclaw", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	p, err := policy.Load([]byte(`{"attestation":{"sealed/*":{"require_sealed":true}}}`))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	srv.SetPolicy(p)
+
+	rawSessionKey := "ocsk_SEALED_POLICY_DO_NOT_LOG"
+	req = httptest.NewRequest("GET", "/v1/secrets/sealed/openclaw", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-OpenClaw-Session-Key", rawSessionKey)
+	req.Header.Set("X-OpenClaw-Session-Id", "session-for-audit")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("OpenClaw session key should not satisfy sealed policy: got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "sealed response required") {
+		t.Fatalf("expected sealed policy denial, got: %s", w.Body.String())
+	}
+
+	entries, rawAudit := queryAPIAuditEntries(t, srv, adminToken)
+	if strings.Contains(rawAudit, rawSessionKey) {
+		t.Fatal("raw X-OpenClaw-Session-Key appeared in audit output")
+	}
+	entry := findAPIAuditEntry(entries, "read_value", "sealed/openclaw", "denied", "attestation")
+	if entry == nil {
+		t.Fatalf("missing sealed policy audit entry; got: %+v", entries)
+	}
+	if got := entry.Metadata["openclaw.session_id"]; got != "session-for-audit" {
+		t.Fatalf("metadata openclaw.session_id = %q, want %q", got, "session-for-audit")
+	}
+	if _, ok := entry.Metadata["openclaw.session_key"]; ok {
+		t.Fatal("session key metadata must not be present")
+	}
+}
+
 func TestResolveEmptyRefs(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 

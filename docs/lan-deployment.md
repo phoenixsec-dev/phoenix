@@ -105,11 +105,11 @@ export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 # Create agents with least-privilege ACLs
 phoenix agent create host-a-builder \
   -t "$(openssl rand -hex 32)" \
-  --acl "build/*:read;ci/*:read"
+  --acl "build/**:read;ci/**:read"
 
 phoenix agent create host-b-deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "deploy/*:read;infra/*:read"
+  --acl "deploy/**:read;infra/**:read"
 ```
 
 ## 3. Issue mTLS certificates
@@ -208,14 +208,14 @@ require mTLS, require sealed delivery for sensitive namespaces:
 ```json
 {
   "attestation": {
-    "dev/*": {
+    "dev/**": {
       "require_mtls": false
     },
-    "build/*": {
+    "build/**": {
       "require_mtls": true,
       "source_ip": ["192.168.1.0/24"]
     },
-    "production/*": {
+    "production/**": {
       "require_mtls": true,
       "require_sealed": true,
       "deny_bearer": true,
@@ -277,7 +277,7 @@ phoenix set build/test-key -v "test-value" -d "deployment test"
 # Resolve from the appropriate agent
 phoenix resolve phoenix://build/test-key
 
-# Verify access control — this should fail for agents without build/* access
+# Verify access control — this should fail for agents without build/** access
 phoenix get build/test-key
 
 # Check audit trail (from admin)

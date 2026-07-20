@@ -1,5 +1,46 @@
 # Release Notes
 
+## v0.15.2 (2026-07-12)
+
+### OpenClaw Exec Provider Merge-Review Fixes
+
+- Session mint with `PHOENIX_ROLE` no longer fails when the home directory
+  cannot be determined and no `PHOENIX_SEAL_KEY` is set; the CLI now mints an
+  unsealed session, matching the missing-key-file behavior.
+- The exec provider short-circuits an empty `ids` list to an empty response
+  without calling the resolve API.
+- The exec provider rejects trailing non-whitespace data after the stdin JSON
+  request object.
+- Audit metadata sanitization now strips Unicode format/bidi control
+  characters (category Cf, e.g. U+202E) from `X-OpenClaw-*` header values.
+- Added tests for the sealed-envelope decrypt branch, non-200 server
+  responses in the exec-provider path, missing-HOME session mint, and
+  format-control sanitization.
+- Documented the three exec-provider auth modes (bootstrap token + role,
+  mTLS + role, pre-minted session token) and the invalid combinations,
+  added `HOME` to the recommended `passEnv` example, documented the
+  audit-only `X-OpenClaw-*` metadata headers, and noted that signed resolve
+  is not supported in the exec-provider path. `phoenix openclaw-exec-provider`
+  is now documented as the canonical command form.
+
+## v0.15.1 (2026-06-17)
+
+### OpenClaw Audit Metadata
+
+- Captures sanitized allowlisted `X-OpenClaw-*` metadata headers on server audit entries as audit hints only.
+- Omits raw `X-OpenClaw-Session-Key` from audit records.
+- Added tests proving spoofed OpenClaw headers do not affect Phoenix authorization, attestation policy identity, or sealed-response policy decisions.
+
+## v0.15.0 (2026-04-27)
+
+### OpenClaw SecretRef Exec Provider
+
+- Added `phoenix openclaw-exec-provider` for OpenClaw's built-in exec SecretRef provider protocol.
+- Added `phoenix secret-provider openclaw` and `phoenix resolve --stdin-json` aliases for compatibility with OpenClaw exec-provider configuration.
+- The provider reads OpenClaw's stdin JSON request, resolves requested ids through Phoenix using the existing auth/session/mTLS/sealed-response paths, and writes OpenClaw-compatible `values`/`errors` JSON to stdout.
+- Added tests for request parsing, stdout response shape, id normalization, and partial per-id failures.
+- Updated OpenClaw integration docs to distinguish bootstrap/config SecretRefs from runtime `openclaw-phoenix` plugin tools, and to stop claiming plain `phoenix resolve <ref>` is the exec-provider protocol.
+
 ## v0.13.5 (2026-04-07)
 
 ### Step-Up Authorization Hygiene

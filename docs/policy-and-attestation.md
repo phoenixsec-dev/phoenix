@@ -7,15 +7,15 @@ Phoenix evaluates policy per path. Different secrets can require different proof
 ```json
 {
   "attestation": {
-    "dev/*": {
+    "dev/**": {
       "require_mtls": false,
       "deny_bearer": false
     },
-    "staging/*": {
+    "staging/**": {
       "require_mtls": true,
       "source_ip": ["192.168.0.0/24"]
     },
-    "production/*": {
+    "production/**": {
       "require_mtls": true,
       "deny_bearer": true,
       "source_ip": ["192.168.0.110", "192.168.0.115"],
@@ -25,9 +25,9 @@ Phoenix evaluates policy per path. Different secrets can require different proof
 }
 ```
 
-- `dev/*` — any valid credential works
-- `staging/*` — must use mTLS and come from the expected network
-- `production/*` — must use a specific certificate from a specific IP, with no bearer fallback
+- `dev/**` — any valid credential works
+- `staging/**` — must use mTLS and come from the expected network
+- `production/**` — must use a specific certificate from a specific IP, with no bearer fallback
 
 Add the policy file in server config:
 
