@@ -210,7 +210,7 @@ captured and is never written to audit logs.
 
 ### 2. Plugin tools for agent/tool runtime access
 
-Use the separate `openclaw-phoenix` plugin for agent/tool-time workflows:
+Use the separate [`openclaw-phoenix`](https://github.com/phoenixsec-dev/openclaw-phoenix) plugin for agent/tool-time workflows:
 
 - `phoenix_resolve` for Phoenix-aware runtime resolution
 - `phoenix_list` for listing visible paths
