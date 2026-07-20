@@ -1136,10 +1136,10 @@ func TestSanitizeOpenClawAuditMetadataValueStripsFormatControls(t *testing.T) {
 		in   string
 		want string
 	}{
-		{name: "rtl-override", in: "admin‮nimda", want: "adminnimda"},
-		{name: "zero-width-space-joiner", in: "ag​ent‍", want: "agent"},
-		{name: "bidi-isolates", in: "⁦spoof⁩", want: "spoof"},
-		{name: "only-format-chars", in: "‮​", want: ""},
+		{name: "rtl-override", in: "admin\u202enimda", want: "adminnimda"},
+		{name: "zero-width-space-joiner", in: "ag\u200bent\u200d", want: "agent"},
+		{name: "bidi-isolates", in: "\u2066spoof\u2069", want: "spoof"},
+		{name: "only-format-chars", in: "\u202e\u200b", want: ""},
 		{name: "plain", in: "openclaw-agent", want: "openclaw-agent"},
 	}
 	for _, tc := range cases {

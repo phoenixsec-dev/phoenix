@@ -55,11 +55,6 @@ func NewWriterLogger(w io.Writer) *Logger {
 	}
 }
 
-// log writes a low-level audit entry.
-func (l *Logger) log(agent, action, path, status, ip, reason, sessionID string, sealed bool) error {
-	return l.logWithMetadata(agent, action, path, status, ip, reason, sessionID, sealed, nil)
-}
-
 // logWithMetadata writes a low-level audit entry with optional sanitized metadata.
 func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessionID string, sealed bool, metadata map[string]string) error {
 	entry := Entry{

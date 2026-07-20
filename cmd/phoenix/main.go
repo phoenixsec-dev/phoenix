@@ -1138,7 +1138,7 @@ func cmdOpenClawExecProvider(args []string) error {
 	}
 
 	values := make(map[string]string)
-	errs := make(map[string]string)
+	var errs map[string]string
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
