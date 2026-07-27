@@ -818,7 +818,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		var visible []string
+		visible := []string{}
 		for _, p := range allPaths {
 			if s.dataAccessReason(info, p, "list", acl.ActionList) != "" {
 				continue

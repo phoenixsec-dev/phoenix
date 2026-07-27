@@ -281,6 +281,36 @@ func TestListSecrets(t *testing.T) {
 	}
 }
 
+// An empty result must marshal as [] rather than null so clients can iterate
+// the array unconditionally.
+func TestListSecretsEmptyResultIsEmptyArrayNotNull(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Only "other/*" exists, which the reader has no permission to see.
+	body, _ := json.Marshal(setSecretRequest{Value: "v"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/other/c", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	raw := w.Body.String()
+	if strings.Contains(raw, `"paths":null`) {
+		t.Fatalf("empty list marshalled as null: %s", raw)
+	}
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("decoding list response: %v", err)
+	}
+	if got := string(resp["paths"]); got != "[]" {
+		t.Fatalf("paths = %s, want []", got)
+	}
+}
+
 func TestNotFound(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
