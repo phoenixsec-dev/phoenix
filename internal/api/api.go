@@ -36,17 +36,40 @@ import (
 // MaxRequestBodyBytes limits the size of request bodies to prevent DoS.
 const MaxRequestBodyBytes = 1 << 20 // 1 MB
 
-const openClawAuditMetadataMaxValueLen = 256
+const callerAuditMetadataMaxValueLen = 256
 
-var openClawAuditHeaders = []struct {
+// callerAuditHeaders is the exhaustive allowlist of caller-supplied headers
+// captured as audit metadata, one family per integrating agent platform.
+// Headers outside this table are never recorded.
+//
+// Every value here is an untrusted hint from the client: a caller may set any
+// of them to anything. They exist so an audit entry can be traced back to the
+// conversation, task, or tool that triggered it — never to decide anything.
+// Adding a header to this table must not create a path into authentication,
+// ACL, policy/attestation, session identity, role mapping, or sealing.
+//
+// In particular, X-Phoenix-Tool is deliberately absent: it is an attestation
+// policy input read by attestFull, and must not be conflated with the
+// audit-only X-Hermes-Tool hint.
+//
+// Session keys (e.g. X-OpenClaw-Session-Key) are credentials and must never
+// appear here — capturing one would write it to the audit log in cleartext.
+var callerAuditHeaders = []struct {
 	header string
 	key    string
 }{
+	// OpenClaw
 	{header: "X-OpenClaw-Agent", key: "openclaw.agent"},
 	{header: "X-OpenClaw-Session-Id", key: "openclaw.session_id"},
 	{header: "X-OpenClaw-Channel", key: "openclaw.channel"},
 	{header: "X-OpenClaw-Requester-Sender", key: "openclaw.requester_sender"},
 	{header: "X-OpenClaw-Sender-Is-Owner", key: "openclaw.sender_is_owner"},
+	// Hermes
+	{header: "X-Hermes-Profile", key: "hermes.profile"},
+	{header: "X-Hermes-Session-Id", key: "hermes.session_id"},
+	{header: "X-Hermes-Channel", key: "hermes.channel"},
+	{header: "X-Hermes-Tool", key: "hermes.tool"},
+	{header: "X-Hermes-Task-Id", key: "hermes.task_id"},
 }
 
 // Rate limiting constants for authentication attempts.
@@ -480,16 +503,16 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-// openClawAuditMetadata returns sanitized audit-only OpenClaw metadata hints.
+// callerAuditMetadata returns sanitized audit-only caller metadata hints.
 // These headers must never participate in authentication, ACL, policy,
 // session identity, role mapping, or sealed-response decisions.
-func openClawAuditMetadata(r *http.Request) map[string]string {
+func callerAuditMetadata(r *http.Request) map[string]string {
 	if r == nil {
 		return nil
 	}
-	metadata := make(map[string]string, len(openClawAuditHeaders))
-	for _, h := range openClawAuditHeaders {
-		value := sanitizeOpenClawAuditMetadataValue(r.Header.Get(h.header))
+	metadata := make(map[string]string, len(callerAuditHeaders))
+	for _, h := range callerAuditHeaders {
+		value := sanitizeCallerAuditMetadataValue(r.Header.Get(h.header))
 		if value != "" {
 			metadata[h.key] = value
 		}
@@ -500,7 +523,7 @@ func openClawAuditMetadata(r *http.Request) map[string]string {
 	return metadata
 }
 
-func sanitizeOpenClawAuditMetadataValue(value string) string {
+func sanitizeCallerAuditMetadataValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
@@ -515,12 +538,12 @@ func sanitizeOpenClawAuditMetadataValue(value string) string {
 		return r
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
-	if len(value) <= openClawAuditMetadataMaxValueLen {
+	if len(value) <= callerAuditMetadataMaxValueLen {
 		return value
 	}
 	last := 0
 	for i := range value {
-		if i > openClawAuditMetadataMaxValueLen {
+		if i > callerAuditMetadataMaxValueLen {
 			break
 		}
 		last = i
@@ -595,27 +618,27 @@ func handleAuthError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) auditLogAllowed(r *http.Request, agent, action, path, ip string) {
-	s.logAudit(s.audit.LogAllowedWithMetadata(agent, action, path, ip, openClawAuditMetadata(r)))
+	s.logAudit(s.audit.LogAllowedWithMetadata(agent, action, path, ip, callerAuditMetadata(r)))
 }
 
 func (s *Server) auditLogAllowedSealed(r *http.Request, agent, action, path, ip string, sealed bool) {
-	s.logAudit(s.audit.LogAllowedSealedWithMetadata(agent, action, path, ip, sealed, openClawAuditMetadata(r)))
+	s.logAudit(s.audit.LogAllowedSealedWithMetadata(agent, action, path, ip, sealed, callerAuditMetadata(r)))
 }
 
 func (s *Server) auditLogDenied(r *http.Request, agent, action, path, ip, reason string) {
-	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, openClawAuditMetadata(r)))
+	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, callerAuditMetadata(r)))
 }
 
 func (s *Server) auditLogSessionAllowed(r *http.Request, agent, action, path, ip, sessionID string) {
-	s.logAudit(s.audit.LogSessionAllowedWithMetadata(agent, action, path, ip, sessionID, openClawAuditMetadata(r)))
+	s.logAudit(s.audit.LogSessionAllowedWithMetadata(agent, action, path, ip, sessionID, callerAuditMetadata(r)))
 }
 
 func (s *Server) auditLogSessionAllowedSealed(r *http.Request, agent, action, path, ip, sessionID string, sealed bool) {
-	s.logAudit(s.audit.LogSessionAllowedSealedWithMetadata(agent, action, path, ip, sessionID, sealed, openClawAuditMetadata(r)))
+	s.logAudit(s.audit.LogSessionAllowedSealedWithMetadata(agent, action, path, ip, sessionID, sealed, callerAuditMetadata(r)))
 }
 
 func (s *Server) auditLogSessionDenied(r *http.Request, agent, action, path, ip, reason, sessionID string) {
-	s.logAudit(s.audit.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, sessionID, openClawAuditMetadata(r)))
+	s.logAudit(s.audit.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, sessionID, callerAuditMetadata(r)))
 }
 
 // auditAllowed logs an allowed action, including session ID when a session was used.
