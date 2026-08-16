@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.16.0 (2026-07-27)
+## v0.16.0 (2026-08-16)
 
 ### Hermes Caller Metadata Audit Capture
 
