@@ -69,9 +69,35 @@ enabled, bootstrap trust, attestation requirements, and seal key.
 The dashboard session cookie carries admin-equivalent access to session
 and approval management. Protecting it in transit is critical.
 
-### Recommended: TLS reverse proxy
+### Default: loopback only
 
-The safest general deployment is behind a TLS-terminating reverse proxy
+If `server.listen` is `127.0.0.1:9090` (the default), the dashboard is
+only reachable from the server host itself. This is safe for local-only
+operator access — plain HTTP on loopback never touches the network. Use
+SSH port forwarding for remote browser access:
+
+```bash
+ssh -L 9090:127.0.0.1:9090 user@phoenix-host
+# Then open http://127.0.0.1:9090/dashboard/ in your browser
+```
+
+### Network access: native TLS
+
+If other machines need to reach the dashboard, enable the server's TLS:
+
+```json
+{ "tls": { "enabled": true } }
+```
+
+TLS is native (using the `--init` server certificate — import `ca.crt`
+into the browser's trust store or accept the certificate), and the
+cookie gets `Secure` automatically via `r.TLS != nil`. No client
+certificates or mTLS are required; `auth.mtls` can be layered on top for
+API client-certificate auth and also provides TLS by itself, as before.
+
+### Network access: TLS reverse proxy
+
+Alternatively, deploy behind a TLS-terminating reverse proxy
 (Nginx, Caddy, NPM, Traefik):
 
 ```
@@ -79,29 +105,16 @@ Browser --[HTTPS]--> Reverse Proxy --[HTTP]--> Phoenix (127.0.0.1:9090)
 ```
 
 The proxy sets `X-Forwarded-Proto: https`, which Phoenix detects to
-enable the `Secure` cookie flag. The server itself can bind to loopback.
-
-### Alternative: mTLS mode
-
-If Phoenix runs with `auth.mtls.enabled: true`, TLS is native and the
-cookie gets `Secure` automatically via `r.TLS != nil`.
-
-### Alternative: loopback only
-
-If `server.listen` is `127.0.0.1:9090` (the default), the dashboard is
-only reachable from the server host itself. This is safe for local-only
-operator access. Use SSH port forwarding for remote browser access:
-
-```bash
-ssh -L 9090:127.0.0.1:9090 user@phoenix-host
-# Then open http://127.0.0.1:9090/dashboard/ in your browser
-```
+enable the `Secure` cookie flag. The server itself binds to loopback.
 
 ### Not acceptable
 
 Do not expose the dashboard over plain HTTP on a network you do not
 fully control. The session cookie would be transmitted in cleartext,
-making session hijacking trivial.
+making session hijacking trivial. If the dashboard is enabled on a
+non-loopback bind without TLS, the server logs a prominent
+`INSECURE TRANSPORT` startup warning that names the dashboard cookie
+exposure — it warns and continues; fixing the config is on you.
 
 ## Configuration
 
@@ -225,9 +238,9 @@ but-invalid cookies generate `dashboard.auth` denied entries.
 Use this checklist when enabling the dashboard on an existing Phoenix server.
 
 1. Choose transport mode:
-   - [ ] TLS reverse proxy (recommended), or
-   - [ ] Native mTLS (`auth.mtls.enabled: true`), or
-   - [ ] Loopback only (`server.listen: "127.0.0.1:..."`)
+   - [ ] Loopback only (`server.listen: "127.0.0.1:..."`, the default), or
+   - [ ] Native TLS (`"tls": {"enabled": true}`), or
+   - [ ] TLS reverse proxy in front of a loopback bind
 
 2. Choose credential mode:
    - [ ] Password (recommended for production)

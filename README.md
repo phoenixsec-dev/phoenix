@@ -110,8 +110,16 @@ phoenix exec --env API_KEY=phoenix://myapp/api-key -- env | grep API_KEY
 ```
 
 > The default server config listens on `127.0.0.1:9090` over plain HTTP.
-> This is safe for local-only use. For LAN or production deployment,
-> enable TLS — see [LAN Deployment](docs/lan-deployment.md).
+> That is the supported default — loopback traffic never touches the network.
+> The moment other machines need access, enable `"tls": {"enabled": true}`
+> (one line; the `--init` certificate is used automatically) — see
+> [LAN Deployment](docs/lan-deployment.md). The server warns loudly at
+> startup if it is ever bound to a non-loopback address without TLS.
+>
+> **Deployment envelope:** Phoenix is LAN-scoped by design. A single machine
+> or a local network you operate is the supported territory; exposing Phoenix
+> to the internet (port forwarding, public ingress) is out of scope and
+> unsupported. See [Threat Model](docs/threat-model.md).
 
 For the full first-run walkthrough, see [Getting Started](docs/getting-started.md).
 

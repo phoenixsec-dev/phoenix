@@ -6,7 +6,15 @@ Phoenix includes a built-in MCP server.
 
 Transport options:
 - `phoenix mcp-server` → stdio JSON-RPC
-- `phoenix mcp-server --http :8080 --mcp-token <token>` → Streamable HTTP on `/mcp`
+- `phoenix mcp-server --http 127.0.0.1:8080 --mcp-token <token>` → Streamable HTTP on `/mcp`
+- add `--tls-cert`/`--tls-key` to serve the HTTP transport over HTTPS
+  (required whenever MCP clients connect from other machines; on a
+  non-loopback bind without TLS the transport starts but logs a loud
+  `INSECURE TRANSPORT` warning)
+
+`https://` server URLs below assume the Phoenix server has its `tls` config
+block enabled and clients trust the CA via `PHOENIX_CA_CERT` — see
+[LAN Deployment](lan-deployment.md). No mTLS is required for this.
 
 Example Claude MCP config:
 
@@ -18,6 +26,7 @@ Example Claude MCP config:
       "args": ["mcp-server"],
       "env": {
         "PHOENIX_SERVER": "https://phoenix:9090",
+        "PHOENIX_CA_CERT": "/etc/phoenix/certs/ca.crt",
         "PHOENIX_TOKEN": "..."
       }
     }
@@ -29,6 +38,7 @@ Streamable HTTP mode example:
 
 ```bash
 export PHOENIX_SERVER="https://phoenix:9090"
+export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
 export PHOENIX_TOKEN="<phoenix-agent-token>"
 export PHOENIX_MCP_TOKEN="<separate-mcp-client-token>"
 phoenix mcp-server --http 127.0.0.1:8080
@@ -148,6 +158,7 @@ to mint a short-lived session for the role:
 
 ```bash
 export PHOENIX_SERVER=https://phoenix:9090
+export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
 export PHOENIX_TOKEN=<bootstrap-token>   # NOT a phxs_... session token
 export PHOENIX_ROLE=openclaw-gateway
 ```
@@ -168,6 +179,7 @@ export PHOENIX_CLIENT_KEY=/etc/phoenix/openclaw.key
 
 ```bash
 export PHOENIX_SERVER=https://phoenix:9090
+export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
 export PHOENIX_TOKEN=<phxs_session-token>
 # Do NOT set PHOENIX_ROLE in this mode.
 ```
@@ -239,6 +251,13 @@ services:
   openclaw:
     image: ghcr.io/openclaw/openclaw:latest
     environment:
+      # Plaintext http:// is acceptable here ONLY because this traffic stays
+      # on the single-host Compose default network (no published Phoenix
+      # port, nothing crosses a physical wire). The Phoenix CLI still prints
+      # a plaintext warning for this non-loopback URL — expected in this
+      # topology. If Phoenix publishes a port or the network spans hosts,
+      # enable the server's tls block and switch to https:// with
+      # PHOENIX_CA_CERT (see the TLS variant below).
       PHOENIX_SERVER: "http://phoenix:9090"
       PHOENIX_TOKEN: "${OPENCLAW_PHOENIX_TOKEN}"
       PHOENIX_ROLE: "openclaw-gateway"
@@ -251,6 +270,23 @@ services:
 volumes:
   phoenix-data:
 ```
+
+TLS variant — enable `"tls": {"enabled": true}` in the Phoenix config, then:
+
+```yaml
+  openclaw:
+    environment:
+      PHOENIX_SERVER: "https://phoenix:9090"
+      PHOENIX_CA_CERT: "/etc/phoenix/ca.crt"
+      PHOENIX_TOKEN: "${OPENCLAW_PHOENIX_TOKEN}"
+      PHOENIX_ROLE: "openclaw-gateway"
+    volumes:
+      - phoenix-data:/etc/phoenix:ro   # or copy just ca.crt
+```
+
+The `--init` server certificate covers `localhost`/`127.0.0.1` only; for the
+`phoenix` service hostname, re-issue it once with
+`phoenix-server --reissue-cert --san phoenix --config /data/phoenix/config.json`.
 
 For mTLS instead of bearer tokens, mount certs into the OpenClaw container and set
 `PHOENIX_CA_CERT`, `PHOENIX_CLIENT_CERT`, and `PHOENIX_CLIENT_KEY`.
