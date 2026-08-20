@@ -10,7 +10,10 @@ The canonical Phoenix e2e suite. It runs only throwaway state, localhost-bound s
 ./tests/e2e/run-all.sh --format jsonl   # or: --format tap
 ```
 
-The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PATH Go executable, `E2E_BIN_DIR` to reuse prebuilt binaries, or `E2E_REBUILD=1` to force a rebuild. Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run project and free localhost port. Scenario 12 is opt-in: it needs the `op` CLI, `OP_SERVICE_ACCOUNT_TOKEN`, and a read-only synthetic vault selected by `PHOENIX_E2E_OP_VAULT` (default `phoenix-test`). Manual `stack.sh` use can override `COMPOSE_PROJECT_NAME` and the `E2E_*_PORT` variables. Scenario 18 builds Git commit `21a6ca4` (v0.13.5) and the current checkout.
+The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PATH Go executable, `E2E_BIN_DIR` to reuse prebuilt binaries, or `E2E_REBUILD=1` to force a rebuild.
+
+> Binaries in `E2E_BIN_DIR` are reused whenever they already exist. After changing server behavior, run with `E2E_REBUILD=1` — otherwise scenarios silently test the previously built binary and a new assertion fails as if the feature were broken.
+ Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run project and free localhost port. Scenario 12 is opt-in: it needs the `op` CLI, `OP_SERVICE_ACCOUNT_TOKEN`, and a read-only synthetic vault selected by `PHOENIX_E2E_OP_VAULT` (default `phoenix-test`). Manual `stack.sh` use can override `COMPOSE_PROJECT_NAME` and the `E2E_*_PORT` variables. Scenario 18 builds Git commit `21a6ca4` (v0.13.5) and the current checkout.
 
 ## Add a scenario
 
@@ -44,5 +47,7 @@ The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PA
 | 16 | elevated step-up deny/approve/expiry/renewal | implemented |
 | 17 | sealed-response S1–S8 plus policy/keypair regressions | implemented |
 | 18 | v0.13.5 → current in-place data/config/ACL/audit upgrade | implemented |
+| 19 | — | reserved for secure-transport coverage |
+| 20 | Hermes caller metadata: capture, sanitization/cap, unlisted-header exclusion, ACL spoof resistance, `X-Hermes-Tool` vs `X-Phoenix-Tool` | implemented |
 
 Active sessions are intentionally memory-only. Scenario 18 verifies that an old in-memory token is rejected after restart and that the preserved role configuration can mint a new compatible session.

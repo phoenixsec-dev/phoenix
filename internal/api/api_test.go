@@ -281,6 +281,36 @@ func TestListSecrets(t *testing.T) {
 	}
 }
 
+// An empty result must marshal as [] rather than null so clients can iterate
+// the array unconditionally.
+func TestListSecretsEmptyResultIsEmptyArrayNotNull(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	// Only "other/*" exists, which the reader has no permission to see.
+	body, _ := json.Marshal(setSecretRequest{Value: "v"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/other/c", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	req = httptest.NewRequest("GET", "/v1/secrets/", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	raw := w.Body.String()
+	if strings.Contains(raw, `"paths":null`) {
+		t.Fatalf("empty list marshalled as null: %s", raw)
+	}
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("decoding list response: %v", err)
+	}
+	if got := string(resp["paths"]); got != "[]" {
+		t.Fatalf("paths = %s, want []", got)
+	}
+}
+
 func TestNotFound(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
@@ -1130,7 +1160,7 @@ func addSpoofedOpenClawHeaders(req *http.Request, rawSessionKey string) {
 	req.Header.Set("X-OpenClaw-Role", "admin")
 }
 
-func TestSanitizeOpenClawAuditMetadataValueStripsFormatControls(t *testing.T) {
+func TestSanitizeCallerAuditMetadataValueStripsFormatControls(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -1143,7 +1173,7 @@ func TestSanitizeOpenClawAuditMetadataValueStripsFormatControls(t *testing.T) {
 		{name: "plain", in: "openclaw-agent", want: "openclaw-agent"},
 	}
 	for _, tc := range cases {
-		if got := sanitizeOpenClawAuditMetadataValue(tc.in); got != tc.want {
+		if got := sanitizeCallerAuditMetadataValue(tc.in); got != tc.want {
 			t.Errorf("%s: sanitize(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
 		}
 	}
@@ -1323,6 +1353,339 @@ func TestOpenClawSessionKeyDoesNotSatisfySealedPolicyOrLeak(t *testing.T) {
 	}
 	if _, ok := entry.Metadata["openclaw.session_key"]; ok {
 		t.Fatal("session key metadata must not be present")
+	}
+}
+
+func addSpoofedHermesHeaders(req *http.Request) {
+	req.Header.Set("X-Hermes-Profile", "kit\u202emain")
+	req.Header.Set("X-Hermes-Session-Id", " hermes-session-77 ")
+	req.Header.Set("X-Hermes-Channel", "telegram\tdm")
+	req.Header.Set("X-Hermes-Tool", "phoenix_get")
+	req.Header.Set("X-Hermes-Task-Id", "task-104")
+	// Not in the allowlist — must be ignored entirely.
+	req.Header.Set("X-Hermes-Role", "admin")
+	req.Header.Set("X-Hermes-Agent", "admin")
+}
+
+func TestHermesHeadersCapturedAsSanitizedAuditMetadataOnly(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "secret-val"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/hermes-meta", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/secrets/test/hermes-meta", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	addSpoofedHermesHeaders(req)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("read: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	entry := findAPIAuditEntry(entries, "read_value", "test/hermes-meta", "allowed", "")
+	if entry == nil {
+		t.Fatalf("missing read_value audit entry; got: %+v", entries)
+	}
+	if entry.Agent != "reader" {
+		t.Fatalf("audit agent = %q, want authenticated Phoenix agent %q", entry.Agent, "reader")
+	}
+	expected := map[string]string{
+		"hermes.profile":    "kitmain",
+		"hermes.session_id": "hermes-session-77",
+		"hermes.channel":    "telegram dm",
+		"hermes.tool":       "phoenix_get",
+		"hermes.task_id":    "task-104",
+	}
+	if len(entry.Metadata) != len(expected) {
+		t.Fatalf("metadata keys = %+v, want exactly %+v", entry.Metadata, expected)
+	}
+	for k, want := range expected {
+		if got := entry.Metadata[k]; got != want {
+			t.Fatalf("metadata[%s] = %q, want %q", k, got, want)
+		}
+	}
+	// Unlisted X-Hermes-* headers must not be captured under any key.
+	for k, v := range entry.Metadata {
+		if v == "admin" {
+			t.Fatalf("unlisted Hermes header captured as metadata[%s]", k)
+		}
+	}
+}
+
+// Missing Hermes headers must be harmless: no keys, no empty-string values.
+func TestMissingHermesHeadersProduceNoMetadata(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "v"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/hermes-absent", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Only one Hermes header set; the other four are absent.
+	req = httptest.NewRequest("GET", "/v1/secrets/test/hermes-absent", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Hermes-Channel", "cli")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("read: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	entry := findAPIAuditEntry(entries, "read_value", "test/hermes-absent", "allowed", "")
+	if entry == nil {
+		t.Fatalf("missing read_value audit entry; got: %+v", entries)
+	}
+	if len(entry.Metadata) != 1 || entry.Metadata["hermes.channel"] != "cli" {
+		t.Fatalf("metadata = %+v, want only hermes.channel=cli", entry.Metadata)
+	}
+
+	// A request with no caller headers at all must carry no metadata.
+	req = httptest.NewRequest("GET", "/v1/secrets/test/hermes-absent", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bare read: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := callerAuditMetadata(req); got != nil {
+		t.Fatalf("callerAuditMetadata with no headers = %+v, want nil", got)
+	}
+}
+
+// Oversized and control-character values must be capped and sanitized.
+func TestHermesHeaderValuesAreSanitizedAndCapped(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "v"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/hermes-oversize", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/v1/secrets/test/hermes-oversize", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Hermes-Channel", strings.Repeat("x", 300))
+	req.Header.Set("X-Hermes-Task-Id", "task\x00\x7f-42")
+	req.Header.Set("X-Hermes-Profile", "\u202e\u200b")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("read: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	entry := findAPIAuditEntry(entries, "read_value", "test/hermes-oversize", "allowed", "")
+	if entry == nil {
+		t.Fatalf("missing read_value audit entry; got: %+v", entries)
+	}
+	if got := len(entry.Metadata["hermes.channel"]); got > callerAuditMetadataMaxValueLen {
+		t.Fatalf("hermes.channel length = %d, want <= %d", got, callerAuditMetadataMaxValueLen)
+	}
+	if got := entry.Metadata["hermes.task_id"]; got != "task -42" {
+		t.Fatalf("hermes.task_id = %q, want control chars converted to space", got)
+	}
+	// A value that is nothing but format controls sanitizes to empty and is dropped.
+	if _, ok := entry.Metadata["hermes.profile"]; ok {
+		t.Fatalf("hermes.profile = %q, want key absent", entry.Metadata["hermes.profile"])
+	}
+}
+
+// X-Hermes-Tool is an audit hint; X-Phoenix-Tool is the attestation input.
+// A conflicting pair must not let the Hermes header satisfy tool policy.
+func TestHermesToolHeaderDoesNotSpoofPhoenixToolAttestation(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "tool-guarded"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/locked/hermes-tool", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	p, err := policy.Load([]byte(`{"attestation":{"locked/*":{"allowed_tools":["phoenix_resolve"]}}}`))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	srv.SetPolicy(p)
+
+	// Hermes claims the allowed tool; the real attestation header does not.
+	req = httptest.NewRequest("GET", "/v1/secrets/locked/hermes-tool", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-Hermes-Tool", "phoenix_resolve")
+	req.Header.Set("X-Phoenix-Tool", "wrong_tool")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("X-Hermes-Tool must not satisfy allowed_tools: got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	entry := findAPIAuditEntry(entries, "read_value", "locked/hermes-tool", "denied", "attestation")
+	if entry == nil {
+		t.Fatalf("missing attestation denial audit entry; got: %+v", entries)
+	}
+	// The spoofed hint is still recorded as a hint, under the Hermes key only.
+	if got := entry.Metadata["hermes.tool"]; got != "phoenix_resolve" {
+		t.Fatalf("metadata hermes.tool = %q, want spoofed hint %q", got, "phoenix_resolve")
+	}
+	for k := range entry.Metadata {
+		if strings.HasPrefix(k, "phoenix.") {
+			t.Fatalf("X-Phoenix-Tool captured as caller metadata key %q", k)
+		}
+	}
+
+	// The genuine attestation header still works on its own.
+	req = httptest.NewRequest("GET", "/v1/secrets/locked/hermes-tool", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-Hermes-Tool", "anything-at-all")
+	req.Header.Set("X-Phoenix-Tool", "phoenix_resolve")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("genuine X-Phoenix-Tool should be allowed: got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHermesHeadersDoNotBypassACL(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "admin-secret"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/admin-only/hermes", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// reader may only read test/*; no Hermes header may change that.
+	req = httptest.NewRequest("GET", "/v1/secrets/admin-only/hermes", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	req.Header.Set("X-Hermes-Profile", "admin")
+	req.Header.Set("X-Hermes-Tool", "phoenix_get")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("spoofed Hermes headers should not bypass ACL: got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	entry := findAPIAuditEntry(entries, "read_value", "admin-only/hermes", "denied", "")
+	if entry == nil {
+		t.Fatalf("missing denial audit entry; got: %+v", entries)
+	}
+	if entry.Agent != "reader" {
+		t.Fatalf("audit agent = %q, want authenticated Phoenix agent %q", entry.Agent, "reader")
+	}
+	if got := entry.Metadata["hermes.profile"]; got != "admin" {
+		t.Fatalf("metadata hermes.profile = %q, want spoofed hint %q", got, "admin")
+	}
+}
+
+// Both families on one request must coexist without interfering.
+func TestOpenClawAndHermesFamiliesCoexist(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+
+	body, _ := json.Marshal(setSecretRequest{Value: "v"})
+	req := httptest.NewRequest("PUT", "/v1/secrets/test/both-families", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	rawSessionKey := "ocsk_BOTH_FAMILIES_DO_NOT_LOG"
+	req = httptest.NewRequest("GET", "/v1/secrets/test/both-families", nil)
+	req.Header.Set("Authorization", "Bearer reader-token")
+	addSpoofedOpenClawHeaders(req, rawSessionKey)
+	addSpoofedHermesHeaders(req)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("read: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	entries, rawAudit := queryAPIAuditEntries(t, srv, adminToken)
+	if strings.Contains(rawAudit, rawSessionKey) {
+		t.Fatal("raw X-OpenClaw-Session-Key appeared in audit output")
+	}
+	entry := findAPIAuditEntry(entries, "read_value", "test/both-families", "allowed", "")
+	if entry == nil {
+		t.Fatalf("missing read_value audit entry; got: %+v", entries)
+	}
+	expected := map[string]string{
+		"openclaw.agent":            "admin spoof",
+		"openclaw.session_id":       "session-123",
+		"openclaw.channel":          "growth ops",
+		"openclaw.requester_sender": "aaron@example",
+		"openclaw.sender_is_owner":  "true",
+		"hermes.profile":            "kitmain",
+		"hermes.session_id":         "hermes-session-77",
+		"hermes.channel":            "telegram dm",
+		"hermes.tool":               "phoenix_get",
+		"hermes.task_id":            "task-104",
+	}
+	if len(entry.Metadata) != len(expected) {
+		t.Fatalf("metadata keys = %+v, want exactly %+v", entry.Metadata, expected)
+	}
+	for k, want := range expected {
+		if got := entry.Metadata[k]; got != want {
+			t.Fatalf("metadata[%s] = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// Guards the allowlist itself: no credential-bearing or reserved header may be
+// added to callerAuditHeaders, and every entry must be a namespaced X- header.
+func TestCallerAuditHeadersAllowlistIsSafe(t *testing.T) {
+	forbiddenSubstrings := []string{
+		"authorization", "cookie", "credential", "password",
+		"private", "secret", "token", "key",
+	}
+	seenHeader := map[string]bool{}
+	seenKey := map[string]bool{}
+	for _, h := range callerAuditHeaders {
+		lower := strings.ToLower(h.header)
+		if !strings.HasPrefix(lower, "x-") {
+			t.Errorf("header %q must be a namespaced X- header", h.header)
+		}
+		if strings.HasPrefix(lower, "x-phoenix-") {
+			t.Errorf("header %q is reserved for Phoenix attestation inputs", h.header)
+		}
+		for _, bad := range forbiddenSubstrings {
+			if strings.Contains(lower, bad) {
+				t.Errorf("header %q looks credential-bearing (%q) and must not be audited", h.header, bad)
+			}
+		}
+		if seenHeader[lower] {
+			t.Errorf("duplicate header %q", h.header)
+		}
+		seenHeader[lower] = true
+		if h.key == "" || strings.ToLower(h.key) != h.key {
+			t.Errorf("audit key %q must be lowercase and non-empty", h.key)
+		}
+		if seenKey[h.key] {
+			t.Errorf("duplicate audit key %q", h.key)
+		}
+		seenKey[h.key] = true
 	}
 }
 

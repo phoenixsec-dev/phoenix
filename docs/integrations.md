@@ -193,20 +193,9 @@ there relies on mTLS/role identity instead.
 
 ### Audit-only OpenClaw metadata headers
 
-The Phoenix server captures the following request headers as audit-only,
-untrusted metadata hints (each value sanitized and capped at 256 characters):
-
-- `X-OpenClaw-Agent`
-- `X-OpenClaw-Session-Id`
-- `X-OpenClaw-Channel`
-- `X-OpenClaw-Requester-Sender`
-- `X-OpenClaw-Sender-Is-Owner`
-
-They exist purely for audit-log correlation with OpenClaw sessions. They have
-zero effect on authorization, attestation, or sealed-response decisions —
-spoofing them cannot elevate access; the audited identity is always the
-authenticated Phoenix agent. `X-OpenClaw-Session-Key` is deliberately not
-captured and is never written to audit logs.
+The server records five `X-OpenClaw-*` headers as untrusted audit hints. See
+[Caller metadata audit headers](#caller-metadata-audit-headers) for the full
+list and the guarantees that apply to it.
 
 ### 2. Plugin tools for agent/tool runtime access
 
@@ -265,6 +254,54 @@ volumes:
 
 For mTLS instead of bearer tokens, mount certs into the OpenClaw container and set
 `PHOENIX_CA_CERT`, `PHOENIX_CLIENT_CERT`, and `PHOENIX_CLIENT_KEY`.
+
+## Caller metadata audit headers
+
+An agent platform can label its Phoenix requests so an audit entry can be traced
+back to the conversation, task, or tool that triggered it. The server captures
+one fixed header family per supported platform:
+
+| Header | Audit metadata key |
+|---|---|
+| `X-OpenClaw-Agent` | `openclaw.agent` |
+| `X-OpenClaw-Session-Id` | `openclaw.session_id` |
+| `X-OpenClaw-Channel` | `openclaw.channel` |
+| `X-OpenClaw-Requester-Sender` | `openclaw.requester_sender` |
+| `X-OpenClaw-Sender-Is-Owner` | `openclaw.sender_is_owner` |
+| `X-Hermes-Profile` | `hermes.profile` |
+| `X-Hermes-Session-Id` | `hermes.session_id` |
+| `X-Hermes-Channel` | `hermes.channel` |
+| `X-Hermes-Tool` | `hermes.tool` |
+| `X-Hermes-Task-Id` | `hermes.task_id` |
+
+The `hermes-phoenix` plugin emits the `X-Hermes-*` family. Both families may
+appear on the same request; they do not interact.
+
+**These values are untrusted and audit-only.** Any caller can set them to
+anything, so treat them as labels, not identity:
+
+- They have zero effect on authentication, ACL authorization, attestation
+  policy, session identity, role mapping, or sealed-response decisions.
+  Spoofing them cannot elevate access.
+- The audited actor is always the authenticated Phoenix agent. A spoofed
+  `X-Hermes-Profile: admin` is recorded as a hint under `hermes.profile` while
+  the `agent` field stays whatever the credential proved.
+- The list above is exhaustive. Any other header — including other `X-Hermes-*`
+  or `X-OpenClaw-*` names — is ignored entirely.
+- Session keys (`X-OpenClaw-Session-Key`) are credentials. They are deliberately
+  never captured and never written to audit logs.
+- Each value is sanitized (format characters removed, control characters
+  converted to spaces, whitespace collapsed) and capped at 256 bytes. Values
+  that sanitize to empty are dropped rather than stored blank.
+
+`X-Phoenix-Tool` is **not** part of this mechanism. It is an attestation policy
+input evaluated against `allowed_tools`/`deny_tools`, so it is never recorded as
+caller metadata. `X-Hermes-Tool` is the audit-only hint of the same idea; a
+request may send both, and only `X-Phoenix-Tool` affects the access decision.
+
+Adding a platform is a code change to the allowlist in `internal/api/api.go`,
+not configuration — an operator cannot map arbitrary headers, so a credential
+header can never be routed into the audit log by misconfiguration.
 
 ## Go SDK
 

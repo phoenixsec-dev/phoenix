@@ -1,5 +1,31 @@
 # Release Notes
 
+## v0.16.0 (2026-08-16)
+
+### Hermes Caller Metadata Audit Capture
+
+- Captures the sanitized `X-Hermes-Profile`, `X-Hermes-Session-Id`,
+  `X-Hermes-Channel`, `X-Hermes-Tool`, and `X-Hermes-Task-Id` headers as
+  audit-only metadata under `hermes.*` keys, for the `hermes-phoenix` plugin.
+- Generalized the OpenClaw-specific header table into a single
+  platform-neutral caller-metadata allowlist. The OpenClaw family, its
+  `openclaw.*` audit keys, the 256-byte cap, and the sanitization rules are
+  unchanged.
+- The allowlist stays compiled in rather than operator-configurable, so no
+  configuration change can route a credential header into the audit log.
+- `X-Phoenix-Tool` remains an attestation policy input and is never recorded
+  as caller metadata; the audit-only `X-Hermes-Tool` hint cannot satisfy
+  `allowed_tools`.
+- Added unit coverage for Hermes capture, absent headers, oversize/control
+  sanitization, ACL and attestation spoof resistance, both families on one
+  request, and an allowlist self-check that rejects credential-bearing or
+  `X-Phoenix-*` entries. Added e2e scenario 20.
+- `GET /v1/secrets` list responses now return `"paths": []` instead of
+  `"paths": null` when no paths are visible.
+
+> `v0.16.0` is the minimum Phoenix version for `hermes-phoenix` first-class
+> audit metadata. Older servers ignore the `X-Hermes-*` family entirely.
+
 ## v0.15.2 (2026-07-12)
 
 ### OpenClaw Exec Provider Merge-Review Fixes
