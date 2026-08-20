@@ -88,6 +88,7 @@ If your agent platform uses MCP over HTTP instead of local stdio, run Phoenix MC
 
 ```bash
 export PHOENIX_SERVER="https://phoenix:9090"
+export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
 export PHOENIX_TOKEN="<phoenix-agent-token>"
 export PHOENIX_MCP_TOKEN="<mcp-client-token>"
 phoenix mcp-server --http 127.0.0.1:8080

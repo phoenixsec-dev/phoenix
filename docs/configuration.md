@@ -3,13 +3,18 @@
 ## Configuration reference
 
 The server reads a JSON config file. `config.example.json` is a starter template.
-The example binds to loopback (`127.0.0.1`): binding to a non-loopback address
-requires enabling TLS/mTLS — never expose the plaintext HTTP listener beyond
-localhost.
+The example binds to loopback (`127.0.0.1`), where plaintext HTTP is the safe,
+supported default. Binding a non-loopback address means requests cross a wire:
+enable the `tls` block. The server starts either way, but logs a prominent
+`INSECURE TRANSPORT` warning when a non-loopback bind would put bearer tokens
+and secret values on the network in cleartext.
 
 | Field | Description | Default |
 |-------|-------------|---------|
 | `server.listen` | Bind address | `127.0.0.1:9090` |
+| `tls.enabled` | Serve HTTPS (independent of mTLS) | `false` |
+| `tls.cert` | Server certificate path | `auth.mtls.server_cert` (the `--init` leaf) |
+| `tls.key` | Server private key path | `auth.mtls.server_key` |
 | `store.path` | Encrypted store file | `/data/store.json` |
 | `store.master_key` | Master key file | `/data/master.key` |
 | `store.backend` | Secret backend (`file` or `1password`) | `file` |
@@ -109,15 +114,16 @@ The dashboard uses cookie-based auth with HMAC-signed tokens and CSRF protection
 Login attempts are rate-limited with exponential backoff (5 failures before lockout,
 up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.
 
-**Transport security:** When the server runs with mTLS enabled or behind a TLS
-reverse proxy (detected via `X-Forwarded-Proto: https`), the session cookie is
-set with `Secure` flag automatically. For production use:
+**Transport security:** When the server serves TLS (the `tls` block or mTLS)
+or sits behind a TLS reverse proxy (detected via `X-Forwarded-Proto: https`),
+the session cookie is set with `Secure` flag automatically. For production use:
 
-- Run behind a TLS reverse proxy (e.g., Nginx Proxy Manager), or
-- Use the built-in mTLS mode (`auth.mtls.enabled: true`), or
-- Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`)
+- Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`), or
+- Enable native TLS (`"tls": {"enabled": true}` — no client certs needed), or
+- Run behind a TLS reverse proxy (e.g., Nginx Proxy Manager)
 
-Do not expose the dashboard over plain HTTP on a network you do not control.
+Do not expose the dashboard over plain HTTP on a network you do not control —
+the server logs a loud startup warning if you do.
 
 ## 1Password runtime backend (broker mode, read-only)
 
@@ -143,23 +149,44 @@ Behavior:
 
 ## Transport security
 
-The default configuration starts the server on plain HTTP at `127.0.0.1:9090`.
-This is safe for local-only use — the server is not reachable from the network.
+Phoenix is LAN-scoped by design — internet/WAN exposure is out of scope and
+unsupported (see [Threat Model](threat-model.md)). Within that envelope:
 
-`phoenix-server --init` generates a CA and server certificate, but does **not**
-enable TLS by default. To enable TLS, set `auth.mtls.enabled: true` in the
-config. This activates server-side TLS using the generated certificate. You can
-set `auth.mtls.require: false` to accept TLS connections without requiring
-client certificates (agents can still use bearer tokens).
+The default configuration starts the server on plain HTTP at `127.0.0.1:9090`.
+This is safe for local-only use — loopback traffic never reaches a NIC, so the
+server is not reachable from the network and TLS would add nothing.
+
+The moment the listener crosses a wire, enable TLS. `phoenix-server --init`
+generates a CA and server certificate; `"tls": {"enabled": true}` serves HTTPS
+with them — no client certificates, no mTLS required:
+
+```json
+{
+  "server": { "listen": "0.0.0.0:9090" },
+  "tls": { "enabled": true }
+}
+```
+
+`tls.cert` / `tls.key` override the certificate paths; when unset, the `--init`
+server leaf (`auth.mtls.server_cert` / `server_key` paths) is used. mTLS is a
+separate, optional layer for client-certificate authentication — enabling
+`auth.mtls` also serves TLS, as it always has, but plain HTTPS no longer
+requires it.
+
+If you bind a non-loopback address without TLS, the server still starts but
+logs a prominent `INSECURE TRANSPORT` warning: bearer tokens and every secret
+value it returns would cross the network in cleartext.
 
 | Deployment | Config | Result |
 |-----------|--------|--------|
-| Local only | Default (`127.0.0.1`, mTLS disabled) | Plain HTTP on loopback — safe |
-| LAN / remote | `0.0.0.0`, `auth.mtls.enabled: true` | TLS with optional client certs |
-| Production | `0.0.0.0`, `auth.mtls.enabled: true`, `require: true` | Full mTLS required |
+| Local only | Default (`127.0.0.1`, TLS disabled) | Plain HTTP on loopback — safe |
+| LAN / remote | `0.0.0.0`, `"tls": {"enabled": true}` | HTTPS, bearer tokens still work |
+| LAN + client certs | add `auth.mtls.enabled: true` (`require: false`) | HTTPS with optional client certs |
+| Locked down | `auth.mtls.enabled: true`, `require: true` | Full mTLS required |
 | Behind reverse proxy | `127.0.0.1`, proxy terminates TLS | Plain HTTP on loopback, TLS to clients |
 
-See [LAN Deployment](lan-deployment.md) for the full multi-host setup.
+See [LAN Deployment](lan-deployment.md) for the full multi-host setup,
+including re-issuing the server certificate with LAN IP/hostname SANs.
 
 ## Architecture summary
 
@@ -220,7 +247,10 @@ volumes:
 ```
 
 **Important:** The generated config defaults to `127.0.0.1:9090`. For Docker port
-mapping to work, set `server.listen` to `0.0.0.0:9090` in the config.
+mapping to work, set `server.listen` to `0.0.0.0:9090` in the config. That is a
+non-loopback bind: published ports are reachable from the LAN, so also set
+`"tls": {"enabled": true}` (or bind the mapping to loopback with
+`-p 127.0.0.1:9090:9090` if only this host needs access).
 
 ## Related docs
 

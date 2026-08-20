@@ -6,17 +6,23 @@
 //
 // Usage:
 //
-//	phoenix mcp-server --http :8080 --mcp-token <token>
+//	phoenix mcp-server --http 127.0.0.1:8080 --mcp-token <token>
 //
 // Or via environment:
 //
-//	PHOENIX_MCP_TOKEN=<token> phoenix mcp-server --http :8080
+//	PHOENIX_MCP_TOKEN=<token> phoenix mcp-server --http 127.0.0.1:8080
+//
+// To serve MCP clients on other hosts, enable TLS:
+//
+//	phoenix mcp-server --http 0.0.0.0:8080 --mcp-token <token> \
+//	  --tls-cert /data/phoenix/server.crt --tls-key /data/phoenix/server.key
 package main
 
 import (
 	"bytes"
 	cryptorand "crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -26,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/transport"
 )
 
 type mcpSession struct {
@@ -184,12 +192,19 @@ func (s *mcpHTTPServer) validSession(id string) bool {
 }
 
 // cmdMCPHTTP starts the MCP server in Streamable HTTP mode.
-func cmdMCPHTTP(addr string, mcpToken string) error {
+// tlsCert/tlsKey enable HTTPS serving (the Phoenix --init server leaf works:
+// <data-dir>/server.crt and <data-dir>/server.key). Without TLS on a
+// non-loopback address, a loud warning is emitted — but the server still
+// starts: plaintext loopback is the supported default.
+func cmdMCPHTTP(addr, mcpToken, tlsCert, tlsKey string) error {
 	if err := requireAuth(); err != nil {
 		return err
 	}
 	if mcpToken == "" {
 		return fmt.Errorf("MCP HTTP mode requires --mcp-token or PHOENIX_MCP_TOKEN")
+	}
+	if (tlsCert == "") != (tlsKey == "") {
+		return fmt.Errorf("--tls-cert and --tls-key must be set together")
 	}
 
 	logger := log.New(os.Stderr, "phoenix-mcp-http: ", log.LstdFlags)
@@ -204,6 +219,21 @@ func cmdMCPHTTP(addr string, mcpToken string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", srv)
 
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	if tlsCert != "" {
+		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+		logger.Printf("listening on %s (TLS)", addr)
+		return httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
+	}
+
+	if !transport.IsLoopbackListen(addr) {
+		logger.Printf("\n%s", transport.MCPPlaintextWarning(addr))
+	}
 	logger.Printf("listening on %s", addr)
-	return http.ListenAndServe(addr, mux)
+	return httpSrv.ListenAndServe()
 }

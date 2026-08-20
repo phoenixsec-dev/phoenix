@@ -67,6 +67,7 @@ reference.
 
 ```bash
 export PHOENIX_SERVER="https://phoenix:9090"
+export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
 export PHOENIX_TOKEN="<builder-token>"
 export PHOENIX_SEAL_KEY="/etc/phoenix/keys/builder.seal.key"
 ```
@@ -75,9 +76,15 @@ export PHOENIX_SEAL_KEY="/etc/phoenix/keys/builder.seal.key"
 
 ```ini
 Environment=PHOENIX_SERVER=https://phoenix:9090
+Environment=PHOENIX_CA_CERT=/etc/phoenix/certs/ca.crt
 Environment=PHOENIX_TOKEN=<deployer-token>
 Environment=PHOENIX_SEAL_KEY=/etc/phoenix/keys/deployer.seal.key
 ```
+
+(`https://` assumes the server's `tls` block is enabled; `PHOENIX_CA_CERT`
+points at the Phoenix CA so the internal certificate validates. On a single
+machine with the default loopback listener, `http://127.0.0.1:9090` without
+a CA cert is the expected setup.)
 
 For MCP configuration, add the same env vars to the agent's MCP server
 config. See [Integrations](integrations.md) for the config format.

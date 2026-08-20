@@ -46,7 +46,7 @@ phoenix agent create app-deployer -t "deploy-token" --acl "myapp/**:read,write"
 If mTLS is enabled (required for `phoenix cert issue`):
 
 ```bash
-export PHOENIX_SERVER="https://phoenix.home:9090"
+export PHOENIX_SERVER="https://phoenix:9090"
 export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 phoenix cert issue app-runtime -o /etc/phoenix/certs
 ```

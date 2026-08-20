@@ -196,7 +196,8 @@ Set `PHOENIX_ROLE` in your MCP server config:
       "command": "phoenix",
       "args": ["mcp-server"],
       "env": {
-        "PHOENIX_SERVER": "https://phoenix.home:9090",
+        "PHOENIX_SERVER": "https://phoenix:9090",
+        "PHOENIX_CA_CERT": "/etc/phoenix/certs/ca.crt",
         "PHOENIX_TOKEN": "bootstrap-token",
         "PHOENIX_ROLE": "dev"
       }

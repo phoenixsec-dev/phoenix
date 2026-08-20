@@ -1,5 +1,46 @@
 # Release Notes
 
+## v0.17.0 (2026-08-20)
+
+### Secure Transport: LAN-Scoped by Design, Loud When It Matters
+
+Phoenix is **LAN-scoped by design**. Use outside a LAN — internet/WAN
+exposure, public ingress, hostile-network operation — is out of scope and
+unsupported. Being in scope is not the same as being trusted: a LAN
+includes containers on shared bridges, IoT devices, and anything that has
+compromised one host, so TLS matters whenever a request crosses a wire.
+
+Plaintext on loopback remains the default and is unchanged. Loopback
+traffic never reaches a network interface, so TLS adds nothing there.
+
+- **New first-class `tls:` config block**, independent of `mtls:`. TLS
+  serving previously existed only inside the mTLS block, so operators had
+  to enable client-certificate authentication just to obtain HTTPS.
+  `"tls": {"enabled": true}` now works on its own, defaulting to the
+  server leaf certificate that `--init` already generates. `mtls:` is now
+  purely the client-certificate layer.
+- **Loud warning on insecure transport.** Binding a non-loopback address
+  without TLS previously produced no signal at all — a one-line config
+  change silently moved bearer tokens and secret values onto the wire.
+  The server now prints a prominent startup banner naming exactly what is
+  exposed and the one-line fix. It warns; it never refuses to start.
+- **TLS for the MCP HTTP transport** — `phoenix mcp-server --http` gains
+  `--tls-cert`/`--tls-key` (or `PHOENIX_MCP_TLS_CERT`/`PHOENIX_MCP_TLS_KEY`),
+  and carries the same warning on plaintext non-loopback binds.
+- **Client-side warnings** in the CLI and Go SDK for non-loopback
+  `http://` server URLs. Warn and proceed; never fail.
+- **Docs**: `docs/threat-model.md` gains a deployment-envelope section and
+  its mitigations were re-audited against that envelope;
+  `docs/lan-deployment.md` is rewritten onto the `tls:` block with mTLS as
+  a separate optional step. No silent non-loopback `http://` examples
+  remain anywhere in the docs.
+- **New e2e scenario 19** covering transport behavior.
+
+**Upgrading:** no action required. Existing configs behave identically,
+including `auth.mtls.enabled: true`, which still implies TLS. If you bind
+a non-loopback address without TLS you will now see a startup warning —
+that is the point, and the fix is one line.
+
 ## v0.16.0 (2026-08-16)
 
 ### Hermes Caller Metadata Audit Capture

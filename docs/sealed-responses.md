@@ -80,6 +80,7 @@ When set, `phoenix get`, `phoenix resolve`, and `phoenix exec` automatically:
       "args": ["mcp-server"],
       "env": {
         "PHOENIX_SERVER": "https://phoenix:9090",
+        "PHOENIX_CA_CERT": "/etc/phoenix/certs/ca.crt",
         "PHOENIX_TOKEN": "...",
         "PHOENIX_SEAL_KEY": "/etc/phoenix/keys/myagent.seal.key"
       }

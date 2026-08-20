@@ -6,6 +6,12 @@ This guide covers the topology, server setup, certificate distribution, agent
 provisioning, and verification for a multi-host deployment. It is written so that
 an agent (or a human) can execute it end-to-end with no prior Phoenix experience.
 
+A LAN is the outer edge of Phoenix's supported envelope — internet/WAN
+exposure is out of scope (see [Threat Model](threat-model.md)). And a LAN is
+not a trust boundary: the moment requests cross a wire, enable TLS. That is
+one config line, covered in step 1. mTLS (client certificates) is a separate,
+optional hardening step — you do not need it to get HTTPS.
+
 ## Topology
 
 ```text
@@ -15,8 +21,9 @@ an agent (or a human) can execute it end-to-end with no prior Phoenix experience
               |              |              |
          [Phoenix Server]  [Host A]       [Host B]    ... [Host N]
          192.168.1.10       agent-a        agent-b        agent-n
-         port 9090          phoenix CLI    phoenix CLI    phoenix CLI
-                            mTLS cert      mTLS cert      mTLS cert
+         port 9090 (TLS)    phoenix CLI    phoenix CLI    phoenix CLI
+                            ca.crt         ca.crt         ca.crt
+                            (+ optional mTLS client cert per agent)
 ```
 
 One server, N clients. Each client machine runs the `phoenix` CLI (and optionally
@@ -48,22 +55,26 @@ Edit `/data/phoenix/config.json` to bind to all interfaces and enable TLS:
   "server": {
     "listen": "0.0.0.0:9090"
   },
+  "tls": {
+    "enabled": true
+  },
   "auth": {
     "bearer": {
       "enabled": true
-    },
-    "mtls": {
-      "enabled": true,
-      "require": false
     }
   }
 }
 ```
 
-Setting `auth.mtls.enabled: true` activates TLS using the server certificate
-generated during init. Setting `require: false` means client certs are optional
-at this stage — agents can still authenticate with bearer tokens. You can
-tighten this later with `"require": true` once all agents have certs.
+`"tls": {"enabled": true}` serves HTTPS using the server certificate generated
+during init — no client certificates involved, agents authenticate with bearer
+tokens exactly as before. mTLS is a separate optional layer added in step 3.
+
+If you bind a non-loopback address without enabling TLS, the server still
+starts, but it logs a prominent `INSECURE TRANSPORT` warning: every bearer
+token and secret value would cross the network in cleartext, readable by
+anything on the segment. The `tls` block above is the one-line fix the
+warning points at.
 
 ### Re-issue the server certificate with LAN SANs
 
@@ -89,8 +100,8 @@ to the paths in the config. You can add as many `--san` flags as needed
 phoenix-server --config /data/phoenix/config.json
 ```
 
-You should see `TLS: enabled` and `mTLS: enabled (require=false)` in the
-startup output.
+You should see `TLS: enabled (server cert: ...)` in the startup output, and
+no `INSECURE TRANSPORT` warning.
 
 ## 2. Create agent identities
 
@@ -112,9 +123,32 @@ phoenix agent create host-b-deployer \
   --acl "deploy/**:read;infra/**:read"
 ```
 
-## 3. Issue mTLS certificates
+## 3. Add mTLS (optional)
 
-Issue a client cert per agent:
+Bearer tokens over TLS are a complete, supported setup — you can skip to
+step 4 and distribute only `ca.crt`. mTLS adds client-certificate identity
+on top of TLS: stronger caller authentication, and the prerequisite for
+`require_mtls` / `deny_bearer` attestation policies.
+
+Enable mTLS in the server config (this also loads the CA for cert issuance):
+
+```json
+{
+  "auth": {
+    "bearer": {
+      "enabled": true
+    },
+    "mtls": {
+      "enabled": true,
+      "require": false
+    }
+  }
+}
+```
+
+`require: false` means client certs are optional — agents without certs can
+still authenticate with bearer tokens. Tighten to `"require": true` once all
+agents have certs. Restart the server, then issue a client cert per agent:
 
 ```bash
 phoenix cert issue host-a-builder -o /tmp/certs/host-a/
@@ -128,7 +162,14 @@ Each command produces:
 
 ## 4. Distribute certificates to client machines
 
-Copy the cert bundle to each client. For example with `scp`:
+Every client needs `ca.crt` so it can verify the server's TLS certificate.
+If you skipped mTLS, that single file is the only thing to distribute:
+
+```bash
+scp /data/phoenix/ca.crt user@192.168.1.20:/etc/phoenix/certs/
+```
+
+With mTLS, copy the full cert bundle to each client. For example with `scp`:
 
 ```bash
 # To Host A
@@ -148,7 +189,17 @@ On each client machine, lock down permissions (`chmod 700` on the directory,
 ## 5. Configure client machines
 
 On each client host, set environment variables for the agent. Add to the agent's
-shell profile, systemd unit, or MCP config:
+shell profile, systemd unit, or MCP config.
+
+Bearer token over TLS (no mTLS):
+
+```bash
+export PHOENIX_SERVER="https://192.168.1.10:9090"
+export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
+export PHOENIX_TOKEN="<agent-token>"
+```
+
+With mTLS client certificates:
 
 ```bash
 export PHOENIX_SERVER="https://192.168.1.10:9090"
@@ -235,7 +286,10 @@ on available policy fields and testing with `phoenix policy test`.
 
 If you want browser-based approval and session management, enable the dashboard.
 Since this is a LAN deployment with the server on `0.0.0.0`, you **must** use
-TLS — either native mTLS (already configured above) or a reverse proxy.
+TLS — the native `tls` block (already configured above) or a reverse proxy.
+The startup warning covers this case too: a dashboard on a non-loopback bind
+without TLS means the dashboard password and session cookie cross the network
+in cleartext.
 
 Generate a password hash and add to the server config:
 
@@ -252,10 +306,10 @@ phoenix-server --hash-password
 }
 ```
 
-Restart the server. With mTLS enabled, the `Secure` cookie flag is set
+Restart the server. With TLS enabled, the `Secure` cookie flag is set
 automatically. Access the dashboard at `https://192.168.1.10:9090/dashboard/`.
 
-If you are using a reverse proxy instead of native mTLS, ensure the proxy
+If you are using a reverse proxy instead of native TLS, ensure the proxy
 sets `X-Forwarded-Proto: https` so Phoenix enables the `Secure` flag.
 
 **Do not** enable the dashboard on a LAN deployment without TLS. The session

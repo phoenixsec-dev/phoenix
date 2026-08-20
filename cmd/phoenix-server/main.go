@@ -36,6 +36,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
+	"github.com/phoenixsec/phoenix/internal/transport"
 	"github.com/phoenixsec/phoenix/internal/version"
 )
 
@@ -357,6 +358,9 @@ func main() {
 		}
 		log.Printf("  mTLS: enabled (require=%v)", cfg.Auth.MTLS.Require)
 		log.Printf("  Bearer: %v", cfg.Auth.Bearer.Enabled)
+	} else if cfg.TLSEnabled() {
+		// TLS without mTLS: encrypt the pipe, no client certificates.
+		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS13}
 	}
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
@@ -373,13 +377,21 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	if tlsCfg != nil {
+	if cfg.TLSEnabled() {
 		// Use the dedicated server leaf cert for TLS identity (NOT the CA cert)
-		log.Printf("  TLS: enabled (server cert: %s)", cfg.Auth.MTLS.ServerCert)
-		if err := httpSrv.ListenAndServeTLS(cfg.Auth.MTLS.ServerCert, cfg.Auth.MTLS.ServerKey); err != nil {
+		serverCert, serverKey := cfg.TLSCertKey()
+		log.Printf("  TLS: enabled (server cert: %s)", serverCert)
+		if err := httpSrv.ListenAndServeTLS(serverCert, serverKey); err != nil {
 			log.Fatalf("server error: %v", err)
 		}
 	} else {
+		log.Printf("  TLS: disabled (plaintext HTTP)")
+		if !transport.IsLoopbackListen(cfg.Server.Listen) {
+			// Loud, never fatal: loopback plaintext is the supported default,
+			// but a non-loopback bind without TLS puts bearer tokens and
+			// secret values on the wire in cleartext.
+			log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
+		}
 		if err := httpSrv.ListenAndServe(); err != nil {
 			log.Fatalf("server error: %v", err)
 		}

@@ -4,6 +4,15 @@ Phoenix supports bearer tokens, mTLS client certificates, and sealed-response ke
 pairs. These can be combined — mTLS for identity, bearer for bootstrap, sealed keys
 for context-safe delivery.
 
+**Transport is separate from authentication.** TLS (HTTPS) comes from the
+server's `tls` config block and does not require mTLS or client certificates —
+bearer tokens work over TLS unchanged. mTLS is an authentication method layered
+on top of TLS. Any auth method on this page can run over either transport;
+whenever requests cross a wire (any non-loopback listener), enable the `tls`
+block so tokens and secret values are encrypted in transit. See
+[Configuration](configuration.md#transport-security) and
+[LAN Deployment](lan-deployment.md).
+
 ## Bearer tokens
 
 Create an agent with scoped permissions:
@@ -47,7 +56,7 @@ phoenix cert issue deployer -o /etc/phoenix/certs/
 This writes `deployer.crt`, `deployer.key`, and `ca.crt`.
 
 ```bash
-export PHOENIX_SERVER="https://phoenix.home:9090"
+export PHOENIX_SERVER="https://192.168.1.10:9090"
 export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
 export PHOENIX_CLIENT_CERT="/etc/phoenix/certs/deployer.crt"
 export PHOENIX_CLIENT_KEY="/etc/phoenix/certs/deployer.key"
