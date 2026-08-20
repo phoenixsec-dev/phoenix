@@ -503,3 +503,107 @@ func TestOPConfigJSON(t *testing.T) {
 		t.Errorf("cache_ttl = %q, want %q", parsed.OnePassword.CacheTTL, "60s")
 	}
 }
+
+func TestTLSEnabledCombinations(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.TLSEnabled() {
+		t.Fatal("default config should not enable TLS")
+	}
+
+	cfg.TLS.Enabled = true
+	if !cfg.TLSEnabled() {
+		t.Fatal("tls.enabled=true should enable TLS")
+	}
+
+	cfg = DefaultConfig()
+	cfg.Auth.MTLS.Enabled = true
+	if !cfg.TLSEnabled() {
+		t.Fatal("auth.mtls.enabled=true should imply TLS (backward compat)")
+	}
+}
+
+func TestTLSCertKeyFallsBackToMTLSPaths(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Auth.MTLS.ServerCert = "/data/server.crt"
+	cfg.Auth.MTLS.ServerKey = "/data/server.key"
+
+	cert, key := cfg.TLSCertKey()
+	if cert != "/data/server.crt" || key != "/data/server.key" {
+		t.Fatalf("expected mTLS leaf fallback, got cert=%q key=%q", cert, key)
+	}
+
+	cfg.TLS.Cert = "/custom/tls.crt"
+	cfg.TLS.Key = "/custom/tls.key"
+	cert, key = cfg.TLSCertKey()
+	if cert != "/custom/tls.crt" || key != "/custom/tls.key" {
+		t.Fatalf("explicit tls paths should win, got cert=%q key=%q", cert, key)
+	}
+}
+
+func TestValidateTLSEnabledRequiresPaths(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TLS.Enabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error: tls.enabled with no cert/key anywhere")
+	}
+
+	// mTLS leaf paths present (as written by --init) satisfy the requirement
+	// even with mTLS disabled.
+	cfg.Auth.MTLS.ServerCert = "/data/server.crt"
+	cfg.Auth.MTLS.ServerKey = "/data/server.key"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("tls.enabled with --init mTLS leaf paths should pass: %v", err)
+	}
+
+	// Explicit tls paths also satisfy it.
+	cfg = DefaultConfig()
+	cfg.TLS.Enabled = true
+	cfg.TLS.Cert = "/custom/tls.crt"
+	cfg.TLS.Key = "/custom/tls.key"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("tls.enabled with explicit paths should pass: %v", err)
+	}
+}
+
+func TestValidateTLSCertKeyMustBeSetTogether(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TLS.Cert = "/custom/tls.crt"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error: tls.cert without tls.key")
+	}
+	cfg = DefaultConfig()
+	cfg.TLS.Key = "/custom/tls.key"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error: tls.key without tls.cert")
+	}
+}
+
+func TestTLSConfigJSON(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TLS.Enabled = true
+	cfg.TLS.Cert = "/data/server.crt"
+	cfg.TLS.Key = "/data/server.key"
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var parsed Config
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !parsed.TLS.Enabled || parsed.TLS.Cert != "/data/server.crt" || parsed.TLS.Key != "/data/server.key" {
+		t.Fatalf("tls block did not round-trip: %+v", parsed.TLS)
+	}
+
+	// The tls block must appear in generated configs even when disabled,
+	// so operators can discover the one-line fix.
+	data, err = json.Marshal(DefaultConfig())
+	if err != nil {
+		t.Fatalf("marshal default: %v", err)
+	}
+	if !strings.Contains(string(data), `"tls"`) {
+		t.Fatal("default config JSON should include the tls block")
+	}
+}
