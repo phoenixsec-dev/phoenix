@@ -26,9 +26,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Pinned, not @latest. staticcheck v0.8.0 requires Go >= 1.26, which
+      # this job cannot satisfy under GOTOOLCHAIN=local, so @latest breaks the
+      # build the moment upstream releases ahead of our Go matrix. Bump this
+      # deliberately alongside go-version.
       - name: Staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           staticcheck ./...
 
       - name: Test
