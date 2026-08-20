@@ -54,6 +54,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/store"
+	"github.com/phoenixsec/phoenix/internal/transport"
 	"github.com/phoenixsec/phoenix/internal/version"
 )
 
@@ -129,6 +130,18 @@ func main() {
 
 	cmd := os.Args[1]
 	args := os.Args[2:]
+
+	// Warn (never fail) when the configured server is plaintext HTTP on a
+	// non-loopback address: bearer tokens and secret values would cross the
+	// network unencrypted. Loopback plaintext is the supported default.
+	switch cmd {
+	case "version", "--version", "-V", "help", "--help", "-h":
+		// No server contact.
+	default:
+		if w := transport.ClientPlaintextWarning(serverURL); w != "" {
+			fmt.Fprintln(os.Stderr, w)
+		}
+	}
 
 	var err error
 	switch cmd {
@@ -273,6 +286,8 @@ func main() {
 	case "mcp-server":
 		httpAddr := ""
 		mcpToken := os.Getenv("PHOENIX_MCP_TOKEN")
+		mcpTLSCert := os.Getenv("PHOENIX_MCP_TLS_CERT")
+		mcpTLSKey := os.Getenv("PHOENIX_MCP_TLS_KEY")
 		for i := 0; i < len(args); i++ {
 			switch {
 			case args[i] == "--http" && i+1 < len(args):
@@ -285,10 +300,20 @@ func main() {
 				i++
 			case strings.HasPrefix(args[i], "--mcp-token="):
 				mcpToken = strings.TrimPrefix(args[i], "--mcp-token=")
+			case args[i] == "--tls-cert" && i+1 < len(args):
+				mcpTLSCert = args[i+1]
+				i++
+			case strings.HasPrefix(args[i], "--tls-cert="):
+				mcpTLSCert = strings.TrimPrefix(args[i], "--tls-cert=")
+			case args[i] == "--tls-key" && i+1 < len(args):
+				mcpTLSKey = args[i+1]
+				i++
+			case strings.HasPrefix(args[i], "--tls-key="):
+				mcpTLSKey = strings.TrimPrefix(args[i], "--tls-key=")
 			}
 		}
 		if httpAddr != "" {
-			err = cmdMCPHTTP(httpAddr, mcpToken)
+			err = cmdMCPHTTP(httpAddr, mcpToken, mcpTLSCert, mcpTLSKey)
 		} else {
 			err = cmdMCP(args)
 		}
@@ -367,7 +392,8 @@ Usage:
   phoenix sessions revoke <session-id>          Revoke a session
   phoenix approve <approval-id>                Approve a step-up session request
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
-  phoenix mcp-server --http :8080             Run MCP server (Streamable HTTP)
+  phoenix mcp-server --http 127.0.0.1:8080    Run MCP server (Streamable HTTP)
+  phoenix mcp-server --http <addr> --tls-cert <crt> --tls-key <key>  Serve MCP over HTTPS
   phoenix init <dir>                          Initialize data directory
 
 Environment:
@@ -380,7 +406,9 @@ Environment:
   PHOENIX_POLICY       Path to attestation policy file (JSON)
   PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)
   PHOENIX_ROLE         Role name for auto-mint session identity
-  PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)`)
+  PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)
+  PHOENIX_MCP_TLS_CERT TLS server certificate for MCP HTTP mode (--tls-cert)
+  PHOENIX_MCP_TLS_KEY  TLS server key for MCP HTTP mode (--tls-key)`)
 }
 
 // requireAuth checks that at least one auth method is configured

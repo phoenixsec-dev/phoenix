@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -80,6 +83,8 @@ func New(server, token string) *Client {
 		token = os.Getenv("PHOENIX_TOKEN")
 	}
 
+	warnPlaintextOnce(server)
+
 	c := &Client{
 		Server: server,
 		Token:  token,
@@ -89,6 +94,47 @@ func New(server, token string) *Client {
 	}
 
 	return c
+}
+
+// plaintextWarned tracks server URLs already warned about, so a process
+// creating many clients warns once per distinct server.
+var plaintextWarned sync.Map
+
+// warnPlaintextOnce emits a stderr warning when the server URL is plain
+// http:// to a non-loopback host: bearer tokens and secret values would
+// cross the network unencrypted. Phoenix is LAN-scoped with plaintext
+// loopback as the supported default — this warns on the transition, it
+// never fails. Hostnames other than "localhost" are not resolved; they
+// are treated as non-loopback so ambiguity warns.
+func warnPlaintextOnce(server string) {
+	if !isPlaintextNonLoopback(server) {
+		return
+	}
+	if _, loaded := plaintextWarned.LoadOrStore(server, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"phoenix: WARNING: server URL is plaintext http:// to a non-loopback address (%s).\n"+
+			"phoenix: Bearer tokens and secret values will cross the network unencrypted.\n"+
+			"phoenix: Enable the server's \"tls\" config block and use https:// (see docs/lan-deployment.md).\n",
+		server)
+}
+
+// isPlaintextNonLoopback reports whether rawurl is plain http:// to a
+// non-loopback host.
+func isPlaintextNonLoopback(rawurl string) bool {
+	u, err := url.Parse(rawurl)
+	if err != nil || !strings.EqualFold(u.Scheme, "http") {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return !ip.IsLoopback()
+	}
+	return true
 }
 
 // NewWithRole creates a client and mints a scoped session for the given role.

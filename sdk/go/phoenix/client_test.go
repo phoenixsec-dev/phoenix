@@ -359,3 +359,24 @@ func TestRevokeSession(t *testing.T) {
 		t.Fatalf("RevokeSession: %v", err)
 	}
 }
+
+func TestIsPlaintextNonLoopback(t *testing.T) {
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"http://127.0.0.1:9090", false},
+		{"http://localhost:9090", false},
+		{"http://[::1]:9090", false},
+		{"http://192.168.1.10:9090", true},
+		{"http://0.0.0.0:9090", true},
+		{"http://phoenix.internal:9090", true},
+		{"https://192.168.1.10:9090", false},
+		{"https://phoenix.internal:9090", false},
+	}
+	for _, tt := range tests {
+		if got := isPlaintextNonLoopback(tt.url); got != tt.want {
+			t.Errorf("isPlaintextNonLoopback(%q) = %v, want %v", tt.url, got, tt.want)
+		}
+	}
+}
