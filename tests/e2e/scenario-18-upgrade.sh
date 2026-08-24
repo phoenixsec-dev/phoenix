@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
-scenario_start 18 upgrade-0.13.5-to-0.15.2
+scenario_start 18 upgrade-0.13.5-to-current
 require_cmd git
 require_cmd tar
 require_cmd curl
