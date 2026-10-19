@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 var (
@@ -126,7 +127,9 @@ func (s *Store) load() error {
 	return nil
 }
 
-// save writes the store to disk atomically (write-tmp + rename).
+// save writes the store to disk crash-safely: fsynced write-tmp + rename +
+// directory fsync (fsutil.WriteFileAtomic). The whole store is one file, so
+// a torn write here would lose every secret at once.
 func (s *Store) save() error {
 	data, err := json.MarshalIndent(s.data, "", "  ")
 	if err != nil {
@@ -138,14 +141,8 @@ func (s *Store) save() error {
 		return fmt.Errorf("creating store directory: %w", err)
 	}
 
-	tmp := s.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("writing temp file: %w", err)
-	}
-
-	if err := os.Rename(tmp, s.filePath); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("renaming temp file: %w", err)
+	if err := fsutil.WriteFileAtomic(s.filePath, data, 0600); err != nil {
+		return fmt.Errorf("saving store file: %w", err)
 	}
 
 	return nil
@@ -336,6 +333,9 @@ func (s *Store) Count() int {
 // pre-rotation backup (atomic rename), and the provider's pending key
 // is rolled back.
 //
+// afterSave must return an error only when it did NOT persist the new key
+// (the key file still holds the old key) — the rollback relies on that.
+//
 // When afterSave is nil (e.g. in unit tests), the provider's rotation is
 // auto-committed after a successful save.
 //
@@ -370,11 +370,16 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	// eliminates the double-failure path where both callback and
 	// rollback-save fail.
 	preRotatePath := s.filePath + ".pre-rotate"
+	keepBackup := false // set when the backup is the operator's recovery path
 	if afterSave != nil {
 		if err := copyFile(s.filePath, preRotatePath); err != nil {
 			return 0, fmt.Errorf("backing up store before rotation: %w", err)
 		}
-		defer os.Remove(preRotatePath)
+		defer func() {
+			if !keepBackup {
+				os.Remove(preRotatePath)
+			}
+		}()
 	}
 
 	// Rotate: unwrap all with old key, generate new key, re-wrap all.
@@ -413,19 +418,51 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 			// Restore store file from pre-rotation backup via atomic rename.
 			// This is more reliable than re-marshaling + re-saving because
 			// it's a single rename syscall on the same filesystem.
-			if restoreErr := os.Rename(preRotatePath, s.filePath); restoreErr != nil {
-				// CRITICAL: store on disk has new DEKs but key file has
-				// old key, and we cannot restore the old store. Persist the
-				// pending key to an emergency file so an operator can
-				// forward-recover using the new key + on-disk store.
-				s.emergencyPersistPendingKey()
+			restoreErr := os.Rename(preRotatePath, s.filePath)
+			if restoreErr == nil {
+				// Without this the restore could be undone by a crash,
+				// leaving new-key DEKs on disk next to the old key file.
+				if syncErr := fsutil.SyncDir(filepath.Dir(s.filePath)); syncErr != nil {
+					log.Printf("WARNING: store restored from backup but directory sync failed: %v", syncErr)
+				}
 				s.provider.RollbackRotation()
-				return 0, fmt.Errorf("CRITICAL: callback failed: %w; store restore failed: %v; "+
-					"check for %s.emergency-key or use .prev backup", err, restoreErr, s.filePath)
+				return 0, fmt.Errorf("post-save callback: %w", err)
 			}
 
+			// Restore failed: the store on disk has new-key DEKs but the
+			// key file still has the old key. Memory holds the old DEKs
+			// again, so rewrite the store from memory to match the key file.
+			if healErr := s.save(); healErr == nil {
+				log.Printf("WARNING: rotation callback failed and backup restore failed (%v); "+
+					"store rewritten from memory under the old key", restoreErr)
+				s.provider.RollbackRotation()
+				return 0, fmt.Errorf("post-save callback: %w (backup restore failed: %v; "+
+					"store rewritten under the old key)", err, restoreErr)
+			}
+
+			// CRITICAL: nothing on disk could be repaired. Keep the
+			// pre-rotate backup (old DEKs, matches the old key file) and
+			// try the passphrase-encrypted emergency key.
+			keepBackup = true
+			var options []string
+			if _, statErr := os.Stat(preRotatePath); statErr == nil {
+				options = append(options, fmt.Sprintf("restore %s over %s and keep the current key file", preRotatePath, s.filePath))
+			}
+			if emergencyPath, emErr := s.emergencyPersistPendingKey(); emErr == nil {
+				options = append(options, fmt.Sprintf("open the current store with the passphrase-protected key in %s", emergencyPath))
+			} else {
+				log.Printf("CRITICAL: new master key not saved: %v", emErr)
+			}
+			recovery := "none on disk"
+			if len(options) > 0 {
+				recovery = strings.Join(options, ", or ")
+			}
 			s.provider.RollbackRotation()
-			return 0, fmt.Errorf("post-save callback: %w", err)
+			log.Printf("CRITICAL: master key rotation failed and the store on disk may be unreadable. "+
+				"The running server still has a working key and DEKs in memory; the next successful "+
+				"write repairs the store, so do not restart before then. Manual recovery: %s", recovery)
+			return 0, fmt.Errorf("CRITICAL: callback failed: %w; store restore failed: %v; "+
+				"store rewrite failed; recovery: %s", err, restoreErr, recovery)
 		}
 	}
 
@@ -434,38 +471,44 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	return len(nsNames), nil
 }
 
-// emergencyPersistPendingKey saves the provider's staged key to an
-// emergency recovery file as a last resort. This is called only in the
-// double-failure path where both the afterSave callback and the store
-// file restore fail, to prevent the new key from being lost.
-func (s *Store) emergencyPersistPendingKey() {
+// emergencyPersistPendingKey saves the provider's staged (new) master key
+// to <store>.emergency-key and returns that path. It runs only in the
+// rotation path where the callback, the backup restore, and the store
+// rewrite all failed, so the store on disk may hold new-key DEKs.
+//
+// The key is written ONLY when a passphrase is configured, and then only
+// passphrase-encrypted. With no passphrase it refuses and returns an error:
+// Phoenix never writes an unprotected master key to a side file (review
+// finding M2, 2026-07-19). The .pre-rotate backup covers recovery instead.
+// The operator deletes the file once recovery is done.
+func (s *Store) emergencyPersistPendingKey() (string, error) {
 	fkp, ok := s.provider.(*crypto.FileKeyProvider)
-	if !ok || fkp.PendingMasterKey() == nil {
-		return
+	if !ok {
+		return "", fmt.Errorf("provider %T does not expose key material", s.provider)
+	}
+	pending := fkp.PendingMasterKey()
+	if pending == nil {
+		return "", errors.New("no pending key")
+	}
+	defer crypto.ZeroBytes(pending)
+	if fkp.Passphrase() == "" {
+		return "", errors.New("no passphrase configured; refusing to write an unprotected master key")
 	}
 	emergencyPath := s.filePath + ".emergency-key"
-	var err error
-	if fkp.Passphrase() != "" {
-		err = crypto.SaveProtectedMasterKey(emergencyPath, fkp.PendingMasterKey(), fkp.Passphrase())
-	} else {
-		err = crypto.SaveMasterKeyAtomic(emergencyPath, fkp.PendingMasterKey())
+	if err := crypto.SaveProtectedMasterKey(emergencyPath, pending, fkp.Passphrase()); err != nil {
+		return "", fmt.Errorf("saving emergency key to %s: %w", emergencyPath, err)
 	}
-	if err != nil {
-		log.Printf("CRITICAL: failed to save emergency key to %s: %v", emergencyPath, err)
-		return
-	}
-	log.Printf("CRITICAL: emergency recovery key saved to %s — "+
-		"use this key with the current store file to recover, "+
-		"or restore store from .pre-rotate backup with the old key", emergencyPath)
+	return emergencyPath, nil
 }
 
-// copyFile copies src to dst with 0600 permissions.
+// copyFile copies src to dst with 0600 permissions. dst is fsynced because
+// the rotation rollback renames it over the live store file.
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0600)
+	return fsutil.WriteFileAtomic(dst, data, 0600)
 }
 
 // Provider returns the store's KeyProvider.

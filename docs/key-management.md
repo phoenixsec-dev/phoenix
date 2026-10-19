@@ -12,6 +12,28 @@ Phoenix generates a new master key, re-wraps namespace DEKs, and persists the
 change atomically. If anything fails mid-rotation, the two-phase commit path
 recovers automatically.
 
+The store file and master key file are written with fsync before and after
+the rename, so a crash or power loss leaves either the old or the new file,
+never a truncated one.
+
+### If rotation fails
+
+Normally a failed rotation rolls back on its own and the old key stays in
+use. In the rare case where the rollback cannot repair the store file either,
+the server logs a `CRITICAL` message and leaves these recovery files next to
+the store:
+
+- `<store>.pre-rotate` — the store as it was before rotation, readable with
+  the current `master.key`. Recovery: stop the server, move it over the
+  store file, start again.
+- `<store>.emergency-key` — the new master key, written **only** when the
+  master key is passphrase-protected, and encrypted with that passphrase.
+  Without a passphrase Phoenix refuses to write the new key to disk at all.
+
+The running server keeps a working key in memory, and its next successful
+write repairs the store file, so avoid restarting it until you have acted.
+Delete both files once you have recovered.
+
 ## Master key passphrase protection
 
 Phoenix can protect the master key file with a passphrase using Argon2id and
