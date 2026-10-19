@@ -1,17 +1,24 @@
+# Phoenix server in Docker. First run, initialize the volume once (prints
+# the admin token a single time):
+#
+#   docker compose run --rm phoenix --init /data
+#   docker compose up -d
+#   export PHOENIX_TOKEN=<admin token>
+#   docker compose exec -e PHOENIX_TOKEN phoenix phoenix status
+#
+# No ports are published: the generated config listens on the container's
+# own loopback, which is the safe default. To reach Phoenix from the host,
+# enable TLS first, then uncomment "ports" (see docs/quickstart.md,
+# "Reaching the container from the host").
 services:
   phoenix:
     build: .
     container_name: phoenix
-    ports:
-      - "127.0.0.1:9090:9090"
+    # ports:
+    #   - "127.0.0.1:9090:9090"
     volumes:
       - phoenix-data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/v1/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
 
 volumes:
   phoenix-data:
