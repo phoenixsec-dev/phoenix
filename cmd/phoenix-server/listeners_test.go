@@ -79,10 +79,14 @@ func testClient(t *testing.T, tlsCfg *tls.Config) *http.Client {
 
 func startTestListeners(t *testing.T, cfg *config.Config, handler http.Handler, tlsCfg *tls.Config, client *http.Client) (*listenerLog, func()) {
 	t.Helper()
+	optional, err := loadHTTPSListener(cfg.HTTPSListener)
+	if err != nil {
+		t.Fatal(err)
+	}
 	primary := &http.Server{Addr: cfg.Server.Listen, Handler: handler, TLSConfig: tlsCfg, ReadHeaderTimeout: time.Second}
 	logs := &listenerLog{}
 	done := make(chan error, 1)
-	go func() { done <- serveListeners(primary, cfg, logs.printf) }()
+	go func() { done <- serveListeners(primary, cfg, optional, logs.printf) }()
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -198,9 +202,46 @@ func TestOptionalHTTPSSharedHandlerAndTLSVerification(t *testing.T) {
 	}
 }
 
-func TestOptionalHTTPSSetupFailurePreservesPrimary(t *testing.T) {
-	_, optional, trust := testCertificates(t)
+// Static misconfiguration must stop startup: Config.Validate catches missing
+// fields and loadHTTPSListener catches certificates that cannot be loaded.
+func TestOptionalHTTPSStaticMisconfigurationIsFatal(t *testing.T) {
+	_, optional, _ := testCertificates(t)
 	_, other, _ := testCertificates(t)
+	for _, tc := range []struct {
+		name   string
+		change func(*config.Config)
+		want   string
+	}{
+		{"empty address", func(c *config.Config) { c.HTTPSListener.Listen = "" }, "https_listener.listen is required"},
+		{"empty certificate", func(c *config.Config) { c.HTTPSListener.Cert = "" }, "https_listener.cert and https_listener.key are required"},
+		{"missing certificate", func(c *config.Config) { c.HTTPSListener.Cert = "missing" }, "https_listener: loading certificate"},
+		{"mismatched certificate", func(c *config.Config) { c.HTTPSListener.Key = other.Key }, "https_listener: loading certificate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.HTTPSListener = optional
+			tc.change(cfg)
+			err := cfg.Validate()
+			if err == nil {
+				_, err = loadHTTPSListener(cfg.HTTPSListener)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want error containing %q", err, tc.want)
+			}
+		})
+	}
+	disabled := optional
+	disabled.Enabled = false
+	disabled.Cert = "missing"
+	if l, err := loadHTTPSListener(disabled); l != nil || err != nil {
+		t.Fatalf("disabled listener loaded: %v, %v", l, err)
+	}
+}
+
+// Runtime failures (bind) are contained: the optional endpoint is logged as
+// unavailable and the primary keeps serving.
+func TestOptionalHTTPSBindFailurePreservesPrimary(t *testing.T) {
+	_, optional, trust := testCertificates(t)
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -212,9 +253,6 @@ func TestOptionalHTTPSSetupFailurePreservesPrimary(t *testing.T) {
 		want   string
 	}{
 		{"disabled", func(c *config.Config) { c.HTTPSListener.Enabled = false; c.HTTPSListener.Cert = "missing" }, ""},
-		{"missing certificate", func(c *config.Config) { c.HTTPSListener.Cert = "missing" }, "loading certificate"},
-		{"mismatched certificate", func(c *config.Config) { c.HTTPSListener.Key = other.Key }, "loading certificate"},
-		{"empty address", func(c *config.Config) { c.HTTPSListener.Listen = "" }, "https_listener.listen is required"},
 		{"bad address", func(c *config.Config) { c.HTTPSListener.Listen = "bad-address" }, "binding"},
 		{"occupied", func(c *config.Config) { c.HTTPSListener.Listen = occupied.Addr().String() }, "binding"},
 		{"primary overlap", func(c *config.Config) { c.HTTPSListener.Listen = c.Server.Listen }, "binding"},
@@ -358,8 +396,12 @@ func TestPrimaryBindFailureDoesNotStartOptionalHTTPS(t *testing.T) {
 	_, optional, _ := testCertificates(t)
 	cfg := config.DefaultConfig()
 	cfg.HTTPSListener = optional
+	loaded, err := loadHTTPSListener(optional)
+	if err != nil {
+		t.Fatal(err)
+	}
 	logs := &listenerLog{}
-	if err := serveListeners(&http.Server{Addr: occupied.Addr().String()}, cfg, logs.printf); err == nil {
+	if err := serveListeners(&http.Server{Addr: occupied.Addr().String()}, cfg, loaded, logs.printf); err == nil {
 		t.Fatal("primary bind failure must be returned")
 	}
 	if logs.text() != "" {

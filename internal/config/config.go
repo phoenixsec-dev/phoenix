@@ -59,16 +59,17 @@ type HTTPSListenerConfig struct {
 	Key     string `json:"key,omitempty"`
 }
 
-// Validate is deliberately separate from Config.Validate: an unusable optional
-// listener must not prevent the primary endpoint from starting.
+// Validate is called from Config.Validate, so a blank address or missing
+// certificate path stops startup like any other config error. Only runtime
+// failures (bind, serve) are contained so the primary keeps running.
 func (c HTTPSListenerConfig) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	if strings.TrimSpace(c.Listen) == "" {
+	if c.Listen == "" {
 		return errors.New("https_listener.listen is required")
 	}
-	if strings.TrimSpace(c.Cert) == "" || strings.TrimSpace(c.Key) == "" {
+	if c.Cert == "" || c.Key == "" {
 		return errors.New("https_listener.cert and https_listener.key are required")
 	}
 	return nil
@@ -374,6 +375,9 @@ func (c *Config) Validate() error {
 		if cert == "" || key == "" {
 			return errors.New("tls.enabled requires tls.cert and tls.key paths (or the auth.mtls.server_cert/server_key paths written by --init)")
 		}
+	}
+	if err := c.HTTPSListener.Validate(); err != nil {
+		return err
 	}
 	// mTLS requires CA and server cert paths
 	if c.Auth.MTLS.Enabled {

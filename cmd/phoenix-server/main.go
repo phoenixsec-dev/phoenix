@@ -140,6 +140,12 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}
+	// Load the optional HTTPS certificate before anything else starts: a bad
+	// path or mismatched key is a config error and stops startup, like any other.
+	optionalHTTPS, err := loadHTTPSListener(cfg.HTTPSListener)
+	if err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
 
 	// Initialize backend
 	var backend store.SecretBackend
@@ -390,7 +396,7 @@ func main() {
 			log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
 		}
 	}
-	if err := serveListeners(httpSrv, cfg, log.Printf); err != nil {
+	if err := serveListeners(httpSrv, cfg, optionalHTTPS, log.Printf); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }

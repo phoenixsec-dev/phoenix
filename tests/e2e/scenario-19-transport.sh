@@ -11,7 +11,8 @@
 #   - MCP HTTP transport serves TLS via --tls-cert/--tls-key and warns on
 #     plaintext non-loopback binds
 #   - optional HTTPS shares HTTP auth/store/session/policy/dashboard state
-#     and optional startup failures leave HTTP available
+#   - optional HTTPS misconfiguration (blank address, bad certificate) stops
+#     startup; an optional bind failure is logged and HTTP stays available
 #
 # Per harness convention, nothing here binds a non-loopback interface. The
 # non-loopback warning is asserted with a TEST-NET-1 address (192.0.2.1,
@@ -223,17 +224,27 @@ assert_eq "$(dual_status "$HTTPS_URL" /v1/secrets/dual/key "$ADMIN_TOKEN")" 401 
 ok "optional HTTPS shares auth, ACL, source-IP policy, store, sessions, dashboard and rate limits"
 stop_server
 
-# --- 9. Optional setup failures preserve the primary HTTP endpoint ---
+# --- 9. Optional misconfiguration is fatal; optional bind failure is not ---
+# A static config mistake must stop startup (like every other config error),
+# so a bad deploy cannot look healthy while the HTTPS endpoint is missing.
+run_expect_fatal() {
+  local logfile="$1" want="$2" rc=0
+  timeout 10 "$PHOENIX_SERVER_BIN" --config "$RUN_DIR/config.json" >"$logfile" 2>&1 || rc=$?
+  [[ "$rc" -ne 0 && "$rc" -ne 124 ]] || die "server did not refuse to start (rc=$rc)"
+  assert_contains "$(cat "$logfile")" "$want" "fatal startup reason missing"
+  if curl -fsS --max-time 2 "$PHOENIX_SERVER/v1/health" >/dev/null 2>&1; then
+    die "primary endpoint served despite fatal optional misconfiguration"
+  fi
+}
 config_patch "d['https_listener']['cert']='$RUN_DIR/missing.crt'"
-start_server
-assert_contains "$(cat "$RUN_DIR/server.log")" "Optional HTTPS listener" "optional certificate error not reported"
-assert_contains "$(cat "$RUN_DIR/server.log")" "primary endpoint continues" "failure containment log missing"
-assert_eq "$(phoenix_admin get dual/key)" synthetic-http-update "HTTP survives missing optional certificate"
-if curl -fsS --max-time 2 "http://127.0.0.1:$HTTPS_PORT/v1/health" >/dev/null 2>&1; then
-  die "optional certificate failure left a plaintext fallback"
-fi
-stop_server
-config_patch "d['https_listener']['cert']='$RUN_DIR/server.crt'; d['https_listener']['listen']='127.0.0.1:$PORT'"
+run_expect_fatal "$RUN_DIR/fatal-cert.log" "invalid config: https_listener: loading certificate"
+config_patch "d['https_listener']['cert']='$RUN_DIR/server.crt'; d['https_listener']['listen']=''"
+run_expect_fatal "$RUN_DIR/fatal-listen.log" "invalid config: https_listener.listen is required"
+ok "optional HTTPS misconfiguration stops startup"
+
+# A runtime bind failure is contained: the primary reserves its port first,
+# so pointing the optional listener at it fails only the optional endpoint.
+config_patch "d['https_listener']['listen']='127.0.0.1:$PORT'"
 start_server
 assert_contains "$(cat "$RUN_DIR/server.log")" "primary endpoint continues" "overlapping optional port not reported"
 assert_eq "$(phoenix_admin get dual/key)" synthetic-http-update "primary reserves its port before optional HTTPS"
@@ -242,7 +253,7 @@ config_patch "d['https_listener']['enabled']=False; d['https_listener']['cert']=
 start_server
 assert_eq "$(phoenix_admin get dual/key)" synthetic-http-update "disabled optional config ignored"
 assert_not_contains "$(cat "$RUN_DIR/server.log")" "Optional HTTPS listener" "disabled optional listener attempted setup"
-ok "optional listener failures and disabled configuration preserve HTTP"
+ok "optional bind failure and disabled configuration preserve HTTP"
 
 stop_server
 ok "Scenario 19 passed"

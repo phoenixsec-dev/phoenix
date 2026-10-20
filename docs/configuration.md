@@ -239,13 +239,16 @@ client-certificate verification and revocation checks to both listeners. When
 `auth.mtls.require` is true, both endpoints require a valid client certificate.
 Leave both settings false for the HTTP-plus-HTTPS example above.
 
-An omitted or disabled `https_listener` opens no additional socket and ignores
-unused optional addresses and certificate paths. If optional validation,
-certificate loading, binding, or serving fails, Phoenix logs the endpoint and
-error while the primary continues. The primary reserves its port first, so an
-overlapping optional address cannot take it. HTTPS never falls back to plaintext.
-Malformed JSON, primary failures, shared backend failures, and process restarts
-can still affect both endpoints.
+An omitted or disabled `https_listener` opens no additional socket. When it is
+enabled, a configuration mistake stops startup, the same as any other config
+error: a blank `listen`, `cert`, or `key`, or a certificate and key that cannot
+be loaded. Phoenix exits with `invalid config: ...` instead of starting without
+the HTTPS endpoint you asked for. Problems with the host rather than the config
+(the address is in use or cannot be bound, or the listener stops accepting
+connections) are logged as `Optional HTTPS listener ... primary endpoint
+continues` and HTTP keeps serving. The primary reserves its port first, so an
+overlapping optional address cannot take it. HTTPS never falls back to
+plaintext.
 
 The existing HTTP health check only checks HTTP. Monitor HTTPS separately with
 certificate verification and expiry alerts. An optional HTTPS outage should not

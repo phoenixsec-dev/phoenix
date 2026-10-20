@@ -29,14 +29,17 @@ func TestHTTPSListenerConfig(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := cfg.Validate(); err != nil {
-				t.Fatalf("optional config broke primary validation: %v", err)
+			// An incomplete enabled block is a startup error, like any other
+			// config error; it must be reported by the top-level Validate.
+			err = cfg.Validate()
+			if (err != nil) != tc.wantError {
+				t.Fatalf("validation: %v", err)
+			}
+			if err != nil && !strings.Contains(err.Error(), "https_listener") {
+				t.Fatalf("error does not name https_listener: %v", err)
 			}
 			if cfg.TLSEnabled() || cfg.Server.Listen != "127.0.0.1:9090" {
 				t.Fatal("optional config changed primary transport")
-			}
-			if err := cfg.HTTPSListener.Validate(); (err != nil) != tc.wantError {
-				t.Fatalf("optional validation: %v", err)
 			}
 			data, err := json.Marshal(cfg)
 			if err != nil {
