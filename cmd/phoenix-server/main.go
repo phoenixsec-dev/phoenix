@@ -379,11 +379,8 @@ func main() {
 
 	if cfg.TLSEnabled() {
 		// Use the dedicated server leaf cert for TLS identity (NOT the CA cert)
-		serverCert, serverKey := cfg.TLSCertKey()
+		serverCert, _ := cfg.TLSCertKey()
 		log.Printf("  TLS: enabled (server cert: %s)", serverCert)
-		if err := httpSrv.ListenAndServeTLS(serverCert, serverKey); err != nil {
-			log.Fatalf("server error: %v", err)
-		}
 	} else {
 		log.Printf("  TLS: disabled (plaintext HTTP)")
 		if !transport.IsLoopbackListen(cfg.Server.Listen) {
@@ -392,9 +389,9 @@ func main() {
 			// secret values on the wire in cleartext.
 			log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
 		}
-		if err := httpSrv.ListenAndServe(); err != nil {
-			log.Fatalf("server error: %v", err)
-		}
+	}
+	if err := serveListeners(httpSrv, cfg, log.Printf); err != nil {
+		log.Fatalf("server error: %v", err)
 	}
 }
 

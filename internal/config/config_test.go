@@ -2,9 +2,62 @@ package config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestHTTPSListenerConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, block string
+		wantError   bool
+	}{
+		{"omitted", `{}`, false},
+		{"disabled", `{"https_listener":{"enabled":false,"listen":"bad","cert":"missing"}}`, false},
+		{"missing address", `{"https_listener":{"enabled":true,"cert":"cert","key":"key"}}`, true},
+		{"missing cert", `{"https_listener":{"enabled":true,"listen":"127.0.0.1:9443","key":"key"}}`, true},
+		{"missing key", `{"https_listener":{"enabled":true,"listen":"127.0.0.1:9443","cert":"cert"}}`, true},
+		{"complete", `{"https_listener":{"enabled":true,"listen":"127.0.0.1:9443","cert":"cert","key":"key"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.block), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("optional config broke primary validation: %v", err)
+			}
+			if cfg.TLSEnabled() || cfg.Server.Listen != "127.0.0.1:9090" {
+				t.Fatal("optional config changed primary transport")
+			}
+			if err := cfg.HTTPSListener.Validate(); (err != nil) != tc.wantError {
+				t.Fatalf("optional validation: %v", err)
+			}
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var roundtrip Config
+			if err := json.Unmarshal(data, &roundtrip); err != nil {
+				t.Fatal(err)
+			}
+			if roundtrip.HTTPSListener != cfg.HTTPSListener {
+				t.Fatal("optional config did not round trip")
+			}
+		})
+	}
+	if DefaultConfig().HTTPSListener.Enabled || ExampleConfig().HTTPSListener.Enabled {
+		t.Fatal("HTTPS listener must be opt-in")
+	}
+	if ExampleConfig().HTTPSListener.Listen != "127.0.0.1:9443" {
+		t.Fatal("example must bind optional listener to loopback")
+	}
+}
 
 func TestValidateRequiresAuthMode(t *testing.T) {
 	cfg := DefaultConfig()
