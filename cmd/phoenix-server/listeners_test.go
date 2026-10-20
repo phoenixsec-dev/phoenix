@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,7 +84,7 @@ func startTestListeners(t *testing.T, cfg *config.Config, handler http.Handler, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	primary := &http.Server{Addr: cfg.Server.Listen, Handler: handler, TLSConfig: tlsCfg, ReadHeaderTimeout: time.Second}
+	primary := newHTTPServer(cfg.Server.Listen, handler, tlsCfg)
 	logs := &listenerLog{}
 	done := make(chan error, 1)
 	go func() { done <- serveListeners(primary, cfg, optional, logs.printf) }()
@@ -264,6 +265,9 @@ func TestOptionalHTTPSBindFailurePreservesPrimary(t *testing.T) {
 		}, "binding"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "wildcard overlap" && runtime.GOOS != "linux" {
+				t.Skip("relies on Linux refusing a wildcard bind over a loopback socket on the same port")
+			}
 			cfg := config.DefaultConfig()
 			cfg.Server.Listen = testAddress(t)
 			cfg.HTTPSListener = optional

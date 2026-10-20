@@ -13,7 +13,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -373,15 +372,7 @@ func main() {
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
 	log.Printf("  Audit: %s", cfg.Audit.Path)
 
-	httpSrv := &http.Server{
-		Addr:              cfg.Server.Listen,
-		Handler:           srv,
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	httpSrv := newHTTPServer(cfg.Server.Listen, srv, tlsCfg)
 
 	if cfg.TLSEnabled() {
 		// Use the dedicated server leaf cert for TLS identity (NOT the CA cert)

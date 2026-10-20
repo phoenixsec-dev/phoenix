@@ -179,7 +179,7 @@ dual_status() {
     "$url$path" -H "Authorization: Bearer $token"
 }
 for url in "$HTTP_URL" "$HTTPS_URL"; do
-  assert_eq "$(dual_status "$url" /v1/secrets/dual/key)" 401 "missing bearer denied"
+  assert_eq "$(dual_status "$url" /v1/secrets/dual/key)" 401 "empty bearer denied"
   assert_eq "$(dual_status "$url" /v1/secrets/dual/key invalid-synthetic)" 401 "invalid bearer denied"
   assert_eq "$(dual_status "$url" /v1/secrets/forbidden/key synthetic-dual-reader)" 403 "ACL denied on both transports"
   assert_eq "$(dual_status "$url" /v1/secrets/dual/key synthetic-dual-reader)" 200 "scoped bearer and loopback source policy"
@@ -213,11 +213,19 @@ for url in "$HTTP_URL" "$HTTPS_URL"; do
   assert_eq "$(dual_status "$url" /dashboard/login)" 200 "portal remains available"
 done
 
-# Five failures across both ports must share the same source-IP limiter.
+# Failures across both ports must share the same source-IP limiter. Five
+# failures lock the IP out for 1s, and each later failure doubles that, but a
+# failure only counts once the previous lockout has expired. So wait out the
+# 1s and 2s windows: the seventh failure leaves a 4s lockout, wide enough that
+# a slow box cannot let the proving request below slip past it.
 assert_eq "$(dual_status "$HTTP_URL" /v1/secrets/dual/key "$ADMIN_TOKEN")" 200
 for url in "$HTTP_URL" "$HTTPS_URL" "$HTTP_URL" "$HTTPS_URL" "$HTTP_URL"; do
   assert_eq "$(dual_status "$url" /v1/secrets/dual/key invalid-synthetic)" 401
 done
+sleep 1.2
+assert_eq "$(dual_status "$HTTPS_URL" /v1/secrets/dual/key invalid-synthetic)" 401
+sleep 2.2
+assert_eq "$(dual_status "$HTTP_URL" /v1/secrets/dual/key invalid-synthetic)" 401
 # Phoenix intentionally reports all bearer authentication failures as 401.
 # A known-good token being denied here proves the shared limiter is active.
 assert_eq "$(dual_status "$HTTPS_URL" /v1/secrets/dual/key "$ADMIN_TOKEN")" 401 "switching ports must not reset rate limiting"

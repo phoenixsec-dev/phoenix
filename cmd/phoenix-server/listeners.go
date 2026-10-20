@@ -6,9 +6,24 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/phoenixsec/phoenix/internal/config"
 )
+
+// newHTTPServer builds every Phoenix HTTP server, primary and optional, so
+// timeouts and other settings cannot drift between the two endpoints.
+func newHTTPServer(addr string, handler http.Handler, tlsCfg *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
 
 // httpsListener is an enabled https_listener block whose certificate has
 // already been loaded. A nil *httpsListener means the feature is off.
@@ -57,6 +72,10 @@ func serveListeners(primary *http.Server, cfg *config.Config, optional *httpsLis
 	return primary.Serve(listener)
 }
 
+// startHTTPSListener binds the optional HTTPS address and serves the primary's
+// handler on it in the background, reusing the primary's mTLS/CRL settings.
+// It returns a stop function that shuts the endpoint down and waits for it, or
+// a bind error that the caller logs while the primary continues.
 func startHTTPSListener(primary *http.Server, optional *httpsListener, logf func(string, ...any)) (func(), error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
 	if primary.TLSConfig != nil {
@@ -65,13 +84,7 @@ func startHTTPSListener(primary *http.Server, optional *httpsListener, logf func
 		tlsCfg = primary.TLSConfig.Clone()
 	}
 	tlsCfg.Certificates = []tls.Certificate{optional.cert}
-	server := &http.Server{
-		Addr: optional.addr, Handler: primary.Handler, TLSConfig: tlsCfg,
-		ReadHeaderTimeout: primary.ReadHeaderTimeout,
-		ReadTimeout:       primary.ReadTimeout,
-		WriteTimeout:      primary.WriteTimeout,
-		IdleTimeout:       primary.IdleTimeout,
-	}
+	server := newHTTPServer(optional.addr, primary.Handler, tlsCfg)
 	listener, err := net.Listen("tcp", optional.addr)
 	if err != nil {
 		return nil, fmt.Errorf("binding: %w", err)
@@ -90,6 +103,9 @@ func startHTTPSListener(primary *http.Server, optional *httpsListener, logf func
 	}, nil
 }
 
+// serveOptionalHTTPS runs the optional endpoint until it is closed. A runtime
+// failure (for example, accept errors) is logged, never returned, so it cannot
+// take the primary endpoint down with it.
 func serveOptionalHTTPS(server *http.Server, listener net.Listener, logf func(string, ...any)) {
 	if err := server.ServeTLS(listener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logf("Optional HTTPS listener %q stopped: %v; primary endpoint continues", server.Addr, err)
