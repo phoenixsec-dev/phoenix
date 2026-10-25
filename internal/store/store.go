@@ -131,21 +131,31 @@ func (s *Store) load() error {
 // directory fsync (fsutil.WriteFileAtomic). The whole store is one file, so
 // a torn write here would lose every secret at once.
 func (s *Store) save() error {
-	data, err := json.MarshalIndent(s.data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling store: %w", err)
-	}
-
 	dir := filepath.Dir(s.filePath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating store directory: %w", err)
 	}
-
-	if err := fsutil.WriteFileAtomic(s.filePath, data, 0600); err != nil {
+	if err := s.writeSnapshot(s.filePath); err != nil {
 		return fmt.Errorf("saving store file: %w", err)
 	}
-
 	return nil
+}
+
+// Test seams: the store's file writer and the rotation-restore rename.
+// Tests swap them to simulate a failing disk without chmod tricks.
+var (
+	writeFileAtomic = fsutil.WriteFileAtomic
+	renameFile      = os.Rename
+)
+
+// writeSnapshot writes the in-memory store to path (crash-safe, mode 0600).
+// Used for the live store file and the pre-rotation backup.
+func (s *Store) writeSnapshot(path string) error {
+	data, err := json.MarshalIndent(s.data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling store: %w", err)
+	}
+	return writeFileAtomic(path, data, 0600)
 }
 
 // namespace extracts the namespace from a secret path (first segment).
@@ -365,14 +375,20 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 		wrappedDEKs[i] = &w
 	}
 
-	// Backup the store file before mutation. On callback failure we
-	// restore via atomic rename instead of re-marshaling, which
-	// eliminates the double-failure path where both callback and
-	// rollback-save fail.
+	// Back up the store before mutation. On callback failure we restore
+	// via atomic rename instead of re-marshaling, which eliminates the
+	// double-failure path where both callback and rollback-save fail.
+	//
+	// The backup is written from memory, not copied from the store file.
+	// Memory always matches the active key; the file may not, because a
+	// previous rotation that failed totally can leave abandoned new-key
+	// wrappers on disk. Copying that file would overwrite the good backup
+	// kept from that failure, and a second failure would then "restore"
+	// a store no key on disk can open.
 	preRotatePath := s.filePath + ".pre-rotate"
 	keepBackup := false // set when the backup is the operator's recovery path
 	if afterSave != nil {
-		if err := copyFile(s.filePath, preRotatePath); err != nil {
+		if err := s.writeSnapshot(preRotatePath); err != nil {
 			return 0, fmt.Errorf("backing up store before rotation: %w", err)
 		}
 		defer func() {
@@ -418,7 +434,7 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 			// Restore store file from pre-rotation backup via atomic rename.
 			// This is more reliable than re-marshaling + re-saving because
 			// it's a single rename syscall on the same filesystem.
-			restoreErr := os.Rename(preRotatePath, s.filePath)
+			restoreErr := renameFile(preRotatePath, s.filePath)
 			if restoreErr == nil {
 				// Without this the restore could be undone by a crash,
 				// leaving new-key DEKs on disk next to the old key file.
@@ -449,7 +465,7 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 				options = append(options, fmt.Sprintf("restore %s over %s and keep the current key file", preRotatePath, s.filePath))
 			}
 			if emergencyPath, emErr := s.emergencyPersistPendingKey(); emErr == nil {
-				options = append(options, fmt.Sprintf("open the current store with the passphrase-protected key in %s", emergencyPath))
+				options = append(options, fmt.Sprintf("keep %s and put %s in place of the master key file (same passphrase)", s.filePath, emergencyPath))
 			} else {
 				log.Printf("CRITICAL: new master key not saved: %v", emErr)
 			}
@@ -499,16 +515,6 @@ func (s *Store) emergencyPersistPendingKey() (string, error) {
 		return "", fmt.Errorf("saving emergency key to %s: %w", emergencyPath, err)
 	}
 	return emergencyPath, nil
-}
-
-// copyFile copies src to dst with 0600 permissions. dst is fsynced because
-// the rotation rollback renames it over the live store file.
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return fsutil.WriteFileAtomic(dst, data, 0600)
 }
 
 // Provider returns the store's KeyProvider.

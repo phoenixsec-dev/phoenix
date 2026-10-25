@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,5 +70,71 @@ func TestWriteFileAtomicFailureKeepsOriginal(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("temp file left behind: %d entries", len(entries))
+	}
+}
+
+// swapSeam replaces a package seam for one test and restores it afterwards.
+func swapSeam[T any](t *testing.T, seam *T, fake T) {
+	t.Helper()
+	orig := *seam
+	*seam = fake
+	t.Cleanup(func() { *seam = orig })
+}
+
+// The temp file must be fsynced BEFORE the rename (target still old when
+// the sync runs), and a failed sync must leave the target untouched.
+func TestWriteFileAtomicFileSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.json")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var atSync string
+	swapSeam(t, &syncFile, func(f *os.File) error {
+		got, _ := os.ReadFile(path)
+		atSync = string(got)
+		return errors.New("injected sync failure")
+	})
+
+	if err := WriteFileAtomic(path, []byte("new"), 0600); err == nil {
+		t.Fatal("expected error when the temp file sync fails")
+	}
+	if atSync != "old" {
+		t.Fatalf("target held %q during file sync; sync must run before rename", atSync)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "old" {
+		t.Fatalf("target changed after failed sync: %q %v", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("temp file left behind: %d entries", len(entries))
+	}
+}
+
+// The directory is fsynced AFTER the rename. If that sync fails the file
+// has already been replaced, so the call must report success (an error
+// would tell callers the old content is still in place).
+func TestWriteFileAtomicDirSyncFailureStillSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.json")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var atSync string
+	swapSeam(t, &syncDir, func(string) error {
+		got, _ := os.ReadFile(path)
+		atSync = string(got)
+		return errors.New("injected dir sync failure")
+	})
+
+	if err := WriteFileAtomic(path, []byte("new"), 0600); err != nil {
+		t.Fatalf("dir sync failure after rename must not be an error: %v", err)
+	}
+	if atSync != "new" {
+		t.Fatalf("target held %q during dir sync; dir sync must run after rename", atSync)
 	}
 }

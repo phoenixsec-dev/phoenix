@@ -11,7 +11,13 @@ import (
 
 // WriteFileAtomic replaces path with data so that, after a crash or power
 // loss, the file holds either the complete old content or the complete new
-// content — never a zero-length or half-written file.
+// content — never a zero-length or half-written file. This assumes the
+// filesystem honors fsync (normal local ext4/xfs/zfs do).
+//
+// It covers ONE file. Two files written one after the other (the store and
+// master.key during rotation) are not a transaction: a crash between them
+// can leave a new store next to an old key. Rotation handles that with the
+// .pre-rotate backup.
 //
 // Steps: write a temp file in the same directory, fsync it, rename it over
 // path, then fsync the directory so the rename itself is on disk. Without
@@ -42,7 +48,7 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if _, err := f.Write(data); err != nil {
 		return fail("writing temp file", err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		return fail("syncing temp file", err)
 	}
 	if err := f.Close(); err != nil {
@@ -58,13 +64,21 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// fails we log loudly but return nil: returning an error here would make
 	// callers roll back as if the old file were still in place, and during
 	// master key rotation that pairs a new key file with old DEK wrappers —
-	// unrecoverable. The filesystem still flushes the rename on its own.
-	if err := SyncDir(dir); err != nil {
+	// unrecoverable. The filesystem still flushes the rename on its own, but
+	// until it does a power cut can bring back the old content (still a whole
+	// file, never a torn one).
+	if err := syncDir(dir); err != nil {
 		log.Printf("WARNING: %s was replaced but syncing directory %s failed: %v — "+
 			"the change may not survive a power loss", path, dir, err)
 	}
 	return nil
 }
+
+// Test seams: tests swap these to inject fsync failures and check ordering.
+var (
+	syncFile = (*os.File).Sync
+	syncDir  = SyncDir
+)
 
 // SyncDir fsyncs a directory so that renames and new entries in it are
 // durable. Call it after os.Rename when the rename must survive a crash.
