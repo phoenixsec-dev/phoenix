@@ -1,5 +1,55 @@
 # Release Notes
 
+## v0.18.0 (2026-10-25)
+
+### Optional HTTPS Listener: Move Clients to HTTPS One at a Time
+
+v0.17.0 made HTTPS a one-line switch, but flipping `tls.enabled` converts the
+primary address for every client at once. On a fleet with many HTTP consumers
+that is a flag day. v0.18.0 lets a server offer HTTPS on a second address while
+the existing HTTP endpoint keeps working, so clients can move over gradually
+and nothing breaks for the ones that have not moved yet.
+
+- **New `https_listener` config block**, disabled by default. When enabled it
+  serves HTTPS on its own `listen` address with its own `cert`/`key`. Both
+  endpoints share one handler, so secrets, ACLs, policies, sessions, the bearer
+  rate limiter, and the audit log are the same on either port. Source-IP policy
+  uses the direct client address on both. HTTP is not redirected.
+- **mTLS carries over.** If `auth.mtls` is enabled, its client-certificate
+  verification and CRL revocation checks apply to the HTTPS listener too,
+  including `auth.mtls.require`.
+- **Misconfiguration is fatal, runtime failures are contained.** A blank
+  `listen`, `cert`, or `key`, or a certificate that cannot be loaded, stops
+  startup with `invalid config: ...`, the same as every other config error, so
+  a bad deploy cannot look healthy. If the HTTPS address cannot be bound or the
+  listener fails while running, Phoenix logs it and the primary keeps serving.
+  The primary binds first, so an overlapping address cannot take its port.
+  HTTPS never falls back to plaintext.
+- **`--init` output** now includes `"https_listener": {"enabled": false}` in
+  newly written config files.
+- **Docs**: new "Optional HTTPS alongside the existing endpoint" section in
+  `docs/configuration.md`, linked from `docs/getting-started.md` and
+  `docs/lan-deployment.md`. e2e scenario 19 covers the shared state, the fatal
+  misconfiguration cases, and bind-failure containment.
+
+**Upgrading:** no action required. Configs without `https_listener` load with
+it disabled and behave exactly as before. To use it, see the configuration
+docs; monitor the HTTPS port separately, since the existing health check only
+checks HTTP.
+
+### Installer and Docker Fixes
+
+- **`scripts/install.sh` works again.** It asked for `phoenix_vX.Y.Z_*`
+  archives, but releases ship `phoenix_X.Y.Z_*`, so every install 404'd.
+  It now hard-fails when it cannot verify the checksum, honours an explicit
+  `INSTALL_DIR`, and accepts `PHOENIX_BASE_URL` for mirrors.
+- **Docker first run works.** `--init /data` no longer fails with
+  "permission denied"; `/data` is owned by the runtime user. The healthcheck
+  follows TLS, `latest` no longer moves on `-rc` tags, and a new
+  `.dockerignore` keeps local keys out of the build context.
+- **New [Quickstart](docs/quickstart.md)**: binary and Docker paths in about
+  two minutes, checked by `scripts/quickstart-smoke.sh`.
+
 ## v0.17.1 (2026-10-25)
 
 ### Hidden Prompt for `phoenix set`

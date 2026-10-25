@@ -1,0 +1,15 @@
+# Keep the build context small and never ship local data or keys into the
+# builder stage (COPY . . would otherwise pick them up).
+.git
+bin/
+dist/
+/phoenix
+/phoenix-server
+/data/
+*.key
+*.enc
+.env
+.env.*
+tests/e2e/.bin/
+tests/e2e/logs/
+tests/e2e/results/

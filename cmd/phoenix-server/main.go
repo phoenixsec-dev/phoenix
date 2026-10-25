@@ -13,7 +13,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,6 +137,12 @@ func main() {
 		log.Fatalf("loading config: %v", err)
 	}
 	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid config: %v", err)
+	}
+	// Load the optional HTTPS certificate before anything else starts: a bad
+	// path or mismatched key is a config error and stops startup, like any other.
+	optionalHTTPS, err := loadHTTPSListener(cfg.HTTPSListener)
+	if err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}
 
@@ -367,23 +372,12 @@ func main() {
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
 	log.Printf("  Audit: %s", cfg.Audit.Path)
 
-	httpSrv := &http.Server{
-		Addr:              cfg.Server.Listen,
-		Handler:           srv,
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	httpSrv := newHTTPServer(cfg.Server.Listen, srv, tlsCfg)
 
 	if cfg.TLSEnabled() {
 		// Use the dedicated server leaf cert for TLS identity (NOT the CA cert)
-		serverCert, serverKey := cfg.TLSCertKey()
+		serverCert, _ := cfg.TLSCertKey()
 		log.Printf("  TLS: enabled (server cert: %s)", serverCert)
-		if err := httpSrv.ListenAndServeTLS(serverCert, serverKey); err != nil {
-			log.Fatalf("server error: %v", err)
-		}
 	} else {
 		log.Printf("  TLS: disabled (plaintext HTTP)")
 		if !transport.IsLoopbackListen(cfg.Server.Listen) {
@@ -392,9 +386,9 @@ func main() {
 			// secret values on the wire in cleartext.
 			log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
 		}
-		if err := httpSrv.ListenAndServe(); err != nil {
-			log.Fatalf("server error: %v", err)
-		}
+	}
+	if err := serveListeners(httpSrv, cfg, optionalHTTPS, log.Printf); err != nil {
+		log.Fatalf("server error: %v", err)
 	}
 }
 

@@ -25,7 +25,11 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
-          version: "~> v2"
+          # Pinned, not a range: the release toolchain only moves when we
+          # bump it deliberately (and the new version is past the 14-day
+          # supply-chain quarantine). Matches the local dry run in
+          # docs/release-runbook.md.
+          version: "v2.18.2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,11 +60,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: phoenixsecdev/phoenix
+          # v0.17.0 -> v0.17.0, 0.17.0, 0.17, latest. Pre-release tags
+          # (v0.18.0-rc1) get their own tags but never move "latest".
+          flavor: |
+            latest=false
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
