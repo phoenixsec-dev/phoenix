@@ -106,7 +106,7 @@ Phoenix server starting on 127.0.0.1:9090
 export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<your-admin-token>"
 
-phoenix set myapp/api-key -v "sk-live-abc123" -d "Stripe API key"
+phoenix set myapp/api-key -d "Stripe API key"   # paste at the hidden prompt
 phoenix get myapp/api-key
 ```
 

@@ -3,6 +3,8 @@
 // Usage:
 //
 //	phoenix get <path>
+//	phoenix set <path> [--description <desc>] [--tags <t1,t2>]   (hidden prompt)
+//	phoenix set <path> --multiline [--description <desc>]        (hidden, ends with Ctrl-D)
 //	phoenix set <path> --value <value> [--description <desc>] [--tags <t1,t2>]
 //	phoenix set <path> --value-stdin [--description <desc>] [--tags <t1,t2>]
 //	phoenix delete <path>
@@ -354,8 +356,10 @@ func usage() {
 
 Usage:
   phoenix get <path>                          Read a secret
-  phoenix set <path> -v <value> [-d desc]     Create/update a secret
+  phoenix set <path> [-d desc]                Create/update a secret (hidden prompt)
+  phoenix set <path> --multiline              Hidden multi-line paste (PEM keys), end with Ctrl-D
   phoenix set <path> --value-stdin            Read secret value from stdin
+  phoenix set <path> -v <value> [-d desc]     Value on the command line (leaks to history)
   phoenix delete <path>                       Delete a secret
   phoenix list [prefix]                       List secret paths
   phoenix export <prefix> -f env              Export as .env format
@@ -517,6 +521,46 @@ func cmdGet(args []string) error {
 	return nil
 }
 
+// promptSecretValue asks for a secret on the terminal with echo off, so a
+// pasted value never lands in shell history, `ps`, or the scrollback.
+// Surrounding whitespace is trimmed because clipboard copies often carry a
+// stray newline or space. Prints the length and a masked preview to stderr
+// so the user can tell they pasted the right thing. With multiline set it
+// reads until Ctrl-D, for PEM keys and certs.
+func promptSecretValue(path string, multiline bool) (string, error) {
+	var raw string
+	var err error
+	if multiline {
+		raw, err = crypto.PromptHiddenMultiline(fmt.Sprintf("Paste value for %s, then press Ctrl-D (input hidden): ", path))
+	} else {
+		raw, err = crypto.PromptPassphraseAllowEmpty(fmt.Sprintf("Value for %s (input hidden): ", path))
+	}
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", fmt.Errorf("no value entered")
+	}
+	if multiline {
+		fmt.Fprintf(os.Stderr, "Received %d lines, %d chars\n", strings.Count(value, "\n")+1, len([]rune(value)))
+	} else {
+		fmt.Fprintf(os.Stderr, "Received %s\n", maskedPreview(value))
+	}
+	return value, nil
+}
+
+// maskedPreview describes a secret without revealing it: always the length,
+// plus the first and last 4 characters only when the value is long enough
+// (20+) that those 8 characters give little away.
+func maskedPreview(v string) string {
+	r := []rune(v)
+	if len(r) < 20 {
+		return fmt.Sprintf("%d chars", len(r))
+	}
+	return fmt.Sprintf("%d chars: %s…%s", len(r), string(r[:4]), string(r[len(r)-4:]))
+}
+
 func cmdSet(args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
@@ -524,7 +568,7 @@ func cmdSet(args []string) error {
 
 	var path, value, desc string
 	var tags []string
-	var valueStdin bool
+	var valueStdin, multiline bool
 
 	i := 0
 	if i < len(args) && !strings.HasPrefix(args[i], "-") {
@@ -541,6 +585,8 @@ func cmdSet(args []string) error {
 			}
 		case "--value-stdin":
 			valueStdin = true
+		case "--multiline":
+			multiline = true
 		case "-d", "--description":
 			i++
 			if i < len(args) {
@@ -563,6 +609,10 @@ func cmdSet(args []string) error {
 		return fmt.Errorf("cannot combine -v/--value with --value-stdin")
 	}
 
+	if multiline && (value != "" || valueStdin) {
+		return fmt.Errorf("--multiline is an interactive prompt; it cannot be combined with -v or --value-stdin")
+	}
+
 	if valueStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
@@ -574,8 +624,26 @@ func cmdSet(args []string) error {
 		}
 	}
 
-	if path == "" || value == "" {
-		return fmt.Errorf("usage: phoenix set <path> -v <value> [-d description] [--tags t1,t2]\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]")
+	setUsage := fmt.Errorf("usage: phoenix set <path> [-d description] [--tags t1,t2]   (hidden prompt)\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]\n       phoenix set <path> -v <value> [-d description] [--tags t1,t2]")
+	if path == "" {
+		return setUsage
+	}
+
+	if multiline && !crypto.IsTerminal() {
+		return fmt.Errorf("--multiline needs a terminal; scripts should use --value-stdin")
+	}
+
+	// No value given and a person is at the keyboard: ask for it with echo off.
+	if value == "" && !valueStdin && crypto.IsTerminal() {
+		v, err := promptSecretValue(path, multiline)
+		if err != nil {
+			return err
+		}
+		value = v
+	}
+
+	if value == "" {
+		return setUsage
 	}
 
 	body := map[string]interface{}{

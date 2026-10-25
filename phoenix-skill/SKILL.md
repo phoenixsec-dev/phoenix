@@ -41,7 +41,11 @@ phoenix exec --env KEY=phoenix://namespace/secret --output-env /path/to/envfile 
 ### Store a secret
 
 ```bash
-phoenix set <namespace/key> -v "<value>" -d "description" --tags "tag1,tag2"
+# Agents/scripts: pipe the value in
+<command that outputs the value> | phoenix set <namespace/key> --value-stdin -d "description" --tags "tag1,tag2"
+
+# Humans at a terminal: no value flag, Phoenix prompts with input hidden
+phoenix set <namespace/key> -d "description"
 ```
 
 ### List secrets
@@ -166,8 +170,9 @@ When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 
 ## Safety Guardrails
 
-- **Never ask the user to paste secrets into chat** — use `phoenix set --value-stdin`
-  or `phoenix import` so values never appear in conversation history
+- **Never ask the user to paste secrets into chat** — have them run
+  `phoenix set <path>` in their own terminal (hidden prompt), or use
+  `phoenix import`, so values never appear in conversation history
 - Prefer `phoenix://` references in config files over hardcoded values
 - Recommend least-privilege ACL scopes per agent (e.g. `namespace/*:read` not `*:admin`)
 - Use `phoenix verify --dry-run` to validate references without exposing values
@@ -179,8 +184,8 @@ When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 Typical flow for setting up a new secret with proper access control:
 
 ```bash
-# 1. Store the secret (human runs this, value from stdin)
-echo "sk-live-abc123" | phoenix set myapp/api-key --value-stdin -d "OpenAI API key"
+# 1. Store the secret (human runs this and pastes at the hidden prompt)
+phoenix set myapp/api-key -d "OpenAI API key"
 
 # 2. Create an agent with scoped access
 phoenix agent create deployer -t "$(openssl rand -hex 32)" --acl "myapp/*:read"

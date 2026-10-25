@@ -215,6 +215,64 @@ func PromptPassphraseAllowEmpty(prompt string) (string, error) {
 	return string(pw), nil
 }
 
+// PromptHiddenMultiline prompts on the TTY and reads possibly multi-line input
+// (PEM keys, certs) with echo off until the user presses Ctrl-D. The terminal
+// is put in raw mode so nothing is echoed and Ctrl-C can be caught and the
+// terminal restored, instead of the process dying with echo still off.
+func PromptHiddenMultiline(prompt string) (string, error) {
+	fd := int(os.Stdin.Fd())
+	fmt.Fprint(os.Stderr, prompt)
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr)
+		return "", fmt.Errorf("reading from terminal: %w", err)
+	}
+	value, readErr := collectHiddenInput(os.Stdin)
+	term.Restore(fd, oldState)
+	fmt.Fprintln(os.Stderr)
+	return value, readErr
+}
+
+// collectHiddenInput turns raw-mode keystrokes into text. Raw mode delivers
+// keys untranslated, so this does the terminal's usual job: Ctrl-D ends input,
+// Ctrl-C aborts, Enter (CR) becomes a newline, and backspace drops the last
+// byte. Bracketed-paste markers are stripped in case the terminal sends them.
+func collectHiddenInput(r io.Reader) (string, error) {
+	var out []byte
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		for _, b := range buf[:n] {
+			switch b {
+			case 0x04: // Ctrl-D
+				return finishHiddenInput(out), nil
+			case 0x03: // Ctrl-C
+				return "", fmt.Errorf("cancelled")
+			case 0x7f, 0x08: // backspace
+				if len(out) > 0 {
+					out = out[:len(out)-1]
+				}
+			default:
+				out = append(out, b)
+			}
+		}
+		if err == io.EOF {
+			return finishHiddenInput(out), nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("reading from terminal: %w", err)
+		}
+	}
+}
+
+func finishHiddenInput(b []byte) string {
+	s := strings.ReplaceAll(string(b), "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.ReplaceAll(s, "\x1b[200~", "")
+	s = strings.ReplaceAll(s, "\x1b[201~", "")
+	return s
+}
+
 // ReadPassphrase reads a passphrase using the priority chain:
 //  1. If stdinPipe is true, read one line from stdin
 //  2. PHOENIX_MASTER_PASSPHRASE env var
