@@ -88,7 +88,7 @@ go build -o bin/ ./cmd/...
 ### 2. Initialize
 
 ```bash
-phoenix-server --init /data/phoenix
+phoenix-server --init ~/.phoenix
 ```
 
 Save the printed admin token immediately — it is only shown once.
@@ -96,18 +96,22 @@ Save the printed admin token immediately — it is only shown once.
 ### 3. Start the server
 
 ```bash
-phoenix-server --config /data/phoenix/config.json
+phoenix-server --config ~/.phoenix/config.json
 ```
 
 ### 4. Store and use a secret
 
+In a second terminal:
+
 ```bash
-export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<your-admin-token>"
 
 phoenix set myapp/api-key -d "API key"   # paste at the hidden prompt
 phoenix exec --env API_KEY=phoenix://myapp/api-key -- env | grep API_KEY
 ```
+
+Prefer Docker? See [Quickstart](docs/quickstart.md) for the two-minute
+Docker path (`docker run ... --init /data`, then `docker exec`).
 
 > The default server config listens on `127.0.0.1:9090` over plain HTTP.
 > That is the supported default — loopback traffic never touches the network.
@@ -129,6 +133,7 @@ For the full first-run walkthrough, see [Getting Started](docs/getting-started.m
 
 | Topic | Guide |
 |-------|-------|
+| First secret in 2 minutes (binary or Docker) | [Quickstart](docs/quickstart.md) |
 | First install and setup | [Getting Started](docs/getting-started.md) |
 | CLI commands and workflows | [CLI Usage](docs/cli-usage.md) |
 | Auth, mTLS, and identity | [Authentication](docs/authentication.md) |

@@ -290,43 +290,41 @@ Authentication flow:
 
 ## Docker
 
-Docker images are published to Docker Hub as `phoenixsecdev/phoenix`.
+Docker images are published to Docker Hub as `phoenixsecdev/phoenix`
+(`linux/amd64` and `linux/arm64`). Tags: `latest` (newest final release),
+`X.Y.Z`, `vX.Y.Z`, and `X.Y`. The image runs as uid 1000 and keeps all
+state in the `/data` volume.
 
 ```bash
-docker pull phoenixsecdev/phoenix:latest
-
-# First run: initialize the data directory
-docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix:latest --init /data
+# First run: initialize the volume (prints the admin token once)
+docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix --init /data
 
 # Start the server
-docker run -d --name phoenix \
-  -v phoenix-data:/data \
-  -p 9090:9090 \
-  --restart unless-stopped \
-  phoenixsecdev/phoenix:latest
+docker run -d --name phoenix -v phoenix-data:/data \
+  --restart unless-stopped phoenixsecdev/phoenix
+
+# Use the CLI inside the container
+export PHOENIX_TOKEN=<admin token>
+docker exec -e PHOENIX_TOKEN phoenix phoenix status
 ```
 
-Docker Compose example:
+The generated config listens on `127.0.0.1:9090` *inside the container*,
+so a `-p 9090:9090` port mapping reaches nothing until you change it. To
+use Phoenix from the host or other machines, set `server.listen` to
+`0.0.0.0:9090` **and** `"tls": {"enabled": true}` together: traffic now
+crosses the Docker bridge, which Phoenix treats as an untrusted network.
+The exact commands (a tested `sed` one-liner, then `docker cp` of `ca.crt`
+for `PHOENIX_CA_CERT`) are in
+[Quickstart: reaching the container from the host](quickstart.md#reaching-the-container-from-the-host).
 
-```yaml
-services:
-  phoenix:
-    image: phoenixsecdev/phoenix:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - phoenix-data:/data
-    restart: unless-stopped
+The image healthcheck probes `/v1/health` over plain HTTP and falls back
+to HTTPS, so it stays green after TLS is enabled. With
+`auth.mtls.require: true` it cannot present a client certificate and will
+report unhealthy; override it with `--health-cmd` in that setup.
 
-volumes:
-  phoenix-data:
-```
-
-**Important:** The generated config defaults to `127.0.0.1:9090`. For Docker port
-mapping to work, set `server.listen` to `0.0.0.0:9090` in the config. That is a
-non-loopback bind: published ports are reachable from the LAN, so also set
-`"tls": {"enabled": true}` (or bind the mapping to loopback with
-`-p 127.0.0.1:9090:9090` if only this host needs access).
+The repo's `docker-compose.yml` builds the image from source and follows
+the same flow (`docker compose run --rm phoenix --init /data`, then
+`docker compose up -d`).
 
 ## Related docs
 

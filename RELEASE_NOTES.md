@@ -37,6 +37,19 @@ it disabled and behave exactly as before. To use it, see the configuration
 docs; monitor the HTTPS port separately, since the existing health check only
 checks HTTP.
 
+### Installer and Docker Fixes
+
+- **`scripts/install.sh` works again.** It asked for `phoenix_vX.Y.Z_*`
+  archives, but releases ship `phoenix_X.Y.Z_*`, so every install 404'd.
+  It now hard-fails when it cannot verify the checksum, honours an explicit
+  `INSTALL_DIR`, and accepts `PHOENIX_BASE_URL` for mirrors.
+- **Docker first run works.** `--init /data` no longer fails with
+  "permission denied"; `/data` is owned by the runtime user. The healthcheck
+  follows TLS, `latest` no longer moves on `-rc` tags, and a new
+  `.dockerignore` keeps local keys out of the build context.
+- **New [Quickstart](docs/quickstart.md)**: binary and Docker paths in about
+  two minutes, checked by `scripts/quickstart-smoke.sh`.
+
 ## v0.17.1 (2026-10-25)
 
 ### Hidden Prompt for `phoenix set`

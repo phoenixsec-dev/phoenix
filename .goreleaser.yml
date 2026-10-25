@@ -1,5 +1,10 @@
 version: 2
 
+# Pinned so archive names never depend on the checkout directory or remote
+# name. scripts/install.sh builds the same name: phoenix_<version>_<os>_<arch>,
+# where <version> has NO leading "v" (tag v0.17.0 -> phoenix_0.17.0_...).
+project_name: phoenix
+
 builds:
   - id: phoenix
     main: ./cmd/phoenix/
@@ -31,7 +36,7 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - README.md
@@ -47,3 +52,9 @@ changelog:
       - "^docs:"
       - "^chore:"
       - "^test:"
+
+release:
+  # Tags like v0.18.0-rc1 publish as GitHub pre-releases. Pre-releases are
+  # never returned by /releases/latest, so scripts/install.sh (default
+  # PHOENIX_VERSION=latest) only ever installs a final release.
+  prerelease: auto

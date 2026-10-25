@@ -1,6 +1,8 @@
 # Phoenix Secrets — Getting Started
 
 First-run guide: install, initialize, start the server, store your first secret.
+Just want it running? [Quickstart](quickstart.md) gets you to a first secret
+in under two minutes, with binaries or Docker.
 
 ## Requirements
 
@@ -14,9 +16,11 @@ First-run guide: install, initialize, start the server, store your first secret.
 curl -fsSL https://raw.githubusercontent.com/phoenixsec-dev/phoenix/main/scripts/install.sh | sh
 ```
 
-Options:
+The script verifies the download against the release `checksums.txt` and
+refuses to install on a mismatch. Options:
 - `PHOENIX_VERSION=vX.Y.Z` pin a specific release
-- `INSTALL_DIR=/custom/bin` choose install path
+- `INSTALL_DIR=/custom/bin` choose install path (default `/usr/local/bin`,
+  or `~/.local/bin` if that is not writable)
 
 ## Build from source
 
@@ -33,7 +37,7 @@ This produces:
 ## Initialize
 
 ```bash
-phoenix-server --init /data/phoenix
+phoenix-server --init ~/.phoenix
 ```
 
 This generates:
@@ -62,7 +66,7 @@ server, requests will cross a wire — enable TLS at the same time:
    certificates or mTLS required)
 2. Re-issue the server cert with your LAN IP:
    ```bash
-   phoenix-server --reissue-cert --san 192.168.1.10 --config /data/phoenix/config.json
+   phoenix-server --reissue-cert --san 192.168.1.10 --config ~/.phoenix/config.json
    ```
 3. Restart the server
 
@@ -80,23 +84,23 @@ second port and migrate clients gradually; see
 ## Verify file permissions
 
 ```bash
-chmod 700 /data/phoenix
-chmod 600 /data/phoenix/master.key /data/phoenix/ca.key /data/phoenix/server.key
+chmod 700 ~/.phoenix
+chmod 600 ~/.phoenix/master.key ~/.phoenix/ca.key ~/.phoenix/server.key
 ```
 
 ## Start the server
 
 ```bash
-./bin/phoenix-server --config /data/phoenix/config.json
+phoenix-server --config ~/.phoenix/config.json
 ```
 
 Example startup output (default config, plain HTTP on loopback):
 
 ```text
 Phoenix server starting on 127.0.0.1:9090
-  Store: /data/phoenix/store.json (0 secrets)
-  ACL: /data/phoenix/acl.json (1 agents)
-  Audit: /data/phoenix/audit.log
+  Store: /home/you/.phoenix/store.json (0 secrets)
+  ACL: /home/you/.phoenix/acl.json (1 agents)
+  Audit: /home/you/.phoenix/audit.log
 ```
 
 > **Binding to all interfaces:** The default listen address is `127.0.0.1:9090`.
