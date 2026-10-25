@@ -110,7 +110,11 @@ class PhoenixClient:
         except HTTPError as e:
             try:
                 err_body = json.loads(e.read())
-                msg = err_body.get("error", f"HTTP {e.code}")
+                if err_body.get("code"):
+                    # Structured denial (docs/denial-codes.md): show code + detail.
+                    msg = f"[{err_body['code']}] {err_body.get('detail') or err_body.get('error', '')}"
+                else:
+                    msg = err_body.get("error", f"HTTP {e.code}")
             except (json.JSONDecodeError, AttributeError):
                 msg = f"HTTP {e.code}"
             raise PhoenixError(msg, status=e.code) from None

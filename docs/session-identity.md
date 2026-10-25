@@ -220,7 +220,8 @@ can present to the human with the approve command.
 ## Denial codes
 
 When a session request or scoped access is denied, the response includes a
-machine-readable code:
+machine-readable code and a `next_step` (see [denial-codes.md](denial-codes.md)
+for the full list and client rules):
 
 | Code | Meaning |
 |------|---------|

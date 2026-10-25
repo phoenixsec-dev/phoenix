@@ -450,8 +450,9 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 	// L9: Check sealed response requirement
 	if rule.RequireSealed && !ctx.SealKeyPresented {
 		return &DeniedError{
-			Pattern: pattern,
-			Reason:  "sealed response required but no valid seal key presented",
+			Pattern:        pattern,
+			Reason:         "sealed response required but no valid seal key presented",
+			SealedRequired: true,
 		}
 	}
 
@@ -561,6 +562,9 @@ func (e *Engine) matchRule(secretPath string) (*Rule, string) {
 type DeniedError struct {
 	Pattern string
 	Reason  string
+	// SealedRequired is true when the only unmet requirement is require_sealed,
+	// so the API can tell the caller to use sealed delivery (phoenix exec).
+	SealedRequired bool
 }
 
 func (e *DeniedError) Error() string {

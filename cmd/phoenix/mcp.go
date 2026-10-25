@@ -351,6 +351,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Sprintf("Failed to decode response: %v", err), true
@@ -359,7 +360,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		if len(result.SealedValues) == 0 && len(result.Errors) > 0 {
 			var msgs []string
 			for ref, errMsg := range result.Errors {
-				msgs = append(msgs, fmt.Sprintf("%s: %s", ref, errMsg))
+				msgs = append(msgs, fmt.Sprintf("%s: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
 			}
 			return strings.Join(msgs, "\n"), true
 		}
@@ -379,7 +380,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 				sealToken := "PHOENIX_SEALED:" + base64.StdEncoding.EncodeToString(envJSON)
 				lines = append(lines, fmt.Sprintf("%s = %s", ref, sealToken))
 			} else if errMsg, ok := result.Errors[ref]; ok {
-				lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, errMsg))
+				lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
 			} else {
 				lines = append(lines, fmt.Sprintf("%s: ERROR: no value returned by server", ref))
 				hasErrors = true
@@ -392,8 +393,9 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 
 	// Plaintext mode
 	var result struct {
-		Values map[string]string `json:"values"`
-		Errors map[string]string `json:"errors"`
+		Values     map[string]string    `json:"values"`
+		Errors     map[string]string    `json:"errors"`
+		ErrorCodes map[string]refDenial `json:"error_codes"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Sprintf("Failed to decode response: %v", err), true
@@ -402,7 +404,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 	if len(result.Values) == 0 && len(result.Errors) > 0 {
 		var msgs []string
 		for ref, errMsg := range result.Errors {
-			msgs = append(msgs, fmt.Sprintf("%s: %s", ref, errMsg))
+			msgs = append(msgs, fmt.Sprintf("%s: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
 		}
 		return strings.Join(msgs, "\n"), true
 	}
@@ -412,7 +414,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		if val, ok := result.Values[ref]; ok {
 			lines = append(lines, fmt.Sprintf("%s = %s", ref, val))
 		} else if errMsg, ok := result.Errors[ref]; ok {
-			lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, errMsg))
+			lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
 		}
 	}
 
@@ -628,16 +630,20 @@ func mcpFormatDenial(body []byte, statusCode int) string {
 		Code        string `json:"code"`
 		Detail      string `json:"detail"`
 		Remediation string `json:"remediation"`
+		NextStep    string `json:"next_step"`
 	}
-	if json.Unmarshal(body, &denial) == nil && denial.Code != "" {
-		msg := fmt.Sprintf("[%s] %s", denial.Code, denial.Detail)
+	if json.Unmarshal(body, &denial) == nil && cleanCode(denial.Code) != "" {
+		msg := fmt.Sprintf("[%s] %s", denial.Code, cleanServerText(denial.Detail))
 		if denial.Remediation != "" {
-			msg += "\nhint: " + denial.Remediation
+			msg += "\nhint: " + cleanServerText(denial.Remediation)
+		}
+		if denial.NextStep != "" {
+			msg += "\nnext: " + nextStepHint(denial.NextStep)
 		}
 		return msg
 	}
 	if json.Unmarshal(body, &denial) == nil && denial.Error != "" {
-		return denial.Error
+		return cleanServerText(denial.Error)
 	}
 	return fmt.Sprintf("HTTP %d", statusCode)
 }

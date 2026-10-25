@@ -229,7 +229,11 @@ class PhoenixClient {
     }
 
     if (!resp.ok) {
-      const msg = (data && data.error) || `HTTP ${resp.status}`;
+      // Structured denials (docs/denial-codes.md) carry code + detail.
+      const msg =
+        data && data.code
+          ? `[${data.code}] ${data.detail || data.error || ""}`
+          : (data && data.error) || `HTTP ${resp.status}`;
       throw new PhoenixError(msg, resp.status);
     }
 

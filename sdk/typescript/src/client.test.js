@@ -390,3 +390,23 @@ describe("PhoenixClient sealed mode", () => {
     }
   });
 });
+
+describe("structured denials", () => {
+  it("shows code and detail", async () => {
+    const { url, close } = await createTestServer((req, res) => {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "access_denied", code: "ACL_DENIED", detail: "read_value is not allowed", next_step: "ask_user" }));
+    });
+    try {
+      const c = new PhoenixClient({ server: url, token: "tok" });
+      await assert.rejects(c.health(), (err) => {
+        assert.ok(err instanceof PhoenixError);
+        assert.equal(err.status, 403);
+        assert.equal(err.message, "[ACL_DENIED] read_value is not allowed");
+        return true;
+      });
+    } finally {
+      close();
+    }
+  });
+});

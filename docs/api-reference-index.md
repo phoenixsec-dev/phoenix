@@ -167,14 +167,18 @@ Common status codes: `400`, `401`, `403`, `404`, `405`, `500`, `501`.
 
 ## Structured denials
 
-Session and access control failures return machine-readable denial responses:
+Access control, attestation and session failures return machine-readable
+denial responses with a `code` and a `next_step`. `POST /v1/resolve` reports
+per-ref failures in `error_codes`. Full contract and client rules:
+[denial-codes.md](denial-codes.md).
 
 ```json
 {
   "error": "access_denied",
   "code": "SCOPE_EXCEEDED",
   "detail": "path \"prod/key\" is outside session scope for role \"dev\"",
-  "remediation": "request a session with a role that includes this namespace"
+  "remediation": "request a session with a role that includes this namespace",
+  "next_step": "remint_session"
 }
 ```
 
@@ -182,6 +186,9 @@ Denial codes:
 
 | Code | HTTP | Meaning |
 |------|------|---------|
+| `ACL_DENIED` | 403 | ACL does not allow the action on this path |
+| `ATTESTATION_REQUIRED` | 403 | Path attestation policy not met |
+| `SEALED_REQUIRED` | 403 | Path is only served sealed; use `phoenix exec` |
 | `SESSION_EXPIRED` | 401 | Session TTL elapsed |
 | `SESSION_REVOKED` | 401 | Session was explicitly revoked |
 | `SESSION_INVALID` | 401 | Token malformed or signature invalid |

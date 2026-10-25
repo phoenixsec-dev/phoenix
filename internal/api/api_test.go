@@ -1336,7 +1336,7 @@ func TestOpenClawSessionKeyDoesNotSatisfySealedPolicyOrLeak(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("OpenClaw session key should not satisfy sealed policy: got %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "sealed response required") {
+	if !strings.Contains(w.Body.String(), `"code":"SEALED_REQUIRED"`) {
 		t.Fatalf("expected sealed policy denial, got: %s", w.Body.String())
 	}
 
@@ -1886,8 +1886,11 @@ func TestAttestationDenyBearerOnGet(t *testing.T) {
 
 	var errResp map[string]string
 	json.NewDecoder(w.Body).Decode(&errResp)
-	if !strings.Contains(errResp["error"], "attestation") {
-		t.Fatalf("expected attestation error, got: %s", errResp["error"])
+	if errResp["code"] != "ATTESTATION_REQUIRED" || errResp["next_step"] != "ask_user" {
+		t.Fatalf("expected attestation error, got: %s", errResp)
+	}
+	if strings.Contains(errResp["detail"], "policy") {
+		t.Fatalf("attestation denial leaked policy text: %v", errResp)
 	}
 }
 
@@ -2144,8 +2147,11 @@ func TestAttestationEnforcedOnWrite(t *testing.T) {
 	}
 	var errResp map[string]string
 	json.NewDecoder(w.Body).Decode(&errResp)
-	if !strings.Contains(errResp["error"], "attestation") {
-		t.Fatalf("expected attestation error on write, got: %s", errResp["error"])
+	if errResp["code"] != "ATTESTATION_REQUIRED" || errResp["next_step"] != "ask_user" {
+		t.Fatalf("expected attestation error on write, got: %s", errResp)
+	}
+	if strings.Contains(errResp["detail"], "policy") {
+		t.Fatalf("attestation denial leaked policy text: %v", errResp)
 	}
 
 	// Write from allowed IP — should succeed
@@ -2193,8 +2199,11 @@ func TestAttestationEnforcedOnDelete(t *testing.T) {
 	}
 	var errResp map[string]string
 	json.NewDecoder(w.Body).Decode(&errResp)
-	if !strings.Contains(errResp["error"], "attestation") {
-		t.Fatalf("expected attestation error on delete, got: %s", errResp["error"])
+	if errResp["code"] != "ATTESTATION_REQUIRED" || errResp["next_step"] != "ask_user" {
+		t.Fatalf("expected attestation error on delete, got: %s", errResp)
+	}
+	if strings.Contains(errResp["detail"], "policy") {
+		t.Fatalf("attestation denial leaked policy text: %v", errResp)
 	}
 
 	// Delete from allowed IP — should succeed
@@ -4068,7 +4077,7 @@ func TestRequireSealedPolicyDeniesWithoutKey(t *testing.T) {
 	if w.Code != 403 {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "sealed response required") {
+	if !strings.Contains(w.Body.String(), `"code":"SEALED_REQUIRED"`) {
 		t.Errorf("expected 'sealed response required' in error, got: %s", w.Body.String())
 	}
 }
@@ -5557,7 +5566,7 @@ func TestNonStepUpSessionStillCannotBypassBaseACL(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("non-step-up read: status %d, want 403, body: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "access denied") {
+	if !strings.Contains(w.Body.String(), `"code":"ACL_DENIED"`) {
 		t.Fatalf("expected ACL denial, body: %s", w.Body.String())
 	}
 }
@@ -5589,7 +5598,7 @@ func TestStepUpElevatedSessionStillEnforcesPolicy(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("policy-enforced read: status %d, want 403, body: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "sealed response required") {
+	if !strings.Contains(w.Body.String(), `"code":"SEALED_REQUIRED"`) {
 		t.Fatalf("expected require_sealed policy denial, body: %s", w.Body.String())
 	}
 }

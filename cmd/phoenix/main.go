@@ -1235,15 +1235,18 @@ func cmdOpenClawExecProvider(args []string) error {
 
 	values := make(map[string]string)
 	var errs map[string]string
+	var errCodes map[string]refDenial
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
 				if envRef, _ := envMap["ref"].(string); envRef != ref {
@@ -1258,14 +1261,16 @@ func cmdOpenClawExecProvider(args []string) error {
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		values = result.Values
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 	}
 
 	out := openClawExecProviderResponse{
@@ -1278,7 +1283,7 @@ func cmdOpenClawExecProvider(args []string) error {
 			if out.Errors == nil {
 				out.Errors = make(map[string]openClawExecProviderError)
 			}
-			out.Errors[id] = openClawExecProviderError{Message: errMsg}
+			out.Errors[id] = openClawExecProviderError{Message: formatRefError(ref, errMsg, errCodes)}
 			continue
 		}
 		val, ok := values[ref]
@@ -1400,16 +1405,19 @@ func cmdResolve(args []string) error {
 	// Decode response — handle sealed or plaintext
 	var values map[string]string
 	var errs map[string]string
+	var errCodes map[string]refDenial
 
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 		values = make(map[string]string)
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
@@ -1425,20 +1433,22 @@ func cmdResolve(args []string) error {
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		values = result.Values
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 	}
 
 	// Single ref: output raw value for piping
 	if len(refs) == 1 {
 		if errMsg, ok := errs[refs[0]]; ok {
-			return fmt.Errorf("%s: %s", refs[0], errMsg)
+			return fmt.Errorf("%s: %s", refs[0], formatRefError(refs[0], errMsg, errCodes))
 		}
 		if _, ok := values[refs[0]]; !ok {
 			return fmt.Errorf("%s: no value returned by server", refs[0])
@@ -1451,7 +1461,7 @@ func cmdResolve(args []string) error {
 	var hasErr bool
 	for _, ref := range refs {
 		if errMsg, ok := errs[ref]; ok {
-			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
+			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, formatRefError(ref, errMsg, errCodes))
 			hasErr = true
 			continue
 		}
@@ -1635,16 +1645,19 @@ func cmdExec(args []string) error {
 	// Decode response — handle sealed or plaintext
 	resolvedValues := make(map[string]string)
 	var resolveErrors map[string]string
+	var resolveErrorCodes map[string]refDenial
 
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding resolve response: %w", err)
 		}
 		resolveErrors = result.Errors
+		resolveErrorCodes = result.ErrorCodes
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
 				if envRef, _ := envMap["ref"].(string); envRef != ref {
@@ -1659,20 +1672,22 @@ func cmdExec(args []string) error {
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding resolve response: %w", err)
 		}
 		resolvedValues = result.Values
 		resolveErrors = result.Errors
+		resolveErrorCodes = result.ErrorCodes
 	}
 
 	// Check for resolution errors
 	if len(resolveErrors) > 0 {
 		for ref, errMsg := range resolveErrors {
-			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", ref, errMsg)
+			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", ref, formatRefError(ref, errMsg, resolveErrorCodes))
 		}
 		return fmt.Errorf("failed to resolve %d reference(s)", len(resolveErrors))
 	}
@@ -2924,16 +2939,19 @@ func cmdAgentSockResolve(args []string) error {
 	// Decode response — handle sealed or plaintext
 	var values map[string]string
 	var errs map[string]string
+	var errCodes map[string]refDenial
 
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 		values = make(map[string]string)
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
@@ -2949,20 +2967,22 @@ func cmdAgentSockResolve(args []string) error {
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		values = result.Values
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 	}
 
 	// Single ref: output raw value
 	if len(refs) == 1 {
 		if errMsg, ok := errs[refs[0]]; ok {
-			return fmt.Errorf("%s: %s", refs[0], errMsg)
+			return fmt.Errorf("%s: %s", refs[0], formatRefError(refs[0], errMsg, errCodes))
 		}
 		fmt.Print(values[refs[0]])
 		return nil
@@ -2972,7 +2992,7 @@ func cmdAgentSockResolve(args []string) error {
 	var hasErr bool
 	for _, ref := range refs {
 		if errMsg, ok := errs[ref]; ok {
-			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
+			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, formatRefError(ref, errMsg, errCodes))
 			hasErr = true
 			continue
 		}
@@ -3123,17 +3143,21 @@ func handleError(resp *http.Response) error {
 		Code        string `json:"code"`
 		Detail      string `json:"detail"`
 		Remediation string `json:"remediation"`
+		NextStep    string `json:"next_step"`
 	}
-	if json.Unmarshal(body, &structured) == nil && structured.Code != "" {
-		msg := fmt.Sprintf("HTTP %d [%s]: %s", resp.StatusCode, structured.Code, structured.Detail)
+	if json.Unmarshal(body, &structured) == nil && cleanCode(structured.Code) != "" {
+		msg := fmt.Sprintf("HTTP %d [%s]: %s", resp.StatusCode, structured.Code, cleanServerText(structured.Detail))
 		if structured.Remediation != "" {
-			msg += "\n  hint: " + structured.Remediation
+			msg += "\n  hint: " + cleanServerText(structured.Remediation)
+		}
+		if structured.NextStep != "" {
+			msg += "\n  next: " + nextStepHint(structured.NextStep)
 		}
 		return fmt.Errorf("%s", msg)
 	}
 
 	if json.Unmarshal(body, &structured) == nil && structured.Error != "" {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, structured.Error)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, cleanServerText(structured.Error))
 	}
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
 }

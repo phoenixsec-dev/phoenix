@@ -70,6 +70,19 @@ class TestClientUnit(unittest.TestCase):
         self.assertIn("unreachable", str(ctx.exception))
         self.assertEqual(ctx.exception.status, 0)
 
+    def test_structured_denial_shows_code_and_detail(self):
+        import io
+        from unittest import mock
+        from urllib.error import HTTPError
+
+        body = b'{"error":"access_denied","code":"ACL_DENIED","detail":"read_value is not allowed","next_step":"ask_user"}'
+        err = HTTPError("http://x/v1/health", 403, "Forbidden", {}, io.BytesIO(body))
+        with mock.patch("phoenix_secrets.client.urlopen", side_effect=err):
+            with self.assertRaises(PhoenixError) as ctx:
+                PhoenixClient(server="http://x").health()
+        self.assertEqual(str(ctx.exception), "[ACL_DENIED] read_value is not allowed")
+        self.assertEqual(ctx.exception.status, 403)
+
     def test_phoenix_error_has_status(self):
         err = PhoenixError("not found", status=404)
         self.assertEqual(err.status, 404)

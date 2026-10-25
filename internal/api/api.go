@@ -577,14 +577,16 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// jsonDenied sends a structured denial response with a machine-readable code.
+// jsonDenied sends a structured denial response with a machine-readable code
+// and the matching next_step from the denial contract (denial.go).
 func jsonDenied(w http.ResponseWriter, errMsg, code, detail, remediation string, httpCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpCode)
 	resp := map[string]string{
-		"error":  errMsg,
-		"code":   code,
-		"detail": detail,
+		"error":     errMsg,
+		"code":      code,
+		"detail":    detail,
+		"next_step": nextStepFor(code),
 	}
 	if remediation != "" {
 		resp["remediation"] = remediation
@@ -876,14 +878,13 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		s.auditDenied(r, info, "read_value", path, ip, "acl")
-		jsonError(w, "access denied: read_value permission required (use phoenix exec for context-free secret injection)", http.StatusForbidden)
+		jsonACLDenied(w, "read_value")
 		return
 	}
 
 	// Attestation policy check (with validated seal key state)
 	if err := s.attestFull(r, path, info, false, false, sealKeyValidated); err != nil {
-		s.auditDenied(r, info, "read_value", path, ip, "attestation")
-		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
+		s.denyAttestation(w, r, info, "read_value", path, ip, err)
 		return
 	}
 
@@ -957,14 +958,13 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		s.auditDenied(r, info, "write", path, ip, "acl")
-		jsonError(w, "access denied", http.StatusForbidden)
+		jsonACLDenied(w, "write")
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.auditDenied(r, info, "write", path, ip, "attestation")
-		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
+		s.denyAttestation(w, r, info, "write", path, ip, err)
 		return
 	}
 
@@ -1026,14 +1026,13 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		s.auditDenied(r, info, "delete", path, ip, "acl")
-		jsonError(w, "access denied", http.StatusForbidden)
+		jsonACLDenied(w, "delete")
 		return
 	}
 
 	// Attestation policy check
 	if err := s.attest(r, path, info, false); err != nil {
-		s.auditDenied(r, info, "delete", path, ip, "attestation")
-		jsonError(w, "attestation required: "+err.Error(), http.StatusForbidden)
+		s.denyAttestation(w, r, info, "delete", path, ip, err)
 		return
 	}
 
@@ -1464,6 +1463,13 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	values := make(map[string]string)
 	sealedValues := make(map[string]*crypto.SealedEnvelope)
 	errors := make(map[string]string)
+	errorCodes := make(map[string]refDenial)
+	// deny records a per-ref failure: the legacy message in errors (kept for
+	// existing clients) and the stable code + next step in error_codes.
+	deny := func(refStr, code, msg string) {
+		errors[refStr] = msg
+		errorCodes[refStr] = newRefDenial(code)
+	}
 
 	// Session seal key binding check (once, before processing refs)
 	if !s.checkSessionSealKey(w, r, info) {
@@ -1474,7 +1480,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		path, err := ref.Parse(refStr)
 		if err != nil {
 			s.auditDenied(r, info, "resolve", refStr, ip, "malformed_ref")
-			errors[refStr] = err.Error()
+			deny(refStr, CodeInvalidRef, err.Error())
 			continue
 		}
 
@@ -1483,22 +1489,22 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		case "":
 		case "session_scope":
 			s.auditDenied(r, info, "resolve", path, ip, "session_scope")
-			errors[refStr] = "path outside session scope"
+			deny(refStr, CodeScopeExceeded, "path outside session scope")
 			continue
 		case "session_action":
 			s.auditDenied(r, info, "resolve", path, ip, "session_action")
-			errors[refStr] = "action read_value not permitted by session role"
+			deny(refStr, CodeActionDenied, "action read_value not permitted by session role")
 			continue
 		default:
 			s.auditDenied(r, info, "resolve", path, ip, "acl")
-			errors[refStr] = "access denied: read_value permission required"
+			deny(refStr, CodeACLDenied, "access denied: read_value permission required")
 			continue
 		}
 
 		// Attestation policy check (per-ref)
 		if err := s.attestFull(r, path, info, nonceValidated, signatureVerified, sealKey != nil); err != nil {
-			s.auditDenied(r, info, "resolve", path, ip, "attestation")
-			errors[refStr] = "attestation required"
+			s.auditDeniedDetail(r, info, "resolve", path, ip, "attestation", err.Error())
+			deny(refStr, attestationDenialCode(err), "attestation required")
 			continue
 		}
 
@@ -1507,14 +1513,14 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			if _, err := s.backend.Get(path); err != nil {
 				if err == store.ErrSecretNotFound {
 					s.auditDenied(r, info, "dry-resolve", path, ip, "not_found")
-					errors[refStr] = "secret not found"
+					deny(refStr, CodeNotFound, "secret not found")
 				} else if err == store.ErrInvalidPath {
 					s.auditDenied(r, info, "dry-resolve", path, ip, "invalid_path")
-					errors[refStr] = "invalid path"
+					deny(refStr, CodeInvalidRef, "invalid path")
 				} else {
 					s.auditDenied(r, info, "dry-resolve", path, ip, "internal_error")
 					log.Printf("error dry-resolving %q for %s: %v", path, agentName, err)
-					errors[refStr] = "internal error"
+					deny(refStr, CodeInternalError, "internal error")
 				}
 				continue
 			}
@@ -1527,14 +1533,14 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if err == store.ErrSecretNotFound {
 				s.auditDenied(r, info, "resolve", path, ip, "not_found")
-				errors[refStr] = "secret not found"
+				deny(refStr, CodeNotFound, "secret not found")
 			} else if err == store.ErrInvalidPath {
 				s.auditDenied(r, info, "resolve", path, ip, "invalid_path")
-				errors[refStr] = "invalid path"
+				deny(refStr, CodeInvalidRef, "invalid path")
 			} else {
 				s.auditDenied(r, info, "resolve", path, ip, "internal_error")
 				log.Printf("error resolving %q for %s: %v", path, agentName, err)
-				errors[refStr] = "internal error"
+				deny(refStr, CodeInternalError, "internal error")
 			}
 			continue
 		}
@@ -1545,7 +1551,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
 			if err != nil {
 				log.Printf("error sealing resolved secret %q: %v", path, err)
-				errors[refStr] = "internal error"
+				deny(refStr, CodeInternalError, "internal error")
 				continue
 			}
 			sealedValues[refStr] = env
@@ -1562,6 +1568,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(errors) > 0 {
 		resp["errors"] = errors
+		resp["error_codes"] = errorCodes
 	}
 	if !dryRun {
 		w.Header().Set("Cache-Control", "no-store")
@@ -2144,6 +2151,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 			"status":          "approval_required",
 			"approval_id":     apr.ID,
 			"code":            "APPROVAL_REQUIRED",
+			"next_step":       nextStepFor("APPROVAL_REQUIRED"),
 			"reason":          fmt.Sprintf("role %q requires human approval", req.Role),
 			"approve_command": fmt.Sprintf("phoenix approve %s", apr.ID),
 			"expires_at":      apr.ExpiresAt.Format(time.RFC3339),
