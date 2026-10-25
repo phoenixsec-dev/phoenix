@@ -73,6 +73,9 @@ a LAN is as far as the supported envelope goes, and exposing Phoenix to the
 internet is out of scope entirely (see [Threat Model](threat-model.md)).
 
 For the full multi-host setup walkthrough, see [LAN Deployment](lan-deployment.md).
+Upgrading a server that already has HTTP clients? You can add HTTPS on a
+second port and migrate clients gradually; see
+[Optional HTTPS alongside the existing endpoint](configuration.md#optional-https-alongside-the-existing-endpoint).
 
 ## Verify file permissions
 

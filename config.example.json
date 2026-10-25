@@ -5,6 +5,12 @@
   "tls": {
     "enabled": false
   },
+  "https_listener": {
+    "enabled": false,
+    "listen": "127.0.0.1:9443",
+    "cert": "/data/server.crt",
+    "key": "/data/server.key"
+  },
   "store": {
     "backend": "file",
     "path": "/data/phoenix/store.json",

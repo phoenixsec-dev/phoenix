@@ -11,10 +11,14 @@ and secret values on the network in cleartext.
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `server.listen` | Bind address | `127.0.0.1:9090` |
-| `tls.enabled` | Serve HTTPS (independent of mTLS) | `false` |
+| `server.listen` | Primary bind address | `127.0.0.1:9090` |
+| `tls.enabled` | Serve HTTPS on the primary address (independent of mTLS) | `false` |
 | `tls.cert` | Server certificate path | `auth.mtls.server_cert` (the `--init` leaf) |
 | `tls.key` | Server private key path | `auth.mtls.server_key` |
+| `https_listener.enabled` | Add a separate HTTPS endpoint | `false` |
+| `https_listener.listen` | Additional bind address; required when enabled | — |
+| `https_listener.cert` | Additional endpoint's server certificate; required when enabled | — |
+| `https_listener.key` | Additional endpoint's private key; required when enabled | — |
 | `store.path` | Encrypted store file | `/data/store.json` |
 | `store.master_key` | Master key file | `/data/master.key` |
 | `store.backend` | Secret backend (`file` or `1password`) | `file` |
@@ -114,8 +118,9 @@ The dashboard uses cookie-based auth with HMAC-signed tokens and CSRF protection
 Login attempts are rate-limited with exponential backoff (5 failures before lockout,
 up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.
 
-**Transport security:** When the server serves TLS (the `tls` block or mTLS)
-or sits behind a TLS reverse proxy (detected via `X-Forwarded-Proto: https`),
+**Transport security:** When a request arrives over TLS (the primary or optional
+HTTPS endpoint) or through a TLS reverse proxy (detected via
+`X-Forwarded-Proto: https`),
 the session cookie is set with `Secure` flag automatically. For production use:
 
 - Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`), or
@@ -187,6 +192,77 @@ value it returns would cross the network in cleartext.
 
 See [LAN Deployment](lan-deployment.md) for the full multi-host setup,
 including re-issuing the server certificate with LAN IP/hostname SANs.
+
+### Optional HTTPS alongside the existing endpoint
+
+Use `https_listener` to add HTTPS while existing consumers keep their HTTP
+address and configuration. Both endpoints use the same handler, secret store,
+ACLs, policies, sessions, rate limiter, and audit logger. The additional listener
+uses the direct client address for source-IP policy, just like the primary.
+HTTP requests are not redirected.
+
+This fragment adds HTTPS on port 9443 while keeping HTTP on port 9090:
+
+```json
+{
+  "server": { "listen": "0.0.0.0:9090" },
+  "tls": { "enabled": false },
+  "auth": {
+    "bearer": { "enabled": true },
+    "mtls": { "enabled": false }
+  },
+  "https_listener": {
+    "enabled": true,
+    "listen": "0.0.0.0:9443",
+    "cert": "/data/server.crt",
+    "key": "/data/server.key"
+  }
+}
+```
+
+Merge the fragment into your existing configuration. The checked-in example
+keeps the additional listener disabled and bound to loopback. When enabled,
+`listen`, `cert`, and `key` must all be explicit; this block does not inherit
+certificate paths from `tls` or `auth.mtls`.
+
+The certificate must cover the hostname or IP selected clients use. For a
+private CA, install its public trust certificate on those clients and set
+`PHOENIX_CA_CERT` alongside their new HTTPS `PHOENIX_SERVER` URL. Verify the
+certificate before sending credentials; do not disable certificate checks.
+Other consumers need no configuration changes. HTTP remains unencrypted and
+continues to produce the existing warning on non-loopback binds. Tokens retain
+their existing permissions on both transports; there are no HTTPS-only tokens.
+
+The original settings retain their meaning: `tls.enabled` converts the primary
+address to HTTPS. Enabling `auth.mtls` also converts the primary and applies its
+client-certificate verification and revocation checks to both listeners. When
+`auth.mtls.require` is true, both endpoints require a valid client certificate.
+Leave both settings false for the HTTP-plus-HTTPS example above.
+
+An omitted or disabled `https_listener` opens no additional socket. When it is
+enabled, a configuration mistake stops startup, the same as any other config
+error: a blank `listen`, `cert`, or `key`, or a certificate and key that cannot
+be loaded. Phoenix exits with `invalid config: ...` instead of starting without
+the HTTPS endpoint you asked for. Problems with the host rather than the config
+(the address is in use or cannot be bound, or the listener stops accepting
+connections) are logged as `Optional HTTPS listener ... primary endpoint
+continues` and HTTP keeps serving. The primary reserves its port first, so an
+overlapping optional address cannot take it. HTTPS never falls back to
+plaintext.
+
+The existing HTTP health check only checks HTTP. Monitor HTTPS separately with
+certificate verification and expiry alerts. An optional HTTPS outage should not
+cause a restart loop for working HTTP consumers. Certificates load at startup;
+replacing a certificate requires a restart. In-memory sessions are lost on restart.
+
+For Docker, retain the existing port mapping and add a mapping for the selected
+HTTPS port, for example `9443:9443`, plus certificate mounts if needed. The
+server must bind a container-reachable address for a published port. The default
+Compose mapping and HTTP health check are unchanged.
+
+To stop using the additional endpoint, restore the selected clients' previous
+URLs and disable `https_listener.enabled`, then restart during a planned window.
+Keep the original endpoint's settings and other consumers' configuration intact.
 
 ## Architecture summary
 

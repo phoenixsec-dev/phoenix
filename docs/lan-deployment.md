@@ -70,6 +70,11 @@ Edit `/data/phoenix/config.json` to bind to all interfaces and enable TLS:
 during init — no client certificates involved, agents authenticate with bearer
 tokens exactly as before. mTLS is a separate optional layer added in step 3.
 
+Already serving plain HTTP to existing clients and can't switch them all at
+once? Leave `tls` off and add a second HTTPS endpoint with `https_listener`,
+then move clients over one at a time. See
+[Optional HTTPS alongside the existing endpoint](configuration.md#optional-https-alongside-the-existing-endpoint).
+
 If you bind a non-loopback address without enabling TLS, the server still
 starts, but it logs a prominent `INSECURE TRANSPORT` warning: every bearer
 token and secret value would cross the network in cleartext, readable by

@@ -48,7 +48,7 @@ Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run p
 | 16 | elevated step-up deny/approve/expiry/renewal | implemented |
 | 17 | sealed-response S1–S8 plus policy/keypair regressions | implemented |
 | 18 | v0.13.5 → current in-place data/config/ACL/audit upgrade | implemented |
-| 19 | secure transport: `tls:` block HTTPS, non-loopback plaintext warnings (server/CLI/MCP), mTLS backward compat, MCP `--tls-cert`/`--tls-key` | implemented; non-loopback warning asserted via unbindable TEST-NET-1 address so no listener leaves loopback |
+| 19 | secure transport: `tls:` block, optional HTTPS alongside HTTP, shared auth/ACL/source-IP/session/rate-limit/store behavior, dashboard cookies, fatal optional misconfiguration, optional bind-failure containment, plaintext warnings, mTLS backward compat, MCP TLS | implemented; listeners stay on loopback; non-loopback warning uses an unbindable TEST-NET-1 address |
 | 20 | Hermes caller metadata: capture, sanitization/cap, unlisted-header exclusion, ACL spoof resistance, `X-Hermes-Tool` vs `X-Phoenix-Tool` | implemented |
 
 Active sessions are intentionally memory-only. Scenario 18 verifies that an old in-memory token is rejected after restart and that the preserved role configuration can mint a new compatible session.

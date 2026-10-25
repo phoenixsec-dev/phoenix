@@ -12,18 +12,19 @@ import (
 
 // Config is the top-level server configuration.
 type Config struct {
-	Server      ServerConfig      `json:"server"`
-	TLS         TLSConfig         `json:"tls"`
-	Store       StoreConfig       `json:"store"`
-	Crypto      CryptoConfig      `json:"crypto"`
-	Auth        AuthConfig        `json:"auth"`
-	ACL         ACLFileConfig     `json:"acl"`
-	Audit       AuditConfig       `json:"audit"`
-	Policy      PolicyConfig      `json:"policy,omitempty"`
-	Attestation AttestationConfig `json:"attestation,omitempty"`
-	OnePassword OPConfig          `json:"onepassword,omitempty"`
-	Session     SessionConfig     `json:"session,omitempty"`
-	Dashboard   DashboardConfig   `json:"dashboard,omitempty"`
+	Server        ServerConfig        `json:"server"`
+	TLS           TLSConfig           `json:"tls"`
+	HTTPSListener HTTPSListenerConfig `json:"https_listener"`
+	Store         StoreConfig         `json:"store"`
+	Crypto        CryptoConfig        `json:"crypto"`
+	Auth          AuthConfig          `json:"auth"`
+	ACL           ACLFileConfig       `json:"acl"`
+	Audit         AuditConfig         `json:"audit"`
+	Policy        PolicyConfig        `json:"policy,omitempty"`
+	Attestation   AttestationConfig   `json:"attestation,omitempty"`
+	OnePassword   OPConfig            `json:"onepassword,omitempty"`
+	Session       SessionConfig       `json:"session,omitempty"`
+	Dashboard     DashboardConfig     `json:"dashboard,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -48,6 +49,30 @@ type TLSConfig struct {
 	Enabled bool   `json:"enabled"`
 	Cert    string `json:"cert,omitempty"` // Server certificate path (default: auth.mtls.server_cert)
 	Key     string `json:"key,omitempty"`  // Server private key path (default: auth.mtls.server_key)
+}
+
+// HTTPSListenerConfig adds a separate HTTPS endpoint without changing the primary.
+type HTTPSListenerConfig struct {
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen,omitempty"`
+	Cert    string `json:"cert,omitempty"`
+	Key     string `json:"key,omitempty"`
+}
+
+// Validate is called from Config.Validate, so a blank address or missing
+// certificate path stops startup like any other config error. Only runtime
+// failures (bind, serve) are contained so the primary keeps running.
+func (c HTTPSListenerConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Listen == "" {
+		return errors.New("https_listener.listen is required")
+	}
+	if c.Cert == "" || c.Key == "" {
+		return errors.New("https_listener.cert and https_listener.key are required")
+	}
+	return nil
 }
 
 // MTLSConfig controls mTLS client certificate authentication.
@@ -210,6 +235,11 @@ func DefaultConfig() *Config {
 // area without having to cross-reference multiple docs.
 func ExampleConfig() *Config {
 	cfg := DefaultConfig()
+	cfg.HTTPSListener = HTTPSListenerConfig{
+		Listen: "127.0.0.1:9443",
+		Cert:   "/data/server.crt",
+		Key:    "/data/server.key",
+	}
 	// Loopback plaintext is the supported default: loopback traffic never
 	// reaches a NIC. The moment the listener crosses a wire (any non-loopback
 	// bind), enable the tls block — the server starts either way, but warns
@@ -345,6 +375,9 @@ func (c *Config) Validate() error {
 		if cert == "" || key == "" {
 			return errors.New("tls.enabled requires tls.cert and tls.key paths (or the auth.mtls.server_cert/server_key paths written by --init)")
 		}
+	}
+	if err := c.HTTPSListener.Validate(); err != nil {
+		return err
 	}
 	// mTLS requires CA and server cert paths
 	if c.Auth.MTLS.Enabled {
