@@ -25,7 +25,7 @@ Traditional managers like Vault and SOPS assume the consumer is a trusted proces
 
 ```bash
 # Store a secret
-phoenix set myapp/api-key -v "sk-abc123" -d "OpenAI API key"
+phoenix set myapp/api-key -d "OpenAI API key"   # prompts for the value, input hidden
 
 # Run a command with secrets injected — context-safe, no raw values in agent context
 phoenix exec --env OPENAI_KEY=phoenix://myapp/api-key -- python app.py
@@ -105,7 +105,7 @@ phoenix-server --config /data/phoenix/config.json
 export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<your-admin-token>"
 
-phoenix set myapp/api-key -v "sk-live-abc123" -d "API key"
+phoenix set myapp/api-key -d "API key"   # paste at the hidden prompt
 phoenix exec --env API_KEY=phoenix://myapp/api-key -- env | grep API_KEY
 ```
 

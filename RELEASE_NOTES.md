@@ -1,5 +1,27 @@
 # Release Notes
 
+## v0.17.1 (2026-10-25)
+
+### Hidden Prompt for `phoenix set`
+
+Adding a secret by hand no longer means putting it on the command line.
+
+- **`phoenix set <path>` with no value now prompts with input hidden**
+  when run in a terminal, like `ssh-keygen` or `sudo`. The value never
+  reaches shell history, process listings, or the screen. Surrounding
+  whitespace is trimmed (clipboard copies often carry a stray newline),
+  and a masked preview (`Received 32 chars: sk-p…WXYZ`) confirms the
+  right thing was pasted.
+- **`--multiline`** for PEM keys and certs: paste the block with input
+  hidden and finish with Ctrl-D. Nothing is written to disk, and Ctrl-C
+  cancels cleanly with the terminal restored.
+- **Docs** no longer show `echo "secret" | phoenix set ...` or `-v` as the
+  way to store a secret; both leave it in shell history.
+
+**Upgrading:** no action required. `-v` and `--value-stdin` behave exactly
+as before, and scripts without a terminal still get the usage error rather
+than a prompt.
+
 ## v0.17.0 (2026-08-20)
 
 ### Secure Transport: LAN-Scoped by Design, Loud When It Matters

@@ -3,9 +3,9 @@
 ## Store and retrieve secrets
 
 ```bash
-# Store secrets
-phoenix set myapp/db-password -v "hunter2" -d "Production database password"
-phoenix set myapp/api-key -v "sk-live-abc123" -d "Stripe API key"
+# Store secrets (prompts for the value with input hidden)
+phoenix set myapp/db-password -d "Production database password"
+phoenix set myapp/api-key -d "Stripe API key"
 
 # Read a secret
 phoenix get myapp/db-password
@@ -61,11 +61,47 @@ Additional exec flags:
 
 ## Secure secret input
 
-```bash
-echo "my-secret" | phoenix set myapp/api-key --value-stdin
+Run `phoenix set <path>` with no value and Phoenix asks for it with echo off,
+like `ssh-keygen` or `sudo`. Paste and press Enter:
+
+```
+$ phoenix set myapp/api-key -d "Stripe API key"
+Value for myapp/api-key (input hidden):
+Received 32 chars: sk-l…WXYZ
+ok: myapp/api-key
 ```
 
-Prefer `--value-stdin` over pasting secrets directly into command arguments.
+- The value never appears on screen, in shell history, or in `ps`.
+- Leading/trailing whitespace is trimmed, since clipboard copies often carry a
+  stray newline or space.
+- The preview shows the length, plus the first and last 4 characters for values
+  of 20+ characters, so you can tell you pasted the right thing.
+
+For multi-line values (PEM keys, certs), add `--multiline`. Paste the whole
+block, then press Ctrl-D. Input stays hidden, nothing is written to disk, and
+Ctrl-C cancels without saving:
+
+```
+$ phoenix set ssh/deploy-key --multiline
+Paste value for ssh/deploy-key, then press Ctrl-D (input hidden):
+Received 27 lines, 1679 chars
+ok: ssh/deploy-key
+```
+
+There is deliberately no `$EDITOR` mode: editors write temp, swap, and backup
+files, which would leave the secret on disk.
+
+For scripts and agents, pipe the value in with `--value-stdin`. Only a single
+trailing newline is removed, so multi-line values (PEM keys, certs) work from a
+file:
+
+```bash
+some-command-that-prints-a-token | phoenix set myapp/api-key --value-stdin
+phoenix set ssh/deploy-key --value-stdin < deploy_key.pem
+```
+
+Avoid `-v <value>` and `echo "secret" | ...`: both put the secret in your shell
+history, and `-v` also shows it in process listings.
 
 ## Audit log
 

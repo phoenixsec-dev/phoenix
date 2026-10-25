@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -268,5 +269,28 @@ func TestProtectedKeyFileFormat(t *testing.T) {
 	nonce, _ := base64.StdEncoding.DecodeString(pf.Nonce)
 	if len(nonce) != NonceSize {
 		t.Fatalf("expected nonce %d bytes, got %d", NonceSize, len(nonce))
+	}
+}
+
+func TestCollectHiddenInput(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+		wantErr        bool
+	}{
+		{"pem paste ends at ctrl-d", "-----BEGIN KEY-----\rabc\r-----END KEY-----\r\x04ignored", "-----BEGIN KEY-----\nabc\n-----END KEY-----\n", false},
+		{"crlf normalised", "a\r\nb\x04", "a\nb", false},
+		{"backspace", "abx\x7fc\x04", "abc", false},
+		{"bracketed paste markers stripped", "\x1b[200~line1\rline2\x1b[201~\x04", "line1\nline2", false},
+		{"eof without ctrl-d", "abc", "abc", false},
+		{"ctrl-c cancels", "abc\x03", "", true},
+	}
+	for _, tc := range cases {
+		got, err := collectHiddenInput(strings.NewReader(tc.in))
+		if (err != nil) != tc.wantErr {
+			t.Errorf("%s: err = %v, wantErr %v", tc.name, err, tc.wantErr)
+		}
+		if got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

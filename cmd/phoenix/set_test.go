@@ -105,3 +105,16 @@ func TestCmdSetNoValueNoStdin(t *testing.T) {
 		t.Fatalf("expected usage error, got: %v", err)
 	}
 }
+
+func TestMaskedPreview(t *testing.T) {
+	cases := map[string]string{
+		"short":                      "5 chars",
+		"nineteen-chars-xxxx":        "19 chars",
+		"sk-proj-abcdefghij1234WXYZ": "26 chars: sk-p…WXYZ",
+	}
+	for in, want := range cases {
+		if got := maskedPreview(in); got != want {
+			t.Errorf("maskedPreview(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
