@@ -380,3 +380,23 @@ func TestIsPlaintextNonLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestPlaintextAllowed(t *testing.T) {
+	tests := []struct {
+		url, allow string
+		want       bool
+	}{
+		{"http://192.168.1.10:9090", "192.168.1.10", true},
+		{"http://192.168.1.10:9090", "10.0.0.5, 192.168.1.10", true},
+		{"http://Phoenix.Internal:9090", "phoenix.internal", true},
+		{"http://192.168.1.10:9090", "", false},
+		{"http://192.168.1.10:9090", "192.168.1.11", false},
+		{"http://192.168.1.10:9090", "192.168.1.10:9090", false},
+		{"http://192.168.1.10:9090", "1", false},
+	}
+	for _, tt := range tests {
+		if got := plaintextAllowed(tt.url, tt.allow); got != tt.want {
+			t.Errorf("plaintextAllowed(%q, %q) = %v, want %v", tt.url, tt.allow, got, tt.want)
+		}
+	}
+}

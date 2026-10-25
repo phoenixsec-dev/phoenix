@@ -123,17 +123,44 @@ func MCPPlaintextWarning(listen string) string {
 	return b.String()
 }
 
+// PlaintextAllowed reports whether allowList (the value of
+// PHOENIX_ALLOW_PLAINTEXT) names serverURL's host. allowList is a
+// comma-separated list of hostnames or IPs — no scheme, no port — matched
+// exactly and case-insensitively. It is the opt-out for setups where a
+// non-loopback address never touches a physical wire, such as containers
+// talking over one Proxmox virtual bridge. Scoping it to named hosts means
+// pointing the client at any other server warns again.
+func PlaintextAllowed(serverURL, allowList string) bool {
+	u, err := url.Parse(serverURL)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	for _, h := range strings.Split(allowList, ",") {
+		if strings.EqualFold(strings.TrimSpace(h), u.Hostname()) {
+			return true
+		}
+	}
+	return false
+}
+
 // ClientPlaintextWarning returns a short warning for a client (CLI) that is
 // about to send bearer tokens over plaintext HTTP to a non-loopback server.
-// Returns "" when serverURL does not warrant a warning.
-func ClientPlaintextWarning(serverURL string) string {
-	if !IsPlaintextNonLoopbackURL(serverURL) {
+// allowList is PHOENIX_ALLOW_PLAINTEXT (see PlaintextAllowed). Returns ""
+// when serverURL does not warrant a warning.
+func ClientPlaintextWarning(serverURL, allowList string) string {
+	if !IsPlaintextNonLoopbackURL(serverURL) || PlaintextAllowed(serverURL, allowList) {
 		return ""
+	}
+	host := serverURL
+	if u, err := url.Parse(serverURL); err == nil {
+		host = u.Hostname()
 	}
 	return fmt.Sprintf(
 		"WARNING: PHOENIX_SERVER is plaintext http:// to a non-loopback address (%s).\n"+
 			"Bearer tokens and secret values will cross the network unencrypted.\n"+
 			"Fix: enable the server's \"tls\" config block, switch this URL to https://,\n"+
-			"and set PHOENIX_CA_CERT to the Phoenix CA certificate (docs/lan-deployment.md).",
-		serverURL)
+			"and set PHOENIX_CA_CERT to the Phoenix CA certificate (docs/lan-deployment.md).\n"+
+			"Only if this traffic never leaves the host (e.g. containers on one virtual\n"+
+			"bridge), silence this with PHOENIX_ALLOW_PLAINTEXT=%s.",
+		serverURL, host)
 }

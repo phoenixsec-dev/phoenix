@@ -105,9 +105,10 @@ var plaintextWarned sync.Map
 // cross the network unencrypted. Phoenix is LAN-scoped with plaintext
 // loopback as the supported default — this warns on the transition, it
 // never fails. Hostnames other than "localhost" are not resolved; they
-// are treated as non-loopback so ambiguity warns.
+// are treated as non-loopback so ambiguity warns. Hosts named in
+// PHOENIX_ALLOW_PLAINTEXT are skipped (see plaintextAllowed).
 func warnPlaintextOnce(server string) {
-	if !isPlaintextNonLoopback(server) {
+	if !isPlaintextNonLoopback(server) || plaintextAllowed(server, os.Getenv("PHOENIX_ALLOW_PLAINTEXT")) {
 		return
 	}
 	if _, loaded := plaintextWarned.LoadOrStore(server, struct{}{}); loaded {
@@ -116,8 +117,26 @@ func warnPlaintextOnce(server string) {
 	fmt.Fprintf(os.Stderr,
 		"phoenix: WARNING: server URL is plaintext http:// to a non-loopback address (%s).\n"+
 			"phoenix: Bearer tokens and secret values will cross the network unencrypted.\n"+
-			"phoenix: Enable the server's \"tls\" config block and use https:// (see docs/lan-deployment.md).\n",
+			"phoenix: Enable the server's \"tls\" config block and use https:// (see docs/lan-deployment.md).\n"+
+			"phoenix: Only if this traffic never leaves the host, silence this with PHOENIX_ALLOW_PLAINTEXT=<host>.\n",
 		server)
+}
+
+// plaintextAllowed reports whether allowList (PHOENIX_ALLOW_PLAINTEXT, a
+// comma-separated list of hostnames or IPs, no scheme or port) names the
+// server's host. Exact, case-insensitive match, so any other server still
+// warns. Mirrors transport.PlaintextAllowed used by the CLI.
+func plaintextAllowed(server, allowList string) bool {
+	u, err := url.Parse(server)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	for _, h := range strings.Split(allowList, ",") {
+		if strings.EqualFold(strings.TrimSpace(h), u.Hostname()) {
+			return true
+		}
+	}
+	return false
 }
 
 // isPlaintextNonLoopback reports whether rawurl is plain http:// to a

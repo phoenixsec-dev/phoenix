@@ -89,15 +89,43 @@ func TestMCPPlaintextWarning(t *testing.T) {
 	}
 }
 
+func TestPlaintextAllowed(t *testing.T) {
+	tests := []struct {
+		url, allow string
+		want       bool
+	}{
+		{"http://192.168.1.10:9090", "192.168.1.10", true},
+		{"http://192.168.1.10:9090", " 10.0.0.5 , 192.168.1.10 ", true},
+		{"http://Phoenix.Internal:9090", "phoenix.internal", true},
+		{"http://192.168.1.10:9090", "", false},
+		{"http://192.168.1.10:9090", "192.168.1.11", false},
+		{"http://192.168.1.10:9090", "192.168.1.10:9090", false}, // host only, no port
+		{"http://192.168.1.10:9090", "192.168.1.1", false},       // no prefix match
+		{"http://192.168.1.10:9090", "1", false},                 // not a blanket switch
+		{"not a url %%", "192.168.1.10", false},
+	}
+	for _, tt := range tests {
+		if got := PlaintextAllowed(tt.url, tt.allow); got != tt.want {
+			t.Errorf("PlaintextAllowed(%q, %q) = %v, want %v", tt.url, tt.allow, got, tt.want)
+		}
+	}
+}
+
 func TestClientPlaintextWarning(t *testing.T) {
-	if w := ClientPlaintextWarning("http://127.0.0.1:9090"); w != "" {
+	if w := ClientPlaintextWarning("http://127.0.0.1:9090", ""); w != "" {
 		t.Errorf("loopback URL should not warn, got:\n%s", w)
 	}
-	if w := ClientPlaintextWarning("https://192.168.1.10:9090"); w != "" {
+	if w := ClientPlaintextWarning("https://192.168.1.10:9090", ""); w != "" {
 		t.Errorf("https URL should not warn, got:\n%s", w)
 	}
-	w := ClientPlaintextWarning("http://192.168.1.10:9090")
-	for _, want := range []string{"WARNING", "http://192.168.1.10:9090", "unencrypted", "PHOENIX_CA_CERT"} {
+	if w := ClientPlaintextWarning("http://192.168.1.10:9090", "192.168.1.10"); w != "" {
+		t.Errorf("allowed host should not warn, got:\n%s", w)
+	}
+	if w := ClientPlaintextWarning("http://192.168.1.10:9090", "192.168.1.99"); w == "" {
+		t.Error("host not in PHOENIX_ALLOW_PLAINTEXT should still warn")
+	}
+	w := ClientPlaintextWarning("http://192.168.1.10:9090", "")
+	for _, want := range []string{"WARNING", "http://192.168.1.10:9090", "unencrypted", "PHOENIX_CA_CERT", "PHOENIX_ALLOW_PLAINTEXT=192.168.1.10"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("client warning missing %q:\n%s", want, w)
 		}
