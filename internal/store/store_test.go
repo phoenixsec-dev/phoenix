@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
@@ -634,6 +635,88 @@ func TestRotateMasterKeyRetryAfterTotalFailureKeepsStoreReadable(t *testing.T) {
 		t.Fatal("master.key changed although no key write succeeded")
 	}
 	assertOpensWithKey(t, storePath, diskKey)
+}
+
+// failingRotateProvider wraps a real provider but fails RotateMaster, to
+// reach the rotation's earliest error path.
+type failingRotateProvider struct{ crypto.KeyProvider }
+
+func (failingRotateProvider) RotateMaster([]*crypto.WrappedDEK) ([]*crypto.WrappedDEK, error) {
+	return nil, fmt.Errorf("injected provider rotation failure")
+}
+
+// Regression (review F1 R2, 2026-10-25): after a total failure, a retry that
+// fails BEFORE its callback (live-store save hits ENOSPC, or the provider
+// cannot rotate) must keep the backup it just wrote. The live store still
+// holds the abandoned key's wrappers, so that backup is the only copy the
+// key file can open; deleting it lost every secret on the next restart.
+func TestRotateMasterKeyRetryEarlyFailureKeepsBackup(t *testing.T) {
+	cases := map[string]func(t *testing.T, s *Store, storePath string){
+		"store save fails": func(t *testing.T, s *Store, storePath string) {
+			origWrite := writeFileAtomic
+			t.Cleanup(func() { writeFileAtomic = origWrite })
+			writeFileAtomic = func(path string, data []byte, perm os.FileMode) error {
+				if path == storePath {
+					return &os.PathError{Op: "write", Path: path, Err: syscall.ENOSPC}
+				}
+				return origWrite(path, data, perm)
+			}
+		},
+		"provider rotation fails": func(t *testing.T, s *Store, storePath string) {
+			s.provider = failingRotateProvider{s.provider}
+		},
+	}
+	for name, breakRetry := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, storePath, oldKey := rotationFailureStore(t, "")
+			backupPath := storePath + ".pre-rotate"
+			_, repair, _ := failRotationWithBrokenDisk(t, s)
+			repair()
+			assertNotOpensWithKey(t, storePath, oldKey)
+
+			breakRetry(t, s, storePath)
+			called := false
+			_, err := s.RotateMasterKey(func() error { called = true; return nil })
+			if err == nil || called {
+				t.Fatalf("want failure before the callback, got err=%v called=%t", err, called)
+			}
+			if !strings.Contains(err.Error(), "CRITICAL") || !strings.Contains(err.Error(), backupPath) {
+				t.Fatalf("error should be CRITICAL and name the backup: %v", err)
+			}
+
+			// Simulate a restart and follow the documented recovery:
+			// move .pre-rotate over the store, keep master.key.
+			diskKey, err := crypto.LoadMasterKey(filepath.Join(filepath.Dir(storePath), "master.key"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(diskKey, oldKey) {
+				t.Fatal("master.key changed although no key write succeeded")
+			}
+			assertNotOpensWithKey(t, storePath, diskKey)
+			if err := os.Rename(backupPath, storePath); err != nil {
+				t.Fatalf("backup gone: %v", err)
+			}
+			assertOpensWithKey(t, storePath, diskKey)
+		})
+	}
+}
+
+// An early failure on a healthy store is an ordinary error: the store file
+// still opens with the current key, so the backup is not needed and is
+// removed rather than left behind as a stale copy.
+func TestRotateMasterKeyEarlyFailureOnHealthyStoreRemovesBackup(t *testing.T) {
+	s, storePath, oldKey := rotationFailureStore(t, "")
+	s.provider = failingRotateProvider{s.provider}
+
+	_, err := s.RotateMasterKey(func() error { return nil })
+	if err == nil || strings.Contains(err.Error(), "CRITICAL") {
+		t.Fatalf("want ordinary error, got: %v", err)
+	}
+	if _, statErr := os.Stat(storePath + ".pre-rotate"); !os.IsNotExist(statErr) {
+		t.Fatalf("backup left behind on a healthy store: %v", statErr)
+	}
+	assertOpensWithKey(t, storePath, oldKey)
 }
 
 // Everything fails with a protected master.key: the new key is saved,

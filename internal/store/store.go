@@ -398,11 +398,28 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 		}()
 	}
 
+	// failEarly handles a failure before this rotation replaced the store
+	// file. An untouched file is not necessarily a readable one: a previous
+	// rotation that failed totally can have left abandoned new-key wrappers
+	// on disk, and then the backup just written is the only copy the key
+	// file can open (review F1 R2, 2026-10-25). So the backup is deleted
+	// only when the store file is checked to open with the current key.
+	failEarly := func(err error) (int, error) {
+		if afterSave == nil || s.storeFileOpens() {
+			return 0, err
+		}
+		keepBackup = true
+		recovery := fmt.Sprintf("restore %s over %s and keep the current key file", preRotatePath, s.filePath)
+		logUnreadableStore(recovery)
+		return 0, fmt.Errorf("CRITICAL: %w; the store file on disk does not open with the current key "+
+			"(left by an earlier failed rotation); recovery: %s", err, recovery)
+	}
+
 	// Rotate: unwrap all with old key, generate new key, re-wrap all.
 	// The provider stages the new key (does not swap yet).
 	newWrapped, err := s.provider.RotateMaster(wrappedDEKs)
 	if err != nil {
-		return 0, fmt.Errorf("rotating master key: %w", err)
+		return failEarly(fmt.Errorf("rotating master key: %w", err))
 	}
 
 	// Replace namespace entries with re-wrapped DEKs
@@ -414,12 +431,13 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	if err := s.save(); err != nil {
 		// Rollback: restore old namespace entries + discard staged key.
 		// The store file on disk is unchanged (save() uses tmp+rename;
-		// if rename failed, the old file is still intact).
+		// if rename failed, the old file is still intact). failEarly
+		// checks whether that old file is actually readable.
 		for i, name := range nsNames {
 			s.data.Namespaces[name] = oldEntries[i]
 		}
 		s.provider.RollbackRotation()
-		return 0, fmt.Errorf("saving store after rotation: %w", err)
+		return failEarly(fmt.Errorf("saving store after rotation: %w", err))
 	}
 
 	// Run post-save callback (e.g. write key file) while still under lock.
@@ -474,9 +492,7 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 				recovery = strings.Join(options, ", or ")
 			}
 			s.provider.RollbackRotation()
-			log.Printf("CRITICAL: master key rotation failed and the store on disk may be unreadable. "+
-				"The running server still has a working key and DEKs in memory; the next successful "+
-				"write repairs the store, so do not restart before then. Manual recovery: %s", recovery)
+			logUnreadableStore(recovery)
 			return 0, fmt.Errorf("CRITICAL: callback failed: %w; store restore failed: %v; "+
 				"store rewrite failed; recovery: %s", err, restoreErr, recovery)
 		}
@@ -485,6 +501,38 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	// Both writes succeeded — commit the provider key swap
 	s.provider.CommitRotation()
 	return len(nsNames), nil
+}
+
+// storeFileOpens reports whether the store file on disk opens with the
+// provider's active key: it parses and every namespace DEK unwraps. Any
+// read or parse error counts as "does not open". RotateMasterKey uses it
+// to decide whether the pre-rotate backup is still needed.
+func (s *Store) storeFileOpens() bool {
+	data, err := os.ReadFile(s.filePath)
+	if err != nil {
+		return false
+	}
+	var sd storeData
+	if err := json.Unmarshal(data, &sd); err != nil {
+		return false
+	}
+	for _, entry := range sd.Namespaces {
+		dek, err := s.provider.UnwrapKey(&entry.Wrapped)
+		if err != nil {
+			return false
+		}
+		crypto.ZeroBytes(dek)
+	}
+	return true
+}
+
+// logUnreadableStore logs the CRITICAL message for a failed rotation that
+// left a store file the current key file cannot open. recovery lists the
+// manual recovery steps that are actually available on disk.
+func logUnreadableStore(recovery string) {
+	log.Printf("CRITICAL: master key rotation failed and the store on disk may be unreadable. "+
+		"The running server still has a working key and DEKs in memory; the next successful "+
+		"write repairs the store, so do not restart before then. Manual recovery: %s", recovery)
 }
 
 // emergencyPersistPendingKey saves the provider's staged (new) master key

@@ -8,9 +8,10 @@ Rotate the master encryption key without downtime:
 phoenix rotate-master
 ```
 
-Phoenix generates a new master key, re-wraps namespace DEKs, and persists the
-change atomically. If anything fails mid-rotation, the two-phase commit path
-recovers automatically.
+Phoenix generates a new master key, re-wraps namespace DEKs, and saves the
+store and then the key file. If a step fails, Phoenix rolls back to the old
+key and, in most cases, repairs the store on its own. When it cannot, it
+logs a `CRITICAL` message with manual recovery steps (see below).
 
 The store file and master key file are each written with fsync before and
 after the rename. A crash or power loss leaves either the whole old file or
@@ -26,9 +27,12 @@ covers that case.
 ### If rotation fails
 
 Normally a failed rotation rolls back on its own and the old key stays in
-use. In the rare case where the rollback cannot repair the store file either,
-the server logs a `CRITICAL` message that lists the recovery files it
-actually managed to leave next to the store:
+use. In the rare case where the store file on disk is left in a state the
+current `master.key` cannot open, the server logs a `CRITICAL` message that
+lists the recovery files it actually managed to leave next to the store.
+That can happen when the rollback cannot repair the store, or when a retry
+fails early while the store is still broken from an earlier failure. The
+files:
 
 - `<store>.pre-rotate` — a snapshot of the store taken from memory just
   before rotation. It opens with the **current** `master.key`.
@@ -40,7 +44,10 @@ actually managed to leave next to the store:
 The running server keeps a working key in memory, and its next successful
 write rewrites the store under the current key. So the easiest fix is to
 clear the disk problem, then change or re-set any secret before restarting.
-A later `rotate-master` is also safe.
+A `rotate-master` that succeeds repairs it too. If a retry fails, read the
+log again: another `CRITICAL` message means the store is still unreadable
+and names the recovery files that exist now. Recover from those, not from
+what an earlier message listed.
 
 If the server already stopped, or will not start (it cannot decrypt secrets):
 
