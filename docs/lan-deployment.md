@@ -217,8 +217,9 @@ With mTLS configured, no bearer token is needed — the cert identifies the agen
 
 ### Plaintext on a single host (opt-out)
 
-The CLI and Go SDK print a warning on every call when `PHOENIX_SERVER` is
-plain `http://` to a non-loopback address. If the client and server are
+When `PHOENIX_SERVER` is plain `http://` to a non-loopback address, the CLI
+prints a warning on every command and the Go SDK prints one once per server
+URL per process. If the client and server are
 guests on the same machine (for example containers on one Proxmox virtual
 bridge) the traffic never touches a physical wire, and you can silence the
 warning for that server:
@@ -229,8 +230,11 @@ export PHOENIX_ALLOW_PLAINTEXT="192.168.1.10"
 ```
 
 The value is a comma-separated list of hostnames or IPs (no scheme, no
-port), matched exactly against the host in `PHOENIX_SERVER`. Point the
-client at any other server and the warning comes back, and a machine that
+port), matched against the host in `PHOENIX_SERVER` on any port. IP
+addresses compare as addresses, and an IPv6 zone such as `%eth0` must match
+exactly. Hostnames ignore ASCII letter case only; non-ASCII names must match
+exactly. There are no wildcards. Point the client at any other server and
+the warning comes back, and a machine that
 does not set the variable keeps warning. Set it only on clients that share
 the server's host. You are still accepting plaintext: anything that can see
 that virtual network, including a compromised guest on the same bridge, can

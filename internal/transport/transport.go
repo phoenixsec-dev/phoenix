@@ -10,8 +10,10 @@ package transport
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // IsLoopbackHost reports whether host (an IP literal or hostname, no port)
@@ -125,22 +127,68 @@ func MCPPlaintextWarning(listen string) string {
 
 // PlaintextAllowed reports whether allowList (the value of
 // PHOENIX_ALLOW_PLAINTEXT) names serverURL's host. allowList is a
-// comma-separated list of hostnames or IPs — no scheme, no port — matched
-// exactly and case-insensitively. It is the opt-out for setups where a
+// comma-separated list of hostnames or IPs — no scheme, no port — each
+// matched with allowEntryMatches. It is the opt-out for setups where a
 // non-loopback address never touches a physical wire, such as containers
 // talking over one Proxmox virtual bridge. Scoping it to named hosts means
-// pointing the client at any other server warns again.
+// pointing the client at any other server warns again. The port is ignored:
+// naming a host covers every port on it.
 func PlaintextAllowed(serverURL, allowList string) bool {
 	u, err := url.Parse(serverURL)
 	if err != nil || u.Hostname() == "" {
 		return false
 	}
-	for _, h := range strings.Split(allowList, ",") {
-		if strings.EqualFold(strings.TrimSpace(h), u.Hostname()) {
+	for _, entry := range strings.Split(allowList, ",") {
+		if allowEntryMatches(entry, u.Hostname()) {
 			return true
 		}
 	}
 	return false
+}
+
+// allowEntryMatches reports whether one PHOENIX_ALLOW_PLAINTEXT entry names
+// host (a URL hostname, brackets already stripped). It must never match a
+// host that dials a different destination:
+//   - IP literals compare as addresses ("fe80::0:1" equals "fe80::1"); an
+//     IPv6 zone ("%eth0") must match exactly, since interface names are
+//     case-sensitive. "[addr]" entries are accepted.
+//   - DNS names fold ASCII case only. Non-ASCII bytes must match exactly:
+//     Unicode case folding aliases names that IDNA maps to different DNS
+//     names (e.g. "σ" and "ς").
+//
+// Wildcards have no meaning; "*" is just a name that never matches.
+func allowEntryMatches(entry, host string) bool {
+	entry = strings.TrimSpace(entry)
+	if strings.HasPrefix(entry, "[") && strings.HasSuffix(entry, "]") {
+		entry = entry[1 : len(entry)-1]
+	}
+	if entry == "" || host == "" {
+		return false
+	}
+	if a, err := netip.ParseAddr(entry); err == nil {
+		b, err := netip.ParseAddr(host)
+		return err == nil && a == b
+	}
+	if len(entry) != len(host) {
+		return false
+	}
+	for i := 0; i < len(entry); i++ {
+		a, b := entry[i], host[i]
+		if a < utf8.RuneSelf && b < utf8.RuneSelf {
+			a, b = asciiLower(a), asciiLower(b)
+		}
+		if a != b {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLower(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // ClientPlaintextWarning returns a short warning for a client (CLI) that is

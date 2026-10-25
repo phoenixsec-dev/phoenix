@@ -8,7 +8,9 @@
   SDK warning about plain `http://` to a non-loopback server, for the named
   hosts only. It is meant for clients that reach the server over a
   host-local virtual network (containers on one bridge), where the warning
-  fired on every call and cluttered scripts. Any other server still warns,
+  fired on every CLI command and cluttered scripts. Matching is strict: IP
+  addresses compare as addresses with IPv6 zones matched exactly, hostnames
+  ignore ASCII case only, and there are no wildcards. Any other server still warns,
   and the warning text now names the variable so it can be found. Server
   and MCP startup warnings are unchanged. See
   [LAN deployment](docs/lan-deployment.md#plaintext-on-a-single-host-opt-out).
