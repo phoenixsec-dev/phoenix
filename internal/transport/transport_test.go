@@ -89,15 +89,76 @@ func TestMCPPlaintextWarning(t *testing.T) {
 	}
 }
 
+func TestPlaintextAllowed(t *testing.T) {
+	tests := []struct {
+		url, allow string
+		want       bool
+	}{
+		// Basic named-host matching.
+		{"http://192.168.1.10:9090", "192.168.1.10", true},
+		{"http://192.168.1.10:9090", " 10.0.0.5 , 192.168.1.10 ", true},
+		{"http://192.168.1.10:9090", ", ,192.168.1.10", true},
+		{"http://Phoenix.Internal:9090", "phoenix.internal", true},
+		{"http://192.168.1.10:8443", "192.168.1.10", true}, // every port on a named host
+		{"http://192.168.1.10:9090", "", false},
+		{"http://192.168.1.10:9090", "   ", false},
+		{"http://192.168.1.10:9090", ",,,", false},
+		{"http://192.168.1.10:9090", "192.168.1.11", false},
+		{"http://192.168.1.10:9090", "192.168.1.10:9090", false}, // host only, no port
+		{"http://192.168.1.10:9090", "192.168.1.1", false},       // no prefix match
+		{"http://192.168.1.10:9090", "1", false},                 // not a blanket switch
+		{"http://192.168.1.10:9090", "http://192.168.1.10", false},
+		{"http://192.168.1.10:9090", "192.168.1.10/", false},
+		{"http://192.168.1.10:9090", "::ffff:192.168.1.10", false}, // other spelling warns
+		{"not a url %%", "192.168.1.10", false},
+		// No wildcards.
+		{"http://192.168.1.10:9090", "*", false},
+		{"http://a.example.com:9090", "*.example.com", false},
+		// IPv6 compares as an address; brackets optional.
+		{"http://[fd00::10]:9090", "fd00::10", true},
+		{"http://[fd00::10]:9090", "[fd00::10]", true},
+		{"http://[fd00::10]:9090", "FD00:0::10", true},
+		{"http://[fd00::10]:9090", "fd00::11", false},
+		// IPv6 zones are case-sensitive interface names and must match.
+		{"http://[fe80::1%25eth0]:9090", "fe80::1%eth0", true},
+		{"http://[fe80::1%25ETH0]:9090", "fe80::1%eth0", false},
+		{"http://[fe80::1%25eth0]:9090", "fe80::1", false},
+		{"http://[fe80::1]:9090", "fe80::1%eth0", false},
+		// Non-ASCII names never fold: these are different DNS names.
+		{"http://ς.example:9090", "σ.example", false}, // final sigma vs sigma
+		{"http://σ.example:9090", "σ.example", true},
+		{"http://K.example:9090", "k.example", false}, // Kelvin sign vs k
+	}
+	for _, tt := range tests {
+		if got := PlaintextAllowed(tt.url, tt.allow); got != tt.want {
+			t.Errorf("PlaintextAllowed(%q, %q) = %v, want %v", tt.url, tt.allow, got, tt.want)
+		}
+	}
+}
+
 func TestClientPlaintextWarning(t *testing.T) {
-	if w := ClientPlaintextWarning("http://127.0.0.1:9090"); w != "" {
+	if w := ClientPlaintextWarning("http://127.0.0.1:9090", ""); w != "" {
 		t.Errorf("loopback URL should not warn, got:\n%s", w)
 	}
-	if w := ClientPlaintextWarning("https://192.168.1.10:9090"); w != "" {
+	if w := ClientPlaintextWarning("https://192.168.1.10:9090", ""); w != "" {
 		t.Errorf("https URL should not warn, got:\n%s", w)
 	}
-	w := ClientPlaintextWarning("http://192.168.1.10:9090")
-	for _, want := range []string{"WARNING", "http://192.168.1.10:9090", "unencrypted", "PHOENIX_CA_CERT"} {
+	if w := ClientPlaintextWarning("http://192.168.1.10:9090", "192.168.1.10"); w != "" {
+		t.Errorf("allowed host should not warn, got:\n%s", w)
+	}
+	if w := ClientPlaintextWarning("http://192.168.1.10:9090", "192.168.1.99"); w == "" {
+		t.Error("host not in PHOENIX_ALLOW_PLAINTEXT should still warn")
+	}
+	// Review regressions: names that only Unicode or zone case-folding
+	// would equate dial different destinations, so they must still warn.
+	if w := ClientPlaintextWarning("http://\u03c2.example:9090", "\u03c3.example"); w == "" {
+		t.Error("final sigma host must not be silenced by a sigma entry")
+	}
+	if w := ClientPlaintextWarning("http://[fe80::1%25ETH0]:9090", "fe80::1%eth0"); w == "" {
+		t.Error("IPv6 zone must match exactly to silence the warning")
+	}
+	w := ClientPlaintextWarning("http://192.168.1.10:9090", "")
+	for _, want := range []string{"WARNING", "http://192.168.1.10:9090", "unencrypted", "PHOENIX_CA_CERT", "PHOENIX_ALLOW_PLAINTEXT=192.168.1.10"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("client warning missing %q:\n%s", want, w)
 		}

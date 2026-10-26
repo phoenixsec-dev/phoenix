@@ -11,11 +11,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Error represents a Phoenix API error.
@@ -100,24 +102,87 @@ func New(server, token string) *Client {
 // creating many clients warns once per distinct server.
 var plaintextWarned sync.Map
 
+// plaintextWarnOut is where the plaintext warning goes; tests swap it.
+var plaintextWarnOut io.Writer = os.Stderr
+
 // warnPlaintextOnce emits a stderr warning when the server URL is plain
 // http:// to a non-loopback host: bearer tokens and secret values would
 // cross the network unencrypted. Phoenix is LAN-scoped with plaintext
 // loopback as the supported default — this warns on the transition, it
 // never fails. Hostnames other than "localhost" are not resolved; they
-// are treated as non-loopback so ambiguity warns.
+// are treated as non-loopback so ambiguity warns. Hosts named in
+// PHOENIX_ALLOW_PLAINTEXT are skipped (see plaintextAllowed).
 func warnPlaintextOnce(server string) {
-	if !isPlaintextNonLoopback(server) {
+	if !isPlaintextNonLoopback(server) || plaintextAllowed(server, os.Getenv("PHOENIX_ALLOW_PLAINTEXT")) {
 		return
 	}
 	if _, loaded := plaintextWarned.LoadOrStore(server, struct{}{}); loaded {
 		return
 	}
-	fmt.Fprintf(os.Stderr,
+	fmt.Fprintf(plaintextWarnOut,
 		"phoenix: WARNING: server URL is plaintext http:// to a non-loopback address (%s).\n"+
 			"phoenix: Bearer tokens and secret values will cross the network unencrypted.\n"+
-			"phoenix: Enable the server's \"tls\" config block and use https:// (see docs/lan-deployment.md).\n",
+			"phoenix: Enable the server's \"tls\" config block and use https:// (see docs/lan-deployment.md).\n"+
+			"phoenix: Only if this traffic never leaves the host, silence this with PHOENIX_ALLOW_PLAINTEXT=<host>.\n",
 		server)
+}
+
+// plaintextAllowed reports whether allowList (PHOENIX_ALLOW_PLAINTEXT, a
+// comma-separated list of hostnames or IPs, no scheme or port) names the
+// server's host, on any port. Entries are matched with allowEntryMatches,
+// so any other server still warns. Mirrors transport.PlaintextAllowed used
+// by the CLI; the SDK does not import internal packages.
+func plaintextAllowed(server, allowList string) bool {
+	u, err := url.Parse(server)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	for _, entry := range strings.Split(allowList, ",") {
+		if allowEntryMatches(entry, u.Hostname()) {
+			return true
+		}
+	}
+	return false
+}
+
+// allowEntryMatches reports whether one PHOENIX_ALLOW_PLAINTEXT entry names
+// host. It must never match a host that dials a different destination: IP
+// literals compare as addresses with the IPv6 zone matched exactly ("[addr]"
+// entries are accepted), and DNS names fold ASCII case only, with non-ASCII
+// bytes matched exactly (Unicode folding aliases different IDNA names, e.g.
+// "σ" and "ς"). Copy of the transport package matcher; keep them in step.
+func allowEntryMatches(entry, host string) bool {
+	entry = strings.TrimSpace(entry)
+	if strings.HasPrefix(entry, "[") && strings.HasSuffix(entry, "]") {
+		entry = entry[1 : len(entry)-1]
+	}
+	if entry == "" || host == "" {
+		return false
+	}
+	if a, err := netip.ParseAddr(entry); err == nil {
+		b, err := netip.ParseAddr(host)
+		return err == nil && a == b
+	}
+	if len(entry) != len(host) {
+		return false
+	}
+	for i := 0; i < len(entry); i++ {
+		a, b := entry[i], host[i]
+		if a < utf8.RuneSelf && b < utf8.RuneSelf {
+			a, b = asciiLower(a), asciiLower(b)
+		}
+		if a != b {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLower(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // isPlaintextNonLoopback reports whether rawurl is plain http:// to a

@@ -1,6 +1,22 @@
 # Release Notes
 
-## v0.18.0 (2026-10-25)
+## v0.18.0 (2026-10-26)
+
+### Host-Scoped Opt-Out for the Plaintext Client Warning
+
+- **`PHOENIX_ALLOW_PLAINTEXT=<host>[,<host>...]`** silences the CLI and Go
+  SDK warning about plain `http://` to a non-loopback server, for the named
+  hosts only. It is meant for clients that reach the server over a
+  host-local virtual network (containers on one bridge), where the warning
+  fired on every CLI command and cluttered scripts. Matching is strict: IP
+  addresses compare as addresses with IPv6 zones matched exactly, hostnames
+  ignore ASCII case only, and there are no wildcards. Any other server still warns,
+  and the warning text now names the variable so it can be found. Server
+  and MCP startup warnings are unchanged. See
+  [LAN deployment](docs/lan-deployment.md#plaintext-on-a-single-host-opt-out).
+
+**Upgrading:** no action required. Without the variable, behavior is
+unchanged.
 
 ### Optional HTTPS Listener: Move Clients to HTTPS One at a Time
 
