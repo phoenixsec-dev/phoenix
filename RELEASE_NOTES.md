@@ -66,6 +66,23 @@ checks HTTP.
 - **New [Quickstart](docs/quickstart.md)**: binary and Docker paths in about
   two minutes, checked by `scripts/quickstart-smoke.sh`.
 
+### Safer Store and Master Key Writes
+
+- **Power-loss safe writes.** The store file and every master key file are
+  now written with fsync before and after the rename, so a crash leaves the
+  whole old file or the whole new file, never a truncated one.
+- **Key rotation keeps a working backup.** The `.pre-rotate` backup is now
+  taken from memory just before rotation, so a failed rotation followed by
+  a retry can no longer replace the good backup with an unreadable one.
+- **No unprotected emergency key.** When a rotation cannot finish, the
+  `<store>.emergency-key` file is written only if the master key is
+  passphrase-protected, and it is encrypted with that passphrase. Without a
+  passphrase Phoenix no longer writes the new key to disk.
+- **Recovery steps** for a failed rotation are in
+  [Key management](docs/key-management.md#if-rotation-fails).
+
+**Upgrading:** no action required.
+
 ## v0.17.1 (2026-10-25)
 
 ### Hidden Prompt for `phoenix set`
