@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
@@ -438,89 +439,335 @@ func TestRotateMasterKeyCallbackFailureRollsBack(t *testing.T) {
 	}
 }
 
-func TestRotateMasterKeyDoubleFailureEmergencyKey(t *testing.T) {
+// rotationFailureStore builds a two-secret store for the rotation failure
+// tests. With a non-empty passphrase, master.key is written
+// passphrase-protected and the provider carries the passphrase, the same
+// way the server boots a protected deployment.
+func rotationFailureStore(t *testing.T, passphrase string) (s *Store, storePath string, oldKey []byte) {
+	t.Helper()
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "master.key")
-	masterKey, _ := crypto.GenerateAndSaveMasterKey(keyPath)
-	storePath := filepath.Join(dir, "store.json")
+	var masterKey []byte
+	var err error
+	if passphrase == "" {
+		masterKey, err = crypto.GenerateAndSaveMasterKey(keyPath)
+	} else {
+		masterKey, err = crypto.GenerateKey()
+		if err == nil {
+			err = crypto.SaveProtectedMasterKey(keyPath, masterKey, passphrase)
+		}
+	}
+	if err != nil {
+		t.Fatalf("create master key: %v", err)
+	}
+	storePath = filepath.Join(dir, "store.json")
+	s, err = New(storePath, masterKey)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.Provider().(*crypto.FileKeyProvider).SetPassphrase(passphrase)
+	if err := s.Set("ns1/key1", "value1", "vector", "", nil); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := s.Set("ns2/key2", "value2", "vector", "", nil); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	return s, storePath, append([]byte(nil), masterKey...)
+}
 
-	s, _ := New(storePath, masterKey)
-	s.Set("ns1/key1", "value1", "vector", "", nil)
-	s.Set("ns2/key2", "value2", "vector", "", nil)
+// assertOpensWithKey checks that the store file at path decrypts with key.
+func assertOpensWithKey(t *testing.T, path string, key []byte) {
+	t.Helper()
+	st, err := New(path, key)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	for p, want := range map[string]string{"ns1/key1": "value1", "ns2/key2": "value2"} {
+		sec, err := st.Get(p)
+		if err != nil {
+			t.Fatalf("%s: Get %s: %v", path, p, err)
+		}
+		if sec.Value != want {
+			t.Fatalf("%s: %s = %q, want %q", path, p, sec.Value, want)
+		}
+	}
+}
 
+// assertNotOpensWithKey checks that key can NOT decrypt the store at path
+// (it still holds wrappers for some other key).
+func assertNotOpensWithKey(t *testing.T, path string, key []byte) {
+	t.Helper()
+	st, err := New(path, key)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	if _, err := st.Get("ns1/key1"); err == nil {
+		t.Fatalf("%s unexpectedly decrypts with this key", path)
+	}
+}
+
+// breakStoreDisk makes every store write and the restore rename fail until
+// the returned repair func is called. The rotated store file stays on disk
+// untouched, like a disk that went read-only mid-rotation. Key files are
+// written outside these seams, so the key directory keeps working.
+func breakStoreDisk(t *testing.T) (repair func()) {
+	t.Helper()
+	broken := true
+	origWrite, origRename := writeFileAtomic, renameFile
+	writeFileAtomic = func(path string, data []byte, perm os.FileMode) error {
+		if broken {
+			return fmt.Errorf("injected write failure: %s", path)
+		}
+		return origWrite(path, data, perm)
+	}
+	renameFile = func(from, to string) error {
+		if broken {
+			return fmt.Errorf("injected rename failure: %s", to)
+		}
+		return origRename(from, to)
+	}
+	t.Cleanup(func() { writeFileAtomic, renameFile = origWrite, origRename })
+	return func() { broken = false }
+}
+
+// failRotationWithBrokenDisk runs a rotation whose key write fails and whose
+// store disk breaks right after the rotated store was saved, so backup
+// restore and rewrite both fail. Returns the error and the abandoned new key.
+func failRotationWithBrokenDisk(t *testing.T, s *Store) (newKey []byte, repair func(), err error) {
+	t.Helper()
 	provider := s.Provider().(*crypto.FileKeyProvider)
-	oldKey := make([]byte, len(provider.MasterKey()))
-	copy(oldKey, provider.MasterKey())
+	_, err = s.RotateMasterKey(func() error {
+		newKey = provider.PendingMasterKey()
+		repair = breakStoreDisk(t)
+		return fmt.Errorf("simulated key file write failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "CRITICAL") {
+		t.Fatalf("want CRITICAL error, got: %v", err)
+	}
+	return newKey, repair, err
+}
 
-	preRotatePath := storePath + ".pre-rotate"
-	emergencyKeyPath := storePath + ".emergency-key"
+// Callback fails and the backup restore fails, but the store can still be
+// rewritten from memory: disk ends up consistent with the old key and no
+// emergency key file is needed.
+func TestRotateMasterKeyRestoreFailureRewritesStore(t *testing.T) {
+	s, storePath, oldKey := rotationFailureStore(t, "")
+	provider := s.Provider().(*crypto.FileKeyProvider)
 
-	// Rotate with a callback that:
-	// 1. Deletes the pre-rotate backup (simulating it being lost)
-	// 2. Returns an error (simulating key file write failure)
-	// This forces the double-failure: callback fails AND pre-rotate
-	// restore fails (file is gone).
 	_, err := s.RotateMasterKey(func() error {
-		os.Remove(preRotatePath)
+		os.Remove(storePath + ".pre-rotate") // force the restore rename to fail
 		return fmt.Errorf("simulated key file write failure")
 	})
 	if err == nil {
-		t.Fatal("expected error from double failure")
+		t.Fatal("expected error from failing callback")
+	}
+	if strings.Contains(err.Error(), "CRITICAL") {
+		t.Fatalf("recovered failure should not be CRITICAL: %v", err)
+	}
+	if !bytes.Equal(oldKey, provider.MasterKey()) || provider.PendingMasterKey() != nil {
+		t.Fatal("provider not rolled back to the old key")
+	}
+	if _, statErr := os.Stat(storePath + ".emergency-key"); !os.IsNotExist(statErr) {
+		t.Fatalf("emergency key written although the store was repaired: %v", statErr)
+	}
+	assertOpensWithKey(t, storePath, oldKey)
+}
+
+// Everything fails and no passphrase is configured (finding M2): the new
+// master key must NOT be written to disk. The live store keeps the rotated
+// wrappers, the pre-rotate backup matches the old key, and the next
+// successful write repairs the live store from memory.
+func TestRotateMasterKeyTotalFailureRefusesUnprotectedKey(t *testing.T) {
+	s, storePath, oldKey := rotationFailureStore(t, "")
+	provider := s.Provider().(*crypto.FileKeyProvider)
+
+	newKey, repair, err := failRotationWithBrokenDisk(t, s)
+
+	entries, _ := os.ReadDir(filepath.Dir(storePath))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "emergency-key") {
+			t.Fatalf("unprotected emergency key written: %s", e.Name())
+		}
+	}
+	if !bytes.Equal(oldKey, provider.MasterKey()) || provider.PendingMasterKey() != nil {
+		t.Fatal("provider not rolled back to the old key")
+	}
+	if sec, err := s.Get("ns1/key1"); err != nil || sec.Value != "value1" {
+		t.Fatalf("in-memory Get after total failure: %v %v", sec, err)
+	}
+	if !strings.Contains(err.Error(), storePath+".pre-rotate") {
+		t.Fatalf("error should name the pre-rotate backup: %v", err)
+	}
+	assertOpensWithKey(t, storePath+".pre-rotate", oldKey)
+	assertNotOpensWithKey(t, storePath, oldKey)
+	assertOpensWithKey(t, storePath, newKey) // the abandoned rotation is really on disk
+
+	repair()
+	if err := s.Set("ns1/key1", "value1", "vector", "", nil); err != nil {
+		t.Fatalf("Set after disk repair: %v", err)
+	}
+	assertOpensWithKey(t, storePath, oldKey)
+}
+
+// Regression (review F1, 2026-10-20): after a total failure, a retry whose
+// key write also fails must not destroy the last readable copy. The retry
+// used to copy the abandoned-key store over the good backup, roll back to
+// it, and leave a store that no key on disk could open after a restart.
+func TestRotateMasterKeyRetryAfterTotalFailureKeepsStoreReadable(t *testing.T) {
+	s, storePath, oldKey := rotationFailureStore(t, "")
+
+	_, repair, _ := failRotationWithBrokenDisk(t, s)
+	repair()
+
+	_, err := s.RotateMasterKey(func() error {
+		return fmt.Errorf("key persistence still unavailable")
+	})
+	if err == nil || strings.Contains(err.Error(), "CRITICAL") {
+		t.Fatalf("want ordinary rollback error, got: %v", err)
 	}
 
-	// Error should indicate CRITICAL state
-	if !strings.Contains(err.Error(), "CRITICAL") {
-		t.Fatalf("error should contain CRITICAL, got: %v", err)
-	}
-
-	// Emergency key file should exist
-	if _, statErr := os.Stat(emergencyKeyPath); statErr != nil {
-		t.Fatalf("emergency key file not created: %v", statErr)
-	}
-
-	// Provider should be rolled back (old key, no pending)
-	if !bytes.Equal(oldKey, provider.MasterKey()) {
-		t.Fatal("provider key changed after double failure")
-	}
-	if provider.PendingMasterKey() != nil {
-		t.Fatal("pending key not cleared after double failure")
-	}
-
-	// In-memory secrets should still be readable (old entries restored)
-	sec, err := s.Get("ns1/key1")
+	// Simulate a restart: load master.key from disk and reopen the store.
+	diskKey, err := crypto.LoadMasterKey(filepath.Join(filepath.Dir(storePath), "master.key"))
 	if err != nil {
-		t.Fatalf("in-memory Get after double failure: %v", err)
+		t.Fatal(err)
 	}
-	if sec.Value != "value1" {
-		t.Fatalf("in-memory value = %q, want 'value1'", sec.Value)
+	if !bytes.Equal(diskKey, oldKey) {
+		t.Fatal("master.key changed although no key write succeeded")
+	}
+	assertOpensWithKey(t, storePath, diskKey)
+}
+
+// failingRotateProvider wraps a real provider but fails RotateMaster, to
+// reach the rotation's earliest error path.
+type failingRotateProvider struct{ crypto.KeyProvider }
+
+func (failingRotateProvider) RotateMaster([]*crypto.WrappedDEK) ([]*crypto.WrappedDEK, error) {
+	return nil, fmt.Errorf("injected provider rotation failure")
+}
+
+// Regression (review F1 R2, 2026-10-25): after a total failure, a retry that
+// fails BEFORE its callback (live-store save hits ENOSPC, or the provider
+// cannot rotate) must keep the backup it just wrote. The live store still
+// holds the abandoned key's wrappers, so that backup is the only copy the
+// key file can open; deleting it lost every secret on the next restart.
+func TestRotateMasterKeyRetryEarlyFailureKeepsBackup(t *testing.T) {
+	cases := map[string]func(t *testing.T, s *Store, storePath string){
+		"store save fails": func(t *testing.T, s *Store, storePath string) {
+			origWrite := writeFileAtomic
+			t.Cleanup(func() { writeFileAtomic = origWrite })
+			writeFileAtomic = func(path string, data []byte, perm os.FileMode) error {
+				if path == storePath {
+					return &os.PathError{Op: "write", Path: path, Err: syscall.ENOSPC}
+				}
+				return origWrite(path, data, perm)
+			}
+		},
+		"provider rotation fails": func(t *testing.T, s *Store, storePath string) {
+			s.provider = failingRotateProvider{s.provider}
+		},
+	}
+	for name, breakRetry := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, storePath, oldKey := rotationFailureStore(t, "")
+			backupPath := storePath + ".pre-rotate"
+			_, repair, _ := failRotationWithBrokenDisk(t, s)
+			repair()
+			assertNotOpensWithKey(t, storePath, oldKey)
+
+			breakRetry(t, s, storePath)
+			called := false
+			_, err := s.RotateMasterKey(func() error { called = true; return nil })
+			if err == nil || called {
+				t.Fatalf("want failure before the callback, got err=%v called=%t", err, called)
+			}
+			if !strings.Contains(err.Error(), "CRITICAL") || !strings.Contains(err.Error(), backupPath) {
+				t.Fatalf("error should be CRITICAL and name the backup: %v", err)
+			}
+
+			// Simulate a restart and follow the documented recovery:
+			// move .pre-rotate over the store, keep master.key.
+			diskKey, err := crypto.LoadMasterKey(filepath.Join(filepath.Dir(storePath), "master.key"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(diskKey, oldKey) {
+				t.Fatal("master.key changed although no key write succeeded")
+			}
+			assertNotOpensWithKey(t, storePath, diskKey)
+			if err := os.Rename(backupPath, storePath); err != nil {
+				t.Fatalf("backup gone: %v", err)
+			}
+			assertOpensWithKey(t, storePath, diskKey)
+		})
+	}
+}
+
+// An early failure on a healthy store is an ordinary error: the store file
+// still opens with the current key, so the backup is not needed and is
+// removed rather than left behind as a stale copy.
+func TestRotateMasterKeyEarlyFailureOnHealthyStoreRemovesBackup(t *testing.T) {
+	s, storePath, oldKey := rotationFailureStore(t, "")
+	s.provider = failingRotateProvider{s.provider}
+
+	_, err := s.RotateMasterKey(func() error { return nil })
+	if err == nil || strings.Contains(err.Error(), "CRITICAL") {
+		t.Fatalf("want ordinary error, got: %v", err)
+	}
+	if _, statErr := os.Stat(storePath + ".pre-rotate"); !os.IsNotExist(statErr) {
+		t.Fatalf("backup left behind on a healthy store: %v", statErr)
+	}
+	assertOpensWithKey(t, storePath, oldKey)
+}
+
+// Everything fails with a protected master.key: the new key is saved,
+// passphrase-encrypted, and the pre-rotate backup is kept too. Both
+// documented recoveries must work: the backup with the current master.key,
+// or the live store with the emergency key put in place of master.key.
+func TestRotateMasterKeyTotalFailureWritesEncryptedKey(t *testing.T) {
+	const passphrase = "correct horse battery staple"
+	s, storePath, oldKey := rotationFailureStore(t, passphrase)
+	dir := filepath.Dir(storePath)
+	keyPath := filepath.Join(dir, "master.key")
+	emergencyPath := storePath + ".emergency-key"
+
+	newKey, _, err := failRotationWithBrokenDisk(t, s)
+	if !strings.Contains(err.Error(), emergencyPath) || !strings.Contains(err.Error(), storePath+".pre-rotate") {
+		t.Fatalf("error should name both recovery files, got: %v", err)
 	}
 
-	// --- Verify emergency key enables forward recovery ---
-	// The store file on disk has NEW DEKs (first save succeeded,
-	// restore failed). The emergency key should decrypt them.
-	emergencyKey, err := crypto.LoadMasterKey(emergencyKeyPath)
+	raw, err := os.ReadFile(emergencyPath)
 	if err != nil {
-		t.Fatalf("loading emergency key: %v", err)
+		t.Fatalf("emergency key not written: %v", err)
+	}
+	if !crypto.IsProtectedKeyFile(raw) {
+		t.Fatal("emergency key file is not passphrase-protected")
+	}
+	if _, err := crypto.LoadMasterKey(emergencyPath); err != crypto.ErrPassphraseRequired {
+		t.Fatalf("LoadMasterKey without passphrase: got %v, want ErrPassphraseRequired", err)
 	}
 
-	recovered, err := New(storePath, emergencyKey)
+	// Recovery A: .pre-rotate + the current (unchanged) master.key.
+	current, err := crypto.LoadMasterKeyWithPassphrase(keyPath, passphrase)
 	if err != nil {
-		t.Fatalf("opening store with emergency key: %v", err)
+		t.Fatalf("load current master.key: %v", err)
 	}
-	sec1, err := recovered.Get("ns1/key1")
+	if !bytes.Equal(current, oldKey) {
+		t.Fatal("master.key changed although the key write failed")
+	}
+	assertOpensWithKey(t, storePath+".pre-rotate", current)
+
+	// Recovery B: emergency key moved over master.key opens the live store.
+	if err := os.Rename(emergencyPath, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := crypto.LoadMasterKeyWithPassphrase(keyPath, passphrase)
 	if err != nil {
-		t.Fatalf("recovered Get ns1/key1: %v", err)
+		t.Fatalf("load emergency key as master.key: %v", err)
 	}
-	if sec1.Value != "value1" {
-		t.Fatalf("recovered ns1/key1 = %q, want 'value1'", sec1.Value)
+	if !bytes.Equal(recovered, newKey) {
+		t.Fatal("emergency key is not the pending rotation key")
 	}
-	sec2, err := recovered.Get("ns2/key2")
-	if err != nil {
-		t.Fatalf("recovered Get ns2/key2: %v", err)
-	}
-	if sec2.Value != "value2" {
-		t.Fatalf("recovered ns2/key2 = %q, want 'value2'", sec2.Value)
-	}
+	assertOpensWithKey(t, storePath, recovered)
 }
 
 func TestRotateMasterKeySaveFailureRollsBack(t *testing.T) {

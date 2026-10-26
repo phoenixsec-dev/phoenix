@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/term"
 )
@@ -159,7 +160,7 @@ func DecryptMasterKey(pf *ProtectedKeyFile, passphrase string) ([]byte, error) {
 }
 
 // SaveProtectedMasterKey encrypts the master key with a passphrase and writes
-// it atomically to disk.
+// it to disk crash-safely (fsynced write-tmp + rename).
 func SaveProtectedMasterKey(path string, masterKey []byte, passphrase string) error {
 	pf, err := EncryptMasterKey(masterKey, passphrase)
 	if err != nil {
@@ -171,13 +172,8 @@ func SaveProtectedMasterKey(path string, masterKey []byte, passphrase string) er
 		return fmt.Errorf("marshaling protected key: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("writing temp key file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("renaming temp key file: %w", err)
+	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("saving protected key file: %w", err)
 	}
 	return nil
 }

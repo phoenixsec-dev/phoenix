@@ -136,11 +136,13 @@ func main() {
 	// Warn (never fail) when the configured server is plaintext HTTP on a
 	// non-loopback address: bearer tokens and secret values would cross the
 	// network unencrypted. Loopback plaintext is the supported default.
+	// PHOENIX_ALLOW_PLAINTEXT=<host> opts out for hosts the operator knows
+	// are only reached over a host-local network (see PlaintextAllowed).
 	switch cmd {
 	case "version", "--version", "-V", "help", "--help", "-h":
 		// No server contact.
 	default:
-		if w := transport.ClientPlaintextWarning(serverURL); w != "" {
+		if w := transport.ClientPlaintextWarning(serverURL, os.Getenv("PHOENIX_ALLOW_PLAINTEXT")); w != "" {
 			fmt.Fprintln(os.Stderr, w)
 		}
 	}
@@ -404,6 +406,7 @@ Environment:
   PHOENIX_SERVER       Server URL (default: http://127.0.0.1:9090)
   PHOENIX_TOKEN        Bearer token for authentication
   PHOENIX_CA_CERT      CA certificate for TLS verification
+  PHOENIX_ALLOW_PLAINTEXT Hosts (comma list) to skip the plaintext http:// warning for
   PHOENIX_CLIENT_CERT  Client certificate for mTLS authentication
   PHOENIX_CLIENT_KEY   Client key for mTLS authentication
   PHOENIX_SEAL_KEY     Seal private key file (enables sealed mode)

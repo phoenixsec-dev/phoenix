@@ -109,6 +109,7 @@ step-up approval, and configuration.
 | `PHOENIX_SERVER` | Server URL (default: `http://127.0.0.1:9090`) |
 | `PHOENIX_TOKEN` | Bearer token |
 | `PHOENIX_CA_CERT` | CA certificate for TLS verification |
+| `PHOENIX_ALLOW_PLAINTEXT` | Hosts (comma-separated) to skip the plaintext `http://` warning for; see [LAN deployment](lan-deployment.md#plaintext-on-a-single-host-opt-out) |
 | `PHOENIX_CLIENT_CERT` | Client certificate for mTLS |
 | `PHOENIX_CLIENT_KEY` | Client key for mTLS |
 | `PHOENIX_SEAL_KEY` | Seal private key file path |
