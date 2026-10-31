@@ -138,3 +138,50 @@ func TestWriteFileAtomicDirSyncFailureStillSucceeds(t *testing.T) {
 		t.Fatalf("target held %q during dir sync; dir sync must run after rename", atSync)
 	}
 }
+
+// Strict mode: a dir fsync failure after the rename is reported as
+// ErrDirSyncFailed (content already replaced), so durability-critical callers
+// can treat it as a failed save. Pre-rename failures are NOT ErrDirSyncFailed
+// and leave the old content.
+func TestWriteFileAtomicStrict(t *testing.T) {
+	injected := errors.New("injected")
+	cases := []struct {
+		name        string
+		ops         AtomicOps
+		wantContent string
+		wantDirSync bool
+	}{
+		{"ok", AtomicOps{}, "new", false},
+		{"write", AtomicOps{Write: func(*os.File, []byte) error { return injected }}, "old", false},
+		{"fsync", AtomicOps{SyncFile: func(*os.File) error { return injected }}, "old", false},
+		{"rename", AtomicOps{Rename: func(string, string) error { return injected }}, "old", false},
+		{"dirsync", AtomicOps{SyncDir: func(string) error { return injected }}, "new", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "grants.json")
+			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err := WriteFileAtomicStrictOps(path, []byte("new"), 0600, tc.ops)
+			if tc.name == "ok" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.name != "ok" && err == nil {
+				t.Fatal("expected error")
+			}
+			if got := errors.Is(err, ErrDirSyncFailed); got != tc.wantDirSync {
+				t.Fatalf("errors.Is(ErrDirSyncFailed) = %v, want %v (err %v)", got, tc.wantDirSync, err)
+			}
+			got, rerr := os.ReadFile(path)
+			if rerr != nil || string(got) != tc.wantContent {
+				t.Fatalf("content = %q (%v), want %q", got, rerr, tc.wantContent)
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 1 {
+				t.Fatalf("temp file left behind: %d entries", len(entries))
+			}
+		})
+	}
+}

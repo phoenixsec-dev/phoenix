@@ -3,6 +3,7 @@
 package fsutil
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -28,38 +29,10 @@ import (
 // Callers (key rotation in particular) roll back on error, so a failure
 // after the rename must not be reported as one — see the SyncDir note below.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
+	renamed, err := writeAtomic(path, data, perm, AtomicOps{})
+	if err == nil || !renamed {
+		return err
 	}
-	tmp := f.Name()
-
-	// Any failure before the rename: drop the temp file, leave path alone.
-	fail := func(step string, err error) error {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("%s: %w", step, err)
-	}
-
-	if err := f.Chmod(perm); err != nil {
-		return fail("setting temp file mode", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		return fail("writing temp file", err)
-	}
-	if err := syncFile(f); err != nil {
-		return fail("syncing temp file", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("renaming temp file: %w", err)
-	}
-
 	// The new content is now what every reader sees. If the directory fsync
 	// fails we log loudly but return nil: returning an error here would make
 	// callers roll back as if the old file were still in place, and during
@@ -67,11 +40,102 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// unrecoverable. The filesystem still flushes the rename on its own, but
 	// until it does a power cut can bring back the old content (still a whole
 	// file, never a torn one).
-	if err := syncDir(dir); err != nil {
-		log.Printf("WARNING: %s was replaced but syncing directory %s failed: %v — "+
-			"the change may not survive a power loss", path, dir, err)
-	}
+	log.Printf("WARNING: %s was replaced but syncing directory %s failed: %v — "+
+		"the change may not survive a power loss", path, filepath.Dir(path), errors.Unwrap(err))
 	return nil
+}
+
+// ErrDirSyncFailed is returned (wrapped) by WriteFileAtomicStrict when the
+// new file WAS renamed into place but the directory fsync failed. Readers
+// already see the new content, yet a power cut could bring back the old one.
+// Callers that must only report success once a change is durable (the grant
+// store) treat this as a failed save; use errors.Is to detect it.
+var ErrDirSyncFailed = errors.New("file replaced but directory sync failed")
+
+// AtomicOps lets tests outside this package inject a failure at one step of
+// WriteFileAtomicStrictOps. A nil field means "use the real operation".
+type AtomicOps struct {
+	Write    func(f *os.File, data []byte) error // write data into the temp file
+	SyncFile func(f *os.File) error              // fsync the temp file
+	Rename   func(oldpath, newpath string) error // rename temp over the target
+	SyncDir  func(dir string) error              // fsync the directory
+}
+
+// WriteFileAtomicStrict is WriteFileAtomic for callers that need to know the
+// change is durable. It differs in one case only: when the rename happened
+// but the directory fsync failed, it returns an error wrapping
+// ErrDirSyncFailed instead of logging and returning nil. Any other error
+// means path still holds its old content.
+func WriteFileAtomicStrict(path string, data []byte, perm os.FileMode) error {
+	return WriteFileAtomicStrictOps(path, data, perm, AtomicOps{})
+}
+
+// WriteFileAtomicStrictOps is WriteFileAtomicStrict with injectable steps,
+// used by the grant store's fault-injection tests.
+func WriteFileAtomicStrictOps(path string, data []byte, perm os.FileMode, ops AtomicOps) error {
+	renamed, err := writeAtomic(path, data, perm, ops)
+	if err != nil && renamed {
+		return fmt.Errorf("%w: %s: %v", ErrDirSyncFailed, path, err)
+	}
+	return err
+}
+
+// writeAtomic does the temp-write, fsync, rename, dir-fsync sequence.
+// renamed reports whether the rename succeeded; when it is true a non-nil
+// err can only be the directory fsync failure.
+func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (renamed bool, err error) {
+	write := ops.Write
+	if write == nil {
+		write = func(f *os.File, b []byte) error { _, err := f.Write(b); return err }
+	}
+	sf := ops.SyncFile
+	if sf == nil {
+		sf = syncFile
+	}
+	rename := ops.Rename
+	if rename == nil {
+		rename = os.Rename
+	}
+	sd := ops.SyncDir
+	if sd == nil {
+		sd = syncDir
+	}
+
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return false, fmt.Errorf("creating temp file: %w", err)
+	}
+	tmp := f.Name()
+
+	// Any failure before the rename: drop the temp file, leave path alone.
+	fail := func(step string, err error) (bool, error) {
+		f.Close()
+		os.Remove(tmp)
+		return false, fmt.Errorf("%s: %w", step, err)
+	}
+
+	if err := f.Chmod(perm); err != nil {
+		return fail("setting temp file mode", err)
+	}
+	if err := write(f, data); err != nil {
+		return fail("writing temp file", err)
+	}
+	if err := sf(f); err != nil {
+		return fail("syncing temp file", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return false, fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return false, fmt.Errorf("renaming temp file: %w", err)
+	}
+	if err := sd(dir); err != nil {
+		return true, fmt.Errorf("syncing directory %s: %w", dir, err)
+	}
+	return true, nil
 }
 
 // Test seams: tests swap these to inject fsync failures and check ordering.
