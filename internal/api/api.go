@@ -1405,7 +1405,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.nonces.Validate(req.Nonce); err != nil {
-			jsonError(w, "nonce validation failed: "+err.Error(), http.StatusForbidden)
+			s.denyResolveAttestation(w, r, info, ip, req.Refs, "nonce validation failed: "+err.Error())
 			return
 		}
 		nonceValidated = true
@@ -1427,7 +1427,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if time.Since(ts).Abs() > signedResolveMaxSkew {
-			jsonError(w, "timestamp outside allowed skew window", http.StatusForbidden)
+			s.denyResolveAttestation(w, r, info, ip, req.Refs, "signed resolve timestamp outside allowed skew window")
 			return
 		}
 
@@ -1443,7 +1443,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 		// Verify against mTLS client cert public key
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			jsonError(w, "signed resolve requires mTLS client certificate", http.StatusForbidden)
+			s.denyResolveAttestation(w, r, info, ip, req.Refs, "signed resolve requires mTLS client certificate")
 			return
 		}
 		pubKey, ok := r.TLS.PeerCertificates[0].PublicKey.(*ecdsa.PublicKey)
@@ -1454,7 +1454,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 		hash := sha256.Sum256(canonical)
 		if !ecdsa.VerifyASN1(pubKey, hash[:], sigBytes) {
-			jsonError(w, "signature verification failed", http.StatusForbidden)
+			s.denyResolveAttestation(w, r, info, ip, req.Refs, "signed resolve signature verification failed")
 			return
 		}
 		signatureVerified = true
@@ -2094,11 +2094,11 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	// Check role attestation requirements
 	if len(role.Attestation) > 0 {
 		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
-			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
-				reason,
-				fmt.Sprintf("role %q requires attestation: %v", req.Role, role.Attestation),
-				http.StatusForbidden)
-			s.auditLogDenied(r, info.Agent, "session.mint", req.Role, ip, "attestation_failed")
+			// The failed requirement and the role's list go to the audit
+			// log only, so the caller does not learn the role's policy.
+			writeSessionAttestationFailed(w)
+			s.logAudit(s.audit.LogDeniedWithMetadata(info.Agent, "session.mint", req.Role, ip, "attestation_failed",
+				denialAuditMetadata(r, fmt.Sprintf("%s; role %q requires attestation: %v", reason, req.Role, role.Attestation))))
 			return
 		}
 	}
@@ -2250,19 +2250,15 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 	// carries the real current-request attestation state.
 	if len(role.Attestation) > 0 {
 		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
-			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
-				reason,
-				fmt.Sprintf("role %q requires attestation: %v", info.SessionRole, role.Attestation),
-				http.StatusForbidden)
-			s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID)
+			writeSessionAttestationFailed(w)
+			s.logAudit(s.audit.LogSessionDeniedWithMetadata(info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID,
+				denialAuditMetadata(r, fmt.Sprintf("%s; role %q requires attestation: %v", reason, info.SessionRole, role.Attestation))))
 			return
 		}
 		if slicesContains(role.Attestation, "cert_fingerprint") && sess.CertFingerprint != "" && info.CertFingerprint != sess.CertFingerprint {
-			jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
-				"role requires the same client certificate fingerprint used when the session was minted",
-				"renew using the original client certificate or mint a new session",
-				http.StatusForbidden)
-			s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "cert_continuity_failed", info.SessionID)
+			writeSessionAttestationFailed(w)
+			s.logAudit(s.audit.LogSessionDeniedWithMetadata(info.Agent, "session.renew", info.SessionRole, ip, "cert_continuity_failed", info.SessionID,
+				denialAuditMetadata(r, "role requires the same client certificate fingerprint used when the session was minted")))
 			return
 		}
 	}

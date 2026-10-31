@@ -1690,7 +1690,7 @@ func cmdExec(args []string) error {
 	// Check for resolution errors
 	if len(resolveErrors) > 0 {
 		for ref, errMsg := range resolveErrors {
-			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", ref, formatRefError(ref, errMsg, resolveErrorCodes))
+			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", displayRef(ref), formatRefError(ref, errMsg, resolveErrorCodes))
 		}
 		return fmt.Errorf("failed to resolve %d reference(s)", len(resolveErrors))
 	}
@@ -2536,26 +2536,18 @@ func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
 		var pending struct {
 			Status     string `json:"status"`
 			ApprovalID string `json:"approval_id"`
-			ApproveCmd string `json:"approve_command"`
 			ExpiresAt  string `json:"expires_at"`
 		}
 		if err := json.Unmarshal(respBody, &pending); err == nil && pending.Status == "approval_required" {
-			return pollForApproval(pending.ApprovalID, pending.ExpiresAt, pending.ApproveCmd)
+			return pollForApproval(pending.ApprovalID, pending.ExpiresAt)
 		}
 	}
 
 	if resp.StatusCode != 200 {
-		var errResp struct {
-			Error       string `json:"error"`
-			Code        string `json:"code"`
-			Detail      string `json:"detail"`
-			Remediation string `json:"remediation"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
-			return "", time.Time{}, fmt.Errorf("[%s] %s\n  hint: %s", errResp.Code, errResp.Detail, errResp.Remediation)
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			return "", time.Time{}, fmt.Errorf("session mint: %s", errResp.Error)
+		if d, ok := parseServerDenial(respBody); ok {
+			return "", time.Time{}, fmt.Errorf("session mint: %s", formatDenial(d, "  "))
+		} else if d.Error != "" {
+			return "", time.Time{}, fmt.Errorf("session mint: %s", cleanServerText(d.Error))
 		}
 		return "", time.Time{}, fmt.Errorf("session mint: HTTP %d", resp.StatusCode)
 	}
@@ -2631,14 +2623,8 @@ func renewSessionViaAPI() (string, time.Time, error) {
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != 200 {
-		var errResp struct {
-			Error       string `json:"error"`
-			Code        string `json:"code"`
-			Detail      string `json:"detail"`
-			Remediation string `json:"remediation"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
-			return "", time.Time{}, fmt.Errorf("[%s] %s", errResp.Code, errResp.Detail)
+		if d, ok := parseServerDenial(respBody); ok {
+			return "", time.Time{}, fmt.Errorf("session renew: %s", formatDenial(d, "  "))
 		}
 		return "", time.Time{}, fmt.Errorf("session renew: HTTP %d", resp.StatusCode)
 	}
@@ -3141,25 +3127,11 @@ func cmdEmergencyGet(args []string) error {
 func handleError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
 
-	var structured struct {
-		Error       string `json:"error"`
-		Code        string `json:"code"`
-		Detail      string `json:"detail"`
-		Remediation string `json:"remediation"`
-		NextStep    string `json:"next_step"`
+	structured, ok := parseServerDenial(body)
+	if ok {
+		return fmt.Errorf("HTTP %d %s", resp.StatusCode, formatDenial(structured, "  "))
 	}
-	if json.Unmarshal(body, &structured) == nil && cleanCode(structured.Code) != "" {
-		msg := fmt.Sprintf("HTTP %d [%s]: %s", resp.StatusCode, structured.Code, cleanServerText(structured.Detail))
-		if structured.Remediation != "" {
-			msg += "\n  hint: " + cleanServerText(structured.Remediation)
-		}
-		if structured.NextStep != "" {
-			msg += "\n  next: " + nextStepHint(structured.NextStep)
-		}
-		return fmt.Errorf("%s", msg)
-	}
-
-	if json.Unmarshal(body, &structured) == nil && structured.Error != "" {
+	if structured.Error != "" {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, cleanServerText(structured.Error))
 	}
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -3178,8 +3150,8 @@ func detectTTY() string {
 }
 
 // pollForApproval polls an approval status endpoint until approved, denied, or expired.
-func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.Time, error) {
-	fmt.Fprintf(os.Stderr, "Step-up approval required. Run:\n  %s\n\nWaiting for approval...\n", approveCmd)
+func pollForApproval(approvalID, expiresAtStr string) (string, time.Time, error) {
+	fmt.Fprint(os.Stderr, approvalNotice(approvalID))
 
 	deadline := time.Now().Add(10 * time.Minute) // fallback
 	if exp, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
@@ -3225,6 +3197,16 @@ func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.
 		}
 	}
 	return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval poll ended unexpectedly")
+}
+
+// approvalNotice is the stderr text shown while waiting for step-up
+// approval. The approve command is built locally from the approval ID, never
+// taken from the server's approve_command.
+func approvalNotice(approvalID string) string {
+	if cmd := approveCommand(approvalID); cmd != "" {
+		return fmt.Sprintf("Step-up approval required. Run:\n  %s\n\nWaiting for approval...\n", cmd)
+	}
+	return "Step-up approval required. Ask a human to approve the pending request.\n\nWaiting for approval...\n"
 }
 
 // cmdApprove handles the "phoenix approve <approval-id>" command.

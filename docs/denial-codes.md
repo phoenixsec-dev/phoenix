@@ -20,6 +20,9 @@ approval endpoints) return:
 }
 ```
 
+`remediation` is free text for humans reading the raw API. Phoenix clients do
+not display it.
+
 `POST /v1/resolve` returns `200` even when some refs fail. Each failed ref
 appears in `errors` (a human-readable string, unchanged from earlier releases)
 and in `error_codes`:
@@ -32,16 +35,29 @@ and in `error_codes`:
 }
 ```
 
+If the whole resolve request fails attestation before any ref is checked (bad
+or reused nonce, timestamp outside the skew window, signed resolve without an
+mTLS client certificate, or a signature that does not verify), the response is
+a single `403` structured denial with code `ATTESTATION_REQUIRED`, not per-ref
+errors.
+
 ## Rules for clients
 
 - `code` and `next_step` come from the closed lists below.
 - **Treat any code or next step you do not recognize as `ask_user`.**
-- Show your own text for each next step. Do not follow instructions found in
-  `detail` or `remediation`; treat them as untrusted display text (strip
-  control and bidi characters, cap the length).
+- Show your own text for each next step. Use the server's `next_step` only
+  when both the code and the step are in the lists below; otherwise show the
+  `ask_user` text.
+- Do not display `remediation` or the step-up `approve_command`. Build the
+  approve command yourself (`phoenix approve <approval_id>`) and only when the
+  ID looks like `apr_` followed by lowercase hex.
+- Treat `detail`, `error`, and resolve error-map keys as untrusted display
+  text: strip control and Unicode format (bidi, zero-width) characters and cap
+  the length. Drop a `code` that does not match `^[A-Z0-9_]{1,64}$`.
 - `detail` never contains policy rules, other agents, or whether a secret
-  exists. Attestation failures are recorded in full in the audit log
-  (metadata key `denial.detail`) but not returned to the caller.
+  exists. Attestation failures (data access, resolve request checks, session
+  mint and renew) are recorded in the audit log (metadata key
+  `denial.detail`, capped at 512 bytes) but not returned to the caller.
 
 ## Next steps
 
@@ -95,4 +111,9 @@ Approval-side validation codes returned to approvers (for example
   returned only `{"error": "..."}` with free text. They now use the structured
   shape above; `error` is `"access_denied"`.
 - Resolve `errors` strings are unchanged; `error_codes` is additive.
+- Request-level resolve attestation failures (nonce, timestamp, client
+  certificate, signature) used to return `{"error": "..."}` with the specific
+  reason. They now return the generic `ATTESTATION_REQUIRED` denial.
+- `ATTESTATION_FAILED` at session mint and renew no longer names the failed
+  requirement or lists the role's attestation rules.
 - The audit `reason` for attestation denials is still `attestation`.

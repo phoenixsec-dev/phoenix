@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"unicode/utf8"
 
 	"github.com/phoenixsec/phoenix/internal/policy"
+	"github.com/phoenixsec/phoenix/internal/ref"
 )
 
 // Denial contract shared by every access denial the API returns.
@@ -116,20 +119,47 @@ func (s *Server) denyAttestation(w http.ResponseWriter, r *http.Request, info *a
 			http.StatusForbidden)
 		return
 	}
+	writeAttestationRequired(w)
+}
+
+// writeAttestationRequired writes the generic ATTESTATION_REQUIRED denial.
+// It never says which requirement failed; that goes to the audit log.
+func writeAttestationRequired(w http.ResponseWriter) {
 	jsonDenied(w, "access_denied", CodeAttestationRequired,
 		"this path requires attestation that the request did not meet",
 		"ask the Phoenix operator which attestation this path requires",
 		http.StatusForbidden)
 }
 
+// denyResolveAttestation handles request-level attestation failures in
+// /v1/resolve (nonce, timestamp skew, client certificate, signature). These
+// happen before any ref is checked and need no access to any path, so they
+// write a single audit entry (the first ref's path, plus "resolve.refs" with
+// the ref count) rather than one per ref, which a caller could inflate.
+// The caller gets one generic ATTESTATION_REQUIRED denial.
+func (s *Server) denyResolveAttestation(w http.ResponseWriter, r *http.Request, info *authInfo, ip string, refs []string, detail string) {
+	path := ""
+	if len(refs) > 0 {
+		path = refs[0]
+		if p, err := ref.Parse(refs[0]); err == nil {
+			path = p
+		}
+	}
+	metadata := denialAuditMetadata(r, detail)
+	metadata["resolve.refs"] = strconv.Itoa(len(refs))
+	s.auditDeniedMetadata(info, "resolve", path, ip, "attestation", metadata)
+	writeAttestationRequired(w)
+}
+
 // auditDeniedDetail is auditDenied plus a "denial.detail" metadata entry for
 // detail that must reach the audit log but not the caller.
 func (s *Server) auditDeniedDetail(r *http.Request, info *authInfo, action, path, ip, reason, detail string) {
-	metadata := callerAuditMetadata(r)
-	if metadata == nil {
-		metadata = make(map[string]string, 1)
-	}
-	metadata["denial.detail"] = detail
+	s.auditDeniedMetadata(info, action, path, ip, reason, denialAuditMetadata(r, detail))
+}
+
+// auditDeniedMetadata writes a denied audit entry with the given metadata,
+// as a session entry when the caller used a session token.
+func (s *Server) auditDeniedMetadata(info *authInfo, action, path, ip, reason string, metadata map[string]string) {
 	agent := ""
 	if info != nil {
 		agent = info.Agent
@@ -139,4 +169,46 @@ func (s *Server) auditDeniedDetail(r *http.Request, info *authInfo, action, path
 		return
 	}
 	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, metadata))
+}
+
+// denialAuditMetadata returns the request's caller audit metadata plus
+// "denial.detail", capped by capDenialDetail.
+func denialAuditMetadata(r *http.Request, detail string) map[string]string {
+	metadata := callerAuditMetadata(r)
+	if metadata == nil {
+		metadata = make(map[string]string, 1)
+	}
+	metadata["denial.detail"] = capDenialDetail(detail)
+	return metadata
+}
+
+// maxDenialDetailBytes caps the stored denial.detail. The detail can embed
+// caller-controlled text (for example the X-Phoenix-Tool header), and
+// /v1/resolve logs it once per ref, so it must stay small.
+const maxDenialDetailBytes = 512
+
+// denialDetailTruncated marks a denial.detail that was cut by capDenialDetail.
+const denialDetailTruncated = "...(truncated)"
+
+// capDenialDetail limits s to maxDenialDetailBytes, including the marker,
+// without splitting a UTF-8 character.
+func capDenialDetail(s string) string {
+	if len(s) <= maxDenialDetailBytes {
+		return s
+	}
+	cut := maxDenialDetailBytes - len(denialDetailTruncated)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + denialDetailTruncated
+}
+
+// writeSessionAttestationFailed writes the generic ATTESTATION_FAILED denial
+// for session mint and renew. The failed requirement goes to the audit log
+// (denial.detail), not to the caller.
+func writeSessionAttestationFailed(w http.ResponseWriter) {
+	jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
+		"the request did not meet this role's attestation requirements",
+		"ask the Phoenix operator which attestation this role requires",
+		http.StatusForbidden)
 }

@@ -5,6 +5,38 @@
  * No admin operations. Under 200 lines.
  */
 
+// Denial codes look like "ACL_DENIED" (docs/denial-codes.md); anything else
+// from the server is dropped rather than echoed.
+const CODE_RE = /^[A-Z0-9_]{1,64}$/;
+const MAX_SERVER_TEXT = 300;
+
+/**
+ * Make server-supplied text safe to show: drop control characters (including
+ * terminal escapes) and Unicode format characters (bidi overrides,
+ * zero-width), and cap the length.
+ * @param {unknown} text
+ * @returns {string}
+ */
+function cleanServerText(text) {
+  const chars = Array.from(String(text ?? "").replace(/[\p{Cc}\p{Cf}]/gu, ""));
+  if (chars.length > MAX_SERVER_TEXT) {
+    return chars.slice(0, MAX_SERVER_TEXT).join("") + "...";
+  }
+  return chars.join("");
+}
+
+/**
+ * "[CODE] text" with cleaned text, or just the text when the code is
+ * missing or malformed.
+ * @param {unknown} code
+ * @param {unknown} text
+ * @returns {string}
+ */
+function denialMessage(code, text) {
+  const clean = cleanServerText(text);
+  return typeof code === "string" && CODE_RE.test(code) ? `[${code}] ${clean}` : clean;
+}
+
 class PhoenixError extends Error {
   /**
    * @param {string} message
@@ -105,7 +137,9 @@ class PhoenixClient {
   async resolve(ref) {
     const result = await this.resolveBatch([ref]);
     if (result.errors && result.errors[ref]) {
-      throw new PhoenixError(result.errors[ref]);
+      // Newer servers add a per-ref code in error_codes; older ones do not.
+      const denial = result.error_codes && result.error_codes[ref];
+      throw new PhoenixError(denialMessage(denial && denial.code, result.errors[ref]));
     }
     if (!result.values || !(ref in result.values)) {
       throw new PhoenixError(`no value returned for ${ref}`);
@@ -232,8 +266,8 @@ class PhoenixClient {
       // Structured denials (docs/denial-codes.md) carry code + detail.
       const msg =
         data && data.code
-          ? `[${data.code}] ${data.detail || data.error || ""}`
-          : (data && data.error) || `HTTP ${resp.status}`;
+          ? denialMessage(data.code, data.detail || data.error || "")
+          : cleanServerText((data && data.error) || `HTTP ${resp.status}`);
       throw new PhoenixError(msg, resp.status);
     }
 

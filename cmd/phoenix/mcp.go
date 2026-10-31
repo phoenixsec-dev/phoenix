@@ -360,7 +360,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		if len(result.SealedValues) == 0 && len(result.Errors) > 0 {
 			var msgs []string
 			for ref, errMsg := range result.Errors {
-				msgs = append(msgs, fmt.Sprintf("%s: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
+				msgs = append(msgs, fmt.Sprintf("%s: %s", displayRef(ref), formatRefError(ref, errMsg, result.ErrorCodes)))
 			}
 			return strings.Join(msgs, "\n"), true
 		}
@@ -404,7 +404,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 	if len(result.Values) == 0 && len(result.Errors) > 0 {
 		var msgs []string
 		for ref, errMsg := range result.Errors {
-			msgs = append(msgs, fmt.Sprintf("%s: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
+			msgs = append(msgs, fmt.Sprintf("%s: %s", displayRef(ref), formatRefError(ref, errMsg, result.ErrorCodes)))
 		}
 		return strings.Join(msgs, "\n"), true
 	}
@@ -625,24 +625,11 @@ func sessionRenewalLoop(logger *log.Logger) {
 // mcpFormatDenial parses a structured denial response body and returns
 // a formatted error string for the agent.
 func mcpFormatDenial(body []byte, statusCode int) string {
-	var denial struct {
-		Error       string `json:"error"`
-		Code        string `json:"code"`
-		Detail      string `json:"detail"`
-		Remediation string `json:"remediation"`
-		NextStep    string `json:"next_step"`
+	denial, ok := parseServerDenial(body)
+	if ok {
+		return formatDenial(denial, "")
 	}
-	if json.Unmarshal(body, &denial) == nil && cleanCode(denial.Code) != "" {
-		msg := fmt.Sprintf("[%s] %s", denial.Code, cleanServerText(denial.Detail))
-		if denial.Remediation != "" {
-			msg += "\nhint: " + cleanServerText(denial.Remediation)
-		}
-		if denial.NextStep != "" {
-			msg += "\nnext: " + nextStepHint(denial.NextStep)
-		}
-		return msg
-	}
-	if json.Unmarshal(body, &denial) == nil && denial.Error != "" {
+	if denial.Error != "" {
 		return cleanServerText(denial.Error)
 	}
 	return fmt.Sprintf("HTTP %d", statusCode)
@@ -653,16 +640,17 @@ func mcpFormatDenial(body []byte, statusCode int) string {
 func mcpFormatApprovalRequired(body []byte) string {
 	var pending struct {
 		Status     string `json:"status"`
-		ApproveCmd string `json:"approve_command"`
+		ApprovalID string `json:"approval_id"`
 		ExpiresAt  string `json:"expires_at"`
 	}
 	if json.Unmarshal(body, &pending) == nil && pending.Status == "approval_required" {
 		msg := "[APPROVAL_REQUIRED] This operation requires human approval."
-		if pending.ApproveCmd != "" {
-			msg += "\nRun: " + pending.ApproveCmd
+		// Built locally from a well-formed ID; the server's approve_command is ignored.
+		if cmd := approveCommand(pending.ApprovalID); cmd != "" {
+			msg += "\nRun: " + cmd
 		}
 		if pending.ExpiresAt != "" {
-			msg += "\nExpires: " + pending.ExpiresAt
+			msg += "\nExpires: " + cleanServerText(pending.ExpiresAt)
 		}
 		return msg
 	}
