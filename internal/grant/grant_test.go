@@ -108,3 +108,17 @@ func TestCreateValidation(t *testing.T) {
 		t.Fatalf("token request: fp=%q err=%v", r.CredentialFP, err)
 	}
 }
+
+// Review P3-R2: every Unicode format character (Cf) is rejected, not just
+// the listed bidi and zero-width ones. A soft hyphen is invisible in the
+// approval prompt, so "pro<U+00AD>duction" would look like "production".
+func TestNormalizePathsRejectsAllFormatChars(t *testing.T) {
+	for _, p := range []string{"infra/pro­duction", "infra/a⁡b", "infra/\U000e0001tag"} {
+		if _, err := NormalizePaths([]string{p}); err == nil {
+			t.Errorf("%q accepted", p)
+		}
+	}
+	if _, err := NormalizePaths([]string{"infra/café/key"}); err != nil {
+		t.Errorf("ordinary Unicode path rejected: %v", err)
+	}
+}

@@ -161,13 +161,30 @@ const maxServerTextRunes = 300
 // characters (including terminal escape sequences), Unicode format characters
 // (bidi overrides, zero-width), and caps the length.
 func cleanServerText(s string) string {
+	return cleanTextMax(s, maxServerTextRunes)
+}
+
+// maxPathRunes matches the grant store's longest allowed path, so a path
+// is never shortened: two paths that differ only near the end must look
+// different when a human approves them.
+const maxPathRunes = 512
+
+// cleanPath is cleanServerText for secret paths: same character filtering,
+// but no truncation below the longest valid path.
+func cleanPath(s string) string {
+	return cleanTextMax(s, maxPathRunes)
+}
+
+// cleanTextMax drops control and Unicode format characters and caps the
+// text at max runes, adding "..." when it cuts.
+func cleanTextMax(s string, max int) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
-		if n == maxServerTextRunes {
+		if n == max {
 			b.WriteString("...")
 			break
 		}

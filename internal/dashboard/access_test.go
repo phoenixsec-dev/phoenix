@@ -20,6 +20,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/grant"
+	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/store"
 
 	"golang.org/x/crypto/bcrypt"
@@ -395,5 +396,61 @@ func TestOverviewPendingAccessBadge(t *testing.T) {
 	page := e.get(t, "/dashboard/")
 	if !strings.Contains(page, "Access Requests") || !strings.Contains(page, `<span class="badge">1</span>`) {
 		t.Fatal("overview missing access request count / nav badge")
+	}
+}
+
+// R1 U2: a path pinned to one client certificate shows met / not met from
+// the fingerprint the mTLS request was made with.
+func TestAttestFactsCertPin(t *testing.T) {
+	p, err := policy.Load([]byte(`{"attestation": {"infra/*": {"cert_fingerprint": "sha256:AA11"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{deps: Deps{Policy: p}}
+	status := func(rq grant.Request) string {
+		for _, f := range h.attestFacts(rq, "infra/a", true) {
+			if f.Requirement == "specific client certificate" {
+				return f.Status
+			}
+		}
+		t.Fatal("no certificate fact")
+		return ""
+	}
+	if got := status(grant.Request{AuthMethod: grant.AuthMTLS, CredentialFP: "sha256:aa11"}); got != "met" {
+		t.Errorf("matching cert: %q", got)
+	}
+	if got := status(grant.Request{AuthMethod: grant.AuthMTLS, CredentialFP: "sha256:bb22"}); got != "not met" {
+		t.Errorf("other cert: %q", got)
+	}
+	if got := status(grant.Request{AuthMethod: grant.AuthBearer, CredentialFP: "sha256:aa11"}); got != "not met" {
+		t.Errorf("bearer: %q", got)
+	}
+}
+
+// R2 U2: a path that needs a fresh short-lived token can never be used with
+// a bearer token or cert, so the card says "not met" for those.
+func TestAttestFactsFreshCredential(t *testing.T) {
+	p, err := policy.Load([]byte(`{"attestation": {"infra/*": {"require_fresh_attestation": true}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{deps: Deps{Policy: p}}
+	status := func(method string) string {
+		for _, f := range h.attestFacts(grant.Request{AuthMethod: method}, "infra/a", true) {
+			if f.Requirement == "short-lived credential" {
+				return f.Status
+			}
+		}
+		t.Fatal("no freshness fact")
+		return ""
+	}
+	if got := status(grant.AuthBearer); got != "not met" {
+		t.Errorf("bearer: %q", got)
+	}
+	if got := status(grant.AuthMTLS); got != "not met" {
+		t.Errorf("mtls: %q", got)
+	}
+	if got := status(grant.AuthToken); got != "checked at each use" {
+		t.Errorf("token: %q", got)
 	}
 }

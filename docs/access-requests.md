@@ -98,7 +98,10 @@ been revoked.
    Otherwise the next step is `ask_user`.
 2. It asks, with its own identity (not `PHOENIX_ROLE`):
    `phoenix request <path>... --reason "..." [--ttl 30m] [--wait]`.
-   Up to 10 exact paths, no wildcards. The answer is a `req_...` id.
+   Up to 10 exact paths: no wildcards (`* ? [ ] { }`), no control characters,
+   and no invisible formatting characters (bidi marks, zero-width spaces, soft
+   hyphens), so every path looks exactly like what it is when a human approves
+   it. The answer is a `req_...` id.
 3. It tells the user in chat what it asked for and why.
 4. It waits. `--wait` polls every 5 seconds;
    `phoenix request status req_...` checks once. Each status has a
@@ -119,7 +122,9 @@ The agent's CLI commands:
 
 All of these use the agent's **own** identity (`PHOENIX_TOKEN` bootstrap
 token or mTLS cert). `PHOENIX_ROLE` is ignored and a `phxs_` session token is
-refused before anything is sent.
+refused before anything is sent. The exception is `phoenix whoami`, which uses
+whatever credential you have (session included) so it can show what that
+credential can do.
 
 When a read is denied with `next_step: request_use`, the CLI and MCP print
 the concrete command, e.g.

@@ -187,3 +187,15 @@ func TestMCPRequestUseTool(t *testing.T) {
 		t.Fatalf("bad id accepted: %q", out)
 	}
 }
+
+// R1 U1: paths are shown in full, so two long paths that differ only at
+// the end never look the same in the approval prompt.
+func TestApprovalPromptShowsLongPathsInFull(t *testing.T) {
+	prefix := "infra/" + strings.Repeat("x", 300)
+	a, b := prefix+"/staging", prefix+"/production"
+	rq := accessRequestView{ID: testReqID, Agent: "vector", Action: "read_value", Paths: []string{a, b}}
+	p := approvalPrompt(rq, nil, "15m")
+	if !strings.Contains(p, a) || !strings.Contains(p, b) {
+		t.Fatalf("prompt does not show both full paths:\n%s", p)
+	}
+}

@@ -101,11 +101,12 @@ func apiJSON(method, path string, body any, out any) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// cleanList cleans each server-supplied string and joins them.
+// cleanList cleans each server-supplied string and joins them. It is used
+// for path lists, so items are never shortened below a valid path.
 func cleanList(items []string, sep string) string {
 	out := make([]string, len(items))
 	for i, s := range items {
-		out[i] = cleanServerText(s)
+		out[i] = cleanPath(s)
 	}
 	return strings.Join(out, sep)
 }
@@ -279,7 +280,7 @@ func cmdWhoami(args []string) error {
 		fmt.Println("           Grants are used through the agent's own identity, not a session.")
 	}
 	for _, r := range w.ACL {
-		fmt.Printf("ACL:       %s  %s\n", cleanServerText(r.Path), cleanList(r.Actions, ","))
+		fmt.Printf("ACL:       %s  %s\n", cleanPath(r.Path), cleanList(r.Actions, ","))
 	}
 	for _, g := range w.Grants {
 		fmt.Printf("Grant:     %s  %s  %s until %s\n", cleanServerText(g.ID), cleanList(g.Paths, ", "),
@@ -331,7 +332,7 @@ func cmdPending(args []string) error {
 		fmt.Printf("  %s  agent=%s %s ttl=%s expires=%s\n", cleanServerText(r.ID), cleanServerText(r.Agent),
 			cleanServerText(r.Action), cleanServerText(r.RequestedTTL), cleanServerText(r.ExpiresAt))
 		for _, p := range r.Paths {
-			fmt.Printf("      %s\n", cleanServerText(p))
+			fmt.Printf("      %s\n", cleanPath(p))
 		}
 	}
 	return nil
@@ -447,7 +448,7 @@ func approvalPrompt(rq accessRequestView, keep []string, ttl string) string {
 		if containsString(rq.AlreadyAllowedPaths, p) {
 			note = "  (already allowed)"
 		}
-		fmt.Fprintf(&b, "    %s %s%s\n", mark, cleanServerText(p), note)
+		fmt.Fprintf(&b, "    %s %s%s\n", mark, cleanPath(p), note)
 	}
 	if ttl == "" {
 		ttl = rq.RequestedTTL
@@ -563,7 +564,7 @@ func cmdGrants(args []string) error {
 		fmt.Printf("%s  %-8s  agent=%s  %s  expires=%s  uses=%d  last=%s\n", cleanServerText(g.ID), cleanServerText(g.State),
 			cleanServerText(g.Agent), cleanServerText(g.Action), cleanServerText(g.ExpiresAt), g.UseCount, cleanServerText(last))
 		for _, p := range g.Paths {
-			fmt.Printf("    %s\n", cleanServerText(p))
+			fmt.Printf("    %s\n", cleanPath(p))
 		}
 	}
 	return nil
