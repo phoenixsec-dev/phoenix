@@ -25,6 +25,9 @@ type Config struct {
 	OnePassword   OPConfig            `json:"onepassword,omitempty"`
 	Session       SessionConfig       `json:"session,omitempty"`
 	Dashboard     DashboardConfig     `json:"dashboard,omitempty"`
+	// AccessRequests is nil when the block is missing, which means the
+	// request-use feature is off (safe default for upgraded installs).
+	AccessRequests *AccessRequestsConfig `json:"access_requests,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -279,6 +282,7 @@ func ExampleConfig() *Config {
 		Enabled:    false,
 		SessionTTL: "4h",
 	}
+	cfg.AccessRequests = NewInstallAccessRequests()
 	return cfg
 }
 
@@ -465,6 +469,10 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("session.roles.%s.elevates_acl requires step_up=true", name)
 			}
 		}
+	}
+
+	if err := c.validateAccessRequests(); err != nil {
+		return err
 	}
 
 	return nil

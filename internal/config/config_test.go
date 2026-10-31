@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHTTPSListenerConfig(t *testing.T) {
@@ -662,4 +663,82 @@ func TestTLSConfigJSON(t *testing.T) {
 	if !strings.Contains(string(data), `"tls"`) {
 		t.Fatal("default config JSON should include the tls block")
 	}
+}
+
+func TestAccessRequestsConfig(t *testing.T) {
+	load := func(t *testing.T, block string) (*Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := `{"acl":{"path":"/data/acl.json"},"audit":{"path":"/data/audit.log"},"store":{"path":"/data/store.json","master_key":"/data/master.key"}`
+		if block != "" {
+			body += `,"access_requests":` + block
+		}
+		if err := os.WriteFile(path, []byte(body+"}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg, cfg.Validate()
+	}
+
+	t.Run("missing block is disabled", func(t *testing.T) {
+		cfg, err := load(t, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := cfg.AccessRequestsSettings()
+		if s.Enabled || s.StorePath != "/data/grants.json" || !s.RequireSealed {
+			t.Fatalf("settings = %+v", s)
+		}
+	})
+	t.Run("defaults and explicit false", func(t *testing.T) {
+		cfg, err := load(t, `{"enabled":true,"require_sealed":false}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := cfg.AccessRequestsSettings()
+		if !s.Enabled || s.RequireSealed || !s.BindSourceIP || s.MaxGrantTTL != 8*time.Hour ||
+			len(s.GrantableActions) != 1 || s.GrantableActions[0] != "read_value" {
+			t.Fatalf("settings = %+v", s)
+		}
+	})
+	for _, c := range []struct{ name, block, want string }{
+		{"write not supported", `{"grantable_actions":["read_value","write"]}`, "write grants are not supported yet"},
+		{"never grantable", `{"grantable_actions":["admin"]}`, "can never be granted"},
+		{"bad duration", `{"request_ttl":"soon"}`, "request_ttl"},
+		{"request ttl too short", `{"request_ttl":"30s"}`, "at least 1m"},
+		{"default above max", `{"default_grant_ttl":"9h"}`, "default_grant_ttl <= max_grant_ttl"},
+		{"max above 24h", `{"max_grant_ttl":"25h"}`, "<= 24h"},
+		{"bad deny glob", `{"deny_paths":["infra/*/keys"]}`, "deny_paths"},
+		{"store collides with acl", `{"store_path":"/data/acl.json"}`, "collides with acl.path"},
+		{"store collides with temp", `{"store_path":"/data/store.json.tmp-1"}`, "collides with store.path"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := load(t, c.block)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want it to mention %q", err, c.want)
+			}
+		})
+	}
+	t.Run("new installs are enabled", func(t *testing.T) {
+		if ar := ExampleConfig().AccessRequests; ar == nil || !ar.Enabled {
+			t.Fatal("example/new-install config must enable access_requests")
+		}
+		if DefaultConfig().AccessRequests != nil {
+			t.Fatal("DefaultConfig must leave access_requests unset (upgrade safety)")
+		}
+		data, err := os.ReadFile("../../config.example.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ex Config
+		if err := json.Unmarshal(data, &ex); err != nil {
+			t.Fatal(err)
+		}
+		if ex.AccessRequests == nil || !ex.AccessRequests.Enabled {
+			t.Fatal("config.example.json must enable access_requests")
+		}
+	})
 }

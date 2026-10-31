@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/ref"
 )
@@ -39,6 +40,36 @@ const (
 	CodeNotFound            = "NOT_FOUND"
 	CodeInvalidRef          = "INVALID_REF"
 	CodeInternalError       = "INTERNAL_ERROR"
+	CodeGrantExpired        = "GRANT_EXPIRED"
+	CodeGrantRevoked        = "GRANT_REVOKED"
+)
+
+// Codes for the request-use API (access.go). Store errors use the
+// grant.Code strings, which are listed here too so every code the server
+// can emit has a documented next step.
+const (
+	CodeNotRequestable       = "NOT_REQUESTABLE"
+	CodeSessionCannotRequest = "SESSION_CANNOT_REQUEST"
+	CodeRequestsDisabled     = "REQUESTS_DISABLED"
+	CodeRequestsDegraded     = "REQUESTS_DEGRADED"
+	CodeAlreadyAllowed       = "ALREADY_ALLOWED"
+	CodeSealKeyNotRegistered = "SEAL_KEY_NOT_REGISTERED"
+	CodeApproverRequired     = "APPROVER_REQUIRED"
+	CodeInvalidRequest       = "INVALID_REQUEST"
+	CodeActionNotGrantable   = "ACTION_NOT_GRANTABLE"
+	CodeSelfApproval         = "SELF_APPROVAL"
+	CodeWideningNotAllowed   = "WIDENING_NOT_ALLOWED"
+	CodeEmptyGrant           = "EMPTY_GRANT"
+	CodeNotPending           = "NOT_PENDING"
+	CodeGrantLimit           = "GRANT_LIMIT"
+	CodeTooManyPending       = "TOO_MANY_PENDING"
+	CodeRateLimited          = "RATE_LIMITED"
+	CodeRequestCooldown      = "REQUEST_COOLDOWN"
+	CodeUnknownAgent         = "UNKNOWN_AGENT"
+	CodeAuditWriteFailed     = "AUDIT_WRITE_FAILED"
+	CodeStoreWriteFailed     = "STORE_WRITE_FAILED"
+	CodeRevokeNotDurable     = "REVOKE_NOT_DURABLE"
+	CodeAgentDeleteACLFailed = "AGENT_DELETE_ACL_FAILED"
 )
 
 // denialNextStep maps every code the server emits to its next step.
@@ -52,6 +83,34 @@ var denialNextStep = map[string]string{
 	CodeNotFound:            NextNone,
 	CodeInvalidRef:          NextNone,
 	CodeInternalError:       NextAskUser,
+	// GRANT_EXPIRED says request_use only for requestable paths; see
+	// denialNextStep, which downgrades it to ask_user otherwise.
+	CodeGrantExpired: NextRequestUse,
+	CodeGrantRevoked: NextAskUser,
+
+	// Request-use API codes.
+	CodeNotRequestable:       NextAskUser,
+	CodeSessionCannotRequest: NextRequestUse, // resend with the agent's own identity
+	CodeRequestsDisabled:     NextAskUser,
+	CodeRequestsDegraded:     NextAskUser,
+	CodeAlreadyAllowed:       NextNone,
+	CodeSealKeyNotRegistered: NextAskUser,
+	CodeApproverRequired:     NextAskUser,
+	CodeInvalidRequest:       NextNone,
+	CodeActionNotGrantable:   NextAskUser,
+	CodeSelfApproval:         NextAskUser,
+	CodeWideningNotAllowed:   NextNone,
+	CodeEmptyGrant:           NextNone,
+	CodeNotPending:           NextNone,
+	CodeGrantLimit:           NextAskUser,
+	CodeTooManyPending:       NextWait,
+	CodeRateLimited:          NextAskUser,
+	CodeRequestCooldown:      NextAskUser,
+	CodeUnknownAgent:         NextAskUser,
+	CodeAuditWriteFailed:     NextAskUser,
+	CodeStoreWriteFailed:     NextAskUser,
+	CodeRevokeNotDurable:     NextAskUser,
+	CodeAgentDeleteACLFailed: NextAskUser,
 
 	// Session and step-up codes.
 	"SESSION_EXPIRED":             NextRemintSession,
@@ -87,13 +146,87 @@ func newRefDenial(code string) refDenial {
 	return refDenial{Code: code, NextStep: nextStepFor(code)}
 }
 
-// jsonACLDenied writes the denial for a caller whose ACL does not allow
-// action on the path. It never says whether the secret exists.
-func jsonACLDenied(w http.ResponseWriter, action string) {
-	jsonDenied(w, "access_denied", CodeACLDenied,
+// denialNextStep is nextStepFor plus the request_use rule (plan section 10):
+// request_use is only advertised when the feature is on, the action is
+// grantable and the path is not in deny_paths. ACL_DENIED, GRANT_EXPIRED and
+// the session scope/action denials on a requestable path say request_use
+// (the request and the use then go through the agent's own identity).
+func (s *Server) denialNextStep(code, path, action string) string {
+	switch code {
+	case CodeACLDenied, CodeGrantExpired, CodeScopeExceeded, CodeActionDenied:
+		if s.requestable(path, action) {
+			return NextRequestUse
+		}
+		if code == CodeGrantExpired {
+			return NextAskUser
+		}
+	}
+	return nextStepFor(code)
+}
+
+// writeDataDenial audits and writes the denial for a get/set/delete whose
+// dataAccess reason is non-empty. The session audit entries are exactly the
+// ones the handlers wrote before grants existed.
+func (s *Server) writeDataDenial(w http.ResponseWriter, r *http.Request, info *authInfo, action, path, ip, reason string) {
+	switch reason {
+	case "session_scope":
+		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
+		jsonDeniedStep(w, "access_denied", CodeScopeExceeded,
+			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
+			"request a session with a role that includes this namespace",
+			s.denialNextStep(CodeScopeExceeded, path, action), http.StatusForbidden)
+	case "session_action":
+		s.auditLogSessionDenied(r, info.Agent, action, path, ip, "session_action", info.SessionID)
+		jsonDeniedStep(w, "access_denied", CodeActionDenied,
+			fmt.Sprintf("action %q is not permitted by session role %q", action, info.SessionRole),
+			"request a session with a role that includes this action",
+			s.denialNextStep(CodeActionDenied, path, action), http.StatusForbidden)
+	case grant.ReasonGrantExpired:
+		s.auditDenied(r, info, action, path, ip, reason)
+		jsonDeniedStep(w, "access_denied", CodeGrantExpired,
+			"your temporary grant for this path has ended",
+			"request temporary use again if it is still needed",
+			s.denialNextStep(CodeGrantExpired, path, action), http.StatusForbidden)
+	case grant.ReasonGrantRevoked:
+		s.auditDenied(r, info, action, path, ip, reason)
+		jsonDeniedStep(w, "access_denied", CodeGrantRevoked,
+			"a human revoked your temporary grant for this path",
+			"ask the user before requesting again",
+			NextAskUser, http.StatusForbidden)
+	default:
+		s.auditDenied(r, info, action, path, ip, "acl")
+		s.writeACLDenied(w, action, path)
+	}
+}
+
+// resolveDenial maps a dataAccess reason to the per-ref code and the legacy
+// errors-map message used by /v1/resolve.
+func resolveDenial(reason string) (code, msg string) {
+	switch reason {
+	case "session_scope":
+		return CodeScopeExceeded, "path outside session scope"
+	case "session_action":
+		return CodeActionDenied, "action read_value not permitted by session role"
+	case grant.ReasonGrantExpired:
+		return CodeGrantExpired, "access denied: temporary grant has ended"
+	case grant.ReasonGrantRevoked:
+		return CodeGrantRevoked, "access denied: temporary grant was revoked"
+	}
+	return CodeACLDenied, "access denied: read_value permission required"
+}
+
+// writeACLDenied writes the denial for a caller whose ACL does not allow
+// action on the path. It never says whether the secret exists. The next
+// step is request_use only when the path is requestable.
+func (s *Server) writeACLDenied(w http.ResponseWriter, action, path string) {
+	step := s.denialNextStep(CodeACLDenied, path, action)
+	remediation := "ask the Phoenix operator to grant access"
+	if step == NextRequestUse {
+		remediation = "request temporary use: POST /v1/access-requests (agent's own identity, not a session)"
+	}
+	jsonDeniedStep(w, "access_denied", CodeACLDenied,
 		fmt.Sprintf("%s is not allowed on this path for your identity", action),
-		"ask the Phoenix operator to grant access",
-		http.StatusForbidden)
+		remediation, step, http.StatusForbidden)
 }
 
 // attestationDenialCode picks the code for an attestFull error:

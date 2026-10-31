@@ -90,6 +90,11 @@ Query params:
 - `path` (required): secret path to check
 - `check` (required): policy check to perform (currently only `allow_unseal`)
 
+Any authenticated identity, including session tokens, gets `200`.
+`allow_unseal` is `true` only when the caller can read the path without
+grants (its ACL, or a session's scope + action + ACL/elevation) **and** the
+path's policy sets `allow_unseal`. Unreadable paths return `{"allowed": false}`.
+
 Response:
 ```json
 { "path": "myapp/key", "check": "allow_unseal", "allowed": true }
@@ -154,6 +159,23 @@ Dashboard routes are only registered when `dashboard.enabled` is `true` in
 config. They do not appear in the API mux otherwise.
 
 See [Dashboard](dashboard.md) for the full reference.
+
+## Access requests and grants
+
+See [Access Requests](access-requests.md). Agent side uses the agent's own
+identity (sessions get `403 SESSION_CANNOT_REQUEST`); approve/deny need an
+identity listed in `access_requests.approvers`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/v1/access-requests` | Ask for temporary `read_value` on exact paths |
+| GET | `/v1/access-requests` | Own requests (approvers: all) |
+| GET | `/v1/access-requests/{id}` | One request with `next_step` |
+| POST | `/v1/access-requests/{id}/approve` | Approve, optionally narrowing paths / TTL (approvers) |
+| POST | `/v1/access-requests/{id}/deny` | Deny with optional note (approvers) |
+| GET | `/v1/grants` | Own grants (approvers: all) |
+| POST | `/v1/grants/{id}/revoke` | Revoke (owner or approver) |
+| GET | `/v1/whoami` | Caller identity, ACL rules, grants, pending requests |
 
 ## Common error shape
 

@@ -178,6 +178,11 @@ the agent must pass them to `phoenix exec` for injection:
 
 The `allow_unseal` check is server-authoritative — the MCP client queries
 `GET /v1/policy/check?path=<path>&check=allow_unseal` before decrypting.
+It is caller-aware: the answer is `true` only when the caller can read the
+path through its ACL (or session scope) right now **and** the rule allows
+unsealing. Access that comes only from a temporary grant
+([Access Requests](access-requests.md)) never unseals, so an envelope cached
+while a grant was active cannot be opened after it ends.
 
 ---
 

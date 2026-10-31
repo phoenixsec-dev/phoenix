@@ -91,6 +91,19 @@
     "password_hash": "",
     "session_ttl": "4h"
   },
+  "access_requests": {
+    "enabled": true,
+    "request_ttl": "15m",
+    "default_grant_ttl": "1h",
+    "max_grant_ttl": "8h",
+    "grantable_actions": [
+      "read_value"
+    ],
+    "require_sealed": true,
+    "bind_source_ip": true,
+    "approvers": [],
+    "deny_paths": []
+  },
   "onepassword": {
     "vault": "Engineering",
     "service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN",

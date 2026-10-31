@@ -49,6 +49,15 @@ var knownDenialCodes = map[string]bool{
 	"APPROVAL_REQUIRED": true, "STEP_UP_REAPPROVAL_REQUIRED": true,
 	"ROLE_NOT_FOUND": true, "BOOTSTRAP_FAILED": true, "ATTESTATION_FAILED": true,
 	"ADMIN_AUTH_REQUIRED": true,
+	// Request-use grants.
+	"GRANT_EXPIRED": true, "GRANT_REVOKED": true, "NOT_REQUESTABLE": true,
+	"SESSION_CANNOT_REQUEST": true, "REQUESTS_DISABLED": true, "REQUESTS_DEGRADED": true,
+	"ALREADY_ALLOWED": true, "SEAL_KEY_NOT_REGISTERED": true, "APPROVER_REQUIRED": true,
+	"INVALID_REQUEST": true, "ACTION_NOT_GRANTABLE": true, "SELF_APPROVAL": true,
+	"WIDENING_NOT_ALLOWED": true, "EMPTY_GRANT": true, "NOT_PENDING": true,
+	"GRANT_LIMIT": true, "TOO_MANY_PENDING": true, "RATE_LIMITED": true,
+	"REQUEST_COOLDOWN": true, "UNKNOWN_AGENT": true, "AUDIT_WRITE_FAILED": true,
+	"STORE_WRITE_FAILED": true, "REVOKE_NOT_DURABLE": true, "AGENT_DELETE_ACL_FAILED": true,
 }
 
 // denialHint returns the hint for a denial. The server's next_step is used

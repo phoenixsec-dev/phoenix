@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -29,6 +30,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/dashboard"
+	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
@@ -327,6 +329,24 @@ func main() {
 		log.Printf("  Dashboard: enabled at /dashboard/")
 	}
 
+	// Request-use grants. The store is always opened (it only creates
+	// grants.json on the first change), so listing and revoking keep working
+	// while the feature is disabled. A missing access_requests block = off.
+	tokenTTL := token.DefaultTTL
+	if cfg.Attestation.Token.Enabled && cfg.Attestation.Token.TTL != "" {
+		tokenTTL, _ = time.ParseDuration(cfg.Attestation.Token.TTL) // validated above
+	}
+	grantStore, err := openGrantStore(cfg, a, al, tokenTTL)
+	if err != nil {
+		log.Fatalf("opening grant store: %v", err)
+	}
+	srv.SetGrantStore(grantStore)
+	srv.SetAccessRequests(cfg.AccessRequestsSettings())
+	grantCtx, stopGrants := context.WithCancel(context.Background())
+	defer stopGrants()
+	go grantStore.Run(grantCtx, 30*time.Second)
+	logAccessRequests(cfg, a)
+
 	// Start local attestation agent if enabled
 	if cfg.Attestation.LocalAgent.Enabled {
 		localAgent := agent.New(cfg.Attestation.LocalAgent.SocketPath)
@@ -481,6 +501,9 @@ func runInit(dir, passphrase string) error {
 	cfg.Auth.MTLS.ServerCert = serverCertPath
 	cfg.Auth.MTLS.ServerKey = serverKeyPath
 	cfg.Auth.MTLS.CRLPath = crlPath
+	// New installs get request-use grants switched on (plan Q1); configs
+	// written before this release have no block and stay off.
+	cfg.AccessRequests = config.NewInstallAccessRequests()
 
 	cfgData, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -597,4 +620,46 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 	fmt.Printf("SANs: %s\n", strings.Join(allSANs, ", "))
 	fmt.Println("Restart the server for the new certificate to take effect.")
 	return nil
+}
+
+// openGrantStore opens grants.json (access_requests.store_path, default next
+// to the ACL file). Tombstones for deleted agents are kept for
+// max(short-lived token TTL, max_grant_ttl) plus an hour, so no credential
+// issued before a delete can outlive its tombstone.
+func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger, tokenTTL time.Duration) (*grant.Store, error) {
+	set := cfg.AccessRequestsSettings()
+	return grant.Open(grant.Options{
+		Path:  set.StorePath,
+		Audit: api.NewGrantAuditSink(al),
+		AgentExists: func(name string) bool {
+			_, err := a.GetAgent(name)
+			return err == nil
+		},
+		RequestTTL:         set.RequestTTL,
+		DefaultGrantTTL:    set.DefaultGrantTTL,
+		MaxGrantTTL:        set.MaxGrantTTL,
+		TombstoneRetention: max(tokenTTL, set.MaxGrantTTL) + time.Hour,
+	})
+}
+
+// logAccessRequests prints the request-use status and the startup warnings
+// from plan section 6 (unknown approver names; nobody able to approve).
+func logAccessRequests(cfg *config.Config, a *acl.ACL) {
+	set := cfg.AccessRequestsSettings()
+	if !set.Enabled {
+		log.Printf("  Access requests: disabled (grants file: %s)", set.StorePath)
+		return
+	}
+	log.Printf("  Access requests: enabled (grants file: %s, approvers=%d, sealed=%v)",
+		set.StorePath, len(set.Approvers), set.RequireSealed)
+	for _, name := range set.Approvers {
+		if _, err := a.GetAgent(name); err != nil {
+			log.Printf("WARNING: access_requests.approvers: %q is not an agent in the ACL", name)
+		}
+	}
+	if !cfg.Dashboard.Enabled && len(set.Approvers) == 0 {
+		// Worded without "dashboard": e2e scenario 19 checks that the startup
+		// log never mentions it when that UI is off.
+		log.Printf("WARNING: access_requests is enabled but nobody can approve requests: access_requests.approvers is empty and the operator web UI is off")
+	}
 }

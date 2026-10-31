@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/ref"
@@ -163,6 +165,13 @@ type Server struct {
 	sessionRoles  map[string]config.RoleConfig // nil when sessions are not configured
 	approvals     *approval.Store              // nil when step-up not configured
 	mux           *http.ServeMux
+
+	// Request-use grants (access.go). grants is nil when no grant store was
+	// opened; accessCfg holds the current access_requests settings (nil =
+	// feature off). now is the clock used for grant views; tests replace it.
+	grants    *grant.Store
+	accessCfg atomic.Pointer[config.AccessRequestsSettings]
+	now       func() time.Time
 }
 
 // NewServer creates a new API server with all dependencies.
@@ -177,6 +186,7 @@ func NewServer(b store.SecretBackend, a *acl.ACL, al *audit.Logger, auditPath st
 		startTime:     time.Now(),
 		authRL:        newRateLimiter(),
 		mux:           http.NewServeMux(),
+		now:           time.Now,
 	}
 	// Keep a reference to FileBackend for file-specific operations (rotation).
 	if fb, ok := b.(*store.FileBackend); ok {
@@ -283,6 +293,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/approval/", s.handleApprovalRouter)
 	s.mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
+	s.accessRoutes()
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -292,6 +303,7 @@ type authInfo struct {
 	UsedBearer      bool
 	IsLocal         bool                   // true when client IP is loopback
 	CertFingerprint string                 // "sha256:<hex>" or empty
+	BearerFP        string                 // grant.BearerFingerprint of the presented token's hash (bearer auth only)
 	TokenIssuedAt   *time.Time             // set when authenticated via short-lived token
 	Process         *policy.ProcessContext // set when token carries process attestation claims
 
@@ -441,6 +453,9 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		Agent:      agent,
 		UsedBearer: true,
 		IsLocal:    local,
+		// Fingerprint of the hash that just matched, so a grant is bound to
+		// this exact token (rotating the token ends the agent's grants).
+		BearerFP: grant.BearerFingerprint(crypto.HashToken(tok)),
 	}, nil
 }
 
@@ -580,13 +595,19 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 // jsonDenied sends a structured denial response with a machine-readable code
 // and the matching next_step from the denial contract (denial.go).
 func jsonDenied(w http.ResponseWriter, errMsg, code, detail, remediation string, httpCode int) {
+	jsonDeniedStep(w, errMsg, code, detail, remediation, nextStepFor(code), httpCode)
+}
+
+// jsonDeniedStep is jsonDenied with an explicit next_step, for denials whose
+// next step depends on the path (see Server.denialNextStep).
+func jsonDeniedStep(w http.ResponseWriter, errMsg, code, detail, remediation, step string, httpCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpCode)
 	resp := map[string]string{
 		"error":     errMsg,
 		"code":      code,
 		"detail":    detail,
-		"next_step": nextStepFor(code),
+		"next_step": step,
 	}
 	if remediation != "" {
 		resp["remediation"] = remediation
@@ -726,7 +747,12 @@ func (s *Server) checkSessionAction(w http.ResponseWriter, r *http.Request, info
 	return false
 }
 
-func (s *Server) dataAccessReason(info *authInfo, path, sessionAction string, aclAction acl.Action) string {
+// baseAccessReason is the authorization check WITHOUT grants: session scope,
+// session action and (elevated or ACL) for session callers; the ACL for
+// everyone else. It returns "" when allowed, else "session_scope",
+// "session_action" or "acl". dataAccess (access.go) layers grants on top;
+// handlePolicyCheck uses this directly because grants never unseal.
+func (s *Server) baseAccessReason(info *authInfo, path, sessionAction string, aclAction acl.Action) string {
 	if info.UsedSession {
 		if !session.PathInScope(path, info.SessionNamespaces) {
 			return "session_scope"
@@ -845,7 +871,8 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		visible := []string{}
 		for _, p := range allPaths {
-			if s.dataAccessReason(info, p, "list", acl.ActionList) != "" {
+			// List never consults grants: name visibility is ACL-only.
+			if s.baseAccessReason(info, p, "list", acl.ActionList) != "" {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
@@ -859,26 +886,14 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Session action enforcement: read_value
-	switch reason := s.dataAccessReason(info, path, "read_value", acl.ActionReadValue); reason {
-	case "":
-	case "session_scope":
-		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
-		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
-			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
-			"request a session with a role that includes this namespace",
-			http.StatusForbidden)
+	// Session scope/action, ACL, then request-use grants (access.go).
+	dec := s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+	if dec.Reason != "" {
+		s.writeDataDenial(w, r, info, "read_value", path, ip, dec.Reason)
 		return
-	case "session_action":
-		s.auditLogSessionDenied(r, info.Agent, "read_value", path, ip, "session_action", info.SessionID)
-		jsonDenied(w, "access_denied", "ACTION_DENIED",
-			fmt.Sprintf("action %q is not permitted by session role %q", "read_value", info.SessionRole),
-			"request a session with a role that includes this action",
-			http.StatusForbidden)
-		return
-	default:
-		s.auditDenied(r, info, "read_value", path, ip, "acl")
-		jsonACLDenied(w, "read_value")
+	}
+	// A sealed-only grant is served only to the registered seal key.
+	if !s.checkGrantSealed(w, r, info, "read_value", path, ip, dec.Grant, sealKeyValidated) {
 		return
 	}
 
@@ -903,7 +918,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAllowedWithSeal(r, info, "read_value", path, ip, sealKey != nil)
+	s.auditAllowedAccess(r, info, "read_value", path, ip, sealKey != nil, dec.Grant)
 	if sealKey != nil {
 		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
 		if err != nil {
@@ -940,25 +955,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
-	switch reason := s.dataAccessReason(info, path, "write", acl.ActionWrite); reason {
-	case "":
-	case "session_scope":
-		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
-		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
-			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
-			"request a session with a role that includes this namespace",
-			http.StatusForbidden)
-		return
-	case "session_action":
-		s.auditLogSessionDenied(r, info.Agent, "write", path, ip, "session_action", info.SessionID)
-		jsonDenied(w, "access_denied", "ACTION_DENIED",
-			fmt.Sprintf("action %q is not permitted by session role %q", "write", info.SessionRole),
-			"request a session with a role that includes this action",
-			http.StatusForbidden)
-		return
-	default:
-		s.auditDenied(r, info, "write", path, ip, "acl")
-		jsonACLDenied(w, "write")
+	// write is never grantable, so this is the session + ACL check only.
+	if reason := s.dataAccess(info, path, "write", acl.ActionWrite, ip).Reason; reason != "" {
+		s.writeDataDenial(w, r, info, "write", path, ip, reason)
 		return
 	}
 
@@ -1008,25 +1007,9 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
-	switch reason := s.dataAccessReason(info, path, "delete", acl.ActionDelete); reason {
-	case "":
-	case "session_scope":
-		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
-		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
-			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
-			"request a session with a role that includes this namespace",
-			http.StatusForbidden)
-		return
-	case "session_action":
-		s.auditLogSessionDenied(r, info.Agent, "delete", path, ip, "session_action", info.SessionID)
-		jsonDenied(w, "access_denied", "ACTION_DENIED",
-			fmt.Sprintf("action %q is not permitted by session role %q", "delete", info.SessionRole),
-			"request a session with a role that includes this action",
-			http.StatusForbidden)
-		return
-	default:
-		s.auditDenied(r, info, "delete", path, ip, "acl")
-		jsonACLDenied(w, "delete")
+	// delete never consults grants.
+	if reason := s.dataAccess(info, path, "delete", acl.ActionDelete, ip).Reason; reason != "" {
+		s.writeDataDenial(w, r, info, "delete", path, ip, reason)
 		return
 	}
 
@@ -1213,7 +1196,13 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.acl.RemoveAgent(target); err != nil {
+	if s.grants != nil {
+		// Revoke-before-delete (plan section 5): durably revoke the agent's
+		// grants and record a tombstone, then remove the ACL entry.
+		if !s.deleteAgentWithGrants(w, r, agentName, target) {
+			return
+		}
+	} else if err := s.acl.RemoveAgent(target); err != nil {
 		if errors.Is(err, acl.ErrAgentNotFound) {
 			jsonError(w, "agent not found", http.StatusNotFound)
 			return
@@ -1470,6 +1459,12 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		errors[refStr] = msg
 		errorCodes[refStr] = newRefDenial(code)
 	}
+	// denyStep is deny with a next step that depends on the path (request_use
+	// is only advertised for requestable paths).
+	denyStep := func(refStr, code, msg, step string) {
+		errors[refStr] = msg
+		errorCodes[refStr] = refDenial{Code: code, NextStep: step}
+	}
 
 	// Session seal key binding check (once, before processing refs)
 	if !s.checkSessionSealKey(w, r, info) {
@@ -1484,20 +1479,17 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Session scope enforcement (per-ref)
-		switch reason := s.dataAccessReason(info, path, "read_value", acl.ActionReadValue); reason {
-		case "":
-		case "session_scope":
-			s.auditDenied(r, info, "resolve", path, ip, "session_scope")
-			deny(refStr, CodeScopeExceeded, "path outside session scope")
+		// Session scope/action, ACL, then request-use grants (per-ref).
+		dec := s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		if dec.Reason != "" {
+			s.auditDenied(r, info, "resolve", path, ip, dec.Reason)
+			code, msg := resolveDenial(dec.Reason)
+			denyStep(refStr, code, msg, s.denialNextStep(code, path, "read_value"))
 			continue
-		case "session_action":
-			s.auditDenied(r, info, "resolve", path, ip, "session_action")
-			deny(refStr, CodeActionDenied, "action read_value not permitted by session role")
-			continue
-		default:
-			s.auditDenied(r, info, "resolve", path, ip, "acl")
-			deny(refStr, CodeACLDenied, "access denied: read_value permission required")
+		}
+		if dec.Grant != nil && dec.Grant.SealedOnly && sealKey == nil {
+			s.auditDeniedMetadata(info, "resolve", path, ip, "sealed_required", grantAuditMetadata(r, dec.Grant))
+			deny(refStr, CodeSealedRequired, "sealed delivery required")
 			continue
 		}
 
@@ -1524,7 +1516,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			s.auditAllowed(r, info, "dry-resolve", path, ip)
+			s.auditAllowedAccess(r, info, "dry-resolve", path, ip, false, dec.Grant)
 			values[refStr] = "ok"
 			continue
 		}
@@ -1545,7 +1537,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		s.auditAllowedWithSeal(r, info, "resolve", path, ip, sealKey != nil)
+		s.auditAllowedAccess(r, info, "resolve", path, ip, sealKey != nil, dec.Grant)
 
 		if sealKey != nil {
 			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
@@ -1746,6 +1738,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status["nonce_pending"] = s.nonces.Pending()
 	}
 
+	// Request-use grants: degraded store and audit lines still pending.
+	if ar := s.accessStatus(); ar != nil {
+		status["access_requests"] = ar
+		status["audit"] = s.grantAuditStatus()
+	}
+
 	// Recent audit
 	entries, err := audit.Query(s.auditPath, audit.QueryOptions{Limit: 5})
 	if err == nil && len(entries) > 0 {
@@ -1764,8 +1762,16 @@ type mintTokenRequest struct {
 
 // handlePolicyCheck returns whether a specific policy check passes for a path.
 // Query params: path (required), check (required, e.g. "allow_unseal").
+//
+// allow_unseal is caller-aware (plan section 8): it is true only when the
+// caller can read the path WITHOUT grants (ACL, or session scope + action +
+// elevated-or-ACL) and the path's policy has allow_unseal. Grant-only access
+// never unseals, so an envelope cached while a grant was active cannot be
+// opened later. Paths the caller cannot read still get 200 {allowed:false},
+// which is what the plugins' startup auth probes rely on. Sessions are
+// accepted here (full authentication), unlike admin endpoints.
 func (s *Server) handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
-	_, err := s.authenticate(r)
+	info, err := s.authenticateInfo(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
@@ -1784,7 +1790,8 @@ func (s *Server) handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	allowed := false
-	if s.policy != nil {
+	authorized := s.baseAccessReason(info, path, "read_value", acl.ActionReadValue) == ""
+	if authorized && s.policy != nil {
 		rule, _ := s.policy.RuleFor(path)
 		if rule != nil {
 			allowed = rule.AllowUnseal

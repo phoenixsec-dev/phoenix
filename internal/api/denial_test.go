@@ -36,11 +36,13 @@ func TestDenialNextStepsAreFromClosedSet(t *testing.T) {
 	if got := nextStepFor("SOME_FUTURE_CODE"); got != NextAskUser {
 		t.Fatalf("unknown code next_step = %q, want %q", got, NextAskUser)
 	}
-	// request_use is reserved for request-use grants and must not be
-	// emitted until that API exists.
+	// Only these codes carry request_use statically. GRANT_EXPIRED is still
+	// downgraded to ask_user for paths that are not requestable (see
+	// TestRequestUseOnlyAdvertisedWhenRequestable in access_test.go).
+	staticRequestUse := map[string]bool{CodeGrantExpired: true, CodeSessionCannotRequest: true}
 	for code, step := range denialNextStep {
-		if step == NextRequestUse {
-			t.Errorf("code %s advertises request_use before the request API exists", code)
+		if step == NextRequestUse && !staticRequestUse[code] {
+			t.Errorf("code %s advertises request_use statically; it must go through denialNextStep", code)
 		}
 	}
 }

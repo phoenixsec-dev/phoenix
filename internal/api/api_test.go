@@ -6250,7 +6250,9 @@ func TestSessionTokenBlockedOnAdminEndpoints(t *testing.T) {
 		{"POST", "/v1/agents", `{"name":"x","token":"y","permissions":[]}`},
 		{"GET", "/v1/status", ""},
 		{"POST", "/v1/rotate-master", ""},
-		{"GET", "/v1/policy/check?path=test/x&check=allow_unseal", ""},
+		// /v1/policy/check is no longer admin-only: it authenticates sessions
+		// and answers allow_unseal for the session's own read authority
+		// (TestPolicyCheckUnsealTruthTable in access_test.go).
 	}
 
 	for _, ep := range adminEndpoints {

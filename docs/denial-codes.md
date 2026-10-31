@@ -63,12 +63,25 @@ errors.
 
 | `next_step` | Meaning |
 |---|---|
-| `request_use` | Reserved for request-use grants (not emitted yet) |
+| `request_use` | Ask a human for temporary use of this path (`POST /v1/access-requests`, see [access-requests.md](access-requests.md)) with the agent's own identity, never a session |
 | `wait` | A human decision is pending; poll again |
 | `use_exec` | Use the value through `phoenix exec`, which requests and decrypts sealed values |
 | `remint_session` | Mint a new session, or one whose role covers this path and action |
 | `ask_user` | Only a human can fix this |
 | `none` | Not an access problem; retrying or asking will not help |
+
+### When `request_use` is advertised
+
+`request_use` is only sent when request-use grants are enabled
+(`access_requests.enabled`), the action is grantable (only `read_value` today)
+and the path does not match `access_requests.deny_paths`. Otherwise the same
+denial says `ask_user` (or its usual step for session codes). This applies to
+`ACL_DENIED`, `GRANT_EXPIRED`, and to `SCOPE_EXCEEDED` / `ACTION_DENIED` on
+reads: a session denial on a requestable path says `request_use`, and the
+request and the use then go through the agent's own identity.
+
+Precedence (first failure wins): authentication, session scope / action, ACL
+or grant, sealed requirement, attestation. A grant never waives attestation.
 
 ## Codes
 
@@ -76,11 +89,13 @@ errors.
 
 | Code | HTTP | `next_step` | When |
 |---|---|---|---|
-| `ACL_DENIED` | 403 | `ask_user` | The identity's ACL does not allow the action on this path |
+| `ACL_DENIED` | 403 | `request_use` if requestable, else `ask_user` | The identity's ACL does not allow the action on this path and no grant covers it |
+| `GRANT_EXPIRED` | 403 | `request_use` if requestable, else `ask_user` | A grant for this path ended by time in the last 24h |
+| `GRANT_REVOKED` | 403 | `ask_user` | A human revoked the grant for this path in the last 24h |
 | `ATTESTATION_REQUIRED` | 403 | `ask_user` | The path's attestation policy (mTLS, IP, nonce, process, signed resolve) was not met |
-| `SEALED_REQUIRED` | 403 | `use_exec` | The path is only served sealed (`require_sealed`) and no valid seal key was presented |
-| `SCOPE_EXCEEDED` | 403 | `remint_session` | Path outside the session role's namespaces |
-| `ACTION_DENIED` | 403 | `remint_session` | Action not permitted by the session role |
+| `SEALED_REQUIRED` | 403 | `use_exec` | The path (policy `require_sealed`) or the grant (`sealed_only`) is only served sealed and no valid seal key was presented |
+| `SCOPE_EXCEEDED` | 403 | `remint_session` (`request_use` on a requestable read) | Path outside the session role's namespaces |
+| `ACTION_DENIED` | 403 | `remint_session` (`request_use` on a requestable read) | Action not permitted by the session role |
 | `NOT_FOUND` | resolve only | `none` | Secret not found (resolve per-ref) |
 | `INVALID_REF` | resolve only | `none` | Malformed reference or invalid path (resolve per-ref) |
 | `INTERNAL_ERROR` | resolve only | `ask_user` | Server error for this ref |
@@ -105,6 +120,38 @@ errors.
 Approval-side validation codes returned to approvers (for example
 `ROLE_CHANGED`) use `ask_user`.
 
+### Access requests and grants
+
+Returned by `/v1/access-requests*` and `/v1/grants*` (see
+[access-requests.md](access-requests.md)). Every `429` carries `Retry-After`
+(seconds).
+
+| Code | HTTP | `next_step` | When |
+|---|---|---|---|
+| `SESSION_CANNOT_REQUEST` | 403 | `request_use` | Sent with a `phxs_` session token; resend with the agent's own bearer, mTLS or short-lived token |
+| `REQUESTS_DISABLED` | 501 | `ask_user` | The feature is off (or this server has no grant store) |
+| `REQUESTS_DEGRADED` | 503 | `ask_user` | The grants file could not be saved or was quarantined |
+| `NOT_REQUESTABLE` | 403 | `ask_user` | A path matches `deny_paths` (also re-checked at approval) |
+| `ALREADY_ALLOWED` | 409 | `none` | The ACL already allows every requested path |
+| `SEAL_KEY_NOT_REGISTERED` | 400 | `ask_user` | `require_sealed` is on and the agent has no registered seal key |
+| `ACTION_NOT_GRANTABLE` | 400 | `ask_user` | Only `read_value` can be requested |
+| `INVALID_REQUEST` | 400 | `none` | Bad body, path (wildcards, control/bidi/zero-width characters, more than 10), reason or TTL |
+| `TOO_MANY_PENDING` | 429 | `wait` | 3 pending per agent or 50 in total |
+| `RATE_LIMITED` | 429 | `ask_user` | More than 10 requests created by this agent in the last hour |
+| `REQUEST_COOLDOWN` | 429 | `ask_user` | A human denied one of these paths in the last 10 minutes |
+| `APPROVER_REQUIRED` | 403 | `ask_user` | Approve/deny (or listing other agents) by an identity not in `access_requests.approvers`, or by a session |
+| `SELF_APPROVAL` | 403 | `ask_user` | An agent tried to decide its own request |
+| `WIDENING_NOT_ALLOWED` | 400 | `none` | Approval added a path or lengthened the TTL |
+| `EMPTY_GRANT` | 400 | `none` | Approval removed every path |
+| `NOT_PENDING` | 409 | `none` | The request was already decided (repeating the same decision returns the original result) |
+| `GRANT_LIMIT` | 409 | `ask_user` | The agent already has 10 active grants; the request stays pending |
+| `UNKNOWN_AGENT` | 403 | `ask_user` | The requesting agent is no longer in the ACL |
+| `NOT_FOUND` | 404 | `none` | No such request or grant visible to this identity |
+| `AUDIT_WRITE_FAILED` | 500 | `ask_user` | The audit log refused the "attempt" line; nothing changed |
+| `STORE_WRITE_FAILED` | 500 | `ask_user` | The grants file could not be saved; nothing changed |
+| `REVOKE_NOT_DURABLE` | 500 | `ask_user` | Revoked in memory (denies at once) but not saved; fix the disk, retry, or rotate the secret |
+| `AGENT_DELETE_ACL_FAILED` | 500 | `ask_user` | Agent delete revoked the grants but could not remove the ACL entry |
+
 ## Compatibility
 
 - Before this contract, ACL and attestation denials on single-secret endpoints
@@ -117,3 +164,6 @@ Approval-side validation codes returned to approvers (for example
 - `ATTESTATION_FAILED` at session mint and renew no longer names the failed
   requirement or lists the role's attestation rules.
 - The audit `reason` for attestation denials is still `attestation`.
+- With request-use grants, `ACL_DENIED` (and session scope/action denials on
+  reads) may now say `request_use` instead of `ask_user`. Servers with no
+  `access_requests` block (every upgraded install) never send it.
