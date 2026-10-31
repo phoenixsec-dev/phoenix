@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/phoenixsec/phoenix/internal/policy"
@@ -132,24 +133,33 @@ func writeAttestationRequired(w http.ResponseWriter) {
 
 // denyResolveAttestation handles request-level attestation failures in
 // /v1/resolve (nonce, timestamp skew, client certificate, signature). These
-// happen before any ref is checked, so every requested ref gets an audit
-// entry carrying the specific reason in denial.detail, and the caller gets
-// one generic ATTESTATION_REQUIRED denial.
+// happen before any ref is checked and need no access to any path, so they
+// write a single audit entry (the first ref's path, plus "resolve.refs" with
+// the ref count) rather than one per ref, which a caller could inflate.
+// The caller gets one generic ATTESTATION_REQUIRED denial.
 func (s *Server) denyResolveAttestation(w http.ResponseWriter, r *http.Request, info *authInfo, ip string, refs []string, detail string) {
-	for _, refStr := range refs {
-		path := refStr
-		if p, err := ref.Parse(refStr); err == nil {
+	path := ""
+	if len(refs) > 0 {
+		path = refs[0]
+		if p, err := ref.Parse(refs[0]); err == nil {
 			path = p
 		}
-		s.auditDeniedDetail(r, info, "resolve", path, ip, "attestation", detail)
 	}
+	metadata := denialAuditMetadata(r, detail)
+	metadata["resolve.refs"] = strconv.Itoa(len(refs))
+	s.auditDeniedMetadata(info, "resolve", path, ip, "attestation", metadata)
 	writeAttestationRequired(w)
 }
 
 // auditDeniedDetail is auditDenied plus a "denial.detail" metadata entry for
 // detail that must reach the audit log but not the caller.
 func (s *Server) auditDeniedDetail(r *http.Request, info *authInfo, action, path, ip, reason, detail string) {
-	metadata := denialAuditMetadata(r, detail)
+	s.auditDeniedMetadata(info, action, path, ip, reason, denialAuditMetadata(r, detail))
+}
+
+// auditDeniedMetadata writes a denied audit entry with the given metadata,
+// as a session entry when the caller used a session token.
+func (s *Server) auditDeniedMetadata(info *authInfo, action, path, ip, reason string, metadata map[string]string) {
 	agent := ""
 	if info != nil {
 		agent = info.Agent

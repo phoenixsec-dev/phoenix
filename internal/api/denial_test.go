@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -228,7 +229,7 @@ func TestResolveEarlyAttestationFailuresAreCoded(t *testing.T) {
 	cert, _ := x509.ParseCertificate(block.Bytes)
 	keyBlock, _ := pem.Decode(bundle.KeyPEM)
 	ecKey, _ := x509.ParseECPrivateKey(keyBlock.Bytes)
-	refs := []string{"phoenix://signed/key"}
+	refs := []string{"phoenix://signed/key", "phoenix://signed/key", "phoenix://signed/other"}
 	fresh := func() string { return time.Now().UTC().Format(time.RFC3339) }
 	newNonce := func() string {
 		e, err := ns.Generate()
@@ -284,6 +285,19 @@ func TestResolveEarlyAttestationFailuresAreCoded(t *testing.T) {
 			e := findAPIAuditEntry(entries, "resolve", "signed/key", "denied", "attestation")
 			if e == nil || !strings.Contains(e.Metadata["denial.detail"], c.auditMatch) {
 				t.Fatalf("audit entry missing detail %q: %+v", c.auditMatch, e)
+			}
+			// One entry per request, not per ref, so a caller cannot inflate the log.
+			n := 0
+			for _, en := range entries {
+				if strings.Contains(en.Metadata["denial.detail"], c.auditMatch) {
+					n++
+					if en.Metadata["resolve.refs"] != strconv.Itoa(len(refs)) {
+						t.Fatalf("resolve.refs = %q, want %d", en.Metadata["resolve.refs"], len(refs))
+					}
+				}
+			}
+			if n != 1 {
+				t.Fatalf("%d audit entries for one request, want 1", n)
 			}
 		})
 	}

