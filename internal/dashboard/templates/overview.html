@@ -19,12 +19,25 @@
         <div class="stat-value">{{.PendingApprovals}}</div>
         <div class="stat-label">Pending Approvals</div>
     </div>
+    {{if .AccessHealth}}
+    <a class="stat-card" href="/dashboard/approvals">
+        <div class="stat-value">{{.PendingAccess}}{{if gt .PendingAccess 0}} <span class="badge">new</span>{{end}}</div>
+        <div class="stat-label">Access Requests</div>
+    </a>
+    {{end}}
 </div>
+
+{{with .AccessHealth}}{{if .Degraded}}
+<div class="flash flash-error flash-sticky">Access requests degraded: {{.Reason}}. No new requests, approvals or grant-backed reads until this is fixed.</div>
+{{end}}{{if gt .AuditPending 0}}
+<div class="flash flash-error flash-sticky">Audit degraded: {{.AuditPending}} grant event(s) waiting to reach the audit log (retried every 30s).</div>
+{{end}}{{end}}
 
 <div class="info-card">
     <h2>Server</h2>
     <div class="info-row"><span class="info-label">Uptime</span><span>{{.Uptime}}</span></div>
     <div class="info-row"><span class="info-label">Sessions</span><span>{{if .SessionsEnabled}}enabled{{else}}disabled{{end}}</span></div>
+    <div class="info-row"><span class="info-label">Access requests</span><span>{{if .AccessOn}}enabled{{else}}disabled{{end}}</span></div>
 </div>
 
 {{if .RecentAudit}}

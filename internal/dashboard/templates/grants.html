@@ -1,0 +1,59 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">Grants</h1>
+
+{{if .Error}}<div class="flash flash-error flash-sticky">{{.Error}}</div>{{end}}
+{{if .Flash}}<div class="flash flash-info">{{.Flash}}</div>{{end}}
+
+<div class="filter-bar">
+    <a href="/dashboard/grants" class="btn btn-sm{{if eq .View "active"}} btn-primary{{end}}">Active</a>
+    <a href="/dashboard/grants?view=recent" class="btn btn-sm{{if eq .View "recent"}} btn-primary{{end}}">Recent (expired / revoked)</a>
+</div>
+
+{{if not .Configured}}
+<div class="empty-state"><p>Access requests are not configured on this server.</p></div>
+{{else if .Grants}}
+<p class="revoke-note">Revoking stops new reads at once. It does not recall a value already used; rotate the secret if that matters.</p>
+<div class="table-wrap">
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Agent</th>
+            <th>Paths</th>
+            <th>Action</th>
+            {{if eq .View "active"}}<th>Expires in</th><th>Uses</th><th>Last used</th><th>Approved by</th><th></th>
+            {{else}}<th>State</th><th>Ended</th><th>Uses</th><th>Revoked by</th>{{end}}
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Grants}}
+        <tr>
+            <td>{{.Agent}}</td>
+            <td class="mono">{{join .Paths ", "}}</td>
+            <td class="mono">{{.Action}}</td>
+            {{if eq $.View "active"}}
+            <td>{{ttlRemain .ExpiresAt}}</td>
+            <td>{{.UseCount}}</td>
+            <td>{{fmtTime .LastUsedAt}}</td>
+            <td>{{.ApprovedBy}}</td>
+            <td>
+                <form method="POST" action="/dashboard/grants/{{.ID}}/revoke" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                    <button type="submit" class="btn btn-sm btn-revoke">Revoke</button>
+                </form>
+            </td>
+            {{else}}
+            <td><span class="status-badge status-{{.State}}">{{.State}}</span></td>
+            <td>{{fmtTime .Ended}}</td>
+            <td>{{.UseCount}}</td>
+            <td>{{.RevokedBy}}</td>
+            {{end}}
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+</div>
+{{else}}
+<div class="empty-state"><p>{{if eq .View "active"}}No active grants{{else}}No expired or revoked grants in the last 30 days{{end}}</p></div>
+{{end}}
+{{end}}

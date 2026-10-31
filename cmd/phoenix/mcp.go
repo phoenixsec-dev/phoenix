@@ -173,6 +173,42 @@ var mcpSessionTools = []mcpTool{
 	},
 }
 
+// mcpAccessTools let an agent ask a human for temporary use of a secret it
+// was denied (request-use grants), check on the request, and see its own
+// identity. The grant itself is used through phoenix exec, never through
+// these tools, and they never return a secret value.
+var mcpAccessTools = []mcpTool{
+	{
+		Name:        "phoenix_request_use",
+		Description: "Ask a human for temporary use of exact secret paths you were denied (next step request_use). A human approves or denies in the Phoenix dashboard. Approved secrets are used through phoenix exec, not returned here. Must run on the agent's own identity, not a session.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"paths": {"type": "array", "items": {"type": "string"}, "description": "Exact secret paths, e.g. ['infra/b2/app-key'] (max 10, no wildcards)"},
+				"reason": {"type": "string", "description": "Why you need it, shown to the human as unverified (max 300 characters)"},
+				"ttl": {"type": "string", "description": "Optional grant length like '30m' (default 1h; the human may shorten it)"}
+			},
+			"required": ["paths", "reason"]
+		}`),
+	},
+	{
+		Name:        "phoenix_request_status",
+		Description: "Check an access request (req_...) made with phoenix_request_use: pending, approved, denied or expired, and what to do next.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"request_id": {"type": "string", "description": "Request ID (req_...)"}
+			},
+			"required": ["request_id"]
+		}`),
+	},
+	{
+		Name:        "phoenix_whoami",
+		Description: "Show which Phoenix identity this server uses, its ACL rules, active grants and pending access requests.",
+		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
+	},
+}
+
 var mcpUnsealTool = mcpTool{
 	Name:        "phoenix_unseal",
 	Description: "Decrypt a sealed secret value. The decrypted value will be visible in this conversation. Only works when allow_unseal policy is set for the secret's path.",
@@ -193,6 +229,7 @@ func mcpGetTools() []mcpTool {
 	tools := make([]mcpTool, len(mcpBaseTools))
 	copy(tools, mcpBaseTools)
 	tools = append(tools, mcpSessionTools...)
+	tools = append(tools, mcpAccessTools...)
 	if mcpSealPrivKey != nil {
 		tools = append(tools, mcpUnsealTool)
 	}
@@ -301,6 +338,12 @@ func mcpDispatchTool(name string, args json.RawMessage, logger *log.Logger) (str
 		return mcpToolSessionList(args, logger)
 	case "phoenix_session_revoke":
 		return mcpToolSessionRevoke(args, logger)
+	case "phoenix_request_use":
+		return mcpToolRequestUse(args, logger)
+	case "phoenix_request_status":
+		return mcpToolRequestStatus(args, logger)
+	case "phoenix_whoami":
+		return mcpToolWhoami(args, logger)
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name), true
 	}
@@ -335,11 +378,6 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == 202 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return mcpFormatApprovalRequired(respBody), false
-	}
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -448,14 +486,9 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 202 {
-		body, _ := io.ReadAll(resp.Body)
-		return mcpFormatApprovalRequired(body), false
-	}
-
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Sprintf("%s: %s", params.Path, mcpFormatDenial(body, resp.StatusCode)), true
+		return fmt.Sprintf("%s: %s", params.Path, mcpFormatDenialForPath(body, resp.StatusCode, params.Path)), true
 	}
 
 	// Sealed mode: return opaque PHOENIX_SEALED: token
@@ -516,11 +549,6 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == 202 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return mcpFormatApprovalRequired(respBody), false
-	}
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -625,36 +653,20 @@ func sessionRenewalLoop(logger *log.Logger) {
 // mcpFormatDenial parses a structured denial response body and returns
 // a formatted error string for the agent.
 func mcpFormatDenial(body []byte, statusCode int) string {
+	return mcpFormatDenialForPath(body, statusCode, "")
+}
+
+// mcpFormatDenialForPath is mcpFormatDenial for one secret path, so a
+// request_use hint names the exact phoenix request command.
+func mcpFormatDenialForPath(body []byte, statusCode int, path string) string {
 	denial, ok := parseServerDenial(body)
 	if ok {
-		return formatDenial(denial, "")
+		return formatDenialForPath(denial, "", path)
 	}
 	if denial.Error != "" {
 		return cleanServerText(denial.Error)
 	}
 	return fmt.Sprintf("HTTP %d", statusCode)
-}
-
-// mcpFormatApprovalRequired parses a 202 approval-required response
-// and returns a message suitable for an agent to present to the human.
-func mcpFormatApprovalRequired(body []byte) string {
-	var pending struct {
-		Status     string `json:"status"`
-		ApprovalID string `json:"approval_id"`
-		ExpiresAt  string `json:"expires_at"`
-	}
-	if json.Unmarshal(body, &pending) == nil && pending.Status == "approval_required" {
-		msg := "[APPROVAL_REQUIRED] This operation requires human approval."
-		// Built locally from a well-formed ID; the server's approve_command is ignored.
-		if cmd := approveCommand(pending.ApprovalID); cmd != "" {
-			msg += "\nRun: " + cmd
-		}
-		if pending.ExpiresAt != "" {
-			msg += "\nExpires: " + cleanServerText(pending.ExpiresAt)
-		}
-		return msg
-	}
-	return "[APPROVAL_REQUIRED] This operation requires human approval."
 }
 
 // mcpToolSessionList handles the phoenix_session_list tool.
@@ -722,6 +734,124 @@ func mcpToolSessionRevoke(args json.RawMessage, logger *log.Logger) (string, boo
 
 	logger.Printf("revoked session %s", params.SessionID)
 	return fmt.Sprintf("Session %s revoked.", params.SessionID), false
+}
+
+// mcpToolRequestUse handles phoenix_request_use: POST /v1/access-requests.
+func mcpToolRequestUse(args json.RawMessage, logger *log.Logger) (string, bool) {
+	var params struct {
+		Paths  []string `json:"paths"`
+		Reason string   `json:"reason"`
+		TTL    string   `json:"ttl"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return fmt.Sprintf("Invalid arguments: %v", err), true
+	}
+	if len(params.Paths) == 0 || strings.TrimSpace(params.Reason) == "" {
+		return "paths and reason are required", true
+	}
+	for i, p := range params.Paths {
+		params.Paths[i] = strings.TrimPrefix(p, "phoenix://")
+	}
+	body, _ := json.Marshal(map[string]any{"paths": params.Paths, "action": "read_value", "reason": params.Reason, "ttl": params.TTL})
+	resp, err := apiRequestWithHeaders("POST", "/v1/access-requests", strings.NewReader(string(body)),
+		map[string]string{"X-Phoenix-Tool": "phoenix_request_use"})
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		return mcpFormatDenial(respBody, resp.StatusCode), true
+	}
+	var rq accessRequestView
+	if err := json.Unmarshal(respBody, &rq); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+	logger.Printf("access request %s (%d paths)", rq.ID, len(rq.Paths))
+	return mcpRequestText(rq), false
+}
+
+// mcpToolRequestStatus handles phoenix_request_status.
+func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, bool) {
+	var params struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return fmt.Sprintf("Invalid arguments: %v", err), true
+	}
+	if !requestIDPattern.MatchString(params.RequestID) {
+		return "request_id must look like req_ followed by 32 hex characters", true
+	}
+	resp, err := apiRequest("GET", "/v1/access-requests/"+params.RequestID, nil)
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return mcpFormatDenial(respBody, resp.StatusCode), true
+	}
+	var rq accessRequestView
+	if err := json.Unmarshal(respBody, &rq); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+	return mcpRequestText(rq), false
+}
+
+// mcpRequestText renders a request for the model: cleaned server facts plus
+// a client-authored next step.
+func mcpRequestText(rq accessRequestView) string {
+	lines := []string{
+		"request_id: " + cleanServerText(rq.ID),
+		"status: " + cleanServerText(rq.Status),
+		"paths: " + cleanList(rq.Paths, ", "),
+	}
+	if len(rq.GrantedPaths) > 0 {
+		lines = append(lines, "granted: "+cleanList(rq.GrantedPaths, ", ")+" until "+cleanServerText(rq.GrantExpiresAt))
+	}
+	lines = append(lines, "next: "+requestNextHint(rq))
+	return strings.Join(lines, "\n")
+}
+
+// mcpToolWhoami handles phoenix_whoami: the caller's identity and access
+// summary, passed through as cleaned JSON.
+func mcpToolWhoami(args json.RawMessage, logger *log.Logger) (string, bool) {
+	resp, err := apiRequest("GET", "/v1/whoami", nil)
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return mcpFormatDenial(respBody, resp.StatusCode), true
+	}
+	var v any
+	if err := json.Unmarshal(respBody, &v); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+	out, _ := json.MarshalIndent(cleanJSONStrings(v), "", "  ")
+	return string(out), false
+}
+
+// cleanJSONStrings runs cleanServerText over every string (keys included)
+// in a decoded JSON value.
+func cleanJSONStrings(v any) any {
+	switch t := v.(type) {
+	case string:
+		return cleanServerText(t)
+	case []any:
+		for i := range t {
+			t[i] = cleanJSONStrings(t[i])
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[cleanServerText(k)] = cleanJSONStrings(val)
+		}
+		return out
+	}
+	return v
 }
 
 // mcpSendResult sends a successful JSON-RPC response.

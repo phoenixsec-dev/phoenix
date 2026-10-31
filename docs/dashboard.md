@@ -49,12 +49,21 @@ not use bearer tokens, mTLS, or session tokens. Instead:
 | View pending approvals | Medium | Exposes agent names, roles, IPs, namespaces |
 | Approve step-up requests | **High** | Mints a session token for an agent |
 | Deny step-up requests | Medium | Blocks an agent's session request |
+| Approve access requests | **High** | Grants an agent temporary use of exact secret paths |
+| Deny access requests | Medium | Starts a 10-minute cooldown on those paths |
+| Revoke grants | Medium | Immediate effect; does not recall values already used |
 | View audit log | Medium | Full access to audit trail |
 | View role config | Low | Read-only |
 
 Approval is the highest-risk action. It runs the same safety checks as
 the API (`approval.ValidateForMint`): role existence, step-up still
 enabled, bootstrap trust, attestation requirements, and seal key.
+
+Access-request approval goes through the API server's shared approval
+function (`ApproveAccessRequestAs`), so it applies exactly the API's
+re-checks against the current config. Deny and revoke call the grant store,
+as the API does. This is the one place the dashboard reaches into the API
+server rather than a store, and it is deliberate: one copy of the checks.
 
 ### What the dashboard cannot do
 
@@ -171,9 +180,18 @@ Status cards showing secrets count, agent count, active sessions, and
 pending approvals. Server uptime and session-enabled status. Table of
 the 10 most recent audit entries.
 
+Also an **Access Requests** card with the pending count, and a red banner
+when the grants file or grant audit events are degraded.
+
 ### Approvals (`/dashboard/approvals`)
 
-Each pending approval is a card showing: role name, agent name, source
+**Secret access requests** come first: one card per pending request with
+every fact an approver needs (paths in full with badges, source IP and auth
+method, TTL picker limited to legal values, delivery mode, attestation
+requirements, the agent's reason labelled "not verified", the agent's last
+24 hours). Details in [Access requests](access-requests.md#dashboard).
+
+**Step-up session approvals** follow. Each pending approval is a card showing: role name, agent name, source
 IP, bootstrap method, certificate fingerprint (truncated), namespaces,
 requester TTY, created/expires timestamps with countdown.
 
@@ -182,6 +200,13 @@ submit POST forms with CSRF tokens.
 
 Below: recently resolved approvals (collapsed by default) as a table
 with status badges.
+
+### Grants (`/dashboard/grants`)
+
+Active request-use grants (agent, paths, action, expires in, uses, last
+used, approved by) with a Revoke button, and a Recent view of expired and
+revoked grants. A revoke that could not be saved shows `REVOKE_NOT_DURABLE`
+in red and stays on screen.
 
 ### Sessions (`/dashboard/sessions`)
 
@@ -224,6 +249,9 @@ All dashboard actions are logged to the same audit trail as API actions.
 | `approval.approved` | allowed | `dashboard@<ip>` | Step-up request approved |
 | `approval.denied` | allowed | `dashboard@<ip>` | Step-up request denied |
 | `session.revoke` | allowed | `dashboard@<ip>` | Session revoked |
+| `access_request.approved` / `.denied` | allowed | `dashboard@<ip>` | Access request decided (plus an `.attempt` line before it) |
+| `access_request.approve` | denied | `dashboard@<ip>` | Approval refused by a re-check (reason = code) |
+| `grant.revoked` | allowed | `dashboard@<ip>` | Grant revoked |
 
 Post-login actions use `dashboard@<client_ip>` for per-operator forensic
 distinction. Pre-login events (failures, rate limiting, expired cookies)

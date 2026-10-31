@@ -58,6 +58,33 @@ Additional exec flags:
 - `--timeout 5s`
 - `--mask-env`
 - `--output-env <path>`
+- `--redact-output`: exec stays as the parent and replaces every resolved
+  value in the command's stdout/stderr with `[REDACTED:<NAME>]`; the exit code
+  is passed through. A guard against accidental echo, not a hostile command.
+  Values under 4 bytes are not redacted. See
+  [Access requests](access-requests.md#--redact-output).
+
+## Temporary access (request-use grants)
+
+```bash
+# Agent: ask a human for an exact path you were denied
+phoenix request infra/b2/app-key --reason "nightly backup fails auth" --ttl 30m [--wait]
+phoenix request status req_...
+phoenix whoami
+
+# Approver (dashboard, or an identity in access_requests.approvers)
+phoenix pending
+phoenix approve req_... [--ttl 15m] [--path infra/b2/app-key] [--yes]
+phoenix deny req_... --note "use the staging key"
+phoenix grants --all
+phoenix grants revoke gnt_...
+
+# Agent: use the grant
+phoenix exec --redact-output --env B2_KEY=phoenix://infra/b2/app-key -- ./backup.sh
+```
+
+These run on the agent's own token or cert, never a session. See
+[Access requests](access-requests.md).
 
 ## Secure secret input
 
@@ -152,8 +179,9 @@ phoenix sessions info ses_abc123def456
 # Revoke a session (immediate effect)
 phoenix sessions revoke ses_abc123def456
 
-# Approve a step-up session request
+# Approve or deny a step-up session request
 phoenix approve apr_xyz789
+phoenix deny apr_xyz789
 ```
 
 When `PHOENIX_ROLE` is set, the CLI auto-mints a session on the first request

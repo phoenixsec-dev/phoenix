@@ -214,8 +214,15 @@ Available MCP tools:
 - `phoenix_session_list` — list active sessions
 - `phoenix_session_revoke` — revoke a session by ID
 
-When an MCP tool hits `APPROVAL_REQUIRED`, it returns a message the agent
-can present to the human with the approve command.
+Step-up approval happens while the MCP server mints its session: the
+`phoenix approve apr_...` command (built locally from the approval ID) is
+printed to stderr while it waits. Data tools (`phoenix_get`, `phoenix_resolve`,
+`phoenix_list`) never get a 202; their denials show the code and next step.
+
+The request-use tools (`phoenix_request_use`, `phoenix_request_status`,
+`phoenix_whoami`) are listed too, but requests are refused for session tokens
+(`SESSION_CANNOT_REQUEST`): run an MCP server on the agent's own bootstrap
+identity for them. See [Access requests](access-requests.md).
 
 ## Denial codes
 

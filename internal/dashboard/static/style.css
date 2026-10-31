@@ -202,3 +202,19 @@ body {
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     .role-grid { grid-template-columns: 1fr; }
 }
+
+/* Request-use grants (access requests) */
+.flag-warn { background: rgba(210,153,34,0.15); color: var(--orange); }
+.status-badge.status-revoked { background: rgba(218,54,51,0.15); color: var(--red); }
+.text-red { color: var(--red); }
+.reason-box { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 12px; margin: 12px 0; }
+.reason-label { font-size: 0.75em; text-transform: uppercase; color: var(--orange); margin-bottom: 4px; }
+.reason-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.path-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.path-item { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.path-full { overflow-wrap: anywhere; }
+.attest-list { margin: 8px 0; }
+.revoke-note { font-size: 0.85em; color: var(--text-secondary); margin: 8px 0; }
+.deny-form { display: flex; gap: 8px; margin-top: 8px; }
+.history { margin-top: 12px; font-size: 0.85em; }
+.history-item { color: var(--text-secondary); }
