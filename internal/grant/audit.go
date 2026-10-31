@@ -1,6 +1,8 @@
 package grant
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -76,6 +78,14 @@ func (e Event) Metadata() map[string]string {
 		m[k] = v
 	}
 	return m
+}
+
+// clone deep-copies the slices and maps so a sink can never alias the
+// store's records.
+func (e Event) clone() Event {
+	e.Paths = slices.Clone(e.Paths)
+	e.Detail = maps.Clone(e.Detail)
+	return e
 }
 
 type discardSink struct{}

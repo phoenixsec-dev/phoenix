@@ -32,6 +32,12 @@ import (
 
 const fileVersion = 1
 
+// approveMaybeOnDiskMsg is the STORE_WRITE_FAILED message for the one case
+// where a failed approve may still be on disk (see commit).
+const approveMaybeOnDiskMsg = "could not confirm the approval was saved, and undoing it on disk also failed: " +
+	"the approval may still be on disk and could take effect after a restart. " +
+	"Check the grants list and revoke it if it is not wanted"
+
 // Defaults used when Options leaves a duration at zero.
 const (
 	DefaultRequestTTL         = 15 * time.Minute
@@ -328,18 +334,26 @@ func (s *Store) save(st *state) error {
 // state back over it; if that also fails the store is degraded until Tick
 // manages to. (A crash in that short window can still bring the change back.)
 func (s *Store) commit(next *state, op string, committed Event) error {
-	if err := s.sink.Append(derive(committed, op, PhaseAttempt)); err != nil {
+	if err := s.appendAudit(derive(committed, op, PhaseAttempt)); err != nil {
 		return &Error{Code: CodeAuditWriteFailed, Msg: "audit log unavailable; nothing changed", Err: err}
 	}
 	next.AuditPending = append(next.AuditPending, committed)
 	if err := s.save(next); err != nil {
+		msg := "could not save the grants file; nothing changed"
 		if errors.Is(err, fsutil.ErrDirSyncFailed) {
 			if rerr := s.save(s.snapshot()); rerr != nil {
 				s.setWriteFailed(err)
+				// Residual risk (review R1 G1, accepted): the unacknowledged
+				// change is on disk and the rollback failed, so a restart
+				// before Tick heals the file loads it. For approve that is a
+				// grant the human did approve; tell them so they can revoke.
+				if op == opApprove {
+					msg = approveMaybeOnDiskMsg
+				}
 			}
 		}
 		s.appendFailed(committed, op, err)
-		return &Error{Code: CodeStoreWriteFailed, Msg: "could not save the grants file; nothing changed", Err: err}
+		return &Error{Code: CodeStoreWriteFailed, Msg: msg, Err: err}
 	}
 	s.publish(next)
 	s.setWriteFailed(nil)
@@ -351,7 +365,7 @@ func (s *Store) commit(next *state, op string, committed Event) error {
 // takes effect in memory, even when the attempt line or the save fails; a
 // failed save returns REVOKE_NOT_DURABLE and degrades the store.
 func (s *Store) commitRevoke(next *state, op string, attempt Event, committed []Event) error {
-	if err := s.sink.Append(derive(attempt, op, PhaseAttempt)); err != nil {
+	if err := s.appendAudit(derive(attempt, op, PhaseAttempt)); err != nil {
 		// Never let a broken audit log keep a grant alive. The committed
 		// events below still go through audit_pending.
 		s.logf("WARNING: grant store: audit attempt line for %s failed, revoking anyway: %v", op, err)
@@ -370,10 +384,13 @@ func (s *Store) commitRevoke(next *state, op string, attempt Event, committed []
 	return nil
 }
 
+// appendAudit hands the sink a deep copy of e, never the store's own slices.
+func (s *Store) appendAudit(e Event) error { return s.sink.Append(e.clone()) }
+
 func (s *Store) appendFailed(e Event, op string, cause error) {
 	f := derive(e, op, PhaseFailed)
 	f.Detail = map[string]string{"error": cause.Error()}
-	if err := s.sink.Append(f); err != nil {
+	if err := s.appendAudit(f); err != nil {
 		s.logf("WARNING: grant store: could not audit failed %s: %v", op, err)
 	}
 }
@@ -388,7 +405,7 @@ func (s *Store) flushAudit() {
 	cur := s.snapshot()
 	n := 0
 	for _, e := range cur.AuditPending {
-		if err := s.sink.Append(e); err != nil {
+		if err := s.appendAudit(e); err != nil {
 			s.logf("WARNING: grant store: audit append for %s failed, will retry: %v", e.Name, err)
 			break
 		}
@@ -881,16 +898,22 @@ type MatchResult struct {
 // Match finds an active grant that lets c do action on path right now. It
 // checks expiry and revoke against the clock on every call (no cache), the
 // credential binding, the bound IP, and that the agent still exists. It
-// returns nothing while the store is degraded. It only takes a read lock long
-// enough to grab the current snapshot.
+// returns nothing while the store is degraded.
+//
+// The ACL lookup runs first, outside any store lock. The grant decision then
+// runs entirely under the publish read-lock, which only blocks the instant a
+// transition swaps in new state (never during file or audit I/O). Any revoke
+// acknowledged before that point is therefore seen (review R1 G2).
 func (s *Store) Match(c Caller, path, action string) MatchResult {
-	s.pubMu.RLock()
-	cur := s.cur
-	degraded := s.writeFailed != nil || s.quarantine != quarantineNone
-	s.pubMu.RUnlock()
-	if degraded || c.Agent == "" || !s.exist(c.Agent) {
+	if c.Agent == "" || !s.exist(c.Agent) {
 		return MatchResult{}
 	}
+	s.pubMu.RLock()
+	defer s.pubMu.RUnlock()
+	if s.writeFailed != nil || s.quarantine != quarantineNone {
+		return MatchResult{}
+	}
+	cur := s.cur
 	now := s.now()
 	tomb := cur.Tombstones[c.Agent]
 	var endedAt time.Time

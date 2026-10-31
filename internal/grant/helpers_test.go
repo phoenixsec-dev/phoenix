@@ -133,7 +133,8 @@ type env struct {
 	path  string
 
 	aclMu sync.Mutex
-	gone  map[string]bool // agents removed from the ACL
+	gone  map[string]bool   // agents removed from the ACL
+	hook  func(name string) // optional; runs inside AgentExists before the answer
 }
 
 func newEnv(t *testing.T) *env {
@@ -166,9 +167,17 @@ func (e *env) reopen() *Store {
 
 func (e *env) exists(name string) bool {
 	e.aclMu.Lock()
+	hook := e.hook
+	e.aclMu.Unlock()
+	if hook != nil {
+		hook(name)
+	}
+	e.aclMu.Lock()
 	defer e.aclMu.Unlock()
 	return !e.gone[name]
 }
+
+func (e *env) setHook(h func(string)) { e.aclMu.Lock(); e.hook = h; e.aclMu.Unlock() }
 
 func (e *env) setGone(name string, gone bool) {
 	e.aclMu.Lock()

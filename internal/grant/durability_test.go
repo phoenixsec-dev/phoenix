@@ -85,6 +85,30 @@ func TestApproveDirSyncRollback(t *testing.T) {
 	}
 }
 
+// G1 (accepted residual risk): dir fsync fails AND the rollback write fails.
+// The approval may survive on disk, so the error must say so honestly.
+func TestApproveDoubleFaultMessage(t *testing.T) {
+	e := newEnv(t)
+	r := e.create("vector", "infra/key")
+	e.fs.fail("dirsync") // first save and the rollback both fail
+	_, _, err := e.s.Approve(approveIn(r.ID))
+	wantCode(t, err, CodeStoreWriteFailed)
+	var ge *Error
+	if !errors.As(err, &ge) || ge.Msg != approveMaybeOnDiskMsg {
+		t.Fatalf("message = %q", ge.Msg)
+	}
+	// A plain pre-rename failure keeps the normal message. Fresh store: the
+	// double fault above left the first one degraded.
+	e2 := newEnv(t)
+	r2 := e2.create("vector", "infra/key")
+	e2.fs.fail("rename")
+	_, _, err = e2.s.Approve(approveIn(r2.ID))
+	wantCode(t, err, CodeStoreWriteFailed)
+	if errors.As(err, &ge); ge.Msg == approveMaybeOnDiskMsg {
+		t.Fatal("pre-rename failure must not claim the approval may be on disk")
+	}
+}
+
 // A failed revoke still denies immediately, is never reported as success,
 // degrades the store (no new requests/approvals), and heals when a save works.
 func TestRevokeFaults(t *testing.T) {
