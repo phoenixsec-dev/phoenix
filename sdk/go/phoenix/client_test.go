@@ -1,6 +1,7 @@
 package phoenix
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -378,5 +379,89 @@ func TestIsPlaintextNonLoopback(t *testing.T) {
 		if got := isPlaintextNonLoopback(tt.url); got != tt.want {
 			t.Errorf("isPlaintextNonLoopback(%q) = %v, want %v", tt.url, got, tt.want)
 		}
+	}
+}
+
+func TestPlaintextAllowed(t *testing.T) {
+	tests := []struct {
+		url, allow string
+		want       bool
+	}{
+		// Basic named-host matching.
+		{"http://192.168.1.10:9090", "192.168.1.10", true},
+		{"http://192.168.1.10:9090", " 10.0.0.5 , 192.168.1.10 ", true},
+		{"http://192.168.1.10:9090", ", ,192.168.1.10", true},
+		{"http://Phoenix.Internal:9090", "phoenix.internal", true},
+		{"http://192.168.1.10:8443", "192.168.1.10", true}, // every port on a named host
+		{"http://192.168.1.10:9090", "", false},
+		{"http://192.168.1.10:9090", "   ", false},
+		{"http://192.168.1.10:9090", ",,,", false},
+		{"http://192.168.1.10:9090", "192.168.1.11", false},
+		{"http://192.168.1.10:9090", "192.168.1.10:9090", false}, // host only, no port
+		{"http://192.168.1.10:9090", "192.168.1.1", false},       // no prefix match
+		{"http://192.168.1.10:9090", "1", false},                 // not a blanket switch
+		{"http://192.168.1.10:9090", "http://192.168.1.10", false},
+		{"http://192.168.1.10:9090", "192.168.1.10/", false},
+		{"http://192.168.1.10:9090", "::ffff:192.168.1.10", false}, // other spelling warns
+		{"not a url %%", "192.168.1.10", false},
+		// No wildcards.
+		{"http://192.168.1.10:9090", "*", false},
+		{"http://a.example.com:9090", "*.example.com", false},
+		// IPv6 compares as an address; brackets optional.
+		{"http://[fd00::10]:9090", "fd00::10", true},
+		{"http://[fd00::10]:9090", "[fd00::10]", true},
+		{"http://[fd00::10]:9090", "FD00:0::10", true},
+		{"http://[fd00::10]:9090", "fd00::11", false},
+		// IPv6 zones are case-sensitive interface names and must match.
+		{"http://[fe80::1%25eth0]:9090", "fe80::1%eth0", true},
+		{"http://[fe80::1%25ETH0]:9090", "fe80::1%eth0", false},
+		{"http://[fe80::1%25eth0]:9090", "fe80::1", false},
+		{"http://[fe80::1]:9090", "fe80::1%eth0", false},
+		// Non-ASCII names never fold: these are different DNS names.
+		{"http://ς.example:9090", "σ.example", false}, // final sigma vs sigma
+		{"http://σ.example:9090", "σ.example", true},
+		{"http://K.example:9090", "k.example", false}, // Kelvin sign vs k
+	}
+	for _, tt := range tests {
+		if got := plaintextAllowed(tt.url, tt.allow); got != tt.want {
+			t.Errorf("plaintextAllowed(%q, %q) = %v, want %v", tt.url, tt.allow, got, tt.want)
+		}
+	}
+}
+
+// TestPlaintextWarningAllowList drives the real New -> warnPlaintextOnce path:
+// an allowed host stays quiet, an unlisted host warns exactly once per
+// process, and dropping the variable brings the warning back.
+func TestPlaintextWarningAllowList(t *testing.T) {
+	var out bytes.Buffer
+	prev := plaintextWarnOut
+	plaintextWarnOut = &out
+	plaintextWarned.Clear()
+	t.Cleanup(func() {
+		plaintextWarnOut = prev
+		plaintextWarned.Clear()
+	})
+
+	const allowed, other = "http://10.99.0.1:9090", "http://10.99.0.2:9090"
+	t.Setenv("PHOENIX_ALLOW_PLAINTEXT", "10.99.0.1")
+
+	New(allowed, "tok")
+	if out.Len() != 0 {
+		t.Fatalf("allowed host warned:\n%s", out.String())
+	}
+	New(other, "tok")
+	New(other, "tok")
+	if n := strings.Count(out.String(), "WARNING"); n != 1 {
+		t.Fatalf("unlisted host: got %d warnings, want 1:\n%s", n, out.String())
+	}
+	if !strings.Contains(out.String(), other) || !strings.Contains(out.String(), "PHOENIX_ALLOW_PLAINTEXT") {
+		t.Errorf("warning should name the server and the opt-out:\n%s", out.String())
+	}
+
+	out.Reset()
+	t.Setenv("PHOENIX_ALLOW_PLAINTEXT", "")
+	New(allowed, "tok")
+	if !strings.Contains(out.String(), allowed) {
+		t.Errorf("host should warn once the variable is unset, got:\n%q", out.String())
 	}
 }

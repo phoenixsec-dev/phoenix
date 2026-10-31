@@ -1,6 +1,22 @@
 # Release Notes
 
-## v0.18.0 (2026-10-25)
+## v0.18.0 (2026-10-26)
+
+### Host-Scoped Opt-Out for the Plaintext Client Warning
+
+- **`PHOENIX_ALLOW_PLAINTEXT=<host>[,<host>...]`** silences the CLI and Go
+  SDK warning about plain `http://` to a non-loopback server, for the named
+  hosts only. It is meant for clients that reach the server over a
+  host-local virtual network (containers on one bridge), where the warning
+  fired on every CLI command and cluttered scripts. Matching is strict: IP
+  addresses compare as addresses with IPv6 zones matched exactly, hostnames
+  ignore ASCII case only, and there are no wildcards. Any other server still warns,
+  and the warning text now names the variable so it can be found. Server
+  and MCP startup warnings are unchanged. See
+  [LAN deployment](docs/lan-deployment.md#plaintext-on-a-single-host-opt-out).
+
+**Upgrading:** no action required. Without the variable, behavior is
+unchanged.
 
 ### Optional HTTPS Listener: Move Clients to HTTPS One at a Time
 
@@ -49,6 +65,23 @@ checks HTTP.
   `.dockerignore` keeps local keys out of the build context.
 - **New [Quickstart](docs/quickstart.md)**: binary and Docker paths in about
   two minutes, checked by `scripts/quickstart-smoke.sh`.
+
+### Safer Store and Master Key Writes
+
+- **Power-loss safe writes.** The store file and every master key file are
+  now written with fsync before and after the rename, so a crash leaves the
+  whole old file or the whole new file, never a truncated one.
+- **Key rotation keeps a working backup.** The `.pre-rotate` backup is now
+  taken from memory just before rotation, so a failed rotation followed by
+  a retry can no longer replace the good backup with an unreadable one.
+- **No unprotected emergency key.** When a rotation cannot finish, the
+  `<store>.emergency-key` file is written only if the master key is
+  passphrase-protected, and it is encrypted with that passphrase. Without a
+  passphrase Phoenix no longer writes the new key to disk.
+- **Recovery steps** for a failed rotation are in
+  [Key management](docs/key-management.md#if-rotation-fails).
+
+**Upgrading:** no action required.
 
 ## v0.17.1 (2026-10-25)
 

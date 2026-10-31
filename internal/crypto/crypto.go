@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 const (
@@ -215,25 +217,19 @@ func GenerateAndSaveMasterKey(path string) ([]byte, error) {
 		return nil, err
 	}
 
-	encoded := base64.StdEncoding.EncodeToString(key)
-	if err := os.WriteFile(path, []byte(encoded), 0600); err != nil {
+	if err := SaveMasterKeyAtomic(path, key); err != nil {
 		return nil, fmt.Errorf("writing master key: %w", err)
 	}
 
 	return key, nil
 }
 
-// SaveMasterKeyAtomic writes a master key to disk using write-tmp + rename
-// for crash safety. This matches the atomic write pattern used by store.save().
+// SaveMasterKeyAtomic writes a master key to disk crash-safely (fsynced
+// write-tmp + rename, see fsutil.WriteFileAtomic). Same pattern as store.save().
 func SaveMasterKeyAtomic(path string, key []byte) error {
 	encoded := base64.StdEncoding.EncodeToString(key)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(encoded), 0600); err != nil {
-		return fmt.Errorf("writing temp key file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("renaming temp key file: %w", err)
+	if err := fsutil.WriteFileAtomic(path, []byte(encoded), 0600); err != nil {
+		return fmt.Errorf("saving key file: %w", err)
 	}
 	return nil
 }

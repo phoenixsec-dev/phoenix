@@ -215,6 +215,32 @@ export PHOENIX_CLIENT_KEY="/etc/phoenix/certs/host-a-builder.key"
 
 With mTLS configured, no bearer token is needed — the cert identifies the agent.
 
+### Plaintext on a single host (opt-out)
+
+When `PHOENIX_SERVER` is plain `http://` to a non-loopback address, the CLI
+prints a warning on every command and the Go SDK prints one once per server
+URL per process. If the client and server are
+guests on the same machine (for example containers on one Proxmox virtual
+bridge) the traffic never touches a physical wire, and you can silence the
+warning for that server:
+
+```bash
+export PHOENIX_SERVER="http://192.168.1.10:9090"
+export PHOENIX_ALLOW_PLAINTEXT="192.168.1.10"
+```
+
+The value is a comma-separated list of hostnames or IPs (no scheme, no
+port), matched against the host in `PHOENIX_SERVER` on any port. IP
+addresses compare as addresses, and an IPv6 zone such as `%eth0` must match
+exactly. Hostnames ignore ASCII letter case only; non-ASCII names must match
+exactly. There are no wildcards. Point the client at any other server and
+the warning comes back, and a machine that
+does not set the variable keeps warning. Set it only on clients that share
+the server's host. You are still accepting plaintext: anything that can see
+that virtual network, including a compromised guest on the same bridge, can
+read tokens and secret values. The server's own `INSECURE TRANSPORT` startup
+warning is not affected.
+
 ### MCP configuration (per agent)
 
 If the agent uses MCP (e.g., Claude Code), configure it in the agent's MCP settings:
