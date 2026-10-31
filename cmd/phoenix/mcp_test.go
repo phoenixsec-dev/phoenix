@@ -1085,6 +1085,10 @@ func TestListPathKeepsPathsExact(t *testing.T) {
 	if got := listPath("ns/a\u200db"); got != `"ns/a\u200db"` {
 		t.Fatalf("zero-width path = %q", got)
 	}
+	// A literal path that looks like a quoted one must not collide with it.
+	if listPath(`"ns/a\u200db"`) == listPath("ns/a\u200db") {
+		t.Fatal("literal quoted-looking path collides with the encoded form")
+	}
 	long := "ns/" + strings.Repeat("x", 600)
 	if got := listPath(long); got != long {
 		t.Fatal("long path was shortened")

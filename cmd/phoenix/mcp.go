@@ -877,8 +877,13 @@ func mcpSendError(enc *json.Encoder, id json.RawMessage, code int, msg string) {
 // listPath shows one listed path. Ordinary paths print as they are. A path
 // with control or invisible formatting characters prints as a Go-quoted
 // string ("ns/a\u200db"), so it cannot add lines or terminal escapes to the
-// output, yet stays exact and distinct from similar-looking paths.
+// output, yet stays exact and distinct from similar-looking paths. A path
+// that itself starts with a double quote is quoted too, so a quoted line
+// always means "decode me" and never collides with a literal path.
 func listPath(p string) string {
+	if strings.HasPrefix(p, `"`) {
+		return strconv.QuoteToASCII(p)
+	}
 	for _, r := range p {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return strconv.QuoteToASCII(p)
