@@ -113,7 +113,7 @@ func TestCreateValidation(t *testing.T) {
 // the listed bidi and zero-width ones. A soft hyphen is invisible in the
 // approval prompt, so "pro<U+00AD>duction" would look like "production".
 func TestNormalizePathsRejectsAllFormatChars(t *testing.T) {
-	for _, p := range []string{"infra/pro­duction", "infra/a⁡b", "infra/\U000e0001tag"} {
+	for _, p := range []string{"infra/pro\u00adduction", "infra/a\u2061b", "infra/\U000e0001tag"} {
 		if _, err := NormalizePaths([]string{p}); err == nil {
 			t.Errorf("%q accepted", p)
 		}

@@ -23,9 +23,9 @@ func TestNextStepHintUnknownFallsBackToAskUser(t *testing.T) {
 }
 
 func TestCleanServerTextStripsControlAndFormatChars(t *testing.T) {
-	in := "ok\x1b[31mred\x1b[0m‮evil​zero\nline"
+	in := "ok\x1b[31mred\x1b[0m\u202eevil\u200bzero\nline"
 	got := cleanServerText(in)
-	for _, bad := range []string{"\x1b", "‮", "​", "\n"} {
+	for _, bad := range []string{"\x1b", "\u202e", "\u200b", "\n"} {
 		if strings.Contains(got, bad) {
 			t.Fatalf("cleanServerText kept %q: %q", bad, got)
 		}
@@ -60,12 +60,12 @@ func TestFormatRefError(t *testing.T) {
 }
 
 func TestMCPFormatDenialShowsNextStepAndCleansText(t *testing.T) {
-	body := []byte(`{"error":"access_denied","code":"ACL_DENIED","detail":"no\u001b[2Jaccess","remediation":"ask‮admin","next_step":"ask_user"}`)
+	body := []byte(`{"error":"access_denied","code":"ACL_DENIED","detail":"no\u001b[2Jaccess","remediation":"ask\u202eadmin","next_step":"ask_user"}`)
 	got := mcpFormatDenial(body, 403)
 	if !strings.Contains(got, "[ACL_DENIED]") || !strings.Contains(got, "next: "+nextStepHints["ask_user"]) {
 		t.Fatalf("mcpFormatDenial = %q", got)
 	}
-	if strings.Contains(got, "\x1b") || strings.Contains(got, "‮") {
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "\u202e") {
 		t.Fatalf("mcpFormatDenial kept control chars: %q", got)
 	}
 	// A malformed code is not echoed as a code.
@@ -168,7 +168,7 @@ func TestServerRemediationAndApproveCommandNotDisplayed(t *testing.T) {
 // [CODE], client-authored next hint, no other server fields.
 func TestSessionMintAndRenewUseCommonDenialFormat(t *testing.T) {
 	body := `{"error":"access_denied","code":"ATTESTATION_FAILED","detail":"bad\u001b]52;c;Zm9v\u0007` +
-		`‮thing","remediation":"HOSTILE remediation","next_step":"ask_user","approve_command":"HOSTILE cmd","extra":"HOSTILE extra"}`
+		`\u202ething","remediation":"HOSTILE remediation","next_step":"ask_user","approve_command":"HOSTILE cmd","extra":"HOSTILE extra"}`
 	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte(body))
@@ -183,7 +183,7 @@ func TestSessionMintAndRenewUseCommonDenialFormat(t *testing.T) {
 			if !strings.Contains(got, "[ATTESTATION_FAILED] bad]52;c;Zm9vthing") || !strings.Contains(got, "next: "+nextStepHints["ask_user"]) {
 				t.Errorf("%s error = %q", name, got)
 			}
-			if strings.ContainsAny(got, "\x1b\x07‮") || strings.Contains(got, "HOSTILE") {
+			if strings.ContainsAny(got, "\x1b\x07\u202e") || strings.Contains(got, "HOSTILE") {
 				t.Errorf("%s error shows unsafe server text: %q", name, got)
 			}
 		}

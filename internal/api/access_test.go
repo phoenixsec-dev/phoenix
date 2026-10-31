@@ -337,7 +337,7 @@ func TestAccessRequestCreateErrors(t *testing.T) {
 	}{
 		{"write not grantable", vectorTok, `{"paths":["infra/x"],"action":"write","reason":"r"}`, 400, CodeActionNotGrantable},
 		{"glob path", vectorTok, `{"paths":["infra/*"],"reason":"r"}`, 400, CodeInvalidRequest},
-		{"bidi path", vectorTok, `{"paths":["infra/‮x"],"reason":"r"}`, 400, CodeInvalidRequest},
+		{"bidi path", vectorTok, `{"paths":["infra/\u202ex"],"reason":"r"}`, 400, CodeInvalidRequest},
 		{"no paths", vectorTok, `{"paths":[],"reason":"r"}`, 400, CodeInvalidRequest},
 		{"no reason", vectorTok, `{"paths":["infra/x"]}`, 400, CodeInvalidRequest},
 		{"bad ttl", vectorTok, `{"paths":["infra/x"],"reason":"r","ttl":"soon"}`, 400, CodeInvalidRequest},

