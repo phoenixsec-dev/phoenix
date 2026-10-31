@@ -215,6 +215,7 @@ func waitForDecision(rq accessRequestView) error {
 	if !requestIDPattern.MatchString(rq.ID) {
 		return fmt.Errorf("server returned an invalid request id %q", cleanServerText(rq.ID))
 	}
+	id := rq.ID
 	deadline := time.Now().Add(16 * time.Minute)
 	if t, err := time.Parse(time.RFC3339, rq.ExpiresAt); err == nil {
 		deadline = t.Add(5 * time.Second)
@@ -222,19 +223,24 @@ func waitForDecision(rq accessRequestView) error {
 	fmt.Fprintln(os.Stderr, "Waiting for a human to decide...")
 	for rq.Status == "pending" {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("request %s was not decided in time", rq.ID)
+			return fmt.Errorf("request %s was not decided in time", id)
 		}
 		time.Sleep(5 * time.Second)
 		var next accessRequestView
-		if _, err := apiJSON("GET", "/v1/access-requests/"+rq.ID, nil, &next); err != nil {
+		if _, err := apiJSON("GET", "/v1/access-requests/"+id, nil, &next); err != nil {
 			fmt.Fprintf(os.Stderr, "  poll error: %v\n", err)
 			continue
+		}
+		// Keep polling the id we validated; a reply about another id is
+		// a broken or hostile server.
+		if next.ID != id {
+			return fmt.Errorf("server answered for a different request id %q", cleanServerText(next.ID))
 		}
 		rq = next
 	}
 	printRequest(rq)
 	if rq.Status != "approved" {
-		return fmt.Errorf("request %s %s", rq.ID, cleanServerText(rq.Status))
+		return fmt.Errorf("request %s %s", id, cleanServerText(rq.Status))
 	}
 	return nil
 }

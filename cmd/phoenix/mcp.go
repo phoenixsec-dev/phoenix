@@ -31,8 +31,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/version"
@@ -569,7 +571,7 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	logger.Printf("listed %d secrets", len(result.Paths))
 	paths := make([]string, len(result.Paths))
 	for i, p := range result.Paths {
-		paths[i] = cleanPath(p) // a path must not smuggle extra lines or escapes into the tool output
+		paths[i] = listPath(p)
 	}
 	return strings.Join(paths, "\n"), false
 }
@@ -870,4 +872,17 @@ func mcpSendError(enc *json.Encoder, id json.RawMessage, code int, msg string) {
 	if err := enc.Encode(mcpResponse{JSONRPC: "2.0", ID: id, Error: &mcpError{Code: code, Message: msg}}); err != nil {
 		log.New(os.Stderr, "phoenix-mcp: ", 0).Printf("encode error: %v", err)
 	}
+}
+
+// listPath shows one listed path. Ordinary paths print as they are. A path
+// with control or invisible formatting characters prints as a Go-quoted
+// string ("ns/a\u200db"), so it cannot add lines or terminal escapes to the
+// output, yet stays exact and distinct from similar-looking paths.
+func listPath(p string) string {
+	for _, r := range p {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return strconv.QuoteToASCII(p)
+		}
+	}
+	return p
 }

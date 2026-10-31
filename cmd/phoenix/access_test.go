@@ -208,3 +208,20 @@ func TestWaitForDecisionRejectsBadID(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Final review R2: a poll reply cannot swap in a different request id (it
+// would be reused in the next polling URL). Takes one 5s poll interval.
+func TestWaitForDecisionKeepsValidatedID(t *testing.T) {
+	var log callLog
+	useMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		log.add(r)
+		json.NewEncoder(w).Encode(map[string]any{"id": "../../secrets/infra/key?x=\x1b", "status": "pending"})
+	})
+	err := waitForDecision(accessRequestView{ID: testReqID, Status: "pending"})
+	if err == nil || !strings.Contains(err.Error(), "different request id") || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := log.String(); got != "GET /v1/access-requests/"+testReqID {
+		t.Fatalf("calls = %q", got)
+	}
+}

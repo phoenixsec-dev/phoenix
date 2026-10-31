@@ -1292,7 +1292,7 @@ func cmdOpenClawExecProvider(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			values[ref] = val
 		}
@@ -1464,7 +1464,7 @@ func cmdResolve(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			values[ref] = val
 		}
@@ -1708,7 +1708,7 @@ func cmdExec(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			resolvedValues[ref] = val
 		}
@@ -2991,7 +2991,7 @@ func cmdAgentSockResolve(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			values[ref] = val
 		}

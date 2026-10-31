@@ -1075,3 +1075,18 @@ func TestMCPToolListCleansPaths(t *testing.T) {
 		t.Fatalf("list output not cleaned: %q", text)
 	}
 }
+
+// A valid path with an invisible character is shown exactly (quoted), not
+// silently changed into a different-looking path.
+func TestListPathKeepsPathsExact(t *testing.T) {
+	if got := listPath("ns/plain-key"); got != "ns/plain-key" {
+		t.Fatalf("plain path changed: %q", got)
+	}
+	if got := listPath("ns/a\u200db"); got != `"ns/a\u200db"` {
+		t.Fatalf("zero-width path = %q", got)
+	}
+	long := "ns/" + strings.Repeat("x", 600)
+	if got := listPath(long); got != long {
+		t.Fatal("long path was shortened")
+	}
+}
