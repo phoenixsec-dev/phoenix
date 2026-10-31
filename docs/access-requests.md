@@ -42,7 +42,7 @@ A grant holds no secret and no token. The agent keeps using its own identity
 | `bind_source_ip` | The grant only works from the IP that made the request. |
 | `approvers` | ACL agent names allowed to approve over the API. Empty = dashboard only. ACL `admin` alone is **not** enough, and nobody can approve their own request. The name must also still be in the ACL: a deleted approver's leftover short-lived token or certificate approves nothing. Unknown names only warn at startup. |
 | `deny_paths` | Globs (`phoenix/**`, `infra/*`, exact paths) that can never be requested. |
-| `store_path` | Where grants live. Empty = `grants.json` next to the ACL file (mode `0600`). This path is checked at every start, even without an `access_requests` block: if it (or its temp files) is the same file as the ACL, audit log, secrets data file, master key, policy or CRL file, resolved through relative paths and symlinks, the server refuses to start and touches nothing. Set `store_path` to a separate file to fix it. |
+| `store_path` | Where grants live. Empty = `grants.json` next to the ACL file (mode `0600`). This path is checked at every start, even without an `access_requests` block: if it (or its temp files) is the same file as the ACL, audit log, secrets data file, master key, policy or CRL file, resolved through relative paths and symlinks, the server refuses to start and touches nothing. The grants file itself must not be a symlink. Set `store_path` to a separate regular file to fix either problem. |
 
 Turning it off (`enabled: false`) stops new requests (`501 REQUESTS_DISABLED`)
 **and** all grant-backed access. Records stay on disk; listing and revoking
