@@ -21,7 +21,7 @@ type refDenial struct {
 // nextStepHints holds the text shown for each next_step. The text is ours,
 // not the server's, so a hostile or buggy server cannot inject instructions.
 var nextStepHints = map[string]string{
-	"request_use":    "request temporary use of this secret from a human",
+	"request_use":    `request temporary use from a human: phoenix request <path> --reason "why you need it"`,
 	"wait":           "a human decision is pending; check again shortly",
 	"use_exec":       "use phoenix exec --env NAME=phoenix://<path> -- <command>; it requests and decrypts sealed values for you",
 	"remint_session": "mint a new session, or one whose role covers this path and action",
@@ -36,6 +36,31 @@ func nextStepHint(step string) string {
 		return hint
 	}
 	return nextStepHints["ask_user"]
+}
+
+// hintPathPattern is what a path must look like to be pasted into a
+// suggested command: plain path characters only, so the hint can never
+// carry shell metacharacters, spaces or control characters.
+var hintPathPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$`)
+
+// hintPath returns p (without a phoenix:// prefix) when it is safe to show
+// inside a suggested command, or "".
+func hintPath(p string) string {
+	p = strings.TrimPrefix(p, "phoenix://")
+	if !hintPathPattern.MatchString(p) {
+		return ""
+	}
+	return p
+}
+
+// denialHintForPath is denialHint with the concrete request command for
+// request_use: phoenix request infra/b2/app-key --reason "...".
+func denialHintForPath(code, step, path string) string {
+	hint := denialHint(code, step)
+	if p := hintPath(path); p != "" && hint == nextStepHints["request_use"] {
+		hint = strings.Replace(hint, "<path>", p, 1)
+	}
+	return hint
 }
 
 // knownDenialCodes is every code in docs/denial-codes.md. A code outside this
@@ -94,6 +119,12 @@ func parseServerDenial(body []byte) (serverDenial, bool) {
 // "next: <hint>" line prefixed by indent. Malformed codes are dropped and
 // server text is cleaned. Used by every CLI and MCP denial formatter.
 func formatDenial(d serverDenial, indent string) string {
+	return formatDenialForPath(d, indent, "")
+}
+
+// formatDenialForPath is formatDenial for a known secret path, so a
+// request_use hint names the exact phoenix request command.
+func formatDenialForPath(d serverDenial, indent, path string) string {
 	text := d.Detail
 	if text == "" {
 		text = d.Error
@@ -102,7 +133,7 @@ func formatDenial(d serverDenial, indent string) string {
 	if code := cleanCode(d.Code); code != "" {
 		msg = fmt.Sprintf("[%s] %s", code, msg)
 	}
-	return fmt.Sprintf("%s\n%snext: %s", msg, indent, denialHint(d.Code, d.NextStep))
+	return fmt.Sprintf("%s\n%snext: %s", msg, indent, denialHintForPath(d.Code, d.NextStep, path))
 }
 
 // approvalIDPattern matches IDs from internal/approval ("apr_" + hex).
@@ -171,5 +202,5 @@ func formatRefError(ref, msg string, codes map[string]refDenial) string {
 	if code := cleanCode(d.Code); code != "" {
 		msg = fmt.Sprintf("[%s] %s", code, msg)
 	}
-	return fmt.Sprintf("%s (next: %s)", msg, denialHint(d.Code, d.NextStep))
+	return fmt.Sprintf("%s (next: %s)", msg, denialHintForPath(d.Code, d.NextStep, ref))
 }

@@ -697,19 +697,15 @@ func (s *Server) approverAuth(w http.ResponseWriter, r *http.Request) (*authInfo
 }
 
 // handleAccessRequestApprove: POST /v1/access-requests/{id}/approve with an
-// optional {"paths": [subset], "ttl": "15m"}. Everything is re-checked
-// against the CURRENT config: feature on, action grantable, no path in
-// deny_paths, TTL clamped to max_grant_ttl, require_sealed (and that the
-// agent still has a seal key), bind_source_ip. The store re-checks that the
-// agent still exists and the active-grant cap.
+// optional {"paths": [subset], "ttl": "15m"}. The caller must be an API
+// approver; the re-checks themselves live in approveRequest.
 func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Request) {
 	info, ok := s.approverAuth(w, r)
 	if !ok {
 		return
 	}
 	ip := clientIP(r)
-	cfg := s.accessSettings()
-	if !cfg.Enabled {
+	if !s.accessSettings().Enabled {
 		writeAccessError(w, CodeRequestsDisabled, "access requests are turned off; approvals are paused", http.StatusNotImplemented)
 		return
 	}
@@ -721,45 +717,14 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
-	rq, found := s.grants.GetRequest(id)
-	if !found {
-		writeAccessError(w, CodeNotFound, "request not found", http.StatusNotFound)
-		return
-	}
-	reject := func(code, detail string, status int) {
-		s.auditRequestRejected(r, info, "access_request.approve", rq.Paths, ip, code)
-		writeAccessError(w, code, detail, status)
-	}
-	if rq.Agent == info.Agent {
-		reject(CodeSelfApproval, "an agent cannot approve its own request", http.StatusForbidden)
-		return
-	}
-	if !actionGrantable(cfg, rq.Action) {
-		reject(CodeActionNotGrantable, "this action is no longer grantable", http.StatusBadRequest)
-		return
-	}
-	check := rq.Paths
-	if body.Paths != nil {
-		check = body.Paths
-	}
-	for _, p := range check {
-		if pathDenied(cfg, p) {
-			reject(CodeNotRequestable, "a path in this request now matches deny_paths", http.StatusForbidden)
-			return
-		}
-	}
-	if cfg.RequireSealed && !s.hasSealKey(rq.Agent) {
-		reject(CodeSealKeyNotRegistered, "sealed delivery is required and the agent has no registered seal key", http.StatusBadRequest)
-		return
-	}
-	nr, g, err := s.grants.Approve(grant.ApproveInput{
-		RequestID: id, Approver: info.Agent, ApproverIP: ip, Paths: body.Paths, TTL: ttl,
-		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed, BindSourceIP: cfg.BindSourceIP,
+	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, body.Paths, ttl, func(paths []string, code string) {
+		s.auditRequestRejected(r, info, "access_request.approve", paths, ip, code)
 	})
 	if err != nil {
-		if grant.CodeOf(err) != grant.CodeNotPending {
-			s.auditRequestRejected(r, info, "access_request.approve", rq.Paths, ip, string(grant.CodeOf(err)))
+		var ae *ApprovalError
+		if errors.As(err, &ae) {
+			writeAccessError(w, ae.Code, ae.Detail, ae.Status)
+			return
 		}
 		writeGrantError(w, err)
 		return
@@ -773,6 +738,94 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 		"expires_at":  fmtTime(g.ExpiresAt),
 		"sealed_only": g.SealedOnly,
 	})
+}
+
+// ApprovalError is an approval refused by an API-level re-check (feature
+// off, unknown request, self-approval, deny_paths, ...). Code is one of the
+// denial codes in denial.go; Status is the HTTP status the API answers with.
+// Grant store refusals come back as *grant.Error instead.
+type ApprovalError struct {
+	Code   string
+	Detail string
+	Status int
+}
+
+func (e *ApprovalError) Error() string { return e.Code + ": " + e.Detail }
+
+// ErrorCode returns the denial code (lets the dashboard read it without
+// importing this package).
+func (e *ApprovalError) ErrorCode() string { return e.Code }
+
+// approveRequest is the one approval path for the API and the dashboard.
+// Everything is re-checked against the CURRENT config: feature on, action
+// grantable, no path in deny_paths, require_sealed (and that the agent still
+// has a seal key), bind_source_ip, TTL clamped to max_grant_ttl. The store
+// re-checks that the agent still exists and the active-grant cap. onReject
+// audits refusals (not NOT_PENDING, which is an ordinary race).
+//
+// It does NOT decide who may approve: the API checks the approvers list
+// first, the dashboard checks its login.
+func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl time.Duration, onReject func(paths []string, code string)) (grant.Request, grant.Grant, error) {
+	cfg := s.accessSettings()
+	if s.grants == nil || !cfg.Enabled {
+		return grant.Request{}, grant.Grant{}, &ApprovalError{CodeRequestsDisabled, "access requests are turned off; approvals are paused", http.StatusNotImplemented}
+	}
+	rq, found := s.grants.GetRequest(id)
+	if !found {
+		return grant.Request{}, grant.Grant{}, &ApprovalError{CodeNotFound, "request not found", http.StatusNotFound}
+	}
+	reject := func(code, detail string, status int) (grant.Request, grant.Grant, error) {
+		onReject(rq.Paths, code)
+		return grant.Request{}, grant.Grant{}, &ApprovalError{code, detail, status}
+	}
+	if rq.Agent == approver {
+		return reject(CodeSelfApproval, "an agent cannot approve its own request", http.StatusForbidden)
+	}
+	if !actionGrantable(cfg, rq.Action) {
+		return reject(CodeActionNotGrantable, "this action is no longer grantable", http.StatusBadRequest)
+	}
+	check := rq.Paths
+	if paths != nil {
+		check = paths
+	}
+	for _, p := range check {
+		if pathDenied(cfg, p) {
+			return reject(CodeNotRequestable, "a path in this request now matches deny_paths", http.StatusForbidden)
+		}
+	}
+	if cfg.RequireSealed && !s.hasSealKey(rq.Agent) {
+		return reject(CodeSealKeyNotRegistered, "sealed delivery is required and the agent has no registered seal key", http.StatusBadRequest)
+	}
+	nr, g, err := s.grants.Approve(grant.ApproveInput{
+		RequestID: id, Approver: approver, ApproverIP: ip, Paths: paths, TTL: ttl,
+		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed, BindSourceIP: cfg.BindSourceIP,
+	})
+	if err != nil {
+		if grant.CodeOf(err) != grant.CodeNotPending {
+			onReject(rq.Paths, string(grant.CodeOf(err)))
+		}
+		return grant.Request{}, grant.Grant{}, err
+	}
+	return nr, g, nil
+}
+
+// ApproveAccessRequestAs approves a request for an approver the caller has
+// already authenticated, with the same re-checks as the API. The dashboard
+// uses it with approver "dashboard@<ip>"; it is not subject to the
+// access_requests.approvers list (that list is for API/CLI identities).
+// Refusals are audited under the approver's name.
+func (s *Server) ApproveAccessRequestAs(id, approver, ip string, paths []string, ttl time.Duration) (grant.Grant, error) {
+	_, g, err := s.approveRequest(id, approver, ip, paths, ttl, func(paths []string, code string) {
+		s.logAudit(s.audit.LogDenied(approver, "access_request.approve", strings.Join(paths, ","), ip, strings.ToLower(code)))
+	})
+	return g, err
+}
+
+// AccessRequestSettings returns the access_requests settings in force now
+// (Enabled=false when the block is missing). The dashboard reads it to show
+// delivery mode and the legal TTL choices.
+func (s *Server) AccessRequestSettings() config.AccessRequestsSettings {
+	return s.accessSettings()
 }
 
 // handleAccessRequestDeny: POST /v1/access-requests/{id}/deny with an

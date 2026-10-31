@@ -154,18 +154,10 @@ func TestServerRemediationAndApproveCommandNotDisplayed(t *testing.T) {
 		}
 	}
 
-	good := mcpFormatApprovalRequired([]byte(`{"status":"approval_required","approval_id":"apr_0a1b2c","approve_command":"` + hostile + `"}`))
-	if strings.Contains(good, "HOSTILE") || !strings.Contains(good, "Run: phoenix approve apr_0a1b2c") {
-		t.Errorf("mcpFormatApprovalRequired = %q", good)
-	}
 	if n := approvalNotice("apr_0a1b2c"); !strings.Contains(n, "phoenix approve apr_0a1b2c") {
 		t.Errorf("approvalNotice = %q", n)
 	}
 	for _, badID := range []string{"apr_0a; rm -rf /", "APR_0A", "apr_", "../../v1/secrets", "apr_0a\x1b[2J"} {
-		out := mcpFormatApprovalRequired([]byte(fmt.Sprintf(`{"status":"approval_required","approval_id":%q,"approve_command":%q}`, badID, hostile)))
-		if strings.Contains(out, "HOSTILE") || strings.Contains(out, "Run:") {
-			t.Errorf("approval id %q: mcpFormatApprovalRequired = %q", badID, out)
-		}
 		if n := approvalNotice(badID); strings.Contains(n, "phoenix approve") || strings.Contains(n, badID) {
 			t.Errorf("approval id %q: approvalNotice = %q", badID, n)
 		}

@@ -139,8 +139,8 @@ func TestMCPToolsList(t *testing.T) {
 		t.Fatalf("failed to decode result: %v", err)
 	}
 
-	if len(result.Tools) != 5 {
-		t.Fatalf("expected 5 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 8 {
+		t.Fatalf("expected 8 tools, got %d", len(result.Tools))
 	}
 
 	names := map[string]bool{}
@@ -151,7 +151,7 @@ func TestMCPToolsList(t *testing.T) {
 		}
 	}
 
-	for _, expected := range []string{"phoenix_resolve", "phoenix_get", "phoenix_list"} {
+	for _, expected := range []string{"phoenix_resolve", "phoenix_get", "phoenix_list", "phoenix_request_use", "phoenix_request_status", "phoenix_whoami"} {
 		if !names[expected] {
 			t.Errorf("missing tool %q", expected)
 		}

@@ -20,6 +20,9 @@
             <span class="nav-icon">&#10003;</span> Approvals
             {{if and .PendingCount (gt .PendingCount 0)}}<span class="badge">{{.PendingCount}}</span>{{end}}
         </a>
+        <a href="/dashboard/grants" class="nav-link{{if eq .Active "grants"}} active{{end}}">
+            <span class="nav-icon">&#9873;</span> Grants
+        </a>
         <a href="/dashboard/sessions" class="nav-link{{if eq .Active "sessions"}} active{{end}}">
             <span class="nav-icon">&#9679;</span> Sessions
         </a>

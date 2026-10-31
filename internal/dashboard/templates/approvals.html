@@ -2,7 +2,86 @@
 {{define "content"}}
 <h1 class="page-title">Approvals</h1>
 
+{{if .Error}}<div class="flash flash-error flash-sticky">{{.Error}}</div>{{end}}
 {{if .Flash}}<div class="flash flash-info">{{.Flash}}</div>{{end}}
+
+{{if .AccessOn}}
+<h2 class="section-title">Secret access requests</h2>
+{{if .AccessCards}}
+<div class="approval-grid">
+{{range .AccessCards}}
+    <div class="approval-card access-card" id="{{.ID}}">
+        <div class="approval-header">
+            <span class="approval-role">{{.Action}}</span>
+            <span class="approval-agent">{{.Agent}}</span>
+        </div>
+        <div class="approval-details">
+            <div class="detail-row"><span class="detail-label">Agent</span><span class="mono">{{.Agent}}</span></div>
+            <div class="detail-row"><span class="detail-label">From</span><span class="mono">{{.SourceIP}} ({{.AuthMethod}})</span></div>
+            <div class="detail-row"><span class="detail-label">Action</span><span class="mono">{{.Action}}</span></div>
+            <div class="detail-row"><span class="detail-label">Asked for</span><span>{{.RequestedTTL}}</span></div>
+            <div class="detail-row"><span class="detail-label">Delivery</span><span>{{.Delivery}}</span></div>
+            {{if and .SealRequired (not .SealKeyOK)}}<div class="detail-row"><span class="detail-label">Seal key</span><span class="text-red">agent has no registered seal key; approval will fail</span></div>{{end}}
+            <div class="detail-row"><span class="detail-label">Created</span><span data-time="{{.CreatedAt.Unix}}">{{fmtTime .CreatedAt}}</span></div>
+            <div class="detail-row"><span class="detail-label">Request expires</span><span>{{ttlRemain .ExpiresAt}}</span></div>
+        </div>
+        <div class="reason-box">
+            <div class="reason-label">Agent says (not verified)</div>
+            <div class="reason-text">{{.Reason}}</div>
+        </div>
+        <form method="POST" action="/dashboard/access-requests/{{.ID}}/approve">
+            <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+            <div class="path-list">
+            {{range .Paths}}
+                <label class="path-item">
+                    <input type="checkbox" name="path" value="{{.Path}}" checked>
+                    <span class="mono path-full">{{.Path}}</span>
+                    {{if .Missing}}<span class="flag flag-warn">does not exist</span>{{end}}
+                    {{if .Hidden}}<span class="flag flag-warn">hidden from this agent</span>{{end}}
+                    {{if .AlreadyAllowed}}<span class="flag flag-ttl">already allowed</span>{{end}}
+                </label>
+            {{end}}
+            </div>
+            {{if .Attestation}}
+            <div class="attest-list">
+                <div class="detail-label">Attestation (never waived; checked at every use)</div>
+                {{range .Attestation}}
+                <div class="detail-row"><span class="mono">{{.Path}}</span><span>{{.Requirement}}: <strong>{{.Status}}</strong></span></div>
+                {{end}}
+            </div>
+            {{end}}
+            <div class="detail-row">
+                <span class="detail-label">Allow for</span>
+                <select name="ttl" class="input input-sm">
+                {{range .TTLChoices}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Value}}</option>{{end}}
+                </select>
+            </div>
+            <p class="revoke-note">Revoking later does not recall a value already used.</p>
+            <div class="approval-actions">
+                <button type="submit" class="btn btn-approve">Approve</button>
+            </div>
+        </form>
+        <form method="POST" action="/dashboard/access-requests/{{.ID}}/deny" class="deny-form">
+            <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+            <input type="text" name="note" maxlength="300" placeholder="Optional note to the agent" class="input input-sm">
+            <button type="submit" class="btn btn-deny">Deny</button>
+        </form>
+        <div class="history">
+            <div class="detail-label">This agent, last 24h: {{len .History}} other request(s), {{.HistoryDenied}} denied</div>
+            {{range .History}}<div class="mono history-item">{{.Status}} &middot; {{.Paths}}</div>{{end}}
+        </div>
+        <div class="approval-id mono">{{.ID}}</div>
+    </div>
+{{end}}
+</div>
+{{else}}
+<div class="empty-state">
+    <span class="empty-icon">&#10003;</span>
+    <p>No pending access requests</p>
+</div>
+{{end}}
+<h2 class="section-title">Step-up session approvals</h2>
+{{end}}
 
 {{if .Pending}}
 <div class="approval-grid">

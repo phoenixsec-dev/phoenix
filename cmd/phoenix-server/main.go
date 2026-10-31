@@ -229,8 +229,9 @@ func main() {
 	srv.SetMasterKeyPath(cfg.Store.MasterKey)
 
 	// Load attestation policy if configured
+	var pe *policy.Engine
 	if cfg.Policy.Path != "" {
-		pe, err := policy.LoadFile(cfg.Policy.Path)
+		pe, err = policy.LoadFile(cfg.Policy.Path)
 		if err != nil {
 			log.Fatalf("loading attestation policy: %v", err)
 		}
@@ -309,26 +310,6 @@ func main() {
 		log.Printf("  Sessions: disabled")
 	}
 
-	// Initialize dashboard if enabled
-	if cfg.Dashboard.Enabled {
-		deps := dashboard.Deps{
-			Sessions:     sessionStore,
-			SessionRoles: cfg.Session.Roles,
-			Approvals:    approvalStore,
-			AuditPath:    cfg.Audit.Path,
-			Backend:      backend,
-			ACL:          a,
-			StartTime:    time.Now(),
-			Audit:        al,
-		}
-		dash, err := dashboard.New(cfg.Dashboard, deps)
-		if err != nil {
-			log.Fatalf("initializing dashboard: %v", err)
-		}
-		srv.SetDashboard(dash)
-		log.Printf("  Dashboard: enabled at /dashboard/")
-	}
-
 	// Request-use grants. The store is always opened (it only creates
 	// grants.json on the first change), so listing and revoking keep working
 	// while the feature is disabled. A missing access_requests block = off.
@@ -346,6 +327,29 @@ func main() {
 	defer stopGrants()
 	go grantStore.Run(grantCtx, 30*time.Second)
 	logAccessRequests(cfg, a)
+
+	// Initialize dashboard if enabled
+	if cfg.Dashboard.Enabled {
+		deps := dashboard.Deps{
+			Sessions:     sessionStore,
+			SessionRoles: cfg.Session.Roles,
+			Approvals:    approvalStore,
+			AuditPath:    cfg.Audit.Path,
+			Backend:      backend,
+			ACL:          a,
+			StartTime:    time.Now(),
+			Audit:        al,
+			Policy:       pe,
+			Grants:       grantStore,
+			Access:       srv,
+		}
+		dash, err := dashboard.New(cfg.Dashboard, deps)
+		if err != nil {
+			log.Fatalf("initializing dashboard: %v", err)
+		}
+		srv.SetDashboard(dash)
+		log.Printf("  Dashboard: enabled at /dashboard/")
+	}
 
 	// Start local attestation agent if enabled
 	if cfg.Attestation.LocalAgent.Enabled {

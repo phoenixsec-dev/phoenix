@@ -50,8 +50,8 @@ func TestMCPToolsListWithSealKey(t *testing.T) {
 	var result mcpListToolsResult
 	json.Unmarshal(b, &result)
 
-	if len(result.Tools) != 6 {
-		t.Fatalf("expected 6 tools (incl. unseal + session), got %d", len(result.Tools))
+	if len(result.Tools) != 9 {
+		t.Fatalf("expected 9 tools (incl. unseal + session + access), got %d", len(result.Tools))
 	}
 
 	names := map[string]bool{}
@@ -74,8 +74,8 @@ func TestMCPToolsListWithoutSealKey(t *testing.T) {
 	var result mcpListToolsResult
 	json.Unmarshal(b, &result)
 
-	if len(result.Tools) != 5 {
-		t.Fatalf("expected 5 tools (no unseal), got %d", len(result.Tools))
+	if len(result.Tools) != 8 {
+		t.Fatalf("expected 8 tools (no unseal), got %d", len(result.Tools))
 	}
 
 	for _, tool := range result.Tools {
