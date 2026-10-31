@@ -181,6 +181,10 @@ type Error struct {
 	Msg        string
 	RetryAfter time.Duration // set for the 429 codes
 	Err        error         // underlying cause, if any (never shown to agents)
+	// MaybeSaved is set on a failed approve whose change may still be on
+	// disk (the save could not be confirmed and undoing it also failed), so
+	// the approval could take effect after a restart. UIs must say so.
+	MaybeSaved bool
 }
 
 func (e *Error) Error() string {

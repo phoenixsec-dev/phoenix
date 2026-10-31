@@ -571,3 +571,25 @@ func TestAuditSinkCannotMutateRecords(t *testing.T) {
 		t.Fatalf("grant paths changed by sink after revoke: %v", got.Paths)
 	}
 }
+
+// P5 review S2: when one active grant for a path allows plain delivery and
+// another is sealed-only, Match always picks the plain one, so plain reads
+// do not succeed or fail at random (map order).
+func TestMatchPrefersPlainCapableGrant(t *testing.T) {
+	e := newEnv(t)
+	plain := approveIn(e.create("vector", "infra/key").ID)
+	plain.SealedOnly = false
+	if _, _, err := e.s.Approve(plain); err != nil {
+		t.Fatal(err)
+	}
+	e.approve(e.create("vector", "infra/key", "infra/other").ID) // sealed-only
+	for i := 0; i < 50; i++ {
+		m := e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue)
+		if m.Grant == nil || m.Grant.SealedOnly {
+			t.Fatalf("try %d: got %+v, want the plain-capable grant", i, m.Grant)
+		}
+	}
+	if m := e.s.Match(bearerCaller("vector"), "infra/other", ActionReadValue); m.Grant == nil || !m.Grant.SealedOnly {
+		t.Fatalf("infra/other: got %+v, want the sealed-only grant", m.Grant)
+	}
+}

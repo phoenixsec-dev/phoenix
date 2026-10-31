@@ -340,6 +340,7 @@ func (s *Store) commit(next *state, op string, committed Event) error {
 	next.AuditPending = append(next.AuditPending, committed)
 	if err := s.save(next); err != nil {
 		msg := "could not save the grants file; nothing changed"
+		maybeSaved := false
 		if errors.Is(err, fsutil.ErrDirSyncFailed) {
 			if rerr := s.save(s.snapshot()); rerr != nil {
 				s.setWriteFailed(err)
@@ -349,11 +350,12 @@ func (s *Store) commit(next *state, op string, committed Event) error {
 				// grant the human did approve; tell them so they can revoke.
 				if op == opApprove {
 					msg = approveMaybeOnDiskMsg
+					maybeSaved = true
 				}
 			}
 		}
 		s.appendFailed(committed, op, err)
-		return &Error{Code: CodeStoreWriteFailed, Msg: msg, Err: err}
+		return &Error{Code: CodeStoreWriteFailed, Msg: msg, Err: err, MaybeSaved: maybeSaved}
 	}
 	s.publish(next)
 	s.setWriteFailed(nil)
@@ -918,6 +920,10 @@ func (s *Store) Match(c Caller, path, action string) MatchResult {
 	tomb := cur.Tombstones[c.Agent]
 	var endedAt time.Time
 	var reason string
+	// When several active grants cover the path, prefer one that allows
+	// plain delivery; otherwise the map's random order would make plain
+	// reads succeed or fail at random (review P5 S2).
+	var sealedMatch *Grant
 	for _, g := range cur.Grants {
 		if g.Agent != c.Agent || !g.covers(path, action) {
 			continue
@@ -925,8 +931,13 @@ func (s *Store) Match(c Caller, path, action string) MatchResult {
 		switch g.State(now) {
 		case GrantActive:
 			if credentialMatches(g, c, tomb) {
-				v := s.grantView(g)
-				return MatchResult{Grant: &v}
+				if !g.SealedOnly {
+					v := s.grantView(g)
+					return MatchResult{Grant: &v}
+				}
+				if sealedMatch == nil {
+					sealedMatch = g
+				}
 			}
 		case GrantRevoked, GrantExpired:
 			if end := g.endedAt(); now.Sub(end) < EndedLookback && end.After(endedAt) {
@@ -937,6 +948,10 @@ func (s *Store) Match(c Caller, path, action string) MatchResult {
 				}
 			}
 		}
+	}
+	if sealedMatch != nil {
+		v := s.grantView(sealedMatch)
+		return MatchResult{Grant: &v}
 	}
 	return MatchResult{Reason: reason}
 }

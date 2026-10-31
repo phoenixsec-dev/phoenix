@@ -94,8 +94,8 @@ func TestApproveDoubleFaultMessage(t *testing.T) {
 	_, _, err := e.s.Approve(approveIn(r.ID))
 	wantCode(t, err, CodeStoreWriteFailed)
 	var ge *Error
-	if !errors.As(err, &ge) || ge.Msg != approveMaybeOnDiskMsg {
-		t.Fatalf("message = %q", ge.Msg)
+	if !errors.As(err, &ge) || ge.Msg != approveMaybeOnDiskMsg || !ge.MaybeSaved {
+		t.Fatalf("message = %q, MaybeSaved = %v", ge.Msg, ge.MaybeSaved)
 	}
 	// A plain pre-rename failure keeps the normal message. Fresh store: the
 	// double fault above left the first one degraded.
@@ -104,7 +104,7 @@ func TestApproveDoubleFaultMessage(t *testing.T) {
 	e2.fs.fail("rename")
 	_, _, err = e2.s.Approve(approveIn(r2.ID))
 	wantCode(t, err, CodeStoreWriteFailed)
-	if errors.As(err, &ge); ge.Msg == approveMaybeOnDiskMsg {
+	if errors.As(err, &ge); ge.Msg == approveMaybeOnDiskMsg || ge.MaybeSaved {
 		t.Fatal("pre-rename failure must not claim the approval may be on disk")
 	}
 }

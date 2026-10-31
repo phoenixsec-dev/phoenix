@@ -454,3 +454,16 @@ func TestAttestFactsFreshCredential(t *testing.T) {
 		t.Errorf("token: %q", got)
 	}
 }
+
+// P5 review S1: when a failed approval may still be on disk, the dashboard
+// says so instead of "nothing changed".
+func TestApprovalMaybeSavedShownHonestly(t *testing.T) {
+	code := errCode(&grant.Error{Code: grant.CodeStoreWriteFailed, MaybeSaved: true})
+	msg := accessErrorMessage(code)
+	if strings.Contains(msg, "nothing changed") || !strings.Contains(msg, "revoke") {
+		t.Fatalf("code %q -> %q", code, msg)
+	}
+	if got := accessErrorMessage(errCode(&grant.Error{Code: grant.CodeStoreWriteFailed})); !strings.Contains(got, "nothing changed") {
+		t.Fatalf("plain write failure -> %q", got)
+	}
+}

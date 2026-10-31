@@ -340,6 +340,7 @@ var accessErrorText = map[string]string{
 	"UNKNOWN_AGENT":           "The requesting agent no longer exists.",
 	"SELF_APPROVAL":           "An agent cannot approve its own request.",
 	"STORE_WRITE_FAILED":      "The decision could not be saved; nothing changed.",
+	"APPROVAL_MAYBE_SAVED":    "The approval could not be confirmed as saved, and undoing it also failed: it may still take effect after a restart. Fix the disk, then check Grants and revoke it if it is not wanted.",
 	"AUDIT_WRITE_FAILED":      "The audit log could not be written; nothing changed.",
 	"NOT_CONFIGURED":          "Access requests are not wired into this dashboard.",
 }
@@ -357,6 +358,10 @@ func accessErrorMessage(code string) string {
 
 // errCode returns the denial code of an approve/deny/revoke error.
 func errCode(err error) string {
+	var ge *grant.Error
+	if errors.As(err, &ge) && ge.MaybeSaved {
+		return "APPROVAL_MAYBE_SAVED" // dashboard-only key; never "nothing changed"
+	}
 	if c := grant.CodeOf(err); c != "" {
 		return string(c)
 	}
