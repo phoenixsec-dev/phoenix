@@ -83,7 +83,8 @@ phoenix grants revoke gnt_...
 phoenix exec --redact-output --env B2_KEY=phoenix://infra/b2/app-key -- ./backup.sh
 ```
 
-These run on the agent's own token or cert, never a session. See
+These run on the agent's own token or cert, never a session (except
+`phoenix whoami`, which reports on whatever credential you use). See
 [Access requests](access-requests.md).
 
 ## Secure secret input

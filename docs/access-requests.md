@@ -148,7 +148,9 @@ the URL is never shown in red, so a crafted link cannot fake a warning.
 
 All of these use the agent's **own** identity (`PHOENIX_TOKEN` bootstrap
 token or mTLS cert). `PHOENIX_ROLE` is ignored and a `phxs_` session token is
-refused before anything is sent.
+refused before anything is sent. The exception is `phoenix whoami`, which uses
+whatever credential you have (session included) so it can show what that
+credential can do.
 
 | Command | Who | Does |
 |---|---|---|
