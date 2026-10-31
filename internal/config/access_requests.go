@@ -268,6 +268,12 @@ func checkHTTPURL(raw string) error {
 // the filesystem.
 func (c *Config) ValidateGrantStorePath() error {
 	grants := c.GrantStorePath()
+	// The grants file itself must not be a symlink: its target could be a
+	// protected file's temp name, which no comparison of names would catch.
+	if fi, err := os.Lstat(grants); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("access_requests: the grants file %q is a symlink; "+
+			"set access_requests.store_path to a regular file path", grants)
+	}
 	protected := []struct{ field, path string }{
 		{"acl.path", c.ACL.Path},
 		{"audit.path", c.Audit.Path},
@@ -322,13 +328,20 @@ func rawDir(p string) string {
 // parentResolved returns p with its directory resolved (symlinks and "..",
 // kernel order) and the final name kept as written. When the directory does
 // not exist yet it falls back to the cleaned absolute path.
+//
+// It never calls fullyResolved, so the two helpers cannot loop.
 func parentResolved(p string) string {
 	base := filepath.Base(p)
-	if base == "." || base == ".." || base == string(filepath.Separator) {
-		return fullyResolved(p)
-	}
-	if strings.HasSuffix(p, string(filepath.Separator)) {
-		return fullyResolved(p)
+	if base == "." || base == ".." || base == string(filepath.Separator) ||
+		strings.HasSuffix(p, string(filepath.Separator)) {
+		// No plain final name to keep: resolve the whole path if it exists,
+		// else fall back to the cleaned absolute path.
+		if real, err := filepath.EvalSymlinks(rawAbs(p)); err == nil {
+			if abs, err := filepath.Abs(real); err == nil {
+				return abs
+			}
+		}
+		return filepath.Clean(rawAbs(p))
 	}
 	if dir, err := filepath.EvalSymlinks(rawDir(p)); err == nil {
 		if abs, err := filepath.Abs(dir); err == nil {

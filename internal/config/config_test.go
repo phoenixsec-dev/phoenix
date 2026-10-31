@@ -834,6 +834,34 @@ func TestGrantStorePathCollisions(t *testing.T) {
 		cfg.AccessRequests = &AccessRequestsConfig{StorePath: cfg.ACL.Path + ".tmp"}
 		mustCollide(t, cfg, "acl.path")
 	})
+	// R3: the grants file itself must not be a symlink (it could point at a
+	// protected file's temp name, which no path comparison would see).
+	t.Run("grants file is a symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := base(dir)
+		alias := filepath.Join(dir, "grants-alias.json")
+		if err := os.Symlink(cfg.ACL.Path+".tmp", alias); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: alias}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("err = %v, want a symlink refusal", err)
+		}
+	})
+	// R3: unresolvable paths ending in "/", "/." or "/.." must not loop.
+	t.Run("odd unresolvable paths terminate", func(t *testing.T) {
+		for _, p := range []string{"/missing-dir-r3/", "/missing-dir-r3/.", "/missing-dir-r3/.."} {
+			cfg := base(t.TempDir())
+			cfg.Auth.MTLS.CRLPath = p
+			done := make(chan struct{})
+			go func() { _ = cfg.ValidateGrantStorePath(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("ValidateGrantStorePath hung on %q", p)
+			}
+		}
+	})
 	t.Run("store path is canonical", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(dir, "real", "child"), 0700); err != nil {

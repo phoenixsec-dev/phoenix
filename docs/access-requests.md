@@ -83,7 +83,7 @@ Check it with `phoenix whoami` as the agent: the `Requests:` line shows
 | `notify_token_ref` | A `phoenix://` reference to a token in this Phoenix store. Read at send time and sent as `Authorization: Bearer <token>`. Never write the token itself into the config. |
 | `notify_include_paths` | `true` adds the requested paths to the message. Off by default. |
 | `notify_dashboard_url` | The address you use to open the dashboard, e.g. `https://phoenix.example.net`. Used only to build the link in the message. Empty = no link. |
-| `store_path` | Where grants live. Empty = `grants.json` next to the ACL file (mode `0600`). This path is checked at every start, even without an `access_requests` block: if it (or its temp files) is the same file as the ACL, audit log, secrets data file, master key, policy or CRL file, resolved through relative paths and symlinks, the server refuses to start and touches nothing. Set `store_path` to a separate file to fix it. |
+| `store_path` | Where grants live. Empty = `grants.json` next to the ACL file (mode `0600`). This path is checked at every start, even without an `access_requests` block: if it (or its temp files) is the same file as the ACL, audit log, secrets data file, master key, policy or CRL file, resolved through relative paths and symlinks, the server refuses to start and touches nothing. The grants file itself must not be a symlink. Set `store_path` to a separate regular file to fix either problem. |
 
 Turning it off (`enabled: false`) stops new requests (`501 REQUESTS_DISABLED`)
 **and** all grant-backed access. Records stay on disk; listing and revoking
