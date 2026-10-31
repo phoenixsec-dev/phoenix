@@ -171,7 +171,7 @@ class PhoenixClient {
       for (const [ref, env] of Object.entries(result.sealed_values)) {
         if (env.ref !== ref) {
           throw new PhoenixError(
-            `sealed envelope ref mismatch: map key "${ref}", envelope "${env.ref}"`
+            `sealed envelope ref mismatch: map key "${cleanServerText(ref)}", envelope "${cleanServerText(env.ref)}"`
           );
         }
         result.values[ref] = this._unsealEnvelope(env);
@@ -192,10 +192,10 @@ class PhoenixClient {
       throw new PhoenixError("sealed mode not configured");
     }
     if (env.version !== 1) {
-      throw new PhoenixError(`unsupported seal version: ${env.version}`);
+      throw new PhoenixError(`unsupported seal version: ${cleanServerText(env.version)}`);
     }
     if (env.algorithm !== "x25519-xsalsa20-poly1305") {
-      throw new PhoenixError(`unsupported seal algorithm: ${env.algorithm}`);
+      throw new PhoenixError(`unsupported seal algorithm: ${cleanServerText(env.algorithm)}`);
     }
 
     const ephPub = new Uint8Array(Buffer.from(env.ephemeral_key, "base64"));

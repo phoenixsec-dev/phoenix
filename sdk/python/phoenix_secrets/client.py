@@ -204,7 +204,7 @@ class PhoenixClient:
             for ref, env in result["sealed_values"].items():
                 if env.get("ref") != ref:
                     raise PhoenixError(
-                        f"sealed envelope ref mismatch: map key {ref!r}, envelope {env.get('ref')!r}"
+                        f"sealed envelope ref mismatch: map key {_clean_server_text(ref)!r}, envelope {_clean_server_text(env.get('ref'))!r}"
                     )
                 values[ref] = self._unseal_envelope(env)
             result["values"] = values
@@ -218,9 +218,9 @@ class PhoenixClient:
             raise PhoenixError("sealed mode not configured")
 
         if env.get("version") != 1:
-            raise PhoenixError(f"unsupported seal version: {env.get('version')}")
+            raise PhoenixError(f"unsupported seal version: {_clean_server_text(env.get('version'))}")
         if env.get("algorithm") != "x25519-xsalsa20-poly1305":
-            raise PhoenixError(f"unsupported seal algorithm: {env.get('algorithm')}")
+            raise PhoenixError(f"unsupported seal algorithm: {_clean_server_text(env.get('algorithm'))}")
 
         eph_pub = base64.b64decode(env["ephemeral_key"])
         nonce = base64.b64decode(env["nonce"])

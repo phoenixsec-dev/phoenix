@@ -210,6 +210,11 @@ func requestNextHint(rq accessRequestView) string {
 // waitForDecision polls a request every 5s until it is decided or expires.
 // A deny or expiry is returned as an error so scripts can tell.
 func waitForDecision(rq accessRequestView) error {
+	// The id comes from the server and is reused in a URL: accept only the
+	// real format.
+	if !requestIDPattern.MatchString(rq.ID) {
+		return fmt.Errorf("server returned an invalid request id %q", cleanServerText(rq.ID))
+	}
 	deadline := time.Now().Add(16 * time.Minute)
 	if t, err := time.Parse(time.RFC3339, rq.ExpiresAt); err == nil {
 		deadline = t.Add(5 * time.Second)

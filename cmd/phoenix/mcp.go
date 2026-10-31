@@ -567,7 +567,11 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 
 	logger.Printf("listed %d secrets", len(result.Paths))
-	return strings.Join(result.Paths, "\n"), false
+	paths := make([]string, len(result.Paths))
+	for i, p := range result.Paths {
+		paths[i] = cleanPath(p) // a path must not smuggle extra lines or escapes into the tool output
+	}
+	return strings.Join(paths, "\n"), false
 }
 
 // mcpToolUnseal decrypts a sealed secret token locally.
@@ -767,7 +771,7 @@ func mcpToolRequestUse(args json.RawMessage, logger *log.Logger) (string, bool) 
 	if err := json.Unmarshal(respBody, &rq); err != nil {
 		return fmt.Sprintf("Failed to decode response: %v", err), true
 	}
-	logger.Printf("access request %s (%d paths)", rq.ID, len(rq.Paths))
+	logger.Printf("access request %s (%d paths)", cleanServerText(rq.ID), len(rq.Paths))
 	return mcpRequestText(rq), false
 }
 

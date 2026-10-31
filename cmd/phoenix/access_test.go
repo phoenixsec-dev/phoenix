@@ -199,3 +199,12 @@ func TestApprovalPromptShowsLongPathsInFull(t *testing.T) {
 		t.Fatalf("prompt does not show both full paths:\n%s", p)
 	}
 }
+
+// Final review C1: a server-returned request id is reused in a polling URL,
+// so --wait refuses anything that is not a real req_ id.
+func TestWaitForDecisionRejectsBadID(t *testing.T) {
+	err := waitForDecision(accessRequestView{ID: "req_../../v1/secrets/x\x1b[2J", Status: "pending"})
+	if err == nil || !strings.Contains(err.Error(), "invalid request id") || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("err = %v", err)
+	}
+}

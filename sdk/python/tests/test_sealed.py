@@ -181,6 +181,27 @@ class TestSealedMode(unittest.TestCase):
         finally:
             os.unlink(key_path)
 
+    def test_unseal_errors_clean_server_text(self):
+        # A hostile envelope must not put terminal escapes or extra lines
+        # into the exception message (final review C2).
+        key_path = _write_key_file(self.priv)
+        try:
+            client = PhoenixClient(
+                server=f"http://127.0.0.1:{self.port}",
+                token="test",
+                seal_key_path=key_path,
+            )
+            hostile = "x\x1b]52;c;Zm9v\x07\u202e\nFORGED"
+            for env in ({"version": hostile, "algorithm": "x"},
+                        {"version": 1, "algorithm": hostile}):
+                with self.assertRaises(PhoenixError) as ctx:
+                    client._unseal_envelope(env)
+                msg = str(ctx.exception)
+                for bad in ("\x1b", "\x07", "\u202e", "\n"):
+                    self.assertNotIn(bad, msg)
+        finally:
+            os.unlink(key_path)
+
     def test_set_seal_key_bad_file(self):
         with self.assertRaises(Exception):
             client = PhoenixClient(

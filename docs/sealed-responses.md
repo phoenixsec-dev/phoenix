@@ -159,8 +159,11 @@ valid `X-Phoenix-Seal-Key` header are denied:
 ### `allow_unseal`
 
 Control whether the MCP `phoenix_unseal` tool can decrypt sealed tokens
-for a given path. When `false` (default), sealed tokens remain opaque and
-the agent must pass them to `phoenix exec` for injection:
+for a given path. When `false` (default), sealed tokens stay opaque to the
+agent. To use the value, run the command through `phoenix exec` with a
+`phoenix://` reference (not the token): exec resolves the path sealed and
+decrypts it in its own process, then injects it into the child:
+`phoenix exec --redact-output --env NAME=phoenix://<path> -- <command>`.
 
 ```json
 {
@@ -240,8 +243,10 @@ PHOENIX_SEALED:eyJ2ZXJzaW9uIjoxLC...
 
 The token is the base64-encoded JSON sealed envelope. This format is:
 - Safe to store in environment variables
-- Safe to pass through `phoenix exec --env`
 - Not parseable without the private key
+
+`phoenix exec --env` does not accept these tokens; give it a `phoenix://`
+reference and it fetches and decrypts the value itself.
 
 ---
 

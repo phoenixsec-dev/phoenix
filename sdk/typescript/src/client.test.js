@@ -479,3 +479,23 @@ describe("structured denials", () => {
     }
   });
 });
+
+describe("sealed envelope errors", () => {
+  // A hostile envelope must not put terminal escapes or extra lines into the
+  // exception message (final review C2).
+  it("cleans server text in version and algorithm errors", () => {
+    const c = new PhoenixClient({ server: "http://127.0.0.1:1", token: "tok" });
+    c._nacl = {}; // stand-ins: the version/algorithm checks run first
+    c._sealPriv = new Uint8Array(32);
+    const hostile = "x\u001b]52;c;Zm9v\u0007‮\nFORGED";
+    for (const env of [{ version: hostile }, { version: 1, algorithm: hostile }]) {
+      assert.throws(() => c._unsealEnvelope(env), (err) => {
+        assert.ok(err instanceof PhoenixError);
+        for (const bad of ["\u001b", "\u0007", "‮", "\n"]) {
+          assert.ok(!err.message.includes(bad), `message kept ${JSON.stringify(bad)}`);
+        }
+        return true;
+      });
+    }
+  });
+});

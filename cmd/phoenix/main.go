@@ -3433,13 +3433,14 @@ func cmdApproveStepUp(args []string) error {
 	}
 
 	if details.Status != "pending" {
-		return fmt.Errorf("approval %s is already %s", approvalID, details.Status)
+		return fmt.Errorf("approval %s is already %s", approvalID, cleanServerText(details.Status))
 	}
 
-	// Prompt for confirmation via /dev/tty
-	fmt.Fprintf(os.Stderr, "\nApprove session for role '%s'?\n", details.Role)
-	fmt.Fprintf(os.Stderr, "  Requested by: agent %q\n", details.Agent)
-	fmt.Fprintf(os.Stderr, "  Expires at: %s\n", details.ExpiresAt)
+	// Prompt for confirmation via /dev/tty. Server text is cleaned so it
+	// cannot forge lines or send terminal escapes into the prompt.
+	fmt.Fprintf(os.Stderr, "\nApprove session for role '%s'?\n", cleanServerText(details.Role))
+	fmt.Fprintf(os.Stderr, "  Requested by: agent %q\n", cleanServerText(details.Agent))
+	fmt.Fprintf(os.Stderr, "  Expires at: %s\n", cleanServerText(details.ExpiresAt))
 	fmt.Fprintf(os.Stderr, "\nApprove? [y/N]: ")
 
 	answer, err := readFromTTY()
