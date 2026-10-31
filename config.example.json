@@ -82,7 +82,10 @@
         "require_seal_key": true,
         "step_up": true,
         "step_up_ttl": "15m",
-        "elevates_acl": true
+        "elevates_acl": true,
+        "allowed_agents": [
+          "deployer"
+        ]
       }
     }
   },

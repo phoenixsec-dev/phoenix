@@ -57,7 +57,8 @@ not use bearer tokens, mTLS, or session tokens. Instead:
 
 Approval is the highest-risk action. It runs the same safety checks as
 the API (`approval.ValidateForMint`): role existence, step-up still
-enabled, bootstrap trust, attestation requirements, and seal key.
+enabled, `allowed_agents`, bootstrap trust, attestation requirements, and
+seal key.
 
 Access-request approval goes through the API server's shared approval
 function (`ApproveAccessRequestAs`), so it applies exactly the API's
@@ -193,7 +194,16 @@ requirements, the agent's reason labelled "not verified", the agent's last
 
 **Step-up session approvals** follow. Each pending approval is a card showing: role name, agent name, source
 IP, bootstrap method, certificate fingerprint (truncated), namespaces,
-requester TTY, created/expires timestamps with countdown.
+requester TTY, created/expires timestamps with countdown. A **role has no
+agent binding** badge means the role has no `allowed_agents`: any agent whose
+auth method the role trusts could have asked for it. Approving re-checks
+`allowed_agents`; an agent that is not listed cannot be approved (see
+[Session Identity](session-identity.md#binding-a-role-to-agents-allowed_agents)).
+
+A new access request can also ping your phone (for example through ntfy).
+The notification links to this page with the request's `#req_...` anchor;
+you still log in here to decide. Set `access_requests.notify_url` and
+`notify_dashboard_url` (see [Access requests](access-requests.md#notifications)).
 
 Approve and Deny buttons with JavaScript confirmation dialogs. Both
 submit POST forms with CSRF tokens.
@@ -228,7 +238,8 @@ The audit page auto-refreshes every 30 seconds via client-side fetch.
 ### Roles (`/dashboard/roles`)
 
 Read-only cards for each configured role: name, namespace pills, action
-pills, bootstrap trust pills, and flags for step-up, seal key, max TTL,
+pills, bootstrap trust pills, allowed agents (or "any agent (no binding)"
+when `allowed_agents` is empty), and flags for step-up, seal key, max TTL,
 and attestation requirements.
 
 ## Audit trail

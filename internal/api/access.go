@@ -160,7 +160,7 @@ func (s *Server) checkGrantSealed(w http.ResponseWriter, r *http.Request, info *
 	s.auditDeniedMetadata(info, action, path, ip, "sealed_required", grantAuditMetadata(r, g))
 	jsonDenied(w, "access_denied", CodeSealedRequired,
 		"your temporary grant for this path is only served sealed to your registered seal key",
-		"use phoenix exec, which requests and decrypts sealed values for you",
+		"use phoenix exec --redact-output, which requests and decrypts sealed values for you and hides them in the output",
 		http.StatusForbidden)
 	return false
 }
@@ -377,7 +377,7 @@ func requestNextStep(rq grant.Request, g *grant.Grant, now time.Time) (step, msg
 	}
 	switch g.State(now) {
 	case grant.GrantActive:
-		return NextUseExec, fmt.Sprintf("Use it with phoenix exec --env NAME=phoenix://%s -- <command> until %s.",
+		return NextUseExec, fmt.Sprintf("Use it with phoenix exec --redact-output --env NAME=phoenix://%s -- <command> until %s.",
 			g.Paths[0], fmtTime(g.ExpiresAt))
 	case grant.GrantRevoked:
 		return NextAskUser, "A human revoked this. Ask the user before requesting again."
@@ -577,6 +577,8 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
+		// New requests only; a duplicate of a pending one is not news.
+		s.notifyAccessRequest(cfg, rq)
 	}
 	jsonStatus(w, status, s.requestView(rq, false))
 }

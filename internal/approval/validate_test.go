@@ -156,3 +156,26 @@ func TestCheckAttestation(t *testing.T) {
 		t.Errorf("expected success for cert_fingerprint, got: %s", reason)
 	}
 }
+
+// allowed_agents is re-checked at approval (API and dashboard both call
+// ValidateForMint): an unlisted agent's request cannot be approved.
+func TestValidateRoleNotAllowed(t *testing.T) {
+	roles := map[string]config.RoleConfig{
+		"deploy": {
+			Namespaces:     []string{"prod/*"},
+			BootstrapTrust: []string{"bearer"},
+			StepUp:         true,
+			AllowedAgents:  []string{"deployer"},
+		},
+	}
+	apr := &Approval{Role: "deploy", Agent: "agent1", BootstrapMethod: "bearer", SourceIP: "10.0.0.1", Status: StatusPending}
+	_, err := ValidateForMint(apr, roles)
+	ve, ok := err.(*ValidationError)
+	if !ok || ve.Code != "ROLE_NOT_ALLOWED" {
+		t.Fatalf("err = %v, want ROLE_NOT_ALLOWED", err)
+	}
+	apr.Agent = "deployer"
+	if _, err := ValidateForMint(apr, roles); err != nil {
+		t.Fatalf("bound agent: %v", err)
+	}
+}

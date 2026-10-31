@@ -172,6 +172,8 @@ type Server struct {
 	grants    *grant.Store
 	accessCfg atomic.Pointer[config.AccessRequestsSettings]
 	now       func() time.Time
+	// notifyTimeout limits one access-request notification (notify.go).
+	notifyTimeout time.Duration
 }
 
 // NewServer creates a new API server with all dependencies.
@@ -187,6 +189,7 @@ func NewServer(b store.SecretBackend, a *acl.ACL, al *audit.Logger, auditPath st
 		authRL:        newRateLimiter(),
 		mux:           http.NewServeMux(),
 		now:           time.Now,
+		notifyTimeout: defaultNotifyTimeout,
 	}
 	// Keep a reference to FileBackend for file-specific operations (rotation).
 	if fb, ok := b.(*store.FileBackend); ok {
@@ -2087,6 +2090,14 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Agent binding: checked before step-up, so an agent that is not bound
+	// to the role cannot even put an approval in front of a human.
+	if !role.AgentAllowed(info.Agent) {
+		writeRoleNotAllowed(w, req.Role)
+		s.auditLogDenied(r, info.Agent, "session.mint", req.Role, ip, "role_not_allowed")
+		return
+	}
+
 	// Determine bootstrap method from auth info
 	bootstrapMethod := s.bootstrapMethod(info)
 
@@ -2225,6 +2236,11 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "role_not_found", info.SessionID)
 		return
 	}
+	if !role.AgentAllowed(info.Agent) {
+		writeRoleNotAllowed(w, info.SessionRole)
+		s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "role_not_allowed", info.SessionID)
+		return
+	}
 
 	// Re-check bootstrap trust: look up the original bootstrap method from the session
 	sess := s.sessions.Get(info.SessionID)
@@ -2304,6 +2320,16 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		"expires_at":    renewedSess.ExpiresAt.Format(time.RFC3339),
 		"renewed":       true,
 	})
+}
+
+// writeRoleNotAllowed writes 403 ROLE_NOT_ALLOWED: the role's
+// allowed_agents does not list the caller. The detail names only the role,
+// never the list of allowed agents.
+func writeRoleNotAllowed(w http.ResponseWriter, role string) {
+	jsonDenied(w, "access_denied", CodeRoleNotAllowed,
+		fmt.Sprintf("this agent is not allowed to use role %q", role),
+		"ask the Phoenix operator; only agents listed in the role's allowed_agents can use it",
+		http.StatusForbidden)
 }
 
 // checkRoleAttestation verifies that the request satisfies the role's attestation
@@ -2508,15 +2534,19 @@ func (s *Server) handleApprovalApprove(w http.ResponseWriter, r *http.Request, i
 	if valErr != nil {
 		code := "VALIDATION_FAILED"
 		status := http.StatusForbidden
+		remediation := "role config changed while approval was pending"
 		if ve, ok := valErr.(*approval.ValidationError); ok {
 			code = ve.Code
 			if code == "ROLE_CHANGED" {
 				status = http.StatusConflict
 			}
+			if code == CodeRoleNotAllowed {
+				remediation = "the requesting agent is not in this role's allowed_agents; deny the request"
+			}
 		}
 		jsonDenied(w, "access_denied", code,
 			valErr.Error(),
-			"role config changed while approval was pending",
+			remediation,
 			status)
 		s.auditLogDenied(r, info.Agent, "approval.approve", apr.Role, ip, valErr.Error())
 		return

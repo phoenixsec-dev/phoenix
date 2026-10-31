@@ -114,6 +114,9 @@ Response:
 - `role` (required): role name to mint
 - `seal_public_key` (optional): base64-encoded X25519 public key
 
+If the role has `allowed_agents` and the caller is not on it, mint and renew
+return `403 ROLE_NOT_ALLOWED` (for a step-up role, no approval is created).
+
 `GET /v1/sessions` query params:
 - `role` — filter by role name
 - `agent` — filter by agent name (admin only)
@@ -127,7 +130,7 @@ sessions for their agent. Admins see all.
 |---|---|---|
 | GET | `/v1/approvals` | List pending approvals (admin-only) |
 | GET | `/v1/approval/{id}` | Get approval status |
-| POST | `/v1/approval/{id}/approve` | Approve step-up request |
+| POST | `/v1/approval/{id}/approve` | Approve step-up request (re-checks the role, `allowed_agents`, bootstrap trust, attestation and seal key) |
 | POST | `/v1/approval/{id}/deny` | Deny step-up request |
 
 See [Session Identity](session-identity.md) for the approval workflow.
@@ -164,7 +167,9 @@ See [Dashboard](dashboard.md) for the full reference.
 
 See [Access Requests](access-requests.md). Agent side uses the agent's own
 identity (sessions get `403 SESSION_CANNOT_REQUEST`); approve/deny need an
-identity listed in `access_requests.approvers`.
+identity listed in `access_requests.approvers`. New requests can also send
+a notification to `access_requests.notify_url` (no endpoint; see
+[Notifications](access-requests.md#notifications)).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -210,7 +215,7 @@ Denial codes:
 |------|------|---------|
 | `ACL_DENIED` | 403 | ACL does not allow the action on this path |
 | `ATTESTATION_REQUIRED` | 403 | Path attestation policy not met |
-| `SEALED_REQUIRED` | 403 | Path is only served sealed; use `phoenix exec` |
+| `SEALED_REQUIRED` | 403 | Path is only served sealed; use `phoenix exec --redact-output` |
 | `SESSION_EXPIRED` | 401 | Session TTL elapsed |
 | `SESSION_REVOKED` | 401 | Session was explicitly revoked |
 | `SESSION_INVALID` | 401 | Token malformed or signature invalid |
@@ -220,6 +225,7 @@ Denial codes:
 | `STEP_UP_REAPPROVAL_REQUIRED` | 403 | Elevated step-up session cannot renew without fresh approval |
 | `BOOTSTRAP_FAILED` | 403 | Auth method not accepted for this role |
 | `ROLE_NOT_FOUND` | 404 | Requested role does not exist |
+| `ROLE_NOT_ALLOWED` | 403 | The role's `allowed_agents` does not list this agent |
 | `ATTESTATION_FAILED` | 403 | Attestation requirements not met |
 | `SEAL_KEY_REQUIRED` | 403 | Role requires seal key at mint |
 | `SEAL_KEY_MISMATCH` | 403 | Seal key doesn't match session binding |

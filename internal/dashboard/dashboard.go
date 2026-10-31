@@ -608,6 +608,7 @@ func (h *Handler) handleApprovals(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "approvals.html", map[string]interface{}{
 		"CSRF":          r.Header.Get("X-Csrf-Token"),
 		"Active":        "approvals",
+		"UnboundRoles":  h.unboundRoles(),
 		"Pending":       pending,
 		"Resolved":      resolved,
 		"Flash":         r.URL.Query().Get("flash"),
@@ -616,6 +617,19 @@ func (h *Handler) handleApprovals(w http.ResponseWriter, r *http.Request) {
 		"AccessOn":      h.accessEnabled(),
 		"StepUpEnabled": true,
 	})
+}
+
+// unboundRoles names the session roles with no allowed_agents, so the
+// step-up approval card can show a "role has no agent binding" badge: any
+// agent that passes bootstrap_trust could have asked for such a role.
+func (h *Handler) unboundRoles() map[string]bool {
+	out := map[string]bool{}
+	for name, role := range h.deps.SessionRoles {
+		if len(role.AllowedAgents) == 0 {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func (h *Handler) handleApprove(w http.ResponseWriter, r *http.Request) {

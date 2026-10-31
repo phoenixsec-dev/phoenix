@@ -42,6 +42,9 @@ const (
 	CodeInternalError       = "INTERNAL_ERROR"
 	CodeGrantExpired        = "GRANT_EXPIRED"
 	CodeGrantRevoked        = "GRANT_REVOKED"
+	// CodeRoleNotAllowed: a session role's allowed_agents does not list the
+	// agent (session mint, step-up approval, renewal).
+	CodeRoleNotAllowed = "ROLE_NOT_ALLOWED"
 )
 
 // Codes for the request-use API (access.go). Store errors use the
@@ -123,6 +126,7 @@ var denialNextStep = map[string]string{
 	"APPROVAL_REQUIRED":           NextWait,
 	"STEP_UP_REAPPROVAL_REQUIRED": NextRemintSession,
 	"ROLE_NOT_FOUND":              NextAskUser,
+	CodeRoleNotAllowed:            NextAskUser,
 	"BOOTSTRAP_FAILED":            NextAskUser,
 	"ATTESTATION_FAILED":          NextAskUser,
 	"ADMIN_AUTH_REQUIRED":         NextAskUser,
@@ -246,7 +250,7 @@ func (s *Server) denyAttestation(w http.ResponseWriter, r *http.Request, info *a
 	if attestationDenialCode(err) == CodeSealedRequired {
 		jsonDenied(w, "access_denied", CodeSealedRequired,
 			"this path is only served sealed to your registered seal key",
-			"use phoenix exec, which requests and decrypts sealed values for you",
+			"use phoenix exec --redact-output, which requests and decrypts sealed values for you and hides them in the output",
 			http.StatusForbidden)
 		return
 	}

@@ -871,3 +871,82 @@ func TestValidatePathGlob(t *testing.T) {
 		}
 	}
 }
+
+// P4 (Q5): step-up roles without allowed_agents warn at startup; elevates_acl
+// roles get the stronger "next release" message. Bound roles are quiet.
+func TestRoleBindingWarnings(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session = SessionConfig{Enabled: true, Roles: map[string]RoleConfig{
+		"plain":    {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}},
+		"stepup":   {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true},
+		"elevated": {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true, ElevatesACL: true},
+		"bound": {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true, ElevatesACL: true,
+			AllowedAgents: []string{"vector", "ghost"}},
+	}}
+	exists := func(name string) bool { return name == "vector" }
+	got := strings.Join(cfg.RoleBindingWarnings(exists), "\n")
+	for _, want := range []string{
+		"session.roles.elevated has elevates_acl but no allowed_agents",
+		"next release will refuse to start",
+		"session.roles.stepup has step_up but no allowed_agents",
+		`session.roles.bound.allowed_agents: "ghost" is not an agent in the ACL`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warnings missing %q:\n%s", want, got)
+		}
+	}
+	for _, quiet := range []string{"roles.plain", "roles.bound has"} {
+		if strings.Contains(got, quiet) {
+			t.Errorf("unexpected warning for %q:\n%s", quiet, got)
+		}
+	}
+	cfg.Session.Enabled = false
+	if w := cfg.RoleBindingWarnings(exists); len(w) != 0 {
+		t.Errorf("sessions disabled: got warnings %v", w)
+	}
+
+	if !(RoleConfig{}).AgentAllowed("anyone") {
+		t.Error("empty allowed_agents must allow any agent")
+	}
+	if (RoleConfig{AllowedAgents: []string{"vector"}}).AgentAllowed("echo") {
+		t.Error("bound role must reject other agents")
+	}
+}
+
+func TestAccessRequestsNotifyValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		ar   AccessRequestsConfig
+		want string // "" = valid
+	}{
+		{"ntfy url and ref", AccessRequestsConfig{NotifyURL: "https://ntfy.example.net/phoenix", NotifyTokenRef: "phoenix://phoenix/ntfy-token", NotifyDashboardURL: "https://phoenix.example.net"}, ""},
+		{"not http", AccessRequestsConfig{NotifyURL: "ftp://x/y"}, "notify_url"},
+		{"no host", AccessRequestsConfig{NotifyURL: "https:///topic"}, "no host"},
+		{"credentials in url", AccessRequestsConfig{NotifyURL: "https://user:pw@ntfy.example.net/t"}, "notify_token_ref"},
+		{"query", AccessRequestsConfig{NotifyURL: "https://ntfy.example.net/t?auth=x"}, "query"},
+		{"dashboard fragment", AccessRequestsConfig{NotifyDashboardURL: "https://p.example.net/#x"}, "notify_dashboard_url"},
+		{"token not a ref", AccessRequestsConfig{NotifyTokenRef: "tk_abc"}, "phoenix://"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			dir := t.TempDir()
+			cfg.ACL.Path = filepath.Join(dir, "acl.json")
+			cfg.Audit.Path = filepath.Join(dir, "audit.log")
+			cfg.Store.Path = filepath.Join(dir, "store.json")
+			cfg.Store.MasterKey = filepath.Join(dir, "master.key")
+			ar := c.ar
+			cfg.AccessRequests = &ar
+			err := cfg.Validate()
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want it to mention %q", err, c.want)
+			}
+		})
+	}
+}

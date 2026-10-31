@@ -3,10 +3,13 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/ref"
 )
 
 // AccessRequestsConfig is the "access_requests" block: agents may ask a
@@ -20,14 +23,16 @@ type AccessRequestsConfig struct {
 	GrantableActions []string `json:"grantable_actions,omitempty"` // must be ["read_value"] in this version
 	// RequireSealed and BindSourceIP default to true when left out, so they
 	// are pointers: a missing value and an explicit false must differ.
-	RequireSealed      *bool    `json:"require_sealed,omitempty"`
-	BindSourceIP       *bool    `json:"bind_source_ip,omitempty"`
-	Approvers          []string `json:"approvers"`  // ACL agent names allowed to approve over the API; empty = dashboard only
-	DenyPaths          []string `json:"deny_paths"` // globs that can never be requested, e.g. "phoenix/**"
-	NotifyURL          string   `json:"notify_url,omitempty"`
-	NotifyTokenRef     string   `json:"notify_token_ref,omitempty"`
-	NotifyIncludePaths bool     `json:"notify_include_paths,omitempty"`
-	StorePath          string   `json:"store_path,omitempty"` // empty = grants.json next to the ACL file
+	RequireSealed *bool    `json:"require_sealed,omitempty"`
+	BindSourceIP  *bool    `json:"bind_source_ip,omitempty"`
+	Approvers     []string `json:"approvers"`  // ACL agent names allowed to approve over the API; empty = dashboard only
+	DenyPaths     []string `json:"deny_paths"` // globs that can never be requested, e.g. "phoenix/**"
+	// Notify hook: one POST per new request (see docs/access-requests.md).
+	NotifyURL          string `json:"notify_url,omitempty"`           // e.g. an ntfy topic URL; empty = no notifications
+	NotifyTokenRef     string `json:"notify_token_ref,omitempty"`     // phoenix:// ref resolved at send time, sent as a bearer token
+	NotifyIncludePaths bool   `json:"notify_include_paths,omitempty"` // add the requested paths to the message (off by default)
+	NotifyDashboardURL string `json:"notify_dashboard_url,omitempty"` // the dashboard's external base URL, for the link in the message
+	StorePath          string `json:"store_path,omitempty"`           // empty = grants.json next to the ACL file
 }
 
 // AccessRequestsSettings is the parsed, defaulted form of the block that the
@@ -43,6 +48,11 @@ type AccessRequestsSettings struct {
 	Approvers        []string
 	DenyPaths        []string
 	StorePath        string
+
+	NotifyURL          string
+	NotifyTokenRef     string
+	NotifyIncludePaths bool
+	NotifyDashboardURL string
 }
 
 // Access-request defaults and limits (plan section 6).
@@ -104,6 +114,10 @@ func (c *Config) AccessRequestsSettings() AccessRequestsSettings {
 	}
 	s.Approvers = append([]string(nil), ar.Approvers...)
 	s.DenyPaths = append([]string(nil), ar.DenyPaths...)
+	s.NotifyURL = ar.NotifyURL
+	s.NotifyTokenRef = ar.NotifyTokenRef
+	s.NotifyIncludePaths = ar.NotifyIncludePaths
+	s.NotifyDashboardURL = ar.NotifyDashboardURL
 	return s
 }
 
@@ -199,6 +213,47 @@ func (c *Config) validateAccessRequests() error {
 		}
 	}
 
+	if ar.NotifyURL != "" {
+		if err := checkHTTPURL(ar.NotifyURL); err != nil {
+			return fmt.Errorf("access_requests.notify_url: %w", err)
+		}
+	}
+	if ar.NotifyDashboardURL != "" {
+		if err := checkHTTPURL(ar.NotifyDashboardURL); err != nil {
+			return fmt.Errorf("access_requests.notify_dashboard_url: %w", err)
+		}
+	}
+	if ar.NotifyTokenRef != "" {
+		if _, err := ref.Parse(ar.NotifyTokenRef); err != nil {
+			return fmt.Errorf("access_requests.notify_token_ref must be a phoenix:// reference such as phoenix://phoenix/ntfy-token: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// checkHTTPURL accepts an absolute http(s) URL with a host and no
+// user:password part (credentials belong in notify_token_ref, never in the
+// config file), query or fragment.
+func checkHTTPURL(raw string) error {
+	// The parse error and the user:password case do not echo the URL: it
+	// could hold a password, and this message ends up in logs.
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("not a valid URL")
+	}
+	if u.User != nil {
+		return errors.New("the URL must not contain a user name or password; put a token in Phoenix and set notify_token_ref")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%q must start with https:// or http://", raw)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%q has no host", raw)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%q must not contain a query (?) or fragment (#)", raw)
+	}
 	return nil
 }
 

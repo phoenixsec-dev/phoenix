@@ -37,6 +37,7 @@ and secret values on the network in cleartext.
 | `session.enabled` | Enable session identity | `false` |
 | `session.ttl` | Default session lifetime | `1h` |
 | `session.roles` | Named role definitions (see below) | — |
+| `access_requests.*` | Request-use grants: agents ask a human for temporary use of exact secrets (see below) | block missing = off |
 | `onepassword.vault` | 1Password vault name | — |
 | `onepassword.service_account_token_env` | Token env var name | `OP_SERVICE_ACCOUNT_TOKEN` |
 | `onepassword.cache_ttl` | Runtime read/list cache duration | `60s` |
@@ -64,7 +65,8 @@ See [Session Identity](session-identity.md) for the full guide.
         "require_seal_key": true,
         "step_up": true,
         "step_up_ttl": "15m",
-        "elevates_acl": true
+        "elevates_acl": true,
+        "allowed_agents": ["deployer"]
       }
     }
   }
@@ -73,7 +75,49 @@ See [Session Identity](session-identity.md) for the full guide.
 
 Each role defines: `namespaces` (required), `bootstrap_trust` (required),
 `actions` (default: list + read_value), and optional fields for seal key
-requirements, attestation, and step-up approval.
+requirements, attestation, step-up approval and `allowed_agents`.
+
+`allowed_agents` binds a role to named ACL agents. It is checked at mint,
+at step-up approval and at renewal (`403 ROLE_NOT_ALLOWED`). Empty means any
+agent whose auth method is in `bootstrap_trust`. The server logs a `WARNING`
+at startup for each `step_up` role without it, and for listed names that are
+not in the ACL. The next release makes it required for `elevates_acl` roles.
+See [Session Identity](session-identity.md#binding-a-role-to-agents-allowed_agents).
+
+## Access requests
+
+Agents that are denied a secret can ask a human for temporary use of exact
+paths. Off when the block is missing (upgraded installs); on in
+`config.example.json` and `--init`. Full guide, config reference and
+troubleshooting: [Access Requests](access-requests.md).
+
+```json
+{
+  "access_requests": {
+    "enabled": true,
+    "request_ttl": "15m",
+    "default_grant_ttl": "1h",
+    "max_grant_ttl": "8h",
+    "grantable_actions": ["read_value"],
+    "require_sealed": true,
+    "bind_source_ip": true,
+    "approvers": [],
+    "deny_paths": ["phoenix/**"],
+    "notify_url": "https://ntfy.example.net/phoenix-approvals",
+    "notify_token_ref": "phoenix://phoenix/ntfy-token",
+    "notify_include_paths": false,
+    "notify_dashboard_url": "https://phoenix.example.net"
+  }
+}
+```
+
+The `notify_*` keys are optional. `notify_url` gets one POST per new request
+(ntfy-style; agent, action, path count, request id, dashboard link; never the
+reason). `notify_token_ref` names a secret in this Phoenix store that is sent
+as a bearer token; never put the token itself in the config. The server
+refuses to start if `notify_url` or `notify_dashboard_url` is not a plain
+`http(s)://` URL or contains a `user:password@` part, or if
+`notify_token_ref` is not a `phoenix://` reference.
 
 ## Dashboard
 
@@ -331,6 +375,7 @@ the same flow (`docker compose run --rm phoenix --init /data`, then
 - [Getting Started](getting-started.md)
 - [Authentication](authentication.md)
 - [Session Identity](session-identity.md)
+- [Access Requests](access-requests.md)
 - [Dashboard](dashboard.md) — operator UI deployment and security model
 - [Key Management](key-management.md)
 - [API Reference Index](api-reference-index.md)

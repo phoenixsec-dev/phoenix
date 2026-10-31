@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,6 +287,12 @@ func main() {
 		srv.SetSessionRoles(cfg.Session.Roles)
 		defer sessionStore.Stop()
 		log.Printf("  Sessions: enabled (roles=%d, ttl=%s)", len(cfg.Session.Roles), sessionTTL)
+		for _, warning := range cfg.RoleBindingWarnings(func(name string) bool {
+			_, err := a.GetAgent(name)
+			return err == nil
+		}) {
+			log.Printf("WARNING: %s", warning)
+		}
 
 		// Check if any role requires step-up approval
 		hasStepUp := false
@@ -652,7 +659,8 @@ func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger, tokenTTL t
 }
 
 // logAccessRequests prints the request-use status and the startup warnings
-// from plan section 6 (unknown approver names; nobody able to approve).
+// from plan section 6 (unknown approver names; nobody able to approve), plus
+// the notify hook summary and its plain-http token warning.
 func logAccessRequests(cfg *config.Config, a *acl.ACL) {
 	set := cfg.AccessRequestsSettings()
 	if !set.Enabled {
@@ -664,6 +672,18 @@ func logAccessRequests(cfg *config.Config, a *acl.ACL) {
 	for _, name := range set.Approvers {
 		if _, err := a.GetAgent(name); err != nil {
 			log.Printf("WARNING: access_requests.approvers: %q is not an agent in the ACL", name)
+		}
+	}
+	if set.NotifyURL != "" {
+		// Host only: an ntfy topic name in the path works like a password.
+		host := "?"
+		if u, err := url.Parse(set.NotifyURL); err == nil {
+			host = u.Host
+		}
+		log.Printf("  Access request notifications: on (host %s, paths=%v, link=%v)",
+			host, set.NotifyIncludePaths, set.NotifyDashboardURL != "")
+		if set.NotifyTokenRef != "" && transport.IsPlaintextNonLoopbackURL(set.NotifyURL) {
+			log.Printf("WARNING: access_requests.notify_url uses plain http:// with notify_token_ref set: the notify token crosses the network unencrypted; use https://")
 		}
 	}
 	if !cfg.Dashboard.Enabled && len(set.Approvers) == 0 {

@@ -111,8 +111,15 @@ Session tokens (`phxs_` prefix) introduce additional attack surface:
   sessions — the session keeps the scope it was minted with.
 - **Step-up bypass**: Step-up approval is enforced server-side at mint time. An agent
   cannot mint a step-up role without human approval. The approval re-checks role
-  config, bootstrap trust, attestation, and seal key requirements at approve time
-  to prevent stale-config attacks.
+  config, `allowed_agents`, bootstrap trust, attestation, and seal key requirements
+  at approve time to prevent stale-config attacks.
+- **Wrong agent asks for a powerful role**: `bootstrap_trust` checks *how* a caller
+  logged in, not *who* it is. `allowed_agents` on a role binds it to named agents;
+  it is checked at mint, at approval (API and dashboard) and at renewal
+  (`403 ROLE_NOT_ALLOWED`). A role without it is unbound: the server warns at
+  startup and the dashboard card shows a badge, but nothing is enforced. **The
+  warning alone does not close the gap.** The next release makes `allowed_agents`
+  required for `elevates_acl` roles.
 - **Session token on admin endpoints**: Session tokens are explicitly rejected for
   admin operations (agent management, cert issuance, approval, revocation by other
   agents). This prevents a scoped session from escalating to admin access even if
@@ -127,8 +134,9 @@ API and must be evaluated separately.
 ### What the dashboard exposes
 
 The dashboard can: view secret/agent/session counts, view and revoke active sessions,
-approve and deny step-up requests (minting session tokens), view the full audit log,
-and view role configuration.
+approve and deny step-up requests (minting session tokens), approve and deny secret
+access requests and revoke grants, view the full audit log, and view role
+configuration.
 
 The dashboard **cannot**: read or write secret values, create or modify agents, issue
 or revoke certificates, or change server configuration.
@@ -161,7 +169,7 @@ one credential and are distinguished only by source IP in the audit trail
 | Session cookie theft (network) | `Secure` flag set when TLS detected; `HttpOnly` prevents JS access; `SameSite=Strict` prevents CSRF via cross-origin requests | Plain HTTP on a shared network exposes the cookie — **do not do this**. The server warns loudly at startup when the dashboard is enabled on a non-loopback bind without TLS |
 | Session cookie theft (XSS) | `HttpOnly` flag; no user-supplied content rendered unescaped; embedded static assets (no CDN/external JS) | XSS in Go `html/template` is unlikely but not impossible if templates are modified |
 | CSRF | Token-per-session in signed cookie, validated on all POST actions | Relies on `SameSite=Strict` + token check |
-| Unauthorized approval | Same `ValidateForMint` safety checks as the API; role, bootstrap, attestation, and seal key all re-verified | A compromised dashboard session can approve any pending request |
+| Unauthorized approval | Same `ValidateForMint` safety checks as the API; role, `allowed_agents`, bootstrap, attestation, and seal key all re-verified | A compromised dashboard session can approve any pending request |
 | Shared credential | All operators share one password/PIN; no per-user identity | Forensic distinction limited to source IP (`dashboard@<ip>`) |
 | Config file credential exposure | Password stored as bcrypt hash in config (`password_hash`); plaintext rejected by validation; agent reading config gets only the hash | PIN mode stores plaintext PIN; use `password_hash` for non-loopback deployments |
 
@@ -211,6 +219,31 @@ Per-path policy can require combinations of:
 - `process.uid` / `process.binary_hash`
 - `require_nonce`
 - `require_fresh_attestation`
+
+## Request-use grants
+
+An agent that is denied a secret can ask a human for temporary use of exact
+paths (see [access-requests.md](access-requests.md)). A grant gives no new
+token: the agent keeps its own identity. These are the threats and what
+Phoenix does about them.
+
+| Threat | Mitigation | Residual risk |
+|--------|-----------|---------------|
+| Request spam / approval fatigue | 3 pending per agent, 50 in total, 10 new requests per agent per hour, 10-minute cooldown after a deny, 10 active grants per agent. Limits survive a restart; each `429` has `Retry-After` | A human can still approve something without reading it |
+| Social engineering via the reason | Reason shown as "Agent says (not verified)", escaped, control/bidi/zero-width characters stripped, 300-character cap, never a link. The approval card is built from server facts (paths, badges, attestation), not from the reason | The reason can still be a convincing lie |
+| Approving more than intended | Exact paths only (no wildcards), at most 10, `read_value` only. The approver can untick paths and shorten the TTL, never widen. No bulk approve | |
+| Self-approval / collusion | An agent can never approve its own request. API approval needs a name in `access_requests.approvers`; ACL `admin` alone is not enough | Two agents that are both approvers can approve each other's requests |
+| Replay | Grants carry no token. Approve and deny are one-way saved transitions. Dashboard POSTs keep CSRF and `SameSite=Strict`. IDs are 128-bit random | |
+| Stolen agent token | It can file requests (the human sees the source IP) and could use a live grant only from the bound IP, with the agent's registered seal key, as a non-session call. Sessions never use grants. Grants are short and revocable | A thief who also holds the agent's seal private key, on the bound IP, can use a live grant |
+| Compromised agent | `require_sealed` sends granted values only sealed to the agent's own registered seal key | Sealed-only does **not** stop a compromised agent: it holds its own seal private key and can decrypt and leak the value. Sealing protects the value on the wire and in tool output, not from the agent itself |
+| Unseal after the grant ends | Grant-only access never makes `allow_unseal` true, so an envelope cached while the grant was active cannot be unsealed by plugin unseal tools later | |
+| Name reuse after agent delete | Delete revokes the agent's grants first, under one lock, and keeps a tombstone; grants are bound to the credential that asked | |
+| Lost revoke / phantom grant | Nothing is published before it is saved. A revoke denies at once in memory even if the save fails, and a failed revoke is reported as `REVOKE_NOT_DURABLE`, never as success | **Double disk fault on approve:** if the directory fsync fails after the rename *and* writing the old state back also fails, an approval reported as failed may still be on disk and take effect after a restart. The error message says so; check the grants list and revoke it |
+| Audit loss | An "attempt" line is written before each change and the "committed" line after; committed lines that fail are retried every 30 seconds (at least once) | **No audit hash chain.** Someone with write access to the audit log can edit or delete lines without detection. Accepted inside the LAN envelope |
+| Grants file tampering | `grants.json` is mode `0600`, owned by the server user, same trust level as `acl.json` | Not a new boundary: whoever can write it can already write the ACL |
+| Notification leaks | The notify hook sends agent name, action, number of paths, request id and a dashboard link. Paths only when `notify_include_paths` is on. The reason is never sent. No approve links, no tokens in URLs. The ntfy token comes from Phoenix at send time and is never logged. Redirects are not followed | Whoever can read the notification topic learns that an agent asked for something, and when |
+| Revoke after use | Revoke and expiry are checked on every request | Revoking cannot take back a value already delivered. Rotate the secret if that matters |
+| Shared dashboard credential | Unchanged (see above). Approvals are recorded as `dashboard@<ip>` | Anyone with the dashboard password can approve any request |
 
 ## Sealed responses
 

@@ -20,6 +20,11 @@
             <span class="pill-label">Bootstrap Trust</span>
             {{range .Config.BootstrapTrust}}<span class="pill pill-bootstrap">{{.}}</span>{{end}}
         </div>
+        <div class="pill-group">
+            <span class="pill-label">Allowed Agents</span>
+            {{range .Config.AllowedAgents}}<span class="pill pill-bootstrap">{{.}}</span>{{end}}
+            {{if not .Config.AllowedAgents}}<span class="flag flag-warn">any agent (no binding)</span>{{end}}
+        </div>
         <div class="role-flags">
             {{if .Config.StepUp}}<span class="flag flag-stepup">step-up</span>{{end}}
             {{if .Config.RequireSealKey}}<span class="flag flag-seal">seal key</span>{{end}}

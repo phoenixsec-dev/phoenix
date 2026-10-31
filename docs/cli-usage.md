@@ -184,6 +184,10 @@ phoenix approve apr_xyz789
 phoenix deny apr_xyz789
 ```
 
+If a role has `allowed_agents` and your agent is not on it, mint, approve and
+renew fail with `ROLE_NOT_ALLOWED` (next step: ask the user). See
+[Session Identity](session-identity.md#binding-a-role-to-agents-allowed_agents).
+
 When `PHOENIX_ROLE` is set, the CLI auto-mints a session on the first request
 and caches it for the session lifetime:
 

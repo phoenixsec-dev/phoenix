@@ -65,7 +65,7 @@ errors.
 |---|---|
 | `request_use` | Ask a human for temporary use of this path (`POST /v1/access-requests`, see [access-requests.md](access-requests.md)) with the agent's own identity, never a session |
 | `wait` | A human decision is pending; poll again |
-| `use_exec` | Use the value through `phoenix exec`, which requests and decrypts sealed values |
+| `use_exec` | Use the value through `phoenix exec` (with `--redact-output` for agents), which requests and decrypts sealed values |
 | `remint_session` | Mint a new session, or one whose role covers this path and action |
 | `ask_user` | Only a human can fix this |
 | `none` | Not an access problem; retrying or asking will not help |
@@ -116,6 +116,7 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | `APPROVAL_REQUIRED` | 202 | `wait` | Step-up approval needed |
 | `STEP_UP_REAPPROVAL_REQUIRED` | 403 | `remint_session` | Elevated session cannot renew without fresh approval |
 | `ROLE_NOT_FOUND` | 403/404 | `ask_user` | Requested role does not exist |
+| `ROLE_NOT_ALLOWED` | 403 | `ask_user` | The role's `allowed_agents` does not list this agent. Checked at mint, at step-up approval (API and dashboard) and at renewal |
 | `BOOTSTRAP_FAILED` | 403 | `ask_user` | Auth method not in the role's `bootstrap_trust` |
 | `ATTESTATION_FAILED` | 403 | `ask_user` | Attestation not met at session mint or renew |
 | `ADMIN_AUTH_REQUIRED` | 403 | `ask_user` | Session tokens cannot perform this action |

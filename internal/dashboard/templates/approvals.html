@@ -91,6 +91,7 @@
             <span class="approval-role">{{.Role}}</span>
             <span class="approval-agent">{{.Agent}}</span>
         </div>
+        {{if index $.UnboundRoles .Role}}<div class="detail-row"><span class="flag flag-warn" title="Any agent whose auth method this role trusts can ask for it. Set allowed_agents on the role.">role has no agent binding</span></div>{{end}}
         <div class="approval-details">
             <div class="detail-row"><span class="detail-label">Source IP</span><span class="mono">{{.SourceIP}}</span></div>
             <div class="detail-row"><span class="detail-label">Bootstrap</span><span>{{.BootstrapMethod}}</span></div>
