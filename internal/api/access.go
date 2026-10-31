@@ -76,10 +76,18 @@ func (s *Server) requestable(path, action string) bool {
 	return actionGrantable(cfg, action) && !pathDenied(cfg, path)
 }
 
-// isApprover: not a session, listed in access_requests.approvers. Admin ACL
-// alone does not count. Self-approval is checked separately per request.
+// isApprover: not a session, listed in access_requests.approvers, and still
+// an agent in the ACL. The ACL check matters because short-lived tokens and
+// mTLS certs authenticate by name only, so they outlive an agent delete.
+// Admin ACL alone does not count. Self-approval is checked per request.
+// Every approver-only path (approve, deny, ?agent= lists, full views,
+// revoking others' grants) goes through this one check.
 func (s *Server) isApprover(info *authInfo) bool {
-	return !info.UsedSession && slices.Contains(s.accessSettings().Approvers, info.Agent)
+	if info.UsedSession || !slices.Contains(s.accessSettings().Approvers, info.Agent) {
+		return false
+	}
+	_, err := s.acl.GetAgent(info.Agent)
+	return err == nil
 }
 
 // grantCaller describes the caller's credential for grant binding: the auth
@@ -205,8 +213,9 @@ func (s *Server) accessAuth(w http.ResponseWriter, r *http.Request, approverOnly
 		if approverOnly {
 			writeAccessError(w, CodeApproverRequired, "session tokens cannot approve or deny access requests", http.StatusForbidden)
 		} else {
-			writeAccessError(w, CodeSessionCannotRequest,
-				"access requests and grants use the agent's own identity (bearer, mTLS or short-lived token), not a session", http.StatusForbidden)
+			jsonDeniedStep(w, "access_denied", CodeSessionCannotRequest,
+				"access requests and grants use the agent's own identity (bearer, mTLS or short-lived token), not a session",
+				"", s.sessionRequestStep(r), http.StatusForbidden)
 		}
 		return nil, false
 	}
@@ -215,6 +224,45 @@ func (s *Server) accessAuth(w http.ResponseWriter, r *http.Request, approverOnly
 		return nil, false
 	}
 	return info, true
+}
+
+// sessionRequestStep is the next step for SESSION_CANNOT_REQUEST: request_use
+// (resend with the agent's own identity) only when that request could
+// succeed under the current settings. For POST /v1/access-requests the
+// body's paths and action are checked; other endpoints name no path, so
+// only "feature on and read_value grantable" applies.
+func (s *Server) sessionRequestStep(r *http.Request) string {
+	action, paths := grant.ActionReadValue, []string(nil)
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/access-requests" {
+		var body accessRequestBody
+		if json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body) != nil {
+			return NextAskUser
+		}
+		if body.Action != "" {
+			action = body.Action
+		}
+		if paths = body.Paths; len(paths) == 0 {
+			return NextAskUser
+		}
+	}
+	if s.allRequestable(paths, action) {
+		return NextRequestUse
+	}
+	return NextAskUser
+}
+
+// allRequestable reports whether the feature is on, action is grantable and
+// none of paths is in deny_paths (an empty list checks only the first two).
+func (s *Server) allRequestable(paths []string, action string) bool {
+	if !s.grantsOn() || !actionGrantable(s.accessSettings(), action) {
+		return false
+	}
+	for _, p := range paths {
+		if !s.requestable(p, action) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeAccessError writes the denial shape for a request-use error.
@@ -347,6 +395,14 @@ func (s *Server) requestView(rq grant.Request, full bool) map[string]any {
 		}
 	}
 	step, msg := requestNextStep(rq, g, now)
+	// Apply the current settings: a grant cannot be used while the feature
+	// is off, and request_use is only advertised for requestable paths.
+	switch {
+	case step == NextUseExec && !s.grantsOn():
+		step, msg = NextAskUser, "Access requests are turned off on this server, so the grant cannot be used. Ask the user."
+	case step == NextRequestUse && !s.allRequestable(rq.Paths, rq.Action):
+		step, msg = NextAskUser, "Grant ended and these paths cannot be requested right now. Ask the user."
+	}
 	v := map[string]any{
 		"id":            rq.ID,
 		"status":        string(rq.Status),

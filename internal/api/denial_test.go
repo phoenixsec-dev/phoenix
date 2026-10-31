@@ -36,12 +36,11 @@ func TestDenialNextStepsAreFromClosedSet(t *testing.T) {
 	if got := nextStepFor("SOME_FUTURE_CODE"); got != NextAskUser {
 		t.Fatalf("unknown code next_step = %q, want %q", got, NextAskUser)
 	}
-	// Only these codes carry request_use statically. GRANT_EXPIRED is still
-	// downgraded to ask_user for paths that are not requestable (see
-	// TestRequestUseOnlyAdvertisedWhenRequestable in access_test.go).
-	staticRequestUse := map[string]bool{CodeGrantExpired: true, CodeSessionCannotRequest: true}
+	// request_use is never static: it depends on the current settings and
+	// the path, so it only comes from Server.denialNextStep (see
+	// TestRequestUseFollowsCurrentSettingsEverywhere in access_test.go).
 	for code, step := range denialNextStep {
-		if step == NextRequestUse && !staticRequestUse[code] {
+		if step == NextRequestUse {
 			t.Errorf("code %s advertises request_use statically; it must go through denialNextStep", code)
 		}
 	}

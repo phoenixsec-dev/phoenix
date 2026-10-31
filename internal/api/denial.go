@@ -83,14 +83,15 @@ var denialNextStep = map[string]string{
 	CodeNotFound:            NextNone,
 	CodeInvalidRef:          NextNone,
 	CodeInternalError:       NextAskUser,
-	// GRANT_EXPIRED says request_use only for requestable paths; see
-	// denialNextStep, which downgrades it to ask_user otherwise.
-	CodeGrantExpired: NextRequestUse,
+	// GRANT_EXPIRED and SESSION_CANNOT_REQUEST are upgraded to request_use
+	// by denialNextStep / sessionRequestStep when the path is requestable.
+	// request_use is never static: it depends on the current settings.
+	CodeGrantExpired: NextAskUser,
 	CodeGrantRevoked: NextAskUser,
 
 	// Request-use API codes.
 	CodeNotRequestable:       NextAskUser,
-	CodeSessionCannotRequest: NextRequestUse, // resend with the agent's own identity
+	CodeSessionCannotRequest: NextAskUser,
 	CodeRequestsDisabled:     NextAskUser,
 	CodeRequestsDegraded:     NextAskUser,
 	CodeAlreadyAllowed:       NextNone,
@@ -156,9 +157,6 @@ func (s *Server) denialNextStep(code, path, action string) string {
 	case CodeACLDenied, CodeGrantExpired, CodeScopeExceeded, CodeActionDenied:
 		if s.requestable(path, action) {
 			return NextRequestUse
-		}
-		if code == CodeGrantExpired {
-			return NextAskUser
 		}
 	}
 	return nextStepFor(code)

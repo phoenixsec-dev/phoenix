@@ -78,7 +78,10 @@ and the path does not match `access_requests.deny_paths`. Otherwise the same
 denial says `ask_user` (or its usual step for session codes). This applies to
 `ACL_DENIED`, `GRANT_EXPIRED`, and to `SCOPE_EXCEEDED` / `ACTION_DENIED` on
 reads: a session denial on a requestable path says `request_use`, and the
-request and the use then go through the agent's own identity.
+request and the use then go through the agent's own identity. A single-secret
+`GET` and `/v1/resolve` give the same next step for the same path. It also
+applies to `SESSION_CANNOT_REQUEST` and to the `next_step` in access-request
+status views, which always reflect the settings at the time you ask.
 
 Precedence (first failure wins): authentication, session scope / action, ACL
 or grant, sealed requirement, attestation. A grant never waives attestation.
@@ -128,7 +131,7 @@ Returned by `/v1/access-requests*` and `/v1/grants*` (see
 
 | Code | HTTP | `next_step` | When |
 |---|---|---|---|
-| `SESSION_CANNOT_REQUEST` | 403 | `request_use` | Sent with a `phxs_` session token; resend with the agent's own bearer, mTLS or short-lived token |
+| `SESSION_CANNOT_REQUEST` | 403 | `request_use` if the request could succeed under the current settings, else `ask_user` | Sent with a `phxs_` session token; resend with the agent's own bearer, mTLS or short-lived token |
 | `REQUESTS_DISABLED` | 501 | `ask_user` | The feature is off (or this server has no grant store) |
 | `REQUESTS_DEGRADED` | 503 | `ask_user` | The grants file could not be saved or was quarantined |
 | `NOT_REQUESTABLE` | 403 | `ask_user` | A path matches `deny_paths` (also re-checked at approval) |

@@ -631,6 +631,11 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 // max(short-lived token TTL, max_grant_ttl) plus an hour, so no credential
 // issued before a delete can outlive its tombstone.
 func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger, tokenTTL time.Duration) (*grant.Store, error) {
+	// Checked again here (Validate already did) so no caller can open a
+	// store that would overwrite or quarantine another Phoenix file.
+	if err := cfg.ValidateGrantStorePath(); err != nil {
+		return nil, err
+	}
 	set := cfg.AccessRequestsSettings()
 	return grant.Open(grant.Options{
 		Path:  set.StorePath,
