@@ -225,7 +225,9 @@ func (c *Config) validateAccessRequests() error {
 	}
 	if ar.NotifyTokenRef != "" {
 		if _, err := ref.Parse(ar.NotifyTokenRef); err != nil {
-			return fmt.Errorf("access_requests.notify_token_ref must be a phoenix:// reference such as phoenix://phoenix/ntfy-token: %w", err)
+			// No wrapped parse error: it would quote the value, and a token
+			// pasted here by mistake would end up in the startup log.
+			return errors.New("access_requests.notify_token_ref must be a phoenix:// reference such as phoenix://phoenix/ntfy-token")
 		}
 	}
 
@@ -236,8 +238,8 @@ func (c *Config) validateAccessRequests() error {
 // user:password part (credentials belong in notify_token_ref, never in the
 // config file), query or fragment.
 func checkHTTPURL(raw string) error {
-	// The parse error and the user:password case do not echo the URL: it
-	// could hold a password, and this message ends up in logs.
+	// No message echoes the URL: it could hold a password or a private ntfy
+	// topic, and this message ends up in the startup log.
 	u, err := url.Parse(raw)
 	if err != nil {
 		return errors.New("not a valid URL")
@@ -246,13 +248,13 @@ func checkHTTPURL(raw string) error {
 		return errors.New("the URL must not contain a user name or password; put a token in Phoenix and set notify_token_ref")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("%q must start with https:// or http://", raw)
+		return errors.New("the URL must start with https:// or http://")
 	}
 	if u.Host == "" {
-		return fmt.Errorf("%q has no host", raw)
+		return errors.New("the URL has no host")
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("%q must not contain a query (?) or fragment (#)", raw)
+		return errors.New("the URL must not contain a query (?) or fragment (#)")
 	}
 	return nil
 }

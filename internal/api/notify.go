@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -65,7 +67,7 @@ func (s *Server) sendAccessNotify(ctx context.Context, cfg config.AccessRequests
 	body := notifyMessage(cfg, rq, link)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.NotifyURL, strings.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("building request: %w", err)
+		return errors.New("notify_url is not a usable URL")
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	req.Header.Set("Title", "Phoenix: access request")
@@ -84,7 +86,7 @@ func (s *Server) sendAccessNotify(ctx context.Context, cfg config.AccessRequests
 	}
 	resp, err := notifyClient(s.notifyTimeout).Do(req)
 	if err != nil {
-		return err
+		return notifySendError(err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -140,4 +142,19 @@ func notifyMessage(cfg config.AccessRequestsSettings, rq grant.Request, link str
 		b.WriteString(link + "\n")
 	}
 	return b.String()
+}
+
+// notifySendError turns a transport error into a short reason without the
+// URL. Go's *url.Error quotes the full URL, and an ntfy topic name works
+// like a password, so the raw error must never reach the log.
+func notifySendError(err error) error {
+	var ne net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return errors.New("notify_url timed out")
+	case errors.Is(err, context.Canceled):
+		return errors.New("notify send was cancelled")
+	default:
+		return errors.New("could not reach notify_url (connection or TLS failure)")
+	}
 }

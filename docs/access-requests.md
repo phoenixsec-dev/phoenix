@@ -321,7 +321,9 @@ phoenix set phoenix/ntfy-token -d "ntfy token for approval pings"   # paste tk_.
 ```
 
 Restart the server. Subscribe to `phoenix-approvals` in the ntfy app; tapping
-a notification opens the request card. The token is read from the store each
+a notification opens the request card if you are already logged in to the
+dashboard. If not, you land on the login page, and after logging in you are
+taken to the overview: open Approvals (or tap the notification again). The token is read from the store each
 time a message is sent, so rotating it needs no restart. If the reference
 cannot be read, nothing is sent (an unauthenticated post could land on a
 public topic) and the server logs why, without the token. Consider adding
@@ -379,7 +381,8 @@ Other things to check:
 All responses are JSON with `Cache-Control: no-store`. Errors use the denial
 shape and codes in [denial-codes.md](denial-codes.md#access-requests-and-grants).
 
-Agent side (own bearer / mTLS / short-lived token; sessions get `403 SESSION_CANNOT_REQUEST`):
+Agent side (own bearer / mTLS / short-lived token; sessions get `403 SESSION_CANNOT_REQUEST`,
+except `GET /v1/whoami`, which answers for a session too, showing its scope and no grants):
 
 | Method + path | Does |
 |---|---|

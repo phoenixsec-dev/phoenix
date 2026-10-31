@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -279,4 +280,23 @@ func TestNotifyFailureDoesNotBlockRequest(t *testing.T) {
 			t.Fatalf("notify_url called %d times, want exactly 1 (no retries)", calls)
 		}
 	})
+}
+
+// P4 review N1: a transport failure (here: nothing listening) is logged
+// without the URL. An ntfy topic name works like a password.
+func TestNotifyTransportFailureDoesNotLogURL(t *testing.T) {
+	e := newGrantEnv(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // nothing listens there now: connection refused
+	e.set(func(s *config.AccessRequestsSettings) { s.NotifyURL = "http://" + addr + "/private-topic-xyz" })
+	logs := captureLog(t)
+	e.request(t, vectorTok, "infra/b2/app-key")
+	out := waitLog(t, logs, "notify for")
+	if strings.Contains(out, "private-topic-xyz") || strings.Contains(out, addr) {
+		t.Fatalf("notify failure log shows the URL:\n%s", out)
+	}
 }

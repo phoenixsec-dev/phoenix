@@ -978,3 +978,28 @@ func TestAccessRequestsNotifyValidation(t *testing.T) {
 		})
 	}
 }
+
+// P4 review N2: a rejected notify value never appears in the error, because
+// startup logs it. A pasted token or a URL with a secret in it must not leak.
+func TestAccessRequestsNotifyErrorsDoNotEchoValues(t *testing.T) {
+	const secret = "s3cr3t-topic-or-token"
+	for _, ar := range []AccessRequestsConfig{
+		{NotifyURL: "https://ntfy.example.net/t?auth=" + secret},
+		{NotifyURL: "https://ntfy.example.net/" + secret + "#frag"},
+		{NotifyURL: "ftp://ntfy.example.net/" + secret},
+		{NotifyURL: "https:///" + secret},
+		{NotifyDashboardURL: "https://p.example.net/?k=" + secret},
+		{NotifyTokenRef: "tk_" + secret},
+	} {
+		cfg := DefaultConfig()
+		a := ar
+		cfg.AccessRequests = &a
+		err := cfg.validateAccessRequests()
+		if err == nil {
+			t.Fatalf("%+v accepted", ar)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error echoes the value: %v", err)
+		}
+	}
+}

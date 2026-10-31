@@ -23,7 +23,7 @@ type refDenial struct {
 var nextStepHints = map[string]string{
 	"request_use":    `request temporary use from a human: phoenix request <path> --reason "why you need it"`,
 	"wait":           "a human decision is pending; check again shortly",
-	"use_exec":       "use phoenix exec --env NAME=phoenix://<path> -- <command>; it requests and decrypts sealed values for you",
+	"use_exec":       "use phoenix exec --redact-output --env NAME=phoenix://<path> -- <command>; it requests and decrypts sealed values for you and hides them in the output",
 	"remint_session": "mint a new session, or one whose role covers this path and action",
 	"ask_user":       "ask the user or Phoenix operator; this cannot be fixed by retrying",
 	"none":           "check the reference; retrying will not help",

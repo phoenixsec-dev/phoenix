@@ -17,7 +17,7 @@ func TestNextStepHintUnknownFallsBackToAskUser(t *testing.T) {
 			t.Errorf("nextStepHint(%q) = %q, want ask_user hint", step, got)
 		}
 	}
-	if got := nextStepHint("use_exec"); !strings.Contains(got, "phoenix exec") {
+	if got := nextStepHint("use_exec"); !strings.Contains(got, "phoenix exec --redact-output") {
 		t.Errorf("use_exec hint = %q", got)
 	}
 }
