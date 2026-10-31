@@ -126,11 +126,12 @@ type Grant struct {
 
 // State returns whether the grant is active, expired or revoked at now.
 // Expiry is exclusive: at exactly ExpiresAt the grant is already expired.
+// Once expiry is recorded it is final, even if the clock later steps back.
 func (g Grant) State(now time.Time) GrantState {
 	if !g.RevokedAt.IsZero() {
 		return GrantRevoked
 	}
-	if !now.Before(g.ExpiresAt) {
+	if g.ExpiryRecorded || !now.Before(g.ExpiresAt) {
 		return GrantExpired
 	}
 	return GrantActive

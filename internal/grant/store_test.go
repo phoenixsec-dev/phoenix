@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -472,5 +473,101 @@ func TestTombstonePrune(t *testing.T) {
 	e.s.Tick()
 	if _, ok := e.s.snapshot().Tombstones["gone"]; ok {
 		t.Fatal("tombstone kept past retention")
+	}
+}
+
+// G2: a revoke acknowledged while Match is busy asking the ACL whether the
+// agent exists must still win; Match decides on the state after the call.
+func TestMatchSeesRevokeDuringAgentExists(t *testing.T) {
+	e := newEnv(t)
+	g := e.approve(e.create("vector", "infra/key").ID)
+	entered, release := make(chan struct{}), make(chan struct{})
+	e.setHook(func(string) { close(entered); <-release })
+
+	done := make(chan MatchResult)
+	go func() { done <- e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue) }()
+	<-entered
+	if _, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if m := <-done; m.Grant != nil || m.Reason != ReasonGrantRevoked {
+		t.Fatalf("Match after acknowledged revoke: %+v", m)
+	}
+}
+
+// G3: once expiry is durably recorded, a clock stepping backwards (also
+// across a restart) must not bring the grant back.
+func TestRecordedExpiryIgnoresClockStepBack(t *testing.T) {
+	e := newEnv(t)
+	g := e.approve(e.create("vector", "infra/key").ID)
+	e.clock.Set(g.ExpiresAt)
+	e.s.Tick()
+	e.clock.Set(g.ExpiresAt.Add(-time.Second))
+	e.reopen()
+	if m := e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue); m.Grant != nil {
+		t.Fatalf("expired grant active again after clock step back: %+v", m.Grant)
+	}
+	if v, _ := e.s.GetGrant(g.ID); v.State(e.clock.Now()) != GrantExpired {
+		t.Fatalf("state = %s, want expired", v.State(e.clock.Now()))
+	}
+	// Revoked still takes precedence over recorded expiry.
+	v, _ := e.s.GetGrant(g.ID)
+	v.RevokedAt = t0
+	if v.State(e.clock.Now()) != GrantRevoked {
+		t.Fatal("revoked must take precedence")
+	}
+}
+
+// mutSink keeps every event it gets and then scribbles over its slices and
+// maps, the way a careless sink might.
+type mutSink struct {
+	mu   sync.Mutex
+	kept []Event
+}
+
+func (m *mutSink) Append(e Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range e.Paths {
+		e.Paths[i] = "evil/path"
+	}
+	for k := range e.Detail {
+		e.Detail[k] = "evil"
+	}
+	m.kept = append(m.kept, e)
+	return nil
+}
+
+// G4: events handed to the sink are deep copies of the records.
+func TestAuditSinkCannotMutateRecords(t *testing.T) {
+	e := newEnv(t)
+	sink := &mutSink{}
+	s, err := Open(Options{Path: e.path, Audit: sink, Now: e.clock.Now, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := s.Create(bearerIn("vector", "infra/key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, g, err := s.Approve(approveIn(r.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetRequest(r.ID); !slices.Equal(got.Paths, []string{"infra/key"}) {
+		t.Fatalf("request paths changed by sink: %v", got.Paths)
+	}
+	if got, _ := s.GetGrant(g.ID); !slices.Equal(got.Paths, []string{"infra/key"}) {
+		t.Fatalf("grant paths changed by sink: %v", got.Paths)
+	}
+	if m := s.Match(bearerCaller("vector"), "infra/key", ActionReadValue); m.Grant == nil {
+		t.Fatal("grant no longer matches its real path")
+	}
+	if _, err := s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetGrant(g.ID); !slices.Equal(got.Paths, []string{"infra/key"}) {
+		t.Fatalf("grant paths changed by sink after revoke: %v", got.Paths)
 	}
 }

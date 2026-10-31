@@ -2,6 +2,7 @@ package grant
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -29,9 +30,20 @@ func TestConcurrentTransitions(t *testing.T) {
 					switch i % 3 {
 					case 0:
 						if _, g, err := e.s.Approve(approveIn(r.ID)); err == nil {
-							e.s.Match(bearerCaller(agent), path, ActionReadValue)
+							// Paths repeat every 4 iterations, so an older grant of the
+							// same agent may match too; it must be the caller's, for
+							// this path, and active.
+							if m := e.s.Match(bearerCaller(agent), path, ActionReadValue); m.Grant != nil &&
+								(m.Grant.Agent != agent || !slices.Contains(m.Grant.Paths, path) || !m.Grant.RevokedAt.IsZero()) {
+								t.Errorf("Match returned wrong grant %+v", m.Grant)
+							}
 							e.s.RecordUse(g.ID)
-							e.s.Revoke(RevokeInput{GrantID: g.ID, By: agent, OwnerOnly: true})
+							// After an acknowledged revoke, Match never returns that grant.
+							if _, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: agent, OwnerOnly: true}); err == nil {
+								if m := e.s.Match(bearerCaller(agent), path, ActionReadValue); m.Grant != nil && m.Grant.ID == g.ID {
+									t.Errorf("grant %s matched after acknowledged revoke", g.ID)
+								}
+							}
 						}
 					case 1:
 						e.s.Deny(DenyInput{RequestID: r.ID, Denier: "dashboard@x"})
