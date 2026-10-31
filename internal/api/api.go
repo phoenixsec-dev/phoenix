@@ -721,10 +721,12 @@ func (s *Server) checkSessionScope(w http.ResponseWriter, r *http.Request, info 
 	}
 	if !session.PathInScope(path, info.SessionNamespaces) {
 		s.auditLogSessionDenied(r, info.Agent, "scope_check", path, ip, "session_scope", info.SessionID)
-		jsonDenied(w, "access_denied", "SCOPE_EXCEEDED",
+		// Only used for single-secret GETs, so the action is read_value; the
+		// next step matches what /v1/resolve says for the same path.
+		jsonDeniedStep(w, "access_denied", CodeScopeExceeded,
 			fmt.Sprintf("path %q is outside session scope for role %q", path, info.SessionRole),
 			"request a session with a role that includes this namespace",
-			http.StatusForbidden)
+			s.denialNextStep(CodeScopeExceeded, path, "read_value"), http.StatusForbidden)
 		return false
 	}
 	return true

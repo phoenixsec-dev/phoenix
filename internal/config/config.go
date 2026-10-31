@@ -474,6 +474,10 @@ func (c *Config) Validate() error {
 	if err := c.validateAccessRequests(); err != nil {
 		return err
 	}
+	// Always, even without an access_requests block: the store always opens.
+	if err := c.ValidateGrantStorePath(); err != nil {
+		return err
+	}
 
 	return nil
 }

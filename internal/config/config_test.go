@@ -712,8 +712,8 @@ func TestAccessRequestsConfig(t *testing.T) {
 		{"default above max", `{"default_grant_ttl":"9h"}`, "default_grant_ttl <= max_grant_ttl"},
 		{"max above 24h", `{"max_grant_ttl":"25h"}`, "<= 24h"},
 		{"bad deny glob", `{"deny_paths":["infra/*/keys"]}`, "deny_paths"},
-		{"store collides with acl", `{"store_path":"/data/acl.json"}`, "collides with acl.path"},
-		{"store collides with temp", `{"store_path":"/data/store.json.tmp-1"}`, "collides with store.path"},
+		{"store collides with acl", `{"store_path":"/data/acl.json"}`, "same file as acl.path"},
+		{"store collides with temp", `{"store_path":"/data/store.json.tmp-1"}`, "same file as store.path"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := load(t, c.block)
@@ -741,4 +741,86 @@ func TestAccessRequestsConfig(t *testing.T) {
 			t.Fatal("config.example.json must enable access_requests")
 		}
 	})
+}
+
+// R1 H1: the grants file path is validated even without an access_requests
+// block, and aliases (relative paths, symlinks) are resolved.
+func TestGrantStorePathCollisions(t *testing.T) {
+	base := func(dir string) *Config {
+		cfg := DefaultConfig()
+		cfg.ACL.Path = filepath.Join(dir, "acl.json")
+		cfg.Audit.Path = filepath.Join(dir, "audit.log")
+		cfg.Store.Path = filepath.Join(dir, "store.json")
+		cfg.Store.MasterKey = filepath.Join(dir, "master.key")
+		return cfg
+	}
+	mustCollide := func(t *testing.T, cfg *Config, field string) {
+		t.Helper()
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), "store_path") {
+			t.Fatalf("err = %v, want a collision with %s naming access_requests.store_path", err, field)
+		}
+	}
+
+	t.Run("no block, data file is grants.json", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := base(dir)
+		cfg.Store.Path = filepath.Join(dir, "grants.json")
+		if err := os.WriteFile(cfg.Store.Path, []byte("secrets-db"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		mustCollide(t, cfg, "store.path")
+		if b, _ := os.ReadFile(cfg.Store.Path); string(b) != "secrets-db" {
+			t.Fatalf("data file changed: %q", b)
+		}
+	})
+	t.Run("no block, ACL is grants.json", func(t *testing.T) {
+		cfg := base(t.TempDir())
+		cfg.ACL.Path = filepath.Join(filepath.Dir(cfg.ACL.Path), "grants.json")
+		mustCollide(t, cfg, "acl.path")
+	})
+	t.Run("relative and absolute spelling", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		cfg := base(dir)
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: "store.json"}
+		mustCollide(t, cfg, "store.path")
+		cfg.AccessRequests.StorePath = "./audit.log.tmp-1"
+		mustCollide(t, cfg, "audit.path")
+	})
+	t.Run("symlinked directory", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real")
+		if err := os.Mkdir(real, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		cfg := base(real)
+		// The ACL file does not exist yet: its parent directory is resolved.
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: filepath.Join(dir, "link", "acl.json")}
+		mustCollide(t, cfg, "acl.path")
+	})
+	t.Run("separate file is fine", func(t *testing.T) {
+		cfg := base(t.TempDir())
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// R1 M2: only ONE trailing wildcard suffix is allowed; "infra/*/**" used to
+// pass validation while matching nothing at runtime.
+func TestValidatePathGlob(t *testing.T) {
+	for _, ok := range []string{"*", "**", "infra/b2/app-key", "infra/*", "infra/**", "phoenix/**"} {
+		if err := ValidatePathGlob(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "infra/*/**", "infra/**/*", "infra/**/**", "infra/*/keys", "in*fra", "/infra/**", "/**", "infra/[ab]"} {
+		if err := ValidatePathGlob(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
 }

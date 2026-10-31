@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -191,25 +192,67 @@ func (c *Config) validateAccessRequests() error {
 		}
 	}
 
-	// The grants file must never overwrite another Phoenix file.
-	grants := filepath.Clean(c.GrantStorePath())
-	protected := map[string]string{
-		"acl.path":         c.ACL.Path,
-		"audit.path":       c.Audit.Path,
-		"store.path":       c.Store.Path,
-		"store.master_key": c.Store.MasterKey,
-		"policy.path":      c.Policy.Path,
+	return nil
+}
+
+// ValidateGrantStorePath checks that the EFFECTIVE grants file (store_path,
+// or the default grants.json next to the ACL file) and its temp files are
+// not the same file as another Phoenix file or one of its temp files. It
+// runs whether or not the access_requests block exists, because the server
+// always opens the grant store; without it an install whose secrets file or
+// ACL happens to be grants.json would have it overwritten or quarantined.
+// Paths are compared absolute and with symlinks resolved, so "data/x" vs
+// "/srv/data/x" or a symlinked directory cannot slip past. It only reads
+// the filesystem.
+func (c *Config) ValidateGrantStorePath() error {
+	grants := resolvePath(c.GrantStorePath())
+	protected := []struct{ field, path string }{
+		{"acl.path", c.ACL.Path},
+		{"audit.path", c.Audit.Path},
+		{"store.path", c.Store.Path},
+		{"store.master_key", c.Store.MasterKey},
+		{"policy.path", c.Policy.Path},
+		{"auth.mtls.crl_path", c.Auth.MTLS.CRLPath},
 	}
-	for field, p := range protected {
-		if p == "" {
+	for _, pr := range protected {
+		if pr.path == "" {
 			continue
 		}
-		p = filepath.Clean(p)
-		if grants == p || strings.HasPrefix(grants, p+".tmp") || strings.HasPrefix(p, grants+".tmp") {
-			return fmt.Errorf("access_requests.store_path %q collides with %s (or its temp file)", grants, field)
+		p := resolvePath(pr.path)
+		// Every Phoenix temp file is "<name>.tmp" or "<name>.tmp-<random>".
+		if grants == p || strings.HasPrefix(grants, p+".tmp") || strings.HasPrefix(p, grants+".tmp") || sameFile(grants, p) {
+			return fmt.Errorf("access_requests: the grants file %q is the same file as %s %q (or one of its temp files); "+
+				"set access_requests.store_path to a separate file such as %q",
+				c.GrantStorePath(), pr.field, pr.path, filepath.Join(filepath.Dir(p), "phoenix-grants.json"))
 		}
 	}
 	return nil
+}
+
+// resolvePath returns p as an absolute path with symlinks resolved. When p
+// does not exist yet, its parent directory is resolved instead.
+func resolvePath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = filepath.Clean(p)
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		return filepath.Join(dir, filepath.Base(abs))
+	}
+	return abs
+}
+
+// sameFile catches hard links and bind mounts that path comparison misses.
+func sameFile(a, b string) bool {
+	ia, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	ib, err := os.Stat(b)
+	return err == nil && os.SameFile(ia, ib)
 }
 
 // ValidatePathGlob checks a path pattern in the ACL / session namespace
@@ -222,7 +265,14 @@ func ValidatePathGlob(p string) error {
 	if p == "*" || p == "**" {
 		return nil
 	}
-	base := strings.TrimSuffix(strings.TrimSuffix(p, "/**"), "/*")
+	// Strip at most ONE supported suffix; any wildcard left is an error
+	// ("infra/*/**" would otherwise pass but match nothing at runtime).
+	base := p
+	if b, ok := strings.CutSuffix(p, "/**"); ok {
+		base = b
+	} else if b, ok := strings.CutSuffix(p, "/*"); ok {
+		base = b
+	}
 	if base == "" || strings.HasPrefix(base, "/") || strings.ContainsAny(base, "*?[]{}") {
 		return fmt.Errorf("invalid pattern %q (use an exact path, prefix/*, prefix/** or *)", p)
 	}

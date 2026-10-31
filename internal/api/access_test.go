@@ -947,3 +947,102 @@ func TestEveryDenialCodeIsDocumented(t *testing.T) {
 		}
 	}
 }
+
+// R1 H2: a deleted approver's still-valid short-lived token or mTLS cert
+// (both authenticate by name) must lose every approver power.
+func TestDeletedApproverLosesApproverPowers(t *testing.T) {
+	e := newGrantEnv(t)
+	authority := setCA(t, e.srv)
+	cert := issueCertPEM(t, authority, "approver")
+	iss, _ := token.NewIssuer(time.Hour)
+	e.srv.SetTokenIssuer(iss)
+	tok, _, _ := iss.Mint("approver", nil, "")
+
+	gid := e.approve(t, e.request(t, vectorTok, "infra/other"), "")
+	pending := e.request(t, vectorTok, "infra/b2/app-key")
+	expect(t, e.do("DELETE", "/v1/agents/approver", adminTok, ""), 200, "")
+
+	viaCert := func(method, path string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		e.srv.ServeHTTP(w, makeMTLSRequest(method, path, nil, cert))
+		return w
+	}
+	viaToken := func(method, path string) *httptest.ResponseRecorder { return e.do(method, path, tok, "") }
+	for name, call := range map[string]func(string, string) *httptest.ResponseRecorder{"short-lived token": viaToken, "mtls cert": viaCert} {
+		t.Run(name, func(t *testing.T) {
+			expect(t, call("POST", "/v1/access-requests/"+pending+"/approve"), 403, CodeApproverRequired)
+			expect(t, call("POST", "/v1/access-requests/"+pending+"/deny"), 403, CodeApproverRequired)
+			expect(t, call("GET", "/v1/access-requests?agent=vector"), 403, CodeApproverRequired)
+			expect(t, call("GET", "/v1/grants?agent=vector"), 403, CodeApproverRequired)
+			expect(t, call("GET", "/v1/access-requests/"+pending), 404, CodeNotFound)
+			if l := expect(t, call("GET", "/v1/access-requests"), 200, ""); len(l["requests"].([]any)) != 0 {
+				t.Fatalf("deleted approver still sees other agents' requests: %v", l)
+			}
+			// Revoking another agent's grant looks like 404 (no existence oracle).
+			expect(t, call("POST", "/v1/grants/"+gid+"/revoke"), 404, CodeNotFound)
+		})
+	}
+	if g, _ := e.store.GetGrant(gid); g.State(e.clock.Now()) != grant.GrantActive {
+		t.Fatal("deleted approver revoked another agent's grant")
+	}
+	if r, _ := e.store.GetRequest(pending); r.Status != grant.StatusPending {
+		t.Fatalf("deleted approver decided a request: %s", r.Status)
+	}
+}
+
+// R1 M1: every request_use the server emits follows the CURRENT rule
+// (feature on, action grantable, path not in deny_paths).
+func TestRequestUseFollowsCurrentSettingsEverywhere(t *testing.T) {
+	e := newGrantEnv(t)
+	ss, err := session.NewStore(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ss.Stop)
+	e.srv.SetSessionStore(ss)
+	// A narrow role: infra/** is out of scope for this session.
+	e.srv.SetSessionRoles(map[string]config.RoleConfig{
+		"narrow": {Namespaces: []string{"dev/**"}, Actions: []string{"read_value"}, BootstrapTrust: []string{"bearer"}},
+	})
+	sess := expect(t, e.do("POST", "/v1/session/mint", vectorTok, `{"role":"narrow"}`), 200, "")["session_token"].(string)
+
+	// An approved grant that has expired: its request view says request_use
+	// only while the path is still requestable.
+	expired := e.request(t, vectorTok, "infra/b2/app-key")
+	e.approve(t, expired, `{"ttl":"1m"}`)
+	active := e.request(t, vectorTok, "infra/other")
+	e.approve(t, active, "")
+	e.clock.Advance(2 * time.Minute)
+
+	type steps struct{ getScope, resolveScope, sessCreate, sessList, expiredView, activeView string }
+	observe := func() steps {
+		t.Helper()
+		get := jsonBody(t, e.do("GET", "/v1/secrets/infra/b2/app-key", sess, ""))
+		if get["code"] != CodeScopeExceeded {
+			t.Fatalf("GET out of scope = %v", get)
+		}
+		rm := expect(t, e.do("POST", "/v1/resolve", sess, `{"refs":["phoenix://infra/b2/app-key"]}`), 200, "")
+		rc := rm["error_codes"].(map[string]any)["phoenix://infra/b2/app-key"].(map[string]any)
+		if rc["code"] != CodeScopeExceeded {
+			t.Fatalf("resolve out of scope = %v", rc)
+		}
+		create := expect(t, e.do("POST", "/v1/access-requests", sess, `{"paths":["infra/b2/app-key"],"reason":"r"}`), 403, CodeSessionCannotRequest)
+		list := expect(t, e.do("GET", "/v1/grants", sess, ""), 403, CodeSessionCannotRequest)
+		ev := expect(t, e.do("GET", "/v1/access-requests/"+expired, vectorTok, ""), 200, "")
+		av := expect(t, e.do("GET", "/v1/access-requests/"+active, vectorTok, ""), 200, "")
+		return steps{get["next_step"].(string), rc["next_step"].(string), create["next_step"].(string),
+			list["next_step"].(string), ev["next_step"].(string), av["next_step"].(string)}
+	}
+
+	if got, want := observe(), (steps{NextRequestUse, NextRequestUse, NextRequestUse, NextRequestUse, NextRequestUse, NextUseExec}); got != want {
+		t.Fatalf("enabled: got %+v, want %+v", got, want)
+	}
+	e.set(func(s *config.AccessRequestsSettings) { s.DenyPaths = []string{"infra/b2/**"} })
+	if got, want := observe(), (steps{NextRemintSession, NextRemintSession, NextAskUser, NextRequestUse, NextAskUser, NextUseExec}); got != want {
+		t.Fatalf("deny-listed: got %+v, want %+v", got, want)
+	}
+	e.set(func(s *config.AccessRequestsSettings) { s.DenyPaths = nil; s.Enabled = false })
+	if got, want := observe(), (steps{NextRemintSession, NextRemintSession, NextAskUser, NextAskUser, NextAskUser, NextAskUser}); got != want {
+		t.Fatalf("disabled: got %+v, want %+v", got, want)
+	}
+}
