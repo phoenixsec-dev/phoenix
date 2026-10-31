@@ -234,8 +234,13 @@ func (h *Handler) attestFacts(rq grant.Request, p string, sealKeyOK bool) []atte
 	if rule.TimeWindow != "" {
 		add("time window "+rule.TimeWindow, nil)
 	}
-	if rule.CredentialTTL != "" || rule.RequireFreshAttestation {
-		add("short-lived credential", nil)
+	switch {
+	case rule.RequireFreshAttestation && rq.AuthMethod != grant.AuthToken:
+		// Only a short-lived token carries an issue time, so a bearer token
+		// or cert can never pass this: the grant would be unusable.
+		add("short-lived credential", is(false))
+	case rule.CredentialTTL != "" || rule.RequireFreshAttestation:
+		add("short-lived credential", nil) // token age is checked at each use
 	}
 	if len(rule.AllowedTools) > 0 || len(rule.DenyTools) > 0 {
 		add("tool restriction", nil)

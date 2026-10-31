@@ -254,7 +254,14 @@ func newID(prefix string) string {
 
 // isHiddenRune reports Unicode bidi controls and zero-width characters, which
 // can make text display differently from what it is.
+//
+// Any Unicode format character (category Cf, which includes the soft hyphen)
+// counts: displays strip them, so a path containing one would look the same
+// as a different path when a human approves it.
 func isHiddenRune(r rune) bool {
+	if unicode.Is(unicode.Cf, r) {
+		return true
+	}
 	switch {
 	case r == 0x061C, r == 0x200E, r == 0x200F: // ALM, LRM, RLM
 		return true

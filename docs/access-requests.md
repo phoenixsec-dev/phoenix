@@ -73,6 +73,10 @@ and no `approvers` (nobody could approve).
 All responses are JSON with `Cache-Control: no-store`. Errors use the denial
 shape and codes in [denial-codes.md](denial-codes.md#access-requests-and-grants).
 
+Requested paths must be 1-10 exact secret paths: no wildcards (`* ? [ ] { }`), no control
+characters, and no invisible formatting characters (bidi marks, zero-width spaces, soft hyphens),
+so every path looks exactly like what it is when a human approves it.
+
 Agent side (own bearer / mTLS / short-lived token; sessions get `403 SESSION_CANNOT_REQUEST`):
 
 | Method + path | Does |

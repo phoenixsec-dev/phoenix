@@ -426,3 +426,31 @@ func TestAttestFactsCertPin(t *testing.T) {
 		t.Errorf("bearer: %q", got)
 	}
 }
+
+// R2 U2: a path that needs a fresh short-lived token can never be used with
+// a bearer token or cert, so the card says "not met" for those.
+func TestAttestFactsFreshCredential(t *testing.T) {
+	p, err := policy.Load([]byte(`{"attestation": {"infra/*": {"require_fresh_attestation": true}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{deps: Deps{Policy: p}}
+	status := func(method string) string {
+		for _, f := range h.attestFacts(grant.Request{AuthMethod: method}, "infra/a", true) {
+			if f.Requirement == "short-lived credential" {
+				return f.Status
+			}
+		}
+		t.Fatal("no freshness fact")
+		return ""
+	}
+	if got := status(grant.AuthBearer); got != "not met" {
+		t.Errorf("bearer: %q", got)
+	}
+	if got := status(grant.AuthMTLS); got != "not met" {
+		t.Errorf("mtls: %q", got)
+	}
+	if got := status(grant.AuthToken); got != "checked at each use" {
+		t.Errorf("token: %q", got)
+	}
+}
