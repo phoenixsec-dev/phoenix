@@ -109,11 +109,18 @@ func (c *Config) AccessRequestsSettings() AccessRequestsSettings {
 
 // GrantStorePath is where grants.json lives: access_requests.store_path, or
 // grants.json in the same directory as the ACL file.
+//
+// The result is canonical: absolute, with the directory's symlinks and ".."
+// resolved the way the kernel resolves them. The server opens exactly this
+// path and ValidateGrantStorePath checks exactly this path, so a spelling
+// like "link/../x" cannot make the two disagree about which file it is.
 func (c *Config) GrantStorePath() string {
 	if c.AccessRequests != nil && c.AccessRequests.StorePath != "" {
-		return c.AccessRequests.StorePath
+		return parentResolved(c.AccessRequests.StorePath)
 	}
-	return filepath.Join(filepath.Dir(c.ACL.Path), grantsFileName)
+	// rawDir, not filepath.Dir: Dir would clean "link/.." away before the
+	// symlink is followed.
+	return parentResolved(rawDir(c.ACL.Path) + "/" + grantsFileName)
 }
 
 func durationOr(s string, def time.Duration) time.Duration {
@@ -205,7 +212,7 @@ func (c *Config) validateAccessRequests() error {
 // "/srv/data/x" or a symlinked directory cannot slip past. It only reads
 // the filesystem.
 func (c *Config) ValidateGrantStorePath() error {
-	grants := resolvePath(c.GrantStorePath())
+	grants := c.GrantStorePath()
 	protected := []struct{ field, path string }{
 		{"acl.path", c.ACL.Path},
 		{"audit.path", c.Audit.Path},
@@ -218,31 +225,73 @@ func (c *Config) ValidateGrantStorePath() error {
 		if pr.path == "" {
 			continue
 		}
-		p := resolvePath(pr.path)
-		// Every Phoenix temp file is "<name>.tmp" or "<name>.tmp-<random>".
-		if grants == p || strings.HasPrefix(grants, p+".tmp") || strings.HasPrefix(p, grants+".tmp") || sameFile(grants, p) {
-			return fmt.Errorf("access_requests: the grants file %q is the same file as %s %q (or one of its temp files); "+
-				"set access_requests.store_path to a separate file such as %q",
-				c.GrantStorePath(), pr.field, pr.path, filepath.Join(filepath.Dir(p), "phoenix-grants.json"))
+		// Two names per file: where it really lives (link target), and the
+		// configured name in its resolved directory. Writers derive their
+		// temp names ("<name>.tmp", "<name>.tmp-<random>") from the
+		// configured name, so a symlinked file's temp sits next to the link.
+		for _, p := range []string{fullyResolved(pr.path), parentResolved(pr.path)} {
+			if grants == p || strings.HasPrefix(grants, p+".tmp") || strings.HasPrefix(p, grants+".tmp") || sameFile(grants, p) {
+				return fmt.Errorf("access_requests: the grants file %q is the same file as %s %q (or one of its temp files); "+
+					"set access_requests.store_path to a separate file such as %q",
+					grants, pr.field, pr.path, filepath.Join(filepath.Dir(p), "phoenix-grants.json"))
+			}
 		}
 	}
 	return nil
 }
 
-// resolvePath returns p as an absolute path with symlinks resolved. When p
-// does not exist yet, its parent directory is resolved instead.
-func resolvePath(p string) string {
-	abs, err := filepath.Abs(p)
+// rawAbs makes p absolute WITHOUT cleaning it, so ".." after a symlink is
+// still there for EvalSymlinks to resolve after following the link.
+func rawAbs(p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	wd, err := os.Getwd()
 	if err != nil {
-		abs = filepath.Clean(p)
+		return p
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		return real
+	return wd + string(filepath.Separator) + p
+}
+
+// rawDir is the directory part of p as written (everything before the last
+// separator), without cleaning.
+func rawDir(p string) string {
+	p = rawAbs(p)
+	i := strings.LastIndex(p, string(filepath.Separator))
+	if i <= 0 {
+		return string(filepath.Separator)
 	}
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
-		return filepath.Join(dir, filepath.Base(abs))
+	return p[:i]
+}
+
+// parentResolved returns p with its directory resolved (symlinks and "..",
+// kernel order) and the final name kept as written. When the directory does
+// not exist yet it falls back to the cleaned absolute path.
+func parentResolved(p string) string {
+	base := filepath.Base(p)
+	if base == "." || base == ".." || base == string(filepath.Separator) {
+		return fullyResolved(p)
 	}
-	return abs
+	if strings.HasSuffix(p, string(filepath.Separator)) {
+		return fullyResolved(p)
+	}
+	if dir, err := filepath.EvalSymlinks(rawDir(p)); err == nil {
+		if abs, err := filepath.Abs(dir); err == nil {
+			return filepath.Join(abs, base)
+		}
+	}
+	return filepath.Clean(rawAbs(p))
+}
+
+// fullyResolved returns the file p really names (final symlink followed
+// too). When p does not exist it falls back to parentResolved.
+func fullyResolved(p string) string {
+	if real, err := filepath.EvalSymlinks(rawAbs(p)); err == nil {
+		if abs, err := filepath.Abs(real); err == nil {
+			return abs
+		}
+	}
+	return parentResolved(p)
 }
 
 // sameFile catches hard links and bind mounts that path comparison misses.

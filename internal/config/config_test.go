@@ -802,6 +802,53 @@ func TestGrantStorePathCollisions(t *testing.T) {
 		cfg.AccessRequests = &AccessRequestsConfig{StorePath: filepath.Join(dir, "link", "acl.json")}
 		mustCollide(t, cfg, "acl.path")
 	})
+	// R2: "link/.." must be resolved the way the kernel does (follow the
+	// link, then go up), not cleaned away first.
+	t.Run("symlink then dot-dot", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real")
+		if err := os.MkdirAll(filepath.Join(real, "child"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(real, "child"), filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		cfg := base(real)
+		if err := os.WriteFile(cfg.Store.Path, []byte("secrets-db"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: filepath.Join(dir, "link") + "/../store.json"}
+		mustCollide(t, cfg, "store.path")
+	})
+	// R2: a symlinked ACL file is saved through "<configured name>.tmp", so
+	// that name is protected even though the link points elsewhere.
+	t.Run("temp name of a symlinked file", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := base(dir)
+		if err := os.WriteFile(filepath.Join(dir, "real-acl.json"), []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dir, "real-acl.json"), cfg.ACL.Path); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: cfg.ACL.Path + ".tmp"}
+		mustCollide(t, cfg, "acl.path")
+	})
+	t.Run("store path is canonical", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "real", "child"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dir, "real", "child"), filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		cfg := base(dir)
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: filepath.Join(dir, "link") + "/../g.json"}
+		want, _ := filepath.EvalSymlinks(filepath.Join(dir, "real"))
+		if got := cfg.GrantStorePath(); got != filepath.Join(want, "g.json") {
+			t.Fatalf("GrantStorePath = %q, want %q", got, filepath.Join(want, "g.json"))
+		}
+	})
 	t.Run("separate file is fine", func(t *testing.T) {
 		cfg := base(t.TempDir())
 		if err := cfg.Validate(); err != nil {
