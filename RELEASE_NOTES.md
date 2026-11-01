@@ -1,5 +1,69 @@
 # Release Notes
 
+## v0.19.0 (2026-11-01)
+
+### Request-Use Grants: an Agent Asks, a Human Approves, Access Expires
+
+An agent that is denied a secret can now ask for temporary use of it. A human
+approves or denies in the dashboard, and the agent gets a grant: access to
+those exact paths for a limited time, which the human can revoke at any time.
+There is no new token to steal. The grant is a record that says "agent X,
+using its own credential from IP Y, may read paths Z until time T".
+
+- **Off unless you turn it on.** Configs without an `access_requests` block
+  behave exactly as before. New installs (`--init`) get it enabled.
+- **Agent side:** `phoenix request <path>... --reason "..." [--wait]`,
+  `phoenix request status`, `phoenix whoami`, and MCP tools
+  `phoenix_request_use`, `phoenix_request_status`, `phoenix_whoami`.
+  Up to 10 exact paths per request; no wildcards.
+- **Human side:** a "Secret access requests" section on the dashboard
+  Approvals page shows who is asking, from where, for which paths, why
+  (labelled "not verified"), and what each path requires. The approver can
+  untick paths and shorten the time, never widen. A new Grants page lists
+  active and recent grants with Revoke. `phoenix pending`, `phoenix approve`,
+  `phoenix deny` and `phoenix grants` work for identities listed in
+  `access_requests.approvers`; an agent can never approve its own request.
+- **Using a grant:** `phoenix exec --redact-output --env NAME=phoenix://<path> -- <command>`.
+  Granted values are delivered sealed to the agent's registered key by
+  default, and `--redact-output` replaces them with `[REDACTED:NAME]` in the
+  command's output, so they do not end up in an agent's chat.
+- **Safety limits:** read access only; session tokens can never use or
+  request grants; grants never bypass attestation and never unseal through
+  `phoenix_unseal`; per-agent and global request limits, a 10-minute
+  cooldown after a deny, and a cap on active grants. Grants are saved to
+  `grants.json` (next to the ACL file by default) with fsync, and a revoke
+  is never reported as done unless it was saved.
+- **Notifications:** optional `notify_url` (ntfy works out of the box) pings
+  on each new request with the agent, path count and a dashboard link. Paths
+  only if you opt in; the agent's reason is never sent.
+- **Docs:** [Access requests](docs/access-requests.md) is the full guide.
+
+### Clear Denial Codes and Next Steps
+
+Every access denial now carries a stable `code` and a `next_step`
+(`request_use`, `wait`, `use_exec`, `remint_session`, `ask_user`, `none`), so
+the CLI, MCP server and plugins can tell an agent what to do instead of
+showing "access denied". `/v1/resolve` adds `error_codes` per ref next to
+the unchanged `errors`. Clients show their own fixed hint text and clean
+server text (control, bidi and zero-width characters dropped, length
+capped); they no longer display the server's `remediation` field.
+Attestation denials no longer reveal policy rules to the caller; the detail
+goes to the audit log. See [Denial codes](docs/denial-codes.md).
+
+### Step-Up Role Binding
+
+- **`allowed_agents`** on a session role limits which agents may mint it,
+  have its step-up approved, or renew it (`403 ROLE_NOT_ALLOWED`). Roles
+  without the list behave as before, but the server warns at startup about
+  step-up roles with no binding. A later release will require it for
+  `elevates_acl` roles. See [Session identity](docs/session-identity.md).
+
+**Upgrading:** no action required; nothing changes until you add an
+`access_requests` block. Before turning it on, consider setting
+`allowed_agents` on your step-up roles. The server refuses to start if the
+grants file would be the same file as the ACL, audit log, secrets data file
+or master key, or is a symlink; set `access_requests.store_path` to fix that.
+
 ## v0.18.0 (2026-10-26)
 
 ### Host-Scoped Opt-Out for the Plaintext Client Warning
