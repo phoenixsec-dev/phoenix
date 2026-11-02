@@ -44,7 +44,8 @@ Enable sessions in your server config:
         "require_seal_key": true,
         "step_up": true,
         "step_up_ttl": "15m",
-        "elevates_acl": true
+        "elevates_acl": true,
+        "allowed_agents": ["deployer"]
       }
     }
   }
@@ -62,8 +63,43 @@ Enable sessions in your server config:
 | `max_ttl` | `string` | Per-role TTL override (e.g. `"30m"`) |
 | `attestation` | `[]string` | Attestation requirements (e.g. `["source_ip", "cert_fingerprint"]`) |
 | `step_up` | `bool` | Require human approval before minting |
-| `step_up_ttl` | `string` | TTL for step-up sessions (e.g. `"15m"`) |
+| `step_up_ttl` | `string` | How long a step-up request waits for a human before it expires (e.g. `"15m"`) |
 | `elevates_acl` | `bool` | For approved `step_up` sessions, allow temporary access within role scope even when the base agent ACL would normally deny it |
+| `allowed_agents` | `[]string` | ACL agent names that may use this role. Empty = any agent whose auth method is in `bootstrap_trust` (see below) |
+
+### Binding a role to agents (`allowed_agents`)
+
+Without `allowed_agents`, a role only checks *how* the caller logged in
+(`bootstrap_trust`), not *who* it is. Any agent with a bearer token could ask
+for a `bearer` role. For an `elevates_acl` role that matters: once a human
+approves, that agent reads beyond its own ACL.
+
+`allowed_agents` closes that gap. It is checked three times:
+
+1. **Mint.** An agent not on the list gets `403 ROLE_NOT_ALLOWED` at once. For
+   a step-up role no approval is created, so nothing reaches a human.
+2. **Approval.** `phoenix approve apr_...`, `POST /v1/approval/{id}/approve`
+   and the dashboard Approve button all re-check the list. An agent removed
+   while its request was pending cannot be approved.
+3. **Renewal.** An existing session whose agent is no longer on the list
+   cannot renew.
+
+It is not checked on each read. A session minted before you changed the list
+keeps working until it expires; revoke it (`phoenix sessions revoke`) if it
+must stop now.
+
+The denial names the role, never the list. `next_step` is `ask_user`.
+
+An empty list keeps the old behaviour. At startup the server logs a
+`WARNING` for every `step_up` role with no `allowed_agents` (stronger wording
+for `elevates_acl` roles), and for any listed name that is not an agent in
+the ACL. The dashboard approval card shows a **role has no agent binding**
+badge for such roles.
+
+**Next release:** `allowed_agents` becomes required for `elevates_acl` roles.
+A config without it will fail to load with a message that says how to fix it.
+This release only warns. Bind those roles now (for example
+`openclaw-elevated`). A warning alone does not close the gap.
 
 ## Agent bootstrap
 
@@ -88,13 +124,14 @@ sessions must be re-minted and re-approved when they expire.
 POST /v1/session/mint  {"role": "dev"}
 ```
 
-The server checks bootstrap trust, attestation, and role existence.
+The server checks role existence, `allowed_agents`, bootstrap trust,
+attestation and the seal key.
 Returns a session token (`phxs_...` prefix) with role scope and expiry.
 
 ### Renewal
 
 Non-elevated sessions auto-renew when nearing expiry. On renewal, the
-server rechecks bootstrap trust and attestation. If anything changed
+server rechecks `allowed_agents`, bootstrap trust and attestation. If anything changed
 (cert expired, role config updated), renewal fails and the agent must
 re-mint. Elevated step-up sessions do **not** auto-renew; they require a
 fresh step-up request and approval to extend access.
@@ -137,8 +174,9 @@ When the dashboard is enabled, approvals can also be managed from the browser
 at `/dashboard/approvals`. Each pending approval is shown as a card with full
 context (role, agent, source IP, bootstrap method, namespaces, TTY, expiry
 countdown). Approve or deny with one click. The same safety checks apply —
-role config, bootstrap trust, attestation, and seal key are all re-verified
-at approve time.
+role config, `allowed_agents`, bootstrap trust, attestation, and seal key are
+all re-verified at approve time. A role with no `allowed_agents` shows a
+**role has no agent binding** badge on its card.
 
 ## CLI commands
 
@@ -214,13 +252,21 @@ Available MCP tools:
 - `phoenix_session_list` — list active sessions
 - `phoenix_session_revoke` — revoke a session by ID
 
-When an MCP tool hits `APPROVAL_REQUIRED`, it returns a message the agent
-can present to the human with the approve command.
+Step-up approval happens while the MCP server mints its session: the
+`phoenix approve apr_...` command (built locally from the approval ID) is
+printed to stderr while it waits. Data tools (`phoenix_get`, `phoenix_resolve`,
+`phoenix_list`) never get a 202; their denials show the code and next step.
+
+The request-use tools (`phoenix_request_use`, `phoenix_request_status`,
+`phoenix_whoami`) are listed too, but requests are refused for session tokens
+(`SESSION_CANNOT_REQUEST`): run an MCP server on the agent's own bootstrap
+identity for them. See [Access requests](access-requests.md).
 
 ## Denial codes
 
 When a session request or scoped access is denied, the response includes a
-machine-readable code:
+machine-readable code and a `next_step` (see [denial-codes.md](denial-codes.md)
+for the full list and client rules):
 
 | Code | Meaning |
 |------|---------|
@@ -233,6 +279,7 @@ machine-readable code:
 | `STEP_UP_REAPPROVAL_REQUIRED` | Elevated step-up session cannot renew without fresh approval |
 | `BOOTSTRAP_FAILED` | Auth method not in role's bootstrap_trust |
 | `ROLE_NOT_FOUND` | Requested role does not exist |
+| `ROLE_NOT_ALLOWED` | The role's `allowed_agents` does not list this agent |
 | `ATTESTATION_FAILED` | Missing or insufficient attestation |
 | `SEAL_KEY_REQUIRED` | Role requires a seal key but none was provided |
 | `SEAL_KEY_MISMATCH` | Seal key doesn't match session binding |
@@ -244,9 +291,9 @@ All session lifecycle events are logged to the audit trail:
 | Action | Status | When |
 |--------|--------|------|
 | `session.mint.approved` | allowed | Session minted successfully |
-| `session.mint` | denied | Mint failed (role_not_found, bootstrap_failed, attestation_failed) |
+| `session.mint` | denied | Mint failed (role_not_found, role_not_allowed, bootstrap_failed, attestation_failed) |
 | `session.renewed` | allowed | Session renewed |
-| `session.renew` | denied | Renewal failed |
+| `session.renew` | denied | Renewal failed (for example role_not_allowed) |
 | `session.revoke` | allowed | Session revoked |
 | `session.auth` | denied | Expired or revoked token used for a request |
 | `session.list` | allowed | Sessions listed |

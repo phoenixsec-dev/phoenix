@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHTTPSListenerConfig(t *testing.T) {
@@ -661,5 +662,344 @@ func TestTLSConfigJSON(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"tls"`) {
 		t.Fatal("default config JSON should include the tls block")
+	}
+}
+
+func TestAccessRequestsConfig(t *testing.T) {
+	load := func(t *testing.T, block string) (*Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := `{"acl":{"path":"/data/acl.json"},"audit":{"path":"/data/audit.log"},"store":{"path":"/data/store.json","master_key":"/data/master.key"}`
+		if block != "" {
+			body += `,"access_requests":` + block
+		}
+		if err := os.WriteFile(path, []byte(body+"}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg, cfg.Validate()
+	}
+
+	t.Run("missing block is disabled", func(t *testing.T) {
+		cfg, err := load(t, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := cfg.AccessRequestsSettings()
+		if s.Enabled || s.StorePath != "/data/grants.json" || !s.RequireSealed {
+			t.Fatalf("settings = %+v", s)
+		}
+	})
+	t.Run("defaults and explicit false", func(t *testing.T) {
+		cfg, err := load(t, `{"enabled":true,"require_sealed":false}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := cfg.AccessRequestsSettings()
+		if !s.Enabled || s.RequireSealed || !s.BindSourceIP || s.MaxGrantTTL != 8*time.Hour ||
+			len(s.GrantableActions) != 1 || s.GrantableActions[0] != "read_value" {
+			t.Fatalf("settings = %+v", s)
+		}
+	})
+	for _, c := range []struct{ name, block, want string }{
+		{"write not supported", `{"grantable_actions":["read_value","write"]}`, "write grants are not supported yet"},
+		{"never grantable", `{"grantable_actions":["admin"]}`, "can never be granted"},
+		{"bad duration", `{"request_ttl":"soon"}`, "request_ttl"},
+		{"request ttl too short", `{"request_ttl":"30s"}`, "at least 1m"},
+		{"default above max", `{"default_grant_ttl":"9h"}`, "default_grant_ttl <= max_grant_ttl"},
+		{"max above 24h", `{"max_grant_ttl":"25h"}`, "<= 24h"},
+		{"bad deny glob", `{"deny_paths":["infra/*/keys"]}`, "deny_paths"},
+		{"store collides with acl", `{"store_path":"/data/acl.json"}`, "same file as acl.path"},
+		{"store collides with temp", `{"store_path":"/data/store.json.tmp-1"}`, "same file as store.path"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := load(t, c.block)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want it to mention %q", err, c.want)
+			}
+		})
+	}
+	t.Run("new installs are enabled", func(t *testing.T) {
+		if ar := ExampleConfig().AccessRequests; ar == nil || !ar.Enabled {
+			t.Fatal("example/new-install config must enable access_requests")
+		}
+		if DefaultConfig().AccessRequests != nil {
+			t.Fatal("DefaultConfig must leave access_requests unset (upgrade safety)")
+		}
+		data, err := os.ReadFile("../../config.example.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ex Config
+		if err := json.Unmarshal(data, &ex); err != nil {
+			t.Fatal(err)
+		}
+		if ex.AccessRequests == nil || !ex.AccessRequests.Enabled {
+			t.Fatal("config.example.json must enable access_requests")
+		}
+	})
+}
+
+// R1 H1: the grants file path is validated even without an access_requests
+// block, and aliases (relative paths, symlinks) are resolved.
+func TestGrantStorePathCollisions(t *testing.T) {
+	base := func(dir string) *Config {
+		cfg := DefaultConfig()
+		cfg.ACL.Path = filepath.Join(dir, "acl.json")
+		cfg.Audit.Path = filepath.Join(dir, "audit.log")
+		cfg.Store.Path = filepath.Join(dir, "store.json")
+		cfg.Store.MasterKey = filepath.Join(dir, "master.key")
+		return cfg
+	}
+	mustCollide := func(t *testing.T, cfg *Config, field string) {
+		t.Helper()
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), "store_path") {
+			t.Fatalf("err = %v, want a collision with %s naming access_requests.store_path", err, field)
+		}
+	}
+
+	t.Run("no block, data file is grants.json", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := base(dir)
+		cfg.Store.Path = filepath.Join(dir, "grants.json")
+		if err := os.WriteFile(cfg.Store.Path, []byte("secrets-db"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		mustCollide(t, cfg, "store.path")
+		if b, _ := os.ReadFile(cfg.Store.Path); string(b) != "secrets-db" {
+			t.Fatalf("data file changed: %q", b)
+		}
+	})
+	t.Run("no block, ACL is grants.json", func(t *testing.T) {
+		cfg := base(t.TempDir())
+		cfg.ACL.Path = filepath.Join(filepath.Dir(cfg.ACL.Path), "grants.json")
+		mustCollide(t, cfg, "acl.path")
+	})
+	t.Run("relative and absolute spelling", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		cfg := base(dir)
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: "store.json"}
+		mustCollide(t, cfg, "store.path")
+		cfg.AccessRequests.StorePath = "./audit.log.tmp-1"
+		mustCollide(t, cfg, "audit.path")
+	})
+	t.Run("symlinked directory", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real")
+		if err := os.Mkdir(real, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		cfg := base(real)
+		// The ACL file does not exist yet: its parent directory is resolved.
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: filepath.Join(dir, "link", "acl.json")}
+		mustCollide(t, cfg, "acl.path")
+	})
+	// R2: "link/.." must be resolved the way the kernel does (follow the
+	// link, then go up), not cleaned away first.
+	t.Run("symlink then dot-dot", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "real")
+		if err := os.MkdirAll(filepath.Join(real, "child"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(real, "child"), filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		cfg := base(real)
+		if err := os.WriteFile(cfg.Store.Path, []byte("secrets-db"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: filepath.Join(dir, "link") + "/../store.json"}
+		mustCollide(t, cfg, "store.path")
+	})
+	// R2: a symlinked ACL file is saved through "<configured name>.tmp", so
+	// that name is protected even though the link points elsewhere.
+	t.Run("temp name of a symlinked file", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := base(dir)
+		if err := os.WriteFile(filepath.Join(dir, "real-acl.json"), []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dir, "real-acl.json"), cfg.ACL.Path); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: cfg.ACL.Path + ".tmp"}
+		mustCollide(t, cfg, "acl.path")
+	})
+	// R3: the grants file itself must not be a symlink (it could point at a
+	// protected file's temp name, which no path comparison would see).
+	t.Run("grants file is a symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := base(dir)
+		alias := filepath.Join(dir, "grants-alias.json")
+		if err := os.Symlink(cfg.ACL.Path+".tmp", alias); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: alias}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("err = %v, want a symlink refusal", err)
+		}
+	})
+	// R3: unresolvable paths ending in "/", "/." or "/.." must not loop.
+	t.Run("odd unresolvable paths terminate", func(t *testing.T) {
+		for _, p := range []string{"/missing-dir-r3/", "/missing-dir-r3/.", "/missing-dir-r3/.."} {
+			cfg := base(t.TempDir())
+			cfg.Auth.MTLS.CRLPath = p
+			done := make(chan struct{})
+			go func() { _ = cfg.ValidateGrantStorePath(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("ValidateGrantStorePath hung on %q", p)
+			}
+		}
+	})
+	t.Run("store path is canonical", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "real", "child"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dir, "real", "child"), filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		cfg := base(dir)
+		cfg.AccessRequests = &AccessRequestsConfig{StorePath: filepath.Join(dir, "link") + "/../g.json"}
+		want, _ := filepath.EvalSymlinks(filepath.Join(dir, "real"))
+		if got := cfg.GrantStorePath(); got != filepath.Join(want, "g.json") {
+			t.Fatalf("GrantStorePath = %q, want %q", got, filepath.Join(want, "g.json"))
+		}
+	})
+	t.Run("separate file is fine", func(t *testing.T) {
+		cfg := base(t.TempDir())
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// R1 M2: only ONE trailing wildcard suffix is allowed; "infra/*/**" used to
+// pass validation while matching nothing at runtime.
+func TestValidatePathGlob(t *testing.T) {
+	for _, ok := range []string{"*", "**", "infra/b2/app-key", "infra/*", "infra/**", "phoenix/**"} {
+		if err := ValidatePathGlob(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "infra/*/**", "infra/**/*", "infra/**/**", "infra/*/keys", "in*fra", "/infra/**", "/**", "infra/[ab]"} {
+		if err := ValidatePathGlob(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// P4 (Q5): step-up roles without allowed_agents warn at startup; elevates_acl
+// roles get the stronger "next release" message. Bound roles are quiet.
+func TestRoleBindingWarnings(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session = SessionConfig{Enabled: true, Roles: map[string]RoleConfig{
+		"plain":    {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}},
+		"stepup":   {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true},
+		"elevated": {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true, ElevatesACL: true},
+		"bound": {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true, ElevatesACL: true,
+			AllowedAgents: []string{"vector", "ghost"}},
+	}}
+	exists := func(name string) bool { return name == "vector" }
+	got := strings.Join(cfg.RoleBindingWarnings(exists), "\n")
+	for _, want := range []string{
+		"session.roles.elevated has elevates_acl but no allowed_agents",
+		"next release will refuse to start",
+		"session.roles.stepup has step_up but no allowed_agents",
+		`session.roles.bound.allowed_agents: "ghost" is not an agent in the ACL`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warnings missing %q:\n%s", want, got)
+		}
+	}
+	for _, quiet := range []string{"roles.plain", "roles.bound has"} {
+		if strings.Contains(got, quiet) {
+			t.Errorf("unexpected warning for %q:\n%s", quiet, got)
+		}
+	}
+	cfg.Session.Enabled = false
+	if w := cfg.RoleBindingWarnings(exists); len(w) != 0 {
+		t.Errorf("sessions disabled: got warnings %v", w)
+	}
+
+	if !(RoleConfig{}).AgentAllowed("anyone") {
+		t.Error("empty allowed_agents must allow any agent")
+	}
+	if (RoleConfig{AllowedAgents: []string{"vector"}}).AgentAllowed("echo") {
+		t.Error("bound role must reject other agents")
+	}
+}
+
+func TestAccessRequestsNotifyValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		ar   AccessRequestsConfig
+		want string // "" = valid
+	}{
+		{"ntfy url and ref", AccessRequestsConfig{NotifyURL: "https://ntfy.example.net/phoenix", NotifyTokenRef: "phoenix://phoenix/ntfy-token", NotifyDashboardURL: "https://phoenix.example.net"}, ""},
+		{"not http", AccessRequestsConfig{NotifyURL: "ftp://x/y"}, "notify_url"},
+		{"no host", AccessRequestsConfig{NotifyURL: "https:///topic"}, "no host"},
+		{"credentials in url", AccessRequestsConfig{NotifyURL: "https://user:pw@ntfy.example.net/t"}, "notify_token_ref"},
+		{"query", AccessRequestsConfig{NotifyURL: "https://ntfy.example.net/t?auth=x"}, "query"},
+		{"dashboard fragment", AccessRequestsConfig{NotifyDashboardURL: "https://p.example.net/#x"}, "notify_dashboard_url"},
+		{"token not a ref", AccessRequestsConfig{NotifyTokenRef: "tk_abc"}, "phoenix://"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			dir := t.TempDir()
+			cfg.ACL.Path = filepath.Join(dir, "acl.json")
+			cfg.Audit.Path = filepath.Join(dir, "audit.log")
+			cfg.Store.Path = filepath.Join(dir, "store.json")
+			cfg.Store.MasterKey = filepath.Join(dir, "master.key")
+			ar := c.ar
+			cfg.AccessRequests = &ar
+			err := cfg.Validate()
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want it to mention %q", err, c.want)
+			}
+		})
+	}
+}
+
+// P4 review N2: a rejected notify value never appears in the error, because
+// startup logs it. A pasted token or a URL with a secret in it must not leak.
+func TestAccessRequestsNotifyErrorsDoNotEchoValues(t *testing.T) {
+	const secret = "s3cr3t-topic-or-token"
+	for _, ar := range []AccessRequestsConfig{
+		{NotifyURL: "https://ntfy.example.net/t?auth=" + secret},
+		{NotifyURL: "https://ntfy.example.net/" + secret + "#frag"},
+		{NotifyURL: "ftp://ntfy.example.net/" + secret},
+		{NotifyURL: "https:///" + secret},
+		{NotifyDashboardURL: "https://p.example.net/?k=" + secret},
+		{NotifyTokenRef: "tk_" + secret},
+	} {
+		cfg := DefaultConfig()
+		a := ar
+		cfg.AccessRequests = &a
+		err := cfg.validateAccessRequests()
+		if err == nil {
+			t.Fatalf("%+v accepted", ar)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error echoes the value: %v", err)
+		}
 	}
 }

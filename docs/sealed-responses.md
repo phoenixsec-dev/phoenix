@@ -159,8 +159,11 @@ valid `X-Phoenix-Seal-Key` header are denied:
 ### `allow_unseal`
 
 Control whether the MCP `phoenix_unseal` tool can decrypt sealed tokens
-for a given path. When `false` (default), sealed tokens remain opaque and
-the agent must pass them to `phoenix exec` for injection:
+for a given path. When `false` (default), sealed tokens stay opaque to the
+agent. To use the value, run the command through `phoenix exec` with a
+`phoenix://` reference (not the token): exec resolves the path sealed and
+decrypts it in its own process, then injects it into the child:
+`phoenix exec --redact-output --env NAME=phoenix://<path> -- <command>`.
 
 ```json
 {
@@ -178,6 +181,11 @@ the agent must pass them to `phoenix exec` for injection:
 
 The `allow_unseal` check is server-authoritative — the MCP client queries
 `GET /v1/policy/check?path=<path>&check=allow_unseal` before decrypting.
+It is caller-aware: the answer is `true` only when the caller can read the
+path through its ACL (or session scope) right now **and** the rule allows
+unsealing. Access that comes only from a temporary grant
+([Access Requests](access-requests.md)) never unseals, so an envelope cached
+while a grant was active cannot be opened after it ends.
 
 ---
 
@@ -235,8 +243,10 @@ PHOENIX_SEALED:eyJ2ZXJzaW9uIjoxLC...
 
 The token is the base64-encoded JSON sealed envelope. This format is:
 - Safe to store in environment variables
-- Safe to pass through `phoenix exec --env`
 - Not parseable without the private key
+
+`phoenix exec --env` does not accept these tokens; give it a `phoenix://`
+reference and it fetches and decrypts the value itself.
 
 ---
 

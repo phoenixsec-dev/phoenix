@@ -90,6 +90,11 @@ Query params:
 - `path` (required): secret path to check
 - `check` (required): policy check to perform (currently only `allow_unseal`)
 
+Any authenticated identity, including session tokens, gets `200`.
+`allow_unseal` is `true` only when the caller can read the path without
+grants (its ACL, or a session's scope + action + ACL/elevation) **and** the
+path's policy sets `allow_unseal`. Unreadable paths return `{"allowed": false}`.
+
 Response:
 ```json
 { "path": "myapp/key", "check": "allow_unseal", "allowed": true }
@@ -109,6 +114,9 @@ Response:
 - `role` (required): role name to mint
 - `seal_public_key` (optional): base64-encoded X25519 public key
 
+If the role has `allowed_agents` and the caller is not on it, mint and renew
+return `403 ROLE_NOT_ALLOWED` (for a step-up role, no approval is created).
+
 `GET /v1/sessions` query params:
 - `role` — filter by role name
 - `agent` — filter by agent name (admin only)
@@ -122,7 +130,7 @@ sessions for their agent. Admins see all.
 |---|---|---|
 | GET | `/v1/approvals` | List pending approvals (admin-only) |
 | GET | `/v1/approval/{id}` | Get approval status |
-| POST | `/v1/approval/{id}/approve` | Approve step-up request |
+| POST | `/v1/approval/{id}/approve` | Approve step-up request (re-checks the role, `allowed_agents`, bootstrap trust, attestation and seal key) |
 | POST | `/v1/approval/{id}/deny` | Deny step-up request |
 
 See [Session Identity](session-identity.md) for the approval workflow.
@@ -155,6 +163,25 @@ config. They do not appear in the API mux otherwise.
 
 See [Dashboard](dashboard.md) for the full reference.
 
+## Access requests and grants
+
+See [Access Requests](access-requests.md). Agent side uses the agent's own
+identity (sessions get `403 SESSION_CANNOT_REQUEST`); approve/deny need an
+identity listed in `access_requests.approvers`. New requests can also send
+a notification to `access_requests.notify_url` (no endpoint; see
+[Notifications](access-requests.md#notifications)).
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/v1/access-requests` | Ask for temporary `read_value` on exact paths |
+| GET | `/v1/access-requests` | Own requests (approvers: all) |
+| GET | `/v1/access-requests/{id}` | One request with `next_step` |
+| POST | `/v1/access-requests/{id}/approve` | Approve, optionally narrowing paths / TTL (approvers) |
+| POST | `/v1/access-requests/{id}/deny` | Deny with optional note (approvers) |
+| GET | `/v1/grants` | Own grants (approvers: all) |
+| POST | `/v1/grants/{id}/revoke` | Revoke (owner or approver) |
+| GET | `/v1/whoami` | Caller identity, ACL rules, grants, pending requests |
+
 ## Common error shape
 
 Most failures return:
@@ -167,14 +194,18 @@ Common status codes: `400`, `401`, `403`, `404`, `405`, `500`, `501`.
 
 ## Structured denials
 
-Session and access control failures return machine-readable denial responses:
+Access control, attestation and session failures return machine-readable
+denial responses with a `code` and a `next_step`. `POST /v1/resolve` reports
+per-ref failures in `error_codes`. Full contract and client rules:
+[denial-codes.md](denial-codes.md).
 
 ```json
 {
   "error": "access_denied",
   "code": "SCOPE_EXCEEDED",
   "detail": "path \"prod/key\" is outside session scope for role \"dev\"",
-  "remediation": "request a session with a role that includes this namespace"
+  "remediation": "request a session with a role that includes this namespace",
+  "next_step": "remint_session"
 }
 ```
 
@@ -182,6 +213,9 @@ Denial codes:
 
 | Code | HTTP | Meaning |
 |------|------|---------|
+| `ACL_DENIED` | 403 | ACL does not allow the action on this path |
+| `ATTESTATION_REQUIRED` | 403 | Path attestation policy not met |
+| `SEALED_REQUIRED` | 403 | Path is only served sealed; use `phoenix exec --redact-output` |
 | `SESSION_EXPIRED` | 401 | Session TTL elapsed |
 | `SESSION_REVOKED` | 401 | Session was explicitly revoked |
 | `SESSION_INVALID` | 401 | Token malformed or signature invalid |
@@ -191,6 +225,7 @@ Denial codes:
 | `STEP_UP_REAPPROVAL_REQUIRED` | 403 | Elevated step-up session cannot renew without fresh approval |
 | `BOOTSTRAP_FAILED` | 403 | Auth method not accepted for this role |
 | `ROLE_NOT_FOUND` | 404 | Requested role does not exist |
+| `ROLE_NOT_ALLOWED` | 403 | The role's `allowed_agents` does not list this agent |
 | `ATTESTATION_FAILED` | 403 | Attestation requirements not met |
 | `SEAL_KEY_REQUIRED` | 403 | Role requires seal key at mint |
 | `SEAL_KEY_MISMATCH` | 403 | Seal key doesn't match session binding |

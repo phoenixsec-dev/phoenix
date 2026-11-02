@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -25,21 +26,54 @@ type Error struct {
 	Message     string
 	Status      int
 	Code        string // structured denial code (e.g., SCOPE_EXCEEDED, ACTION_DENIED)
-	Remediation string // hint for resolving the error
+	Remediation string // server-supplied text; untrusted, not included in Error()
 }
 
+// Error formats the error for display. Server text is cleaned (control and
+// Unicode format characters dropped, length capped) and the server's
+// remediation is left out, so a hostile server cannot inject instructions or
+// terminal escapes. See docs/denial-codes.md.
 func (e *Error) Error() string {
-	if e.Code != "" {
-		msg := fmt.Sprintf("phoenix: HTTP %d [%s]: %s", e.Status, e.Code, e.Message)
-		if e.Remediation != "" {
-			msg += "\n  hint: " + e.Remediation
-		}
-		return msg
+	msg := cleanServerText(e.Message)
+	if code := cleanCode(e.Code); code != "" {
+		return fmt.Sprintf("phoenix: HTTP %d [%s]: %s", e.Status, code, msg)
 	}
 	if e.Status > 0 {
-		return fmt.Sprintf("phoenix: HTTP %d: %s", e.Status, e.Message)
+		return fmt.Sprintf("phoenix: HTTP %d: %s", e.Status, msg)
 	}
-	return fmt.Sprintf("phoenix: %s", e.Message)
+	return fmt.Sprintf("phoenix: %s", msg)
+}
+
+// cleanServerText drops control and Unicode format characters (bidi,
+// zero-width) and caps the text at 300 runes.
+func cleanServerText(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		if n == 300 {
+			b.WriteString("...")
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
+
+// cleanCode keeps a denial code only if it looks like one (A-Z, 0-9, _).
+func cleanCode(code string) string {
+	if code == "" || len(code) > 64 {
+		return ""
+	}
+	for _, r := range code {
+		if !(r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_') {
+			return ""
+		}
+	}
+	return code
 }
 
 // ResolveResult contains the result of a batch resolve call.

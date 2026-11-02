@@ -5,6 +5,38 @@
  * No admin operations. Under 200 lines.
  */
 
+// Denial codes look like "ACL_DENIED" (docs/denial-codes.md); anything else
+// from the server is dropped rather than echoed.
+const CODE_RE = /^[A-Z0-9_]{1,64}$/;
+const MAX_SERVER_TEXT = 300;
+
+/**
+ * Make server-supplied text safe to show: drop control characters (including
+ * terminal escapes) and Unicode format characters (bidi overrides,
+ * zero-width), and cap the length.
+ * @param {unknown} text
+ * @returns {string}
+ */
+function cleanServerText(text) {
+  const chars = Array.from(String(text ?? "").replace(/[\p{Cc}\p{Cf}]/gu, ""));
+  if (chars.length > MAX_SERVER_TEXT) {
+    return chars.slice(0, MAX_SERVER_TEXT).join("") + "...";
+  }
+  return chars.join("");
+}
+
+/**
+ * "[CODE] text" with cleaned text, or just the text when the code is
+ * missing or malformed.
+ * @param {unknown} code
+ * @param {unknown} text
+ * @returns {string}
+ */
+function denialMessage(code, text) {
+  const clean = cleanServerText(text);
+  return typeof code === "string" && CODE_RE.test(code) ? `[${code}] ${clean}` : clean;
+}
+
 class PhoenixError extends Error {
   /**
    * @param {string} message
@@ -105,7 +137,9 @@ class PhoenixClient {
   async resolve(ref) {
     const result = await this.resolveBatch([ref]);
     if (result.errors && result.errors[ref]) {
-      throw new PhoenixError(result.errors[ref]);
+      // Newer servers add a per-ref code in error_codes; older ones do not.
+      const denial = result.error_codes && result.error_codes[ref];
+      throw new PhoenixError(denialMessage(denial && denial.code, result.errors[ref]));
     }
     if (!result.values || !(ref in result.values)) {
       throw new PhoenixError(`no value returned for ${ref}`);
@@ -137,7 +171,7 @@ class PhoenixClient {
       for (const [ref, env] of Object.entries(result.sealed_values)) {
         if (env.ref !== ref) {
           throw new PhoenixError(
-            `sealed envelope ref mismatch: map key "${ref}", envelope "${env.ref}"`
+            `sealed envelope ref mismatch: map key "${cleanServerText(ref)}", envelope "${cleanServerText(env.ref)}"`
           );
         }
         result.values[ref] = this._unsealEnvelope(env);
@@ -158,10 +192,10 @@ class PhoenixClient {
       throw new PhoenixError("sealed mode not configured");
     }
     if (env.version !== 1) {
-      throw new PhoenixError(`unsupported seal version: ${env.version}`);
+      throw new PhoenixError(`unsupported seal version: ${cleanServerText(env.version)}`);
     }
     if (env.algorithm !== "x25519-xsalsa20-poly1305") {
-      throw new PhoenixError(`unsupported seal algorithm: ${env.algorithm}`);
+      throw new PhoenixError(`unsupported seal algorithm: ${cleanServerText(env.algorithm)}`);
     }
 
     const ephPub = new Uint8Array(Buffer.from(env.ephemeral_key, "base64"));
@@ -229,7 +263,11 @@ class PhoenixClient {
     }
 
     if (!resp.ok) {
-      const msg = (data && data.error) || `HTTP ${resp.status}`;
+      // Structured denials (docs/denial-codes.md) carry code + detail.
+      const msg =
+        data && data.code
+          ? denialMessage(data.code, data.detail || data.error || "")
+          : cleanServerText((data && data.error) || `HTTP ${resp.status}`);
       throw new PhoenixError(msg, resp.status);
     }
 

@@ -59,7 +59,7 @@
     }
 
     // Auto-dismiss flash messages after 5s
-    document.querySelectorAll('.flash').forEach(function(el) {
+    document.querySelectorAll('.flash:not(.flash-sticky)').forEach(function(el) {
         setTimeout(function() {
             el.style.transition = 'opacity 0.3s';
             el.style.opacity = '0';

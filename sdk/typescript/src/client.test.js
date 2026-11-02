@@ -390,3 +390,112 @@ describe("PhoenixClient sealed mode", () => {
     }
   });
 });
+
+describe("structured denials", () => {
+  it("shows code and detail", async () => {
+    const { url, close } = await createTestServer((req, res) => {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "access_denied", code: "ACL_DENIED", detail: "read_value is not allowed", next_step: "ask_user" }));
+    });
+    try {
+      const c = new PhoenixClient({ server: url, token: "tok" });
+      await assert.rejects(c.health(), (err) => {
+        assert.ok(err instanceof PhoenixError);
+        assert.equal(err.status, 403);
+        assert.equal(err.message, "[ACL_DENIED] read_value is not allowed");
+        return true;
+      });
+    } finally {
+      close();
+    }
+  });
+
+  async function denialError(status, body, call) {
+    const { url, close } = await createTestServer((req, res) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+    try {
+      const c = new PhoenixClient({ server: url, token: "tok" });
+      let caught;
+      await assert.rejects(call(c), (err) => {
+        assert.ok(err instanceof PhoenixError);
+        caught = err;
+        return true;
+      });
+      return caught;
+    } finally {
+      close();
+    }
+  }
+  const health = (c) => c.health();
+  const resolve = (c) => c.resolve("phoenix://a/b");
+
+  it("resolve error includes the per-ref code", async () => {
+    const err = await denialError(200, {
+      values: {},
+      errors: { "phoenix://a/b": "attestation required" },
+      error_codes: { "phoenix://a/b": { code: "SEALED_REQUIRED", next_step: "use_exec" } },
+    }, resolve);
+    assert.equal(err.message, "[SEALED_REQUIRED] attestation required");
+  });
+
+  it("resolve error without error_codes is unchanged", async () => {
+    const err = await denialError(200, { values: {}, errors: { "phoenix://a/b": "secret not found" } }, resolve);
+    assert.equal(err.message, "secret not found");
+  });
+
+  it("sanitizes server text", async () => {
+    const hostile = "a\x1b[2Jb\x1b]52;c;Zm9v\x07c\u202ed\u200be\nf";
+    const errs = [
+      await denialError(403, { error: "access_denied", code: "ACL_DENIED", detail: hostile }, health),
+      await denialError(403, { error: hostile }, health),
+      await denialError(200, {
+        values: {},
+        errors: { "phoenix://a/b": hostile },
+        error_codes: { "phoenix://a/b": { code: "ACL_DENIED" } },
+      }, resolve),
+    ];
+    for (const err of errs) {
+      for (const bad of ["\x1b", "\x07", "\u202e", "\u200b", "\n"]) {
+        assert.ok(!err.message.includes(bad), `kept ${JSON.stringify(bad)}: ${JSON.stringify(err.message)}`);
+      }
+      assert.ok(err.message.includes("a[2Jb]52;c;Zm9vcdef"), err.message);
+    }
+    const long = await denialError(403, { code: "ACL_DENIED", detail: "x".repeat(1000) }, health);
+    assert.equal(long.message, "[ACL_DENIED] " + "x".repeat(300) + "...");
+  });
+
+  it("drops malformed codes", async () => {
+    for (const code of ["acl_denied", "ACL DENIED", "ACL_DENIED\n", "<b>X</b>", "A".repeat(65)]) {
+      const err = await denialError(403, { code, detail: "denied" }, health);
+      assert.equal(err.message, "denied", code);
+      const res = await denialError(200, {
+        values: {},
+        errors: { "phoenix://a/b": "denied" },
+        error_codes: { "phoenix://a/b": { code } },
+      }, resolve);
+      assert.equal(res.message, "denied", code);
+    }
+  });
+});
+
+describe("sealed envelope errors", () => {
+  // A hostile envelope must not put terminal escapes or extra lines into the
+  // exception message (final review C2).
+  it("cleans server text in version and algorithm errors", () => {
+    const c = new PhoenixClient({ server: "http://127.0.0.1:1", token: "tok" });
+    c._nacl = {}; // stand-ins: the version/algorithm checks run first
+    c._sealPriv = new Uint8Array(32);
+    const hostile = "x\u001b]52;c;Zm9v\u0007‮\nFORGED";
+    for (const env of [{ version: hostile }, { version: 1, algorithm: hostile }]) {
+      assert.throws(() => c._unsealEnvelope(env), (err) => {
+        assert.ok(err instanceof PhoenixError);
+        for (const bad of ["\u001b", "\u0007", "‮", "\n"]) {
+          assert.ok(!err.message.includes(bad), `message kept ${JSON.stringify(bad)}`);
+        }
+        return true;
+      });
+    }
+  });
+});

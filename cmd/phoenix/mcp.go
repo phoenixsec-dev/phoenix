@@ -31,8 +31,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/version"
@@ -173,6 +175,42 @@ var mcpSessionTools = []mcpTool{
 	},
 }
 
+// mcpAccessTools let an agent ask a human for temporary use of a secret it
+// was denied (request-use grants), check on the request, and see its own
+// identity. The grant itself is used through phoenix exec, never through
+// these tools, and they never return a secret value.
+var mcpAccessTools = []mcpTool{
+	{
+		Name:        "phoenix_request_use",
+		Description: "Ask a human for temporary use of exact secret paths you were denied (next step request_use). A human approves or denies in the Phoenix dashboard. Approved secrets are used through phoenix exec, not returned here. Must run on the agent's own identity, not a session.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"paths": {"type": "array", "items": {"type": "string"}, "description": "Exact secret paths, e.g. ['infra/b2/app-key'] (max 10, no wildcards)"},
+				"reason": {"type": "string", "description": "Why you need it, shown to the human as unverified (max 300 characters)"},
+				"ttl": {"type": "string", "description": "Optional grant length like '30m' (default 1h; the human may shorten it)"}
+			},
+			"required": ["paths", "reason"]
+		}`),
+	},
+	{
+		Name:        "phoenix_request_status",
+		Description: "Check an access request (req_...) made with phoenix_request_use: pending, approved, denied or expired, and what to do next.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"request_id": {"type": "string", "description": "Request ID (req_...)"}
+			},
+			"required": ["request_id"]
+		}`),
+	},
+	{
+		Name:        "phoenix_whoami",
+		Description: "Show which Phoenix identity this server uses, its ACL rules, active grants and pending access requests.",
+		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
+	},
+}
+
 var mcpUnsealTool = mcpTool{
 	Name:        "phoenix_unseal",
 	Description: "Decrypt a sealed secret value. The decrypted value will be visible in this conversation. Only works when allow_unseal policy is set for the secret's path.",
@@ -193,6 +231,7 @@ func mcpGetTools() []mcpTool {
 	tools := make([]mcpTool, len(mcpBaseTools))
 	copy(tools, mcpBaseTools)
 	tools = append(tools, mcpSessionTools...)
+	tools = append(tools, mcpAccessTools...)
 	if mcpSealPrivKey != nil {
 		tools = append(tools, mcpUnsealTool)
 	}
@@ -301,6 +340,12 @@ func mcpDispatchTool(name string, args json.RawMessage, logger *log.Logger) (str
 		return mcpToolSessionList(args, logger)
 	case "phoenix_session_revoke":
 		return mcpToolSessionRevoke(args, logger)
+	case "phoenix_request_use":
+		return mcpToolRequestUse(args, logger)
+	case "phoenix_request_status":
+		return mcpToolRequestStatus(args, logger)
+	case "phoenix_whoami":
+		return mcpToolWhoami(args, logger)
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name), true
 	}
@@ -336,11 +381,6 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 202 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return mcpFormatApprovalRequired(respBody), false
-	}
-
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
 		return mcpFormatDenial(respBody, resp.StatusCode), true
@@ -351,6 +391,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Sprintf("Failed to decode response: %v", err), true
@@ -359,7 +400,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		if len(result.SealedValues) == 0 && len(result.Errors) > 0 {
 			var msgs []string
 			for ref, errMsg := range result.Errors {
-				msgs = append(msgs, fmt.Sprintf("%s: %s", ref, errMsg))
+				msgs = append(msgs, fmt.Sprintf("%s: %s", displayRef(ref), formatRefError(ref, errMsg, result.ErrorCodes)))
 			}
 			return strings.Join(msgs, "\n"), true
 		}
@@ -379,7 +420,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 				sealToken := "PHOENIX_SEALED:" + base64.StdEncoding.EncodeToString(envJSON)
 				lines = append(lines, fmt.Sprintf("%s = %s", ref, sealToken))
 			} else if errMsg, ok := result.Errors[ref]; ok {
-				lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, errMsg))
+				lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
 			} else {
 				lines = append(lines, fmt.Sprintf("%s: ERROR: no value returned by server", ref))
 				hasErrors = true
@@ -392,8 +433,9 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 
 	// Plaintext mode
 	var result struct {
-		Values map[string]string `json:"values"`
-		Errors map[string]string `json:"errors"`
+		Values     map[string]string    `json:"values"`
+		Errors     map[string]string    `json:"errors"`
+		ErrorCodes map[string]refDenial `json:"error_codes"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Sprintf("Failed to decode response: %v", err), true
@@ -402,7 +444,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 	if len(result.Values) == 0 && len(result.Errors) > 0 {
 		var msgs []string
 		for ref, errMsg := range result.Errors {
-			msgs = append(msgs, fmt.Sprintf("%s: %s", ref, errMsg))
+			msgs = append(msgs, fmt.Sprintf("%s: %s", displayRef(ref), formatRefError(ref, errMsg, result.ErrorCodes)))
 		}
 		return strings.Join(msgs, "\n"), true
 	}
@@ -412,7 +454,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		if val, ok := result.Values[ref]; ok {
 			lines = append(lines, fmt.Sprintf("%s = %s", ref, val))
 		} else if errMsg, ok := result.Errors[ref]; ok {
-			lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, errMsg))
+			lines = append(lines, fmt.Sprintf("%s: ERROR: %s", ref, formatRefError(ref, errMsg, result.ErrorCodes)))
 		}
 	}
 
@@ -446,14 +488,9 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 202 {
-		body, _ := io.ReadAll(resp.Body)
-		return mcpFormatApprovalRequired(body), false
-	}
-
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Sprintf("%s: %s", params.Path, mcpFormatDenial(body, resp.StatusCode)), true
+		return fmt.Sprintf("%s: %s", params.Path, mcpFormatDenialForPath(body, resp.StatusCode, params.Path)), true
 	}
 
 	// Sealed mode: return opaque PHOENIX_SEALED: token
@@ -515,11 +552,6 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 202 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return mcpFormatApprovalRequired(respBody), false
-	}
-
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
 		return mcpFormatDenial(respBody, resp.StatusCode), true
@@ -537,7 +569,11 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	}
 
 	logger.Printf("listed %d secrets", len(result.Paths))
-	return strings.Join(result.Paths, "\n"), false
+	paths := make([]string, len(result.Paths))
+	for i, p := range result.Paths {
+		paths[i] = listPath(p)
+	}
+	return strings.Join(paths, "\n"), false
 }
 
 // mcpToolUnseal decrypts a sealed secret token locally.
@@ -623,44 +659,20 @@ func sessionRenewalLoop(logger *log.Logger) {
 // mcpFormatDenial parses a structured denial response body and returns
 // a formatted error string for the agent.
 func mcpFormatDenial(body []byte, statusCode int) string {
-	var denial struct {
-		Error       string `json:"error"`
-		Code        string `json:"code"`
-		Detail      string `json:"detail"`
-		Remediation string `json:"remediation"`
-	}
-	if json.Unmarshal(body, &denial) == nil && denial.Code != "" {
-		msg := fmt.Sprintf("[%s] %s", denial.Code, denial.Detail)
-		if denial.Remediation != "" {
-			msg += "\nhint: " + denial.Remediation
-		}
-		return msg
-	}
-	if json.Unmarshal(body, &denial) == nil && denial.Error != "" {
-		return denial.Error
-	}
-	return fmt.Sprintf("HTTP %d", statusCode)
+	return mcpFormatDenialForPath(body, statusCode, "")
 }
 
-// mcpFormatApprovalRequired parses a 202 approval-required response
-// and returns a message suitable for an agent to present to the human.
-func mcpFormatApprovalRequired(body []byte) string {
-	var pending struct {
-		Status     string `json:"status"`
-		ApproveCmd string `json:"approve_command"`
-		ExpiresAt  string `json:"expires_at"`
+// mcpFormatDenialForPath is mcpFormatDenial for one secret path, so a
+// request_use hint names the exact phoenix request command.
+func mcpFormatDenialForPath(body []byte, statusCode int, path string) string {
+	denial, ok := parseServerDenial(body)
+	if ok {
+		return formatDenialForPath(denial, "", path)
 	}
-	if json.Unmarshal(body, &pending) == nil && pending.Status == "approval_required" {
-		msg := "[APPROVAL_REQUIRED] This operation requires human approval."
-		if pending.ApproveCmd != "" {
-			msg += "\nRun: " + pending.ApproveCmd
-		}
-		if pending.ExpiresAt != "" {
-			msg += "\nExpires: " + pending.ExpiresAt
-		}
-		return msg
+	if denial.Error != "" {
+		return cleanServerText(denial.Error)
 	}
-	return "[APPROVAL_REQUIRED] This operation requires human approval."
+	return fmt.Sprintf("HTTP %d", statusCode)
 }
 
 // mcpToolSessionList handles the phoenix_session_list tool.
@@ -730,6 +742,124 @@ func mcpToolSessionRevoke(args json.RawMessage, logger *log.Logger) (string, boo
 	return fmt.Sprintf("Session %s revoked.", params.SessionID), false
 }
 
+// mcpToolRequestUse handles phoenix_request_use: POST /v1/access-requests.
+func mcpToolRequestUse(args json.RawMessage, logger *log.Logger) (string, bool) {
+	var params struct {
+		Paths  []string `json:"paths"`
+		Reason string   `json:"reason"`
+		TTL    string   `json:"ttl"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return fmt.Sprintf("Invalid arguments: %v", err), true
+	}
+	if len(params.Paths) == 0 || strings.TrimSpace(params.Reason) == "" {
+		return "paths and reason are required", true
+	}
+	for i, p := range params.Paths {
+		params.Paths[i] = strings.TrimPrefix(p, "phoenix://")
+	}
+	body, _ := json.Marshal(map[string]any{"paths": params.Paths, "action": "read_value", "reason": params.Reason, "ttl": params.TTL})
+	resp, err := apiRequestWithHeaders("POST", "/v1/access-requests", strings.NewReader(string(body)),
+		map[string]string{"X-Phoenix-Tool": "phoenix_request_use"})
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		return mcpFormatDenial(respBody, resp.StatusCode), true
+	}
+	var rq accessRequestView
+	if err := json.Unmarshal(respBody, &rq); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+	logger.Printf("access request %s (%d paths)", cleanServerText(rq.ID), len(rq.Paths))
+	return mcpRequestText(rq), false
+}
+
+// mcpToolRequestStatus handles phoenix_request_status.
+func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, bool) {
+	var params struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return fmt.Sprintf("Invalid arguments: %v", err), true
+	}
+	if !requestIDPattern.MatchString(params.RequestID) {
+		return "request_id must look like req_ followed by 32 hex characters", true
+	}
+	resp, err := apiRequest("GET", "/v1/access-requests/"+params.RequestID, nil)
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return mcpFormatDenial(respBody, resp.StatusCode), true
+	}
+	var rq accessRequestView
+	if err := json.Unmarshal(respBody, &rq); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+	return mcpRequestText(rq), false
+}
+
+// mcpRequestText renders a request for the model: cleaned server facts plus
+// a client-authored next step.
+func mcpRequestText(rq accessRequestView) string {
+	lines := []string{
+		"request_id: " + cleanServerText(rq.ID),
+		"status: " + cleanServerText(rq.Status),
+		"paths: " + cleanList(rq.Paths, ", "),
+	}
+	if len(rq.GrantedPaths) > 0 {
+		lines = append(lines, "granted: "+cleanList(rq.GrantedPaths, ", ")+" until "+cleanServerText(rq.GrantExpiresAt))
+	}
+	lines = append(lines, "next: "+requestNextHint(rq))
+	return strings.Join(lines, "\n")
+}
+
+// mcpToolWhoami handles phoenix_whoami: the caller's identity and access
+// summary, passed through as cleaned JSON.
+func mcpToolWhoami(args json.RawMessage, logger *log.Logger) (string, bool) {
+	resp, err := apiRequest("GET", "/v1/whoami", nil)
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return mcpFormatDenial(respBody, resp.StatusCode), true
+	}
+	var v any
+	if err := json.Unmarshal(respBody, &v); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+	out, _ := json.MarshalIndent(cleanJSONStrings(v), "", "  ")
+	return string(out), false
+}
+
+// cleanJSONStrings runs cleanServerText over every string (keys included)
+// in a decoded JSON value.
+func cleanJSONStrings(v any) any {
+	switch t := v.(type) {
+	case string:
+		return cleanServerText(t)
+	case []any:
+		for i := range t {
+			t[i] = cleanJSONStrings(t[i])
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[cleanServerText(k)] = cleanJSONStrings(val)
+		}
+		return out
+	}
+	return v
+}
+
 // mcpSendResult sends a successful JSON-RPC response.
 func mcpSendResult(enc *json.Encoder, id json.RawMessage, result interface{}) {
 	if err := enc.Encode(mcpResponse{JSONRPC: "2.0", ID: id, Result: result}); err != nil {
@@ -742,4 +872,22 @@ func mcpSendError(enc *json.Encoder, id json.RawMessage, code int, msg string) {
 	if err := enc.Encode(mcpResponse{JSONRPC: "2.0", ID: id, Error: &mcpError{Code: code, Message: msg}}); err != nil {
 		log.New(os.Stderr, "phoenix-mcp: ", 0).Printf("encode error: %v", err)
 	}
+}
+
+// listPath shows one listed path. Ordinary paths print as they are. A path
+// with control or invisible formatting characters prints as a Go-quoted
+// string ("ns/a\u200db"), so it cannot add lines or terminal escapes to the
+// output, yet stays exact and distinct from similar-looking paths. A path
+// that itself starts with a double quote is quoted too, so a quoted line
+// always means "decode me" and never collides with a literal path.
+func listPath(p string) string {
+	if strings.HasPrefix(p, `"`) {
+		return strconv.QuoteToASCII(p)
+	}
+	for _, r := range p {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return strconv.QuoteToASCII(p)
+		}
+	}
+	return p
 }

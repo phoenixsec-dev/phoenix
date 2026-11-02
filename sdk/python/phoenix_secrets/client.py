@@ -9,6 +9,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import unicodedata
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -20,6 +22,31 @@ try:
     _HAS_NACL = True
 except ImportError:
     _HAS_NACL = False
+
+
+# Denial codes look like "ACL_DENIED" (docs/denial-codes.md); anything else
+# from the server is dropped rather than echoed.
+_CODE_RE = re.compile(r"[A-Z0-9_]{1,64}")
+_MAX_SERVER_TEXT = 300
+
+
+def _clean_server_text(text) -> str:
+    """Make server-supplied text safe to show: drop control characters
+    (including terminal escapes) and Unicode format characters (bidi
+    overrides, zero-width), and cap the length."""
+    chars = [ch for ch in str(text or "") if unicodedata.category(ch) not in ("Cc", "Cf")]
+    if len(chars) > _MAX_SERVER_TEXT:
+        return "".join(chars[:_MAX_SERVER_TEXT]) + "..."
+    return "".join(chars)
+
+
+def _denial_message(code, text) -> str:
+    """Return "[CODE] text" with cleaned text, or just the text when the
+    code is missing or malformed."""
+    text = _clean_server_text(text)
+    if isinstance(code, str) and _CODE_RE.fullmatch(code):
+        return f"[{code}] {text}"
+    return text
 
 
 class PhoenixError(Exception):
@@ -110,7 +137,11 @@ class PhoenixClient:
         except HTTPError as e:
             try:
                 err_body = json.loads(e.read())
-                msg = err_body.get("error", f"HTTP {e.code}")
+                if err_body.get("code"):
+                    # Structured denial (docs/denial-codes.md): show code + detail.
+                    msg = _denial_message(err_body["code"], err_body.get("detail") or err_body.get("error", ""))
+                else:
+                    msg = _clean_server_text(err_body.get("error", f"HTTP {e.code}"))
             except (json.JSONDecodeError, AttributeError):
                 msg = f"HTTP {e.code}"
             raise PhoenixError(msg, status=e.code) from None
@@ -143,7 +174,10 @@ class PhoenixClient:
         """
         result = self.resolve_batch([ref])
         if ref in result.get("errors", {}):
-            raise PhoenixError(result["errors"][ref])
+            # Newer servers add a per-ref code in error_codes; older ones do not.
+            denial = (result.get("error_codes") or {}).get(ref)
+            code = denial.get("code") if isinstance(denial, dict) else None
+            raise PhoenixError(_denial_message(code, result["errors"][ref]))
         return result["values"][ref]
 
     def resolve_batch(self, refs: list[str]) -> dict:
@@ -170,7 +204,7 @@ class PhoenixClient:
             for ref, env in result["sealed_values"].items():
                 if env.get("ref") != ref:
                     raise PhoenixError(
-                        f"sealed envelope ref mismatch: map key {ref!r}, envelope {env.get('ref')!r}"
+                        f"sealed envelope ref mismatch: map key {_clean_server_text(ref)!r}, envelope {_clean_server_text(env.get('ref'))!r}"
                     )
                 values[ref] = self._unseal_envelope(env)
             result["values"] = values
@@ -184,9 +218,9 @@ class PhoenixClient:
             raise PhoenixError("sealed mode not configured")
 
         if env.get("version") != 1:
-            raise PhoenixError(f"unsupported seal version: {env.get('version')}")
+            raise PhoenixError(f"unsupported seal version: {_clean_server_text(env.get('version'))}")
         if env.get("algorithm") != "x25519-xsalsa20-poly1305":
-            raise PhoenixError(f"unsupported seal algorithm: {env.get('algorithm')}")
+            raise PhoenixError(f"unsupported seal algorithm: {_clean_server_text(env.get('algorithm'))}")
 
         eph_pub = base64.b64decode(env["ephemeral_key"])
         nonce = base64.b64decode(env["nonce"])

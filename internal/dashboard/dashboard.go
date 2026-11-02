@@ -23,6 +23,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/config"
+	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
@@ -126,6 +127,10 @@ type Deps struct {
 	Policy       *policy.Engine
 	StartTime    time.Time
 	Audit        *audit.Logger
+	// Request-use grants (access.go). Both nil = the access request section
+	// and grants page show "not configured".
+	Grants *grant.Store
+	Access AccessApprover
 }
 
 // Handler serves the dashboard web UI.
@@ -197,6 +202,7 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	pageTemplates := []string{
 		"templates/approvals.html",
 		"templates/audit.html",
+		"templates/grants.html",
 		"templates/login.html",
 		"templates/overview.html",
 		"templates/roles.html",
@@ -226,6 +232,10 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	h.mux.HandleFunc("GET /dashboard/approvals", h.requireAuth(h.handleApprovals))
 	h.mux.HandleFunc("POST /dashboard/approvals/{id}/approve", h.requireAuth(h.handleApprove))
 	h.mux.HandleFunc("POST /dashboard/approvals/{id}/deny", h.requireAuth(h.handleDeny))
+	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/approve", h.requireAuth(h.handleAccessApprove))
+	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/deny", h.requireAuth(h.handleAccessDeny))
+	h.mux.HandleFunc("GET /dashboard/grants", h.requireAuth(h.handleGrants))
+	h.mux.HandleFunc("POST /dashboard/grants/{id}/revoke", h.requireAuth(h.handleGrantRevoke))
 	h.mux.HandleFunc("GET /dashboard/sessions", h.requireAuth(h.handleSessions))
 	h.mux.HandleFunc("POST /dashboard/sessions/{id}/revoke", h.requireAuth(h.handleRevoke))
 	h.mux.HandleFunc("GET /dashboard/audit", h.requireAuth(h.handleAudit))
@@ -527,6 +537,13 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		pendingApprovals = len(h.deps.Approvals.ListPending())
 	}
 
+	// Request-use grants: pending count and degraded state.
+	var accessHealth *grant.Health
+	if h.deps.Grants != nil {
+		hl := h.deps.Grants.Health()
+		accessHealth = &hl
+	}
+
 	// Recent audit
 	var recentAudit []audit.Entry
 	if h.deps.AuditPath != "" {
@@ -544,6 +561,9 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"AgentCount":       agentCount,
 		"SessionCount":     activeSessionCount,
 		"PendingApprovals": pendingApprovals,
+		"PendingAccess":    h.pendingAccessCount(),
+		"AccessHealth":     accessHealth,
+		"AccessOn":         h.accessEnabled() && h.deps.Access.AccessRequestSettings().Enabled,
 		"Uptime":           fmtAgo(h.deps.StartTime),
 		"RecentAudit":      recentAudit,
 		"SessionsEnabled":  h.deps.Sessions != nil,
@@ -553,11 +573,15 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleApprovals(w http.ResponseWriter, r *http.Request) {
 	if h.deps.Approvals == nil {
 		h.render(w, "approvals.html", map[string]interface{}{
-			"CSRF":     r.Header.Get("X-Csrf-Token"),
-			"Active":   "approvals",
-			"Pending":  nil,
-			"Resolved": nil,
-			"Flash":    r.URL.Query().Get("flash"),
+			"CSRF":          r.Header.Get("X-Csrf-Token"),
+			"Active":        "approvals",
+			"Pending":       nil,
+			"Resolved":      nil,
+			"Flash":         r.URL.Query().Get("flash"),
+			"Error":         accessErrorMessage(r.URL.Query().Get("error")),
+			"AccessCards":   h.accessCards(),
+			"AccessOn":      h.accessEnabled(),
+			"StepUpEnabled": false,
 		})
 		return
 	}
@@ -582,12 +606,30 @@ func (h *Handler) handleApprovals(w http.ResponseWriter, r *http.Request) {
 	})
 
 	h.render(w, "approvals.html", map[string]interface{}{
-		"CSRF":     r.Header.Get("X-Csrf-Token"),
-		"Active":   "approvals",
-		"Pending":  pending,
-		"Resolved": resolved,
-		"Flash":    r.URL.Query().Get("flash"),
+		"CSRF":          r.Header.Get("X-Csrf-Token"),
+		"Active":        "approvals",
+		"UnboundRoles":  h.unboundRoles(),
+		"Pending":       pending,
+		"Resolved":      resolved,
+		"Flash":         r.URL.Query().Get("flash"),
+		"Error":         accessErrorMessage(r.URL.Query().Get("error")),
+		"AccessCards":   h.accessCards(),
+		"AccessOn":      h.accessEnabled(),
+		"StepUpEnabled": true,
 	})
+}
+
+// unboundRoles names the session roles with no allowed_agents, so the
+// step-up approval card can show a "role has no agent binding" badge: any
+// agent that passes bootstrap_trust could have asked for such a role.
+func (h *Handler) unboundRoles() map[string]bool {
+	out := map[string]bool{}
+	for name, role := range h.deps.SessionRoles {
+		if len(role.AllowedAgents) == 0 {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func (h *Handler) handleApprove(w http.ResponseWriter, r *http.Request) {
@@ -801,10 +843,12 @@ func (h *Handler) handleRoles(w http.ResponseWriter, r *http.Request) {
 // --- Rendering ---
 
 func (h *Handler) render(w http.ResponseWriter, name string, data map[string]interface{}) {
-	// Count pending approvals for nav badge
+	// Count pending step-up approvals and access requests for the nav badge
+	pending := h.pendingAccessCount()
 	if h.deps.Approvals != nil {
-		data["PendingCount"] = len(h.deps.Approvals.ListPending())
+		pending += len(h.deps.Approvals.ListPending())
 	}
+	data["PendingCount"] = pending
 	t, ok := h.tmpls[name]
 	if !ok {
 		log.Printf("dashboard: unknown template %q", name)

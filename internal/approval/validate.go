@@ -34,6 +34,15 @@ func ValidateForMint(apr *Approval, roles map[string]config.RoleConfig) (config.
 		}
 	}
 
+	// Re-check the agent binding (allowed_agents). An agent removed from
+	// the list while its request was pending must not get the role.
+	if !role.AgentAllowed(apr.Agent) {
+		return config.RoleConfig{}, &ValidationError{
+			Code:    "ROLE_NOT_ALLOWED",
+			Message: fmt.Sprintf("agent %q is not allowed to use role %q (allowed_agents)", apr.Agent, apr.Role),
+		}
+	}
+
 	// Re-check bootstrap trust
 	if !BootstrapAllowed(role.BootstrapTrust, apr.BootstrapMethod, session.IsLoopback(apr.SourceIP)) {
 		return config.RoleConfig{}, &ValidationError{

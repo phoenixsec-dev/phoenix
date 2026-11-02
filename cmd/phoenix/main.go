@@ -17,7 +17,11 @@
 //	phoenix resolve <ref> [ref...]
 //	phoenix resolve --stdin-json
 //	phoenix openclaw-exec-provider
-//	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <dur>] [--mask-env] -- <command> [args...]
+//	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <dur>] [--mask-env] [--redact-output] -- <command> [args...]
+//	phoenix request <path>... --reason "..." [--ttl 30m] [--wait]
+//	phoenix request status <req_id>
+//	phoenix whoami | pending | grants [--all] | grants revoke <gnt_id>
+//	phoenix approve <apr_id|req_id> | deny <apr_id|req_id>
 //	phoenix verify <file> [--dry-run]
 //	phoenix status
 //	phoenix token mint <agent>
@@ -38,6 +42,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -287,6 +292,16 @@ func main() {
 		}
 	case "approve":
 		err = cmdApprove(args)
+	case "deny":
+		err = cmdDeny(args)
+	case "request":
+		err = cmdRequest(args)
+	case "pending":
+		err = cmdPending(args)
+	case "whoami":
+		err = cmdWhoami(args)
+	case "grants":
+		err = cmdGrants(args)
 	case "mcp-server":
 		httpAddr := ""
 		mcpToken := os.Getenv("PHOENIX_MCP_TOKEN")
@@ -347,6 +362,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	var exitCode exitCodeError
+	if errors.As(err, &exitCode) {
+		// phoenix exec --redact-output: pass the child's exit code through.
+		os.Exit(int(exitCode))
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -380,6 +400,10 @@ Usage:
   phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
   phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
   phoenix exec --mask-env --env ...           Strip phoenix:// refs from child env
+  phoenix exec --redact-output --env ...      Replace secret values in the command's output with
+                                              [REDACTED:NAME]; guards against accidental echo,
+                                              not a hostile command; values under 4 bytes are not
+                                              redacted; exit code is passed through
   phoenix verify <file> [--dry-run]           Check phoenix:// refs in file are resolvable
   phoenix status                              Show server health, secrets, agents, policy
   phoenix policy show <path>                  Show attestation requirements for path
@@ -396,7 +420,17 @@ Usage:
   phoenix sessions list [--role R] [--agent A]  List active sessions
   phoenix sessions info <session-id>            Show session details
   phoenix sessions revoke <session-id>          Revoke a session
-  phoenix approve <approval-id>                Approve a step-up session request
+  phoenix approve <apr_id>                     Approve a step-up session request
+  phoenix request <path>... --reason "..." [--ttl 30m] [--wait]
+                                              Ask a human for temporary use of exact secrets
+  phoenix request status <req_id>              Show a request's state and what to do next
+  phoenix whoami                               Show identity, ACL rules, grants, pending requests
+  phoenix pending                              List step-up approvals and access requests (approver)
+  phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]
+                                              Approve an access request (approver; may narrow)
+  phoenix deny <apr_id|req_id> [--note "..."]  Deny a step-up approval or access request
+  phoenix grants [--all] [--agent <name>]      List grants (own; approvers see all)
+  phoenix grants revoke <gnt_id>               Revoke a grant now
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix mcp-server --http 127.0.0.1:8080    Run MCP server (Streamable HTTP)
   phoenix mcp-server --http <addr> --tls-cert <crt> --tls-key <key>  Serve MCP over HTTPS
@@ -495,7 +529,7 @@ func cmdGet(args []string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return handleError(resp)
+		return handleErrorForPath(resp, args[0])
 	}
 
 	if sealPrivKey != nil {
@@ -1238,15 +1272,18 @@ func cmdOpenClawExecProvider(args []string) error {
 
 	values := make(map[string]string)
 	var errs map[string]string
+	var errCodes map[string]refDenial
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
 				if envRef, _ := envMap["ref"].(string); envRef != ref {
@@ -1255,20 +1292,22 @@ func cmdOpenClawExecProvider(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			values[ref] = val
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		values = result.Values
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 	}
 
 	out := openClawExecProviderResponse{
@@ -1281,7 +1320,7 @@ func cmdOpenClawExecProvider(args []string) error {
 			if out.Errors == nil {
 				out.Errors = make(map[string]openClawExecProviderError)
 			}
-			out.Errors[id] = openClawExecProviderError{Message: errMsg}
+			out.Errors[id] = openClawExecProviderError{Message: formatRefError(ref, errMsg, errCodes)}
 			continue
 		}
 		val, ok := values[ref]
@@ -1403,16 +1442,19 @@ func cmdResolve(args []string) error {
 	// Decode response — handle sealed or plaintext
 	var values map[string]string
 	var errs map[string]string
+	var errCodes map[string]refDenial
 
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 		values = make(map[string]string)
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
@@ -1422,26 +1464,28 @@ func cmdResolve(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			values[ref] = val
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		values = result.Values
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 	}
 
 	// Single ref: output raw value for piping
 	if len(refs) == 1 {
 		if errMsg, ok := errs[refs[0]]; ok {
-			return fmt.Errorf("%s: %s", refs[0], errMsg)
+			return fmt.Errorf("%s: %s", refs[0], formatRefError(refs[0], errMsg, errCodes))
 		}
 		if _, ok := values[refs[0]]; !ok {
 			return fmt.Errorf("%s: no value returned by server", refs[0])
@@ -1454,7 +1498,7 @@ func cmdResolve(args []string) error {
 	var hasErr bool
 	for _, ref := range refs {
 		if errMsg, ok := errs[ref]; ok {
-			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
+			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, formatRefError(ref, errMsg, errCodes))
 			hasErr = true
 			continue
 		}
@@ -1532,7 +1576,7 @@ func cmdExec(args []string) error {
 	var cmdArgs []string
 	var outputEnvPath string
 	var timeoutStr string
-	var maskEnv bool
+	var maskEnv, redactOutput bool
 	seenSep := false
 
 	for i := 0; i < len(args); i++ {
@@ -1560,11 +1604,16 @@ func cmdExec(args []string) error {
 			timeoutStr = args[i]
 		case "--mask-env":
 			maskEnv = true
+		case "--redact-output":
+			redactOutput = true
 		}
 	}
 
 	if outputEnvPath == "" && (!seenSep || len(cmdArgs) == 0) {
-		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <duration>] [--mask-env] -- <command> [args...]")
+		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <duration>] [--mask-env] [--redact-output] -- <command> [args...]")
+	}
+	if redactOutput && outputEnvPath != "" {
+		return fmt.Errorf("--redact-output runs a command; it cannot be combined with --output-env")
 	}
 	if len(envMappings) == 0 {
 		return fmt.Errorf("at least one --env mapping is required")
@@ -1638,16 +1687,19 @@ func cmdExec(args []string) error {
 	// Decode response — handle sealed or plaintext
 	resolvedValues := make(map[string]string)
 	var resolveErrors map[string]string
+	var resolveErrorCodes map[string]refDenial
 
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding resolve response: %w", err)
 		}
 		resolveErrors = result.Errors
+		resolveErrorCodes = result.ErrorCodes
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
 				if envRef, _ := envMap["ref"].(string); envRef != ref {
@@ -1656,26 +1708,28 @@ func cmdExec(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			resolvedValues[ref] = val
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding resolve response: %w", err)
 		}
 		resolvedValues = result.Values
 		resolveErrors = result.Errors
+		resolveErrorCodes = result.ErrorCodes
 	}
 
 	// Check for resolution errors
 	if len(resolveErrors) > 0 {
 		for ref, errMsg := range resolveErrors {
-			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", ref, errMsg)
+			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", displayRef(ref), formatRefError(ref, errMsg, resolveErrorCodes))
 		}
 		return fmt.Errorf("failed to resolve %d reference(s)", len(resolveErrors))
 	}
@@ -1700,36 +1754,38 @@ func cmdExec(args []string) error {
 
 	// Build env: inherit current env but strip Phoenix credentials
 	// to prevent the child from escalating access beyond mapped refs.
-	var env []string
-	for _, e := range os.Environ() {
-		key := e[:strings.IndexByte(e, '=')]
-		switch key {
-		case "PHOENIX_TOKEN", "PHOENIX_CLIENT_CERT", "PHOENIX_CLIENT_KEY",
-			"PHOENIX_CA_CERT", "PHOENIX_SERVER", "PHOENIX_POLICY",
-			"PHOENIX_SEAL_KEY":
-			continue // strip broker credentials
-		}
-		if maskEnv {
-			val := e[strings.IndexByte(e, '=')+1:]
-			if strings.Contains(val, "phoenix://") {
-				continue // strip env vars containing phoenix:// refs
-			}
-		}
-		env = append(env, e)
-	}
+	env := childEnv(os.Environ(), maskEnv)
+	var values []redactValue
 	for _, m := range mappings {
 		val, ok := resolvedValues[m.ref]
 		if !ok {
 			return fmt.Errorf("no value returned for %s", m.ref)
 		}
 		env = append(env, m.envVar+"="+val)
+		values = append(values, redactValue{Name: m.envVar, Value: val})
 	}
 
-	// Exec into the child process (replaces current process)
 	binary, err := exec.LookPath(cmdArgs[0])
 	if err != nil {
 		return fmt.Errorf("command not found: %s", cmdArgs[0])
 	}
+	if redactOutput {
+		// Stay as the parent and filter the child's output (redact.go).
+		for _, v := range values {
+			if len(v.Value) < minRedactLen {
+				fmt.Fprintf(os.Stderr, "phoenix exec: warning: %s is shorter than %d bytes and is not redacted\n", v.Name, minRedactLen)
+			}
+		}
+		code, runErr := runRedacted(binary, cmdArgs, env, values, os.Stdin, os.Stdout, os.Stderr)
+		if runErr != nil {
+			return runErr
+		}
+		if code != 0 {
+			return exitCodeError(code)
+		}
+		return nil
+	}
+	// Exec into the child process (replaces current process)
 	return syscall.Exec(binary, cmdArgs, env)
 }
 
@@ -2521,26 +2577,18 @@ func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
 		var pending struct {
 			Status     string `json:"status"`
 			ApprovalID string `json:"approval_id"`
-			ApproveCmd string `json:"approve_command"`
 			ExpiresAt  string `json:"expires_at"`
 		}
 		if err := json.Unmarshal(respBody, &pending); err == nil && pending.Status == "approval_required" {
-			return pollForApproval(pending.ApprovalID, pending.ExpiresAt, pending.ApproveCmd)
+			return pollForApproval(pending.ApprovalID, pending.ExpiresAt)
 		}
 	}
 
 	if resp.StatusCode != 200 {
-		var errResp struct {
-			Error       string `json:"error"`
-			Code        string `json:"code"`
-			Detail      string `json:"detail"`
-			Remediation string `json:"remediation"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
-			return "", time.Time{}, fmt.Errorf("[%s] %s\n  hint: %s", errResp.Code, errResp.Detail, errResp.Remediation)
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			return "", time.Time{}, fmt.Errorf("session mint: %s", errResp.Error)
+		if d, ok := parseServerDenial(respBody); ok {
+			return "", time.Time{}, fmt.Errorf("session mint: %s", formatDenial(d, "  "))
+		} else if d.Error != "" {
+			return "", time.Time{}, fmt.Errorf("session mint: %s", cleanServerText(d.Error))
 		}
 		return "", time.Time{}, fmt.Errorf("session mint: HTTP %d", resp.StatusCode)
 	}
@@ -2616,14 +2664,8 @@ func renewSessionViaAPI() (string, time.Time, error) {
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != 200 {
-		var errResp struct {
-			Error       string `json:"error"`
-			Code        string `json:"code"`
-			Detail      string `json:"detail"`
-			Remediation string `json:"remediation"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Code != "" {
-			return "", time.Time{}, fmt.Errorf("[%s] %s", errResp.Code, errResp.Detail)
+		if d, ok := parseServerDenial(respBody); ok {
+			return "", time.Time{}, fmt.Errorf("session renew: %s", formatDenial(d, "  "))
 		}
 		return "", time.Time{}, fmt.Errorf("session renew: HTTP %d", resp.StatusCode)
 	}
@@ -2927,16 +2969,19 @@ func cmdAgentSockResolve(args []string) error {
 	// Decode response — handle sealed or plaintext
 	var values map[string]string
 	var errs map[string]string
+	var errCodes map[string]refDenial
 
 	if sealPrivKey != nil {
 		var result struct {
 			SealedValues map[string]interface{} `json:"sealed_values"`
 			Errors       map[string]string      `json:"errors"`
+			ErrorCodes   map[string]refDenial   `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 		values = make(map[string]string)
 		for ref, raw := range result.SealedValues {
 			if envMap, ok := raw.(map[string]interface{}); ok {
@@ -2946,26 +2991,28 @@ func cmdAgentSockResolve(args []string) error {
 			}
 			val, err := decryptSealedValue(raw, sealPrivKey)
 			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", ref, err)
+				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
 			}
 			values[ref] = val
 		}
 	} else {
 		var result struct {
-			Values map[string]string `json:"values"`
-			Errors map[string]string `json:"errors"`
+			Values     map[string]string    `json:"values"`
+			Errors     map[string]string    `json:"errors"`
+			ErrorCodes map[string]refDenial `json:"error_codes"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return fmt.Errorf("decoding response: %w", err)
 		}
 		values = result.Values
 		errs = result.Errors
+		errCodes = result.ErrorCodes
 	}
 
 	// Single ref: output raw value
 	if len(refs) == 1 {
 		if errMsg, ok := errs[refs[0]]; ok {
-			return fmt.Errorf("%s: %s", refs[0], errMsg)
+			return fmt.Errorf("%s: %s", refs[0], formatRefError(refs[0], errMsg, errCodes))
 		}
 		fmt.Print(values[refs[0]])
 		return nil
@@ -2975,7 +3022,7 @@ func cmdAgentSockResolve(args []string) error {
 	var hasErr bool
 	for _, ref := range refs {
 		if errMsg, ok := errs[ref]; ok {
-			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, errMsg)
+			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, formatRefError(ref, errMsg, errCodes))
 			hasErr = true
 			continue
 		}
@@ -3119,24 +3166,20 @@ func cmdEmergencyGet(args []string) error {
 }
 
 func handleError(resp *http.Response) error {
+	return handleErrorForPath(resp, "")
+}
+
+// handleErrorForPath is handleError for a request about one secret path:
+// a request_use denial then names the exact phoenix request command.
+func handleErrorForPath(resp *http.Response, path string) error {
 	body, _ := io.ReadAll(resp.Body)
 
-	var structured struct {
-		Error       string `json:"error"`
-		Code        string `json:"code"`
-		Detail      string `json:"detail"`
-		Remediation string `json:"remediation"`
+	structured, ok := parseServerDenial(body)
+	if ok {
+		return fmt.Errorf("HTTP %d %s", resp.StatusCode, formatDenialForPath(structured, "  ", path))
 	}
-	if json.Unmarshal(body, &structured) == nil && structured.Code != "" {
-		msg := fmt.Sprintf("HTTP %d [%s]: %s", resp.StatusCode, structured.Code, structured.Detail)
-		if structured.Remediation != "" {
-			msg += "\n  hint: " + structured.Remediation
-		}
-		return fmt.Errorf("%s", msg)
-	}
-
-	if json.Unmarshal(body, &structured) == nil && structured.Error != "" {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, structured.Error)
+	if structured.Error != "" {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, cleanServerText(structured.Error))
 	}
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
 }
@@ -3154,8 +3197,8 @@ func detectTTY() string {
 }
 
 // pollForApproval polls an approval status endpoint until approved, denied, or expired.
-func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.Time, error) {
-	fmt.Fprintf(os.Stderr, "Step-up approval required. Run:\n  %s\n\nWaiting for approval...\n", approveCmd)
+func pollForApproval(approvalID, expiresAtStr string) (string, time.Time, error) {
+	fmt.Fprint(os.Stderr, approvalNotice(approvalID))
 
 	deadline := time.Now().Add(10 * time.Minute) // fallback
 	if exp, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
@@ -3203,7 +3246,16 @@ func pollForApproval(approvalID, expiresAtStr, approveCmd string) (string, time.
 	return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval poll ended unexpectedly")
 }
 
-// cmdApprove handles the "phoenix approve <approval-id>" command.
+// approvalNotice is the stderr text shown while waiting for step-up
+// approval. The approve command is built locally from the approval ID, never
+// taken from the server's approve_command.
+func approvalNotice(approvalID string) string {
+	if cmd := approveCommand(approvalID); cmd != "" {
+		return fmt.Sprintf("Step-up approval required. Run:\n  %s\n\nWaiting for approval...\n", cmd)
+	}
+	return "Step-up approval required. Ask a human to approve the pending request.\n\nWaiting for approval...\n"
+}
+
 func cmdSessionList(args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
@@ -3346,7 +3398,10 @@ func cmdSessionRevoke(args []string) error {
 	return nil
 }
 
-func cmdApprove(args []string) error {
+// cmdApproveStepUp handles "phoenix approve <apr_id>": the original
+// step-up session approval flow, unchanged. cmdApprove (access.go) routes
+// req_ IDs elsewhere.
+func cmdApproveStepUp(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: phoenix approve <approval-id>")
 	}
@@ -3378,13 +3433,14 @@ func cmdApprove(args []string) error {
 	}
 
 	if details.Status != "pending" {
-		return fmt.Errorf("approval %s is already %s", approvalID, details.Status)
+		return fmt.Errorf("approval %s is already %s", approvalID, cleanServerText(details.Status))
 	}
 
-	// Prompt for confirmation via /dev/tty
-	fmt.Fprintf(os.Stderr, "\nApprove session for role '%s'?\n", details.Role)
-	fmt.Fprintf(os.Stderr, "  Requested by: agent %q\n", details.Agent)
-	fmt.Fprintf(os.Stderr, "  Expires at: %s\n", details.ExpiresAt)
+	// Prompt for confirmation via /dev/tty. Server text is cleaned so it
+	// cannot forge lines or send terminal escapes into the prompt.
+	fmt.Fprintf(os.Stderr, "\nApprove session for role '%s'?\n", cleanServerText(details.Role))
+	fmt.Fprintf(os.Stderr, "  Requested by: agent %q\n", cleanServerText(details.Agent))
+	fmt.Fprintf(os.Stderr, "  Expires at: %s\n", cleanServerText(details.ExpiresAt))
 	fmt.Fprintf(os.Stderr, "\nApprove? [y/N]: ")
 
 	answer, err := readFromTTY()

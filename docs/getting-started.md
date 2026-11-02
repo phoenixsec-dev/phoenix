@@ -156,6 +156,14 @@ bind without TLS. Do not serve the dashboard over plain HTTP on a network you
 do not control.
 See [Dashboard](dashboard.md) for the full deployment guide and security model.
 
+## Let agents ask for temporary access
+
+New installs (`--init`) include an `access_requests` block with
+`"enabled": true`. An agent that is denied a secret can ask for temporary use
+of that exact path, and a human approves or denies it. See
+[Access Requests](access-requests.md). Configs from older releases have no
+block, so the feature stays off until you add it.
+
 ## Next steps
 
 - [CLI Usage](cli-usage.md) — full command reference
