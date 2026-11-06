@@ -20,14 +20,26 @@ WINDOW_BIN=/usr/local/sbin/phoenix-ssh-window
 AUTHZ_BIN=/usr/local/sbin/phoenix-ssh-authz
 UNIT=/etc/systemd/system/phoenix-ssh-window
 
-# Reloads whichever name this distro gives the SSH service. A reload keeps
-# existing connections, so a bad change can't lock anyone out of a running session.
+# Reloads whichever name this distro gives the SSH service, then waits until it is
+# really healthy. Where ssh.socket and ssh.service are both active (Debian 12), a
+# reload makes sshd fail to re-bind port 22 and systemd restarts it. Existing sessions
+# survive that, but /run/sshd is briefly gone, so a check made too soon would fail.
 reload_sshd() {
   if systemctl is-active --quiet sshd; then
-    systemctl reload sshd
+    service=sshd
   else
-    systemctl reload ssh
+    service=ssh
   fi
+  systemctl reload "$service" || systemctl restart "$service"
+  tries=0
+  until systemctl is-active --quiet "$service" && sshd -t 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 20 ]; then
+      echo "the $service service is not healthy after a reload: check it now" >&2
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 install_all() {
