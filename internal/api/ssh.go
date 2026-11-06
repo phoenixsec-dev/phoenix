@@ -15,13 +15,15 @@ import (
 
 // SSH certificates: temporary login to a machine, approved like any grant.
 //
-// An agent files an ordinary access request for the path "ssh/<machine>". That
-// path is not a secret, only the name of a login. Once a human approves, the
-// agent sends a public key to POST /v1/ssh/sign and gets back a certificate
-// that stops working when the grant ends.
+// An agent files an access request with action "ssh_login" for the path
+// "ssh/<machine>". Once a human approves, the agent sends a public key to
+// POST /v1/ssh/sign and gets back a certificate that stops working when the
+// grant ends. The machine also asks GET /v1/ssh/window at every login and while
+// a session is open, so a revoke beats a certificate that is still in date.
 //
 // The grant is the only thing that counts. The agent's ACL is ignored, so a "*"
-// rule can read every secret and still cannot log in to anything.
+// rule can read every secret and still cannot log in to anything. Keying this on
+// the action, not the path, keeps it apart from any secret stored under "ssh/".
 
 const sshPathPrefix = "ssh/"
 
@@ -35,16 +37,7 @@ func (s *Server) SetSSHCA(ca ssh.Signer, hosts map[string]config.SSHHost) {
 func (s *Server) sshRoutes() {
 	s.mux.HandleFunc("POST /v1/ssh/sign", s.handleSSHSign)
 	s.mux.HandleFunc("GET /v1/ssh/ca", s.handleSSHCA)
-	s.mux.HandleFunc("GET /v1/ssh/window/{host}", s.handleSSHWindow)
-}
-
-func isSSHPath(path string) bool {
-	return strings.HasPrefix(path, sshPathPrefix)
-}
-
-// isSSHRequest reports whether any path in a request is a login, not a secret.
-func isSSHRequest(paths []string) bool {
-	return slices.ContainsFunc(paths, isSSHPath)
+	s.mux.HandleFunc("GET /v1/ssh/window/{host}/{grant}", s.handleSSHWindow)
 }
 
 // sshRequestAllowed checks a login request: one configured machine per request,
@@ -53,7 +46,11 @@ func (s *Server) sshRequestAllowed(paths []string) bool {
 	if s.sshCA == nil || len(paths) != 1 {
 		return false
 	}
-	_, known := s.sshHosts[strings.TrimPrefix(paths[0], sshPathPrefix)]
+	name, ok := strings.CutPrefix(paths[0], sshPathPrefix)
+	if !ok {
+		return false
+	}
+	_, known := s.sshHosts[name]
 	return known
 }
 
@@ -95,15 +92,17 @@ func (s *Server) handleSSHSign(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIP(r)
 	path := sshPathPrefix + body.Host
-	m := s.grants.Match(s.grantCaller(info, ip), path, grant.ActionReadValue)
+	m := s.grants.Match(s.grantCaller(info, ip), path, grant.ActionSSHLogin)
 	if m.Grant == nil {
 		s.denySSHSign(w, r, info, path, ip, m.Reason)
 		return
 	}
 	cert, err := sshca.Sign(s.sshCA, sshca.CertRequest{
-		PublicKey:   body.PublicKey,
-		Principal:   body.Host,
-		KeyID:       fmt.Sprintf("agent=%s grant=%s host=%s", info.Agent, m.Grant.ID, body.Host),
+		PublicKey: body.PublicKey,
+		Principal: body.Host,
+		// The machine reads the grant back out of this, so it comes first and
+		// nothing an agent name contains can be mistaken for it.
+		KeyID:       fmt.Sprintf("grant=%s,agent=%s,host=%s", m.Grant.ID, info.Agent, body.Host),
 		SourceIP:    ip,
 		Now:         s.now(),
 		ValidBefore: m.Grant.ExpiresAt,
@@ -148,27 +147,23 @@ func (s *Server) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"public_key": sshca.PublicKey(s.sshCA)})
 }
 
-// handleSSHWindow says whether anyone may be logged in to a machine right now:
-// GET /v1/ssh/window/{host}. Each machine asks this on a timer and ends its
-// agent sessions when the answer is no, which is what makes revoke immediate.
-// It needs no login because a machine holds no Phoenix credential, and it tells
-// the caller only yes or no. It is not audited: it runs every 30 seconds per
-// machine and would only fill the log.
+// handleSSHWindow says whether one approval still stands for one machine:
+// GET /v1/ssh/window/{host}/{grant}. Machines ask this at every login and on a
+// timer for each open session, which is what makes a revoke take effect on a
+// certificate that has not expired yet.
+//
+// Anything that is not a yes is a no, including a machine or feature that has
+// been switched off, so turning this off also ends the sessions it allowed. It
+// needs no login because a machine holds no Phoenix credential, and it tells the
+// caller only yes or no about a random id it must already know. It is not audited:
+// it would only fill the log.
 func (s *Server) handleSSHWindow(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	name := r.PathValue("host")
-	if _, ok := s.sshHostFromRequest(w, name); !ok {
-		return
-	}
+	path := sshPathPrefix + r.PathValue("host")
 	open := false
-	if s.grantsOn() {
-		path := sshPathPrefix + name
-		for _, g := range s.grants.ListGrants("", false) {
-			if slices.Contains(g.Paths, path) {
-				open = true
-				break
-			}
-		}
+	if s.grantsOn() && s.sshRequestAllowed([]string{path}) && !s.grants.Health().Degraded {
+		g, ok := s.grants.GetGrant(r.PathValue("grant"))
+		open = ok && g.Action == grant.ActionSSHLogin && slices.Contains(g.Paths, path) && g.State(s.now()) == grant.GrantActive
 	}
 	jsonOK(w, map[string]any{"open": open})
 }

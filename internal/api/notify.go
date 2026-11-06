@@ -131,7 +131,7 @@ func notifyMessage(cfg config.AccessRequestsSettings, rq grant.Request, link str
 		noun = "secret"
 	}
 	var b strings.Builder
-	if isSSHRequest(rq.Paths) {
+	if rq.Action == grant.ActionSSHLogin {
 		fmt.Fprintf(&b, "%s asks for a root login on a machine.\n", rq.Agent)
 	} else {
 		fmt.Fprintf(&b, "%s asks for %s on %d %s.\n", rq.Agent, rq.Action, len(rq.Paths), noun)

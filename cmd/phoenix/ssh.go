@@ -32,13 +32,14 @@ var (
 	sshUserPattern    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 )
 
-const sshUsage = `usage: phoenix ssh <machine> [--reason "why you need it"] [--ttl 15m] [-- command...]`
+const sshUsage = `usage: phoenix ssh <machine> [--reason "why you need it"] [--ttl 15m] [--ask-again] [-- command...]`
 
 // defaultSSHTTL is what an agent asks for unless it says otherwise.
 const defaultSSHTTL = "15m"
 
 type sshArgs struct {
 	machine, reason, ttl string
+	askAgain             bool // file a new request even after a human revoked the last one
 	command              []string
 }
 
@@ -59,6 +60,8 @@ func parseSSHArgs(args []string) (sshArgs, error) {
 				return a, errors.New("--ttl needs a duration like 15m")
 			}
 			a.ttl = args[i]
+		case args[i] == "--ask-again":
+			a.askAgain = true
 		case strings.HasPrefix(args[i], "-") || a.machine != "":
 			return a, errors.New(sshUsage)
 		default:
@@ -108,10 +111,10 @@ func sshSign(machine, publicKey string) (sshSignResult, *serverDenial, error) {
 	return out, nil, nil
 }
 
-// sshNeedsApproval reports whether filing a request could help. A revoke is not
-// in this list on purpose: a person said no, so the agent must ask them instead.
-func sshNeedsApproval(d *serverDenial) bool {
-	return d.Code == "SSH_GRANT_REQUIRED" || d.Code == "GRANT_EXPIRED"
+// sshNeedsApproval reports whether to file a request. After a revoke only with
+// --ask-again: a person said no, so the agent must ask them, not the dashboard.
+func sshNeedsApproval(d *serverDenial, askAgain bool) bool {
+	return d.Code == "SSH_GRANT_REQUIRED" || d.Code == "GRANT_EXPIRED" || (askAgain && d.Code == "GRANT_REVOKED")
 }
 
 // writeThrowawayKey makes the key pair the certificate is signed for and returns
@@ -174,7 +177,7 @@ func cmdSSH(args []string) error {
 	if err != nil {
 		return err
 	}
-	if denial != nil && sshNeedsApproval(denial) {
+	if denial != nil && sshNeedsApproval(denial, a.askAgain) {
 		if err := sshRequestApproval(a); err != nil {
 			return err
 		}
@@ -214,11 +217,11 @@ func sshRequestApproval(a sshArgs) error {
 	}
 	var rq accessRequestView
 	if _, err := apiJSON("POST", "/v1/access-requests", map[string]any{
-		"paths": []string{"ssh/" + a.machine}, "action": "read_value", "reason": a.reason, "ttl": a.ttl,
+		"paths": []string{"ssh/" + a.machine}, "action": "ssh_login", "reason": a.reason, "ttl": a.ttl,
 	}, &rq); err != nil {
 		return err
 	}
 	// Status goes to stderr: stdout belongs to the remote command.
 	fmt.Fprintf(os.Stderr, "Asked a human for access to %s (%s).\n", a.machine, cleanServerText(rq.ID))
-	return waitForDecision(rq)
+	return waitForDecisionTo(os.Stderr, rq)
 }

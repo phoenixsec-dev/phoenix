@@ -73,9 +73,6 @@ func (s *Server) requestable(path, action string) bool {
 		return false
 	}
 	cfg := s.accessSettings()
-	if isSSHPath(path) {
-		return actionGrantable(cfg, action) && s.sshRequestAllowed([]string{path})
-	}
 	return actionGrantable(cfg, action) && !pathDenied(cfg, path)
 }
 
@@ -140,8 +137,7 @@ func (s *Server) dataAccess(info *authInfo, path, sessionAction string, aclActio
 	if reason == "" || info.UsedSession {
 		return accessDecision{Reason: reason}
 	}
-	// A login grant ("ssh/<machine>") never opens a secret stored at that path.
-	if !s.grantsOn() || !actionGrantable(s.accessSettings(), string(aclAction)) || isSSHPath(path) {
+	if !s.grantsOn() || !actionGrantable(s.accessSettings(), string(aclAction)) {
 		return accessDecision{Reason: reason}
 	}
 	m := s.grants.Match(s.grantCaller(info, ip), path, string(aclAction))
@@ -258,6 +254,9 @@ func (s *Server) sessionRequestStep(r *http.Request) string {
 // allRequestable reports whether the feature is on, action is grantable and
 // none of paths is in deny_paths (an empty list checks only the first two).
 func (s *Server) allRequestable(paths []string, action string) bool {
+	if action == grant.ActionSSHLogin {
+		return s.grantsOn() && s.sshRequestAllowed(paths)
+	}
 	if !s.grantsOn() || !actionGrantable(s.accessSettings(), action) {
 		return false
 	}
@@ -381,7 +380,7 @@ func requestNextStep(rq grant.Request, g *grant.Grant, now time.Time) (step, msg
 	}
 	switch g.State(now) {
 	case grant.GrantActive:
-		if isSSHRequest(g.Paths) {
+		if g.Action == grant.ActionSSHLogin {
 			return NextUseExec, fmt.Sprintf("Log in with phoenix ssh %s until %s.",
 				strings.TrimPrefix(g.Paths[0], sshPathPrefix), fmtTime(g.ExpiresAt))
 		}
@@ -448,7 +447,7 @@ func (s *Server) requestView(rq grant.Request, full bool) map[string]any {
 		// Per-path badge an approver needs: the agent's ACL already allows it.
 		var allowed []string
 		for _, p := range rq.Paths {
-			if !isSSHPath(p) && s.acl.Authorize(rq.Agent, p, acl.Action(rq.Action)) == nil {
+			if rq.Action != grant.ActionSSHLogin && s.acl.Authorize(rq.Agent, p, acl.Action(rq.Action)) == nil {
 				allowed = append(allowed, p)
 			}
 		}
@@ -532,7 +531,8 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 		s.auditRequestRejected(r, info, "access_request.create", body.Paths, ip, code)
 		writeAccessError(w, code, detail, status)
 	}
-	if !actionGrantable(cfg, body.Action) {
+	sshLogin := body.Action == grant.ActionSSHLogin
+	if !sshLogin && !actionGrantable(cfg, body.Action) {
 		reject(CodeActionNotGrantable, "only read_value can be requested", http.StatusBadRequest)
 		return
 	}
@@ -548,7 +548,7 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 	}
 	body.Paths = paths
 	// A login is not a secret: deny_paths, the ACL and sealing do not apply to it.
-	if isSSHRequest(paths) {
+	if sshLogin {
 		if !s.sshRequestAllowed(paths) {
 			reject(CodeNotRequestable, "ask for one configured SSH host per request, with no other paths", http.StatusForbidden)
 			return
@@ -799,14 +799,14 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 	if rq.Agent == approver {
 		return reject(CodeSelfApproval, "an agent cannot approve its own request", http.StatusForbidden)
 	}
-	if !actionGrantable(cfg, rq.Action) {
+	sshLogin := rq.Action == grant.ActionSSHLogin
+	if !sshLogin && !actionGrantable(cfg, rq.Action) {
 		return reject(CodeActionNotGrantable, "this action is no longer grantable", http.StatusBadRequest)
 	}
 	check := rq.Paths
 	if paths != nil {
 		check = paths
 	}
-	sshLogin := isSSHRequest(rq.Paths)
 	if sshLogin {
 		if !s.sshRequestAllowed(rq.Paths) {
 			return reject(CodeNotRequestable, "this SSH host is no longer configured", http.StatusForbidden)
@@ -823,7 +823,8 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 	}
 	nr, g, err := s.grants.Approve(grant.ApproveInput{
 		RequestID: id, Approver: approver, ApproverIP: ip, Paths: paths, TTL: ttl,
-		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed && !sshLogin, BindSourceIP: cfg.BindSourceIP,
+		// A login is always tied to the IP that asked, whatever secrets are set to.
+		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed && !sshLogin, BindSourceIP: cfg.BindSourceIP || sshLogin,
 	})
 	if err != nil {
 		if grant.CodeOf(err) != grant.CodeNotPending {

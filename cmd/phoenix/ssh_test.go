@@ -26,12 +26,27 @@ func TestParseSSHArgs(t *testing.T) {
 	}
 }
 
-func TestRevokedGrantIsNotReRequested(t *testing.T) {
-	if !sshNeedsApproval(&serverDenial{Code: "SSH_GRANT_REQUIRED"}) || !sshNeedsApproval(&serverDenial{Code: "GRANT_EXPIRED"}) {
+func TestRevokedGrantIsOnlyReRequestedWhenAsked(t *testing.T) {
+	if !sshNeedsApproval(&serverDenial{Code: "SSH_GRANT_REQUIRED"}, false) || !sshNeedsApproval(&serverDenial{Code: "GRANT_EXPIRED"}, false) {
 		t.Fatal("no grant yet and an expired grant should file a request")
 	}
-	if sshNeedsApproval(&serverDenial{Code: "GRANT_REVOKED"}) {
+	if sshNeedsApproval(&serverDenial{Code: "GRANT_REVOKED"}, false) {
 		t.Fatal("a revoked grant must go back to the human, not file a new request")
+	}
+	if !sshNeedsApproval(&serverDenial{Code: "GRANT_REVOKED"}, true) {
+		t.Fatal("--ask-again should file a request after a revoke")
+	}
+	if a, err := parseSSHArgs([]string{"vm204", "--ask-again"}); err != nil || !a.askAgain {
+		t.Fatalf("--ask-again: %+v, %v", a, err)
+	}
+}
+
+// Approval status must not land on stdout, which belongs to the remote command.
+func TestApprovalSummaryCanGoToAnyWriter(t *testing.T) {
+	var b strings.Builder
+	fprintRequest(&b, accessRequestView{ID: "req_1", Status: "approved", Action: "ssh_login", NextStep: "use_exec", GrantedPaths: []string{"ssh/vm204"}})
+	if !strings.Contains(b.String(), "phoenix ssh vm204 -- <command>") {
+		t.Fatalf("summary = %q", b.String())
 	}
 }
 

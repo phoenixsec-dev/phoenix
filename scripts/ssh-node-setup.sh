@@ -6,18 +6,18 @@
 #   ssh-node-setup.sh remove
 #
 # install is safe to run again. It makes an "agent" user that nobody can log in as
-# without a certificate from Phoenix for this machine's name, and that has recorded
-# passwordless sudo. Set KEEP_AUTHORIZED_KEYS=1 to leave the user's existing
+# without a certificate from Phoenix for this machine, whose approval Phoenix says is
+# still active, and that has recorded passwordless sudo. Set KEEP_AUTHORIZED_KEYS=1 to leave the user's existing
 # authorized_keys working alongside certificates, for a machine being moved over.
 set -eu
 
 CA_PUB=/etc/ssh/phoenix-user-ca.pub
-PRINCIPALS=/etc/ssh/phoenix-principals
 TLS_CA=/etc/ssh/phoenix-tls-ca.crt
 SSHD_CONF=/etc/ssh/sshd_config.d/50-phoenix-agent.conf
 SUDOERS=/etc/sudoers.d/agent-phoenix
 ENV_FILE=/etc/phoenix-ssh-window.env
 WINDOW_BIN=/usr/local/sbin/phoenix-ssh-window
+AUTHZ_BIN=/usr/local/sbin/phoenix-ssh-authz
 UNIT=/etc/systemd/system/phoenix-ssh-window
 
 # Reloads whichever name this distro gives the SSH service. A reload keeps
@@ -45,35 +45,81 @@ install_all() {
 
   [ "$tls_ca" = "$TLS_CA" ] || install -m 0644 -o root -g root "$tls_ca" "$TLS_CA"
   printf '%s\n' "$ca_key" > "$CA_PUB.new"; chmod 0644 "$CA_PUB.new"; mv "$CA_PUB.new" "$CA_PUB"
-  # A certificate works here only if it names this machine. That is what stops a
-  # pass approved for one machine from opening another.
-  printf '%s\n' "$machine" > "$PRINCIPALS.new"; chmod 0644 "$PRINCIPALS.new"; mv "$PRINCIPALS.new" "$PRINCIPALS"
+  keep_keys=${KEEP_AUTHORIZED_KEYS:-0}
+  printf 'PHOENIX_URL=%s\nPHOENIX_MACHINE=%s\nKEEP_AUTHORIZED_KEYS=%s\n' "$url" "$machine" "$keep_keys" > "$ENV_FILE"
+  chmod 0644 "$ENV_FILE"
 
-  keys_line="    AuthorizedKeysFile none"
-  [ "${KEEP_AUTHORIZED_KEYS:-0}" = 1 ] && keys_line="    # AuthorizedKeysFile none (KEEP_AUTHORIZED_KEYS=1)"
-  had_conf=0
-  [ -e "$SSHD_CONF" ] && { had_conf=1; cp -p "$SSHD_CONF" "$SSHD_CONF.prev"; }
-  cat > "$SSHD_CONF" <<CONF
-# Managed by Phoenix scripts/ssh-node-setup.sh. See docs/ssh-certificates.md.
-Match User agent
-    PasswordAuthentication no
-    KbdInteractiveAuthentication no
-    AuthenticationMethods publickey
-$keys_line
-    TrustedUserCAKeys $CA_PUB
-    AuthorizedPrincipalsFile $PRINCIPALS
-    X11Forwarding no
-    AllowTcpForwarding no
-    AllowAgentForwarding no
-CONF
-  chmod 0644 "$SSHD_CONF"
-  if ! sshd -t; then
-    if [ "$had_conf" = 1 ]; then mv "$SSHD_CONF.prev" "$SSHD_CONF"; else rm -f "$SSHD_CONF"; fi
-    echo "sshd rejected the new config; put the old one back" >&2
-    exit 1
+  # sshd runs this at every login. It prints this machine's name only while the
+  # certificate's grant is still active, so a revoke stops a certificate that has
+  # not expired yet, and a pass for another machine never matches. Printing nothing
+  # refuses the login, so if Phoenix can't be reached nobody new gets in.
+  cat > "$AUTHZ_BIN" <<'AUTHZ'
+#!/bin/sh
+. /etc/phoenix-ssh-window.env
+grant=$(printf '%s' "$1" | sed -n 's/^grant=\(gnt_[0-9a-f]\{32\}\),.*/\1/p')
+[ -n "$grant" ] || exit 0
+answer=$(curl -fsS --max-time 5 --cacert /etc/ssh/phoenix-tls-ca.crt "$PHOENIX_URL/v1/ssh/window/$PHOENIX_MACHINE/$grant") || exit 0
+case $answer in
+  *'"open":true'*) printf '%s\n' "$PHOENIX_MACHINE" ;;
+esac
+AUTHZ
+  chmod 0755 "$AUTHZ_BIN"
+
+  cat > "$WINDOW_BIN" <<'WINDOW'
+#!/bin/sh
+# Ends each agent SSH session whose own approval is over, so a revoke reaches a
+# session that is already open. Only SSH sessions: user services the agent account
+# runs (Cerberus's sidecar on xidax) are left alone.
+#
+# A session's grant comes from sshd's log line for that session's leader process.
+# With certificates only, a session with no grant to check should not exist, so it
+# ends too. It asks Phoenix only while a session exists. If Phoenix can't be reached
+# it does nothing: new logins are already refused, and it asks again next run.
+. /etc/phoenix-ssh-window.env
+for id in $(loginctl list-sessions --no-legend | awk '$3 == "agent" { print $1 }'); do
+  [ "$(loginctl show-session "$id" -p Service --value)" = sshd ] || continue
+  leader=$(loginctl show-session "$id" -p Leader --value)
+  grant=$(journalctl -q -o cat _PID="$leader" | sed -n 's/.* ID grant=\(gnt_[0-9a-f]\{32\}\),.*/\1/p' | tail -n 1)
+  if [ -z "$grant" ]; then
+    [ "$KEEP_AUTHORIZED_KEYS" = 1 ] && continue
+    echo "no approval found: ending session $id"
+    loginctl terminate-session "$id"
+    continue
   fi
-  rm -f "$SSHD_CONF.prev"
-  reload_sshd
+  answer=$(curl -fsS --max-time 5 --cacert /etc/ssh/phoenix-tls-ca.crt "$PHOENIX_URL/v1/ssh/window/$PHOENIX_MACHINE/$grant") || continue
+  case $answer in
+    *'"open":false'*)
+      echo "approval $grant over: ending session $id"
+      loginctl terminate-session "$id"
+      ;;
+  esac
+done
+WINDOW
+  chmod 0755 "$WINDOW_BIN"
+  cat > "$UNIT.service" <<SERVICE
+[Unit]
+Description=End agent SSH sessions when their Phoenix approval is over
+
+[Service]
+Type=oneshot
+ExecStart=$WINDOW_BIN
+# It runs every 30 seconds; only warnings and its own stdout are worth a disk write.
+LogLevelMax=notice
+SERVICE
+  cat > "$UNIT.timer" <<TIMER
+[Unit]
+Description=Check the Phoenix approval of agent SSH sessions
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+TIMER
+  systemctl daemon-reload
+  systemctl enable --now phoenix-ssh-window.timer >/dev/null
 
   # Recorded so a session can be replayed with sudoreplay after the fact. A machine
   # that already gives the agent user sudo (xidax) keeps its own rule.
@@ -88,65 +134,44 @@ SUDO
     rm -f "$tmp"
   fi
 
-  printf 'PHOENIX_URL=%s\nPHOENIX_MACHINE=%s\n' "$url" "$machine" > "$ENV_FILE"
-  chmod 0644 "$ENV_FILE"
-  cat > "$WINDOW_BIN" <<'WINDOW'
-#!/bin/sh
-# Ends the agent user's SSH sessions once Phoenix says the approval is over, so
-# revoke takes effect on a session that is already open. Only SSH sessions: user
-# services the agent account runs (Cerberus's sidecar on xidax) are left alone.
-# It asks Phoenix only while a session exists. If Phoenix can't be reached it does
-# nothing, because the certificate's own expiry still blocks new logins.
-. /etc/phoenix-ssh-window.env
-sessions=
-for id in $(loginctl list-sessions --no-legend | awk '$3 == "agent" { print $1 }'); do
-  [ "$(loginctl show-session "$id" -p Service --value)" = sshd ] && sessions="$sessions $id"
-done
-[ -n "$sessions" ] || exit 0
-answer=$(curl -fsS --max-time 5 --cacert /etc/ssh/phoenix-tls-ca.crt "$PHOENIX_URL/v1/ssh/window/$PHOENIX_MACHINE") || exit 0
-case $answer in
-  *'"open":false'*)
-    for id in $sessions; do
-      echo "approval over: ending session $id"
-      loginctl terminate-session "$id"
-    done
-    ;;
-esac
-WINDOW
-  chmod 0755 "$WINDOW_BIN"
-  cat > "$UNIT.service" <<SERVICE
-[Unit]
-Description=End agent SSH sessions when the Phoenix approval is over
-
-[Service]
-Type=oneshot
-ExecStart=$WINDOW_BIN
-# It runs every 30 seconds; only warnings and its own stdout are worth a disk write.
-LogLevelMax=notice
-SERVICE
-  cat > "$UNIT.timer" <<TIMER
-[Unit]
-Description=Check the Phoenix approval for agent SSH sessions
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=30s
-AccuracySec=5s
-
-[Install]
-WantedBy=timers.target
-TIMER
-  systemctl daemon-reload
-  systemctl enable --now phoenix-ssh-window.timer >/dev/null
+  # Last on purpose: login turns on only once everything that limits it is running.
+  keys_line="    AuthorizedKeysFile none"
+  [ "$keep_keys" = 1 ] && keys_line="    # AuthorizedKeysFile none (KEEP_AUTHORIZED_KEYS=1)"
+  had_conf=0
+  [ -e "$SSHD_CONF" ] && { had_conf=1; cp -p "$SSHD_CONF" "$SSHD_CONF.prev"; }
+  cat > "$SSHD_CONF" <<CONF
+# Managed by Phoenix scripts/ssh-node-setup.sh. See docs/ssh-certificates.md.
+Match User agent
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthenticationMethods publickey
+$keys_line
+    TrustedUserCAKeys $CA_PUB
+    AuthorizedPrincipalsCommand $AUTHZ_BIN %i
+    AuthorizedPrincipalsCommandUser nobody
+    X11Forwarding no
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+CONF
+  chmod 0644 "$SSHD_CONF"
+  if ! sshd -t; then
+    if [ "$had_conf" = 1 ]; then mv "$SSHD_CONF.prev" "$SSHD_CONF"; else rm -f "$SSHD_CONF"; fi
+    echo "sshd rejected the new config; put the old one back" >&2
+    exit 1
+  fi
+  rm -f "$SSHD_CONF.prev"
+  reload_sshd
   echo "ready: $machine"
 }
 
 remove_all() {
-  systemctl disable --now phoenix-ssh-window.timer 2>/dev/null || true
-  rm -f "$UNIT.service" "$UNIT.timer" "$WINDOW_BIN" "$ENV_FILE" "$SUDOERS" "$SSHD_CONF" "$CA_PUB" "$PRINCIPALS" "$TLS_CA"
-  systemctl daemon-reload
+  # Login off first. The timer stops only after that, so nothing is left unlimited.
+  rm -f "$SSHD_CONF"
   sshd -t
   reload_sshd
+  systemctl disable --now phoenix-ssh-window.timer 2>/dev/null || true
+  rm -f "$UNIT.service" "$UNIT.timer" "$WINDOW_BIN" "$AUTHZ_BIN" "$ENV_FILE" "$SUDOERS" "$CA_PUB" "$TLS_CA"
+  systemctl daemon-reload
   echo "removed. The agent user and its files are left in place."
 }
 

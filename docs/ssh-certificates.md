@@ -12,6 +12,8 @@ a short-lived certificate: a login pass with an expiry built in.
   needs an approval to log in. The grant is the only thing that counts.
 - **A pass works in one place.** It names one machine, works only from the IP
   that asked, and ends when the grant ends.
+- **A revoke beats a pass that is still in date.** The machine asks Phoenix at
+  every login whether that pass's grant still stands.
 
 ## The flow
 
@@ -24,23 +26,25 @@ phoenix ssh arch-omen --reason "install the firewall rules" --ttl 15m -- sudo -n
 # Agent: more commands in the same window need no new approval
 phoenix ssh arch-omen -- sudo -n systemctl status something
 
-# Human: take it back. New logins stop now; open sessions end within about 30 seconds.
+# Human: take it back. New logins stop at once, even with a pass the agent kept.
+# Open sessions under that approval end within about 30 seconds.
 #   dashboard -> Grants -> Revoke
 ```
 
-It uses the [request-use grant flow](access-requests.md) as is: the same request
+It uses the [request-use grant flow](access-requests.md): the same request
 limits, TTL choices, audit log and notifications. The agent must use its own
-identity (bearer token, not a `phxs_` session). The path `ssh/<machine>` is the
-name of a login, not a secret, so `deny_paths`, `require_sealed` and
-`ALREADY_ALLOWED` do not apply to it. `deny_paths: ["*"]` is a valid way to turn
-on logins while keeping every secret out of the request flow. One machine per
-request, with no other paths.
+identity (bearer token, not a `phxs_` session). A login is a grant with its own
+action, `ssh_login`, on the path `ssh/<machine>`. Because the action is different,
+a grant to read a secret at that path can never log in, and a login grant can never
+read a secret. `deny_paths`, `require_sealed` and `ALREADY_ALLOWED` do not apply to
+logins, and they are always tied to the IP that asked. `deny_paths: ["*"]` is a valid
+way to turn on logins while keeping every secret out of the request flow. One machine
+per request.
 
 The command goes to ssh as is, so quote it as you would for ssh: `phoenix ssh arch-omen -- 'cd /srv && ls'`.
 
 After a revoke, `phoenix ssh` stops and says to ask the human. It will not file a
-new request by itself. A person can still choose to allow it again with
-`phoenix request ssh/<machine>`.
+new request by itself. If the human agrees, run it again with `--ask-again`.
 
 ## Server setup
 
@@ -59,7 +63,7 @@ new request by itself. A person can still choose to allow it again with
 |---|---|
 | `enabled` | Off when the block is missing. |
 | `key_path` | Signing key. Empty = `ssh_ca.key` next to the ACL file. Made on first start, mode `0600`. Back it up with the rest of the data directory; losing it only means running the machine setup again. |
-| `hosts` | Machine name -> `address` and optional `user` (default `agent`). The name is what agents ask for and what the machine's principals file must list. |
+| `hosts` | Machine name -> `address` and optional `user` (default `agent`). The name is what agents ask for and what a pass is signed for. Removing a machine or the block ends its open sessions. |
 
 ## Machine setup
 
@@ -76,22 +80,26 @@ It makes these changes. `remove` undoes all of them except the `agent` user:
 |---|---|
 | `agent` user, password locked | The only login this feature opens |
 | `/etc/ssh/phoenix-user-ca.pub` | Trust certificates from this Phoenix |
-| `/etc/ssh/phoenix-principals` | This machine's name; a pass for another machine is refused |
+| `/usr/local/sbin/phoenix-ssh-authz` | sshd runs it at every login. Says yes only for this machine's name while the pass's grant is active |
 | `/etc/ssh/sshd_config.d/50-phoenix-agent.conf` | For `agent` only: certificates only, no forwarding. Other users are untouched |
 | `/etc/sudoers.d/agent-phoenix` | Passwordless sudo, with session output recorded for `sudoreplay` |
-| `phoenix-ssh-window.timer` | Every 30s, ends `agent` SSH sessions once the approval is over |
+| `phoenix-ssh-window.timer` | Every 30s, ends each `agent` SSH session whose own approval is over |
 
-Check it from the machine: `sshd -T -C user=agent,host=x,addr=127.0.0.1 | grep -i -E 'trustedusercakeys|authorizedprincipalsfile|authorizedkeysfile'`.
-The machine's sshd log names who logged in: `ID agent=vector grant=gnt_... host=arch-omen`.
+Check it from the machine: `sshd -T -C user=agent,host=x,addr=127.0.0.1 | grep -i -E 'trustedusercakeys|authorizedprincipalscommand|authorizedkeysfile'`.
+The machine's sshd log names who logged in: `ID grant=gnt_...,agent=vector,host=arch-omen`.
+Set `KEEP_AUTHORIZED_KEYS=1` on the install to leave existing keys working while a
+machine moves over. Sessions from those keys have no grant, so the timer leaves them
+alone until you run install again without it.
 
 ## What this does and does not protect
 
 - **A grant is real root for its length.** Anything with root can install a
   backdoor that outlives the window. The recording and the log show what happened
   afterwards; they do not prevent it.
-- **Revoke reaches open sessions only through the timer.** If the machine cannot
-  reach Phoenix, an open session keeps running. New logins still stop when the
-  certificate expires.
+- **If a machine cannot reach Phoenix,** nobody new can log in, and an open session
+  keeps running until it can. The timer finds out on its next run.
+- **Rotating an agent's token ends its grant for signing, not its passes.** A pass
+  already issued keeps working until it expires. Revoke the grant to end it now.
 - **The dashboard login is the approval.** Anyone who has that password can
   approve anything. Do not keep it where an agent can read it.
 - **Root on the Phoenix host beats all of this.** It can read `ssh_ca.key`.

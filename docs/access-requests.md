@@ -415,7 +415,7 @@ preceded by an `....attempt` line. Reads through a grant are normal
 
 ## Logins as grants
 
-A request for `ssh/<machine>` asks to log in to a machine, not to read a secret.
+A request with action `ssh_login` asks to log in to a machine, not to read a secret.
 It follows this same flow with its own rules: see
 [SSH certificates](ssh-certificates.md).
 

@@ -461,7 +461,7 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 	default:
 		return Request{}, false, newErr(CodeInvalidRequest, "requests need the agent's own bearer, mTLS or short-lived token")
 	}
-	if in.Action != ActionReadValue {
+	if in.Action != ActionReadValue && in.Action != ActionSSHLogin {
 		return Request{}, false, newErr(CodeActionNotGrantable, "only %s can be requested", ActionReadValue)
 	}
 	paths, err := NormalizePaths(in.Paths)
