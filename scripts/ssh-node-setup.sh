@@ -20,26 +20,33 @@ WINDOW_BIN=/usr/local/sbin/phoenix-ssh-window
 AUTHZ_BIN=/usr/local/sbin/phoenix-ssh-authz
 UNIT=/etc/systemd/system/phoenix-ssh-window
 
-# Reloads whichever name this distro gives the SSH service, then waits until it is
-# really healthy. Where ssh.socket and ssh.service are both active (Debian 12), a
-# reload makes sshd fail to re-bind port 22 and systemd restarts it. Existing sessions
-# survive that, but /run/sshd is briefly gone, so a check made too soon would fail.
-reload_sshd() {
-  if systemctl is-active --quiet sshd; then
-    service=sshd
-  else
-    service=ssh
-  fi
-  systemctl reload "$service" || systemctl restart "$service"
+# The SSH service's name on this distro.
+sshd_service() {
+  if systemctl is-active --quiet sshd; then echo sshd; else echo ssh; fi
+}
+
+# Makes sure the service is up. sshd -t needs that too: /run/sshd only exists while
+# it runs. On Debian 12 with ssh.socket active, a reload kills sshd (it can't re-bind
+# the socket's port) and the service stays down until something starts it again.
+# Existing sessions survive either way.
+ensure_sshd() {
+  service=$(sshd_service)
   tries=0
-  until systemctl is-active --quiet "$service" && sshd -t 2>/dev/null; do
+  until systemctl is-active --quiet "$service"; do
+    systemctl start "$service" || true
     tries=$((tries + 1))
-    if [ "$tries" -ge 20 ]; then
-      echo "the $service service is not healthy after a reload: check it now" >&2
+    if [ "$tries" -ge 10 ]; then
+      echo "the $service service will not start: check it now" >&2
       return 1
     fi
     sleep 1
   done
+}
+
+reload_sshd() {
+  systemctl reload "$(sshd_service)" || true
+  sleep 1
+  ensure_sshd
 }
 
 install_all() {
@@ -52,6 +59,7 @@ install_all() {
   ca_key=$(printf '%s' "$ca_json" | sed -n 's/.*"public_key":"\(ssh-ed25519 [A-Za-z0-9+/=]*\).*/\1/p')
   [ -n "$ca_key" ] || { echo "could not read the CA key from $url" >&2; exit 1; }
 
+  ensure_sshd
   id agent >/dev/null 2>&1 || useradd --create-home --shell /bin/bash agent
   passwd --lock agent >/dev/null
 
@@ -176,15 +184,18 @@ CONF
   echo "ready: $machine"
 }
 
+# Never stops partway: a problem with sshd is reported at the end, with everything
+# else already removed, so a machine can't be left half set up.
 remove_all() {
+  status=0
   # Login off first. The timer stops only after that, so nothing is left unlimited.
   rm -f "$SSHD_CONF"
-  sshd -t
-  reload_sshd
+  reload_sshd || status=1
   systemctl disable --now phoenix-ssh-window.timer 2>/dev/null || true
   rm -f "$UNIT.service" "$UNIT.timer" "$WINDOW_BIN" "$AUTHZ_BIN" "$ENV_FILE" "$SUDOERS" "$CA_PUB" "$TLS_CA"
   systemctl daemon-reload
-  echo "removed. The agent user and its files are left in place."
+  [ "$status" = 0 ] && echo "removed. The agent user and its files are left in place."
+  return "$status"
 }
 
 case ${1:-} in
