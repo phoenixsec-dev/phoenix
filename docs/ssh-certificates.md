@@ -74,7 +74,8 @@ server must be configured first:
 sudo scripts/ssh-node-setup.sh install arch-omen https://phoenix.example.net:9443 /path/to/phoenix-ca.crt
 ```
 
-It makes these changes. `remove` undoes all of them except the `agent` user:
+It makes these changes. `remove` undoes all of them except the `agent` user, and
+ends any open session that came in with a certificate:
 
 | Change | Why |
 |---|---|

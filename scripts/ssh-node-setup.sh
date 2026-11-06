@@ -43,8 +43,13 @@ ensure_sshd() {
   done
 }
 
+# A reload that fails on a running service means the old login policy is still in
+# force, so that is an error. A stopped service just picks the new one up when started.
 reload_sshd() {
-  systemctl reload "$(sshd_service)" || true
+  service=$(sshd_service)
+  if systemctl is-active --quiet "$service"; then
+    systemctl reload "$service" || return 1
+  fi
   sleep 1
   ensure_sshd
 }
@@ -91,7 +96,9 @@ AUTHZ
 # session that is already open. Only SSH sessions: user services the agent account
 # runs (Cerberus's sidecar on xidax) are left alone.
 #
-# A session's grant comes from sshd's log line for that session's leader process.
+# A session's grant comes from the last successful login logged this boot by that
+# session's leader process, read from the fixed position sshd writes it in. A plain
+# key login on a reused PID therefore has no grant, whatever an older line said.
 # With certificates only, a session with no grant to check should not exist, so it
 # ends too. It asks Phoenix only while a session exists. If Phoenix can't be reached
 # it does nothing: new logins are already refused, and it asks again next run.
@@ -99,7 +106,7 @@ AUTHZ
 for id in $(loginctl list-sessions --no-legend | awk '$3 == "agent" { print $1 }'); do
   [ "$(loginctl show-session "$id" -p Service --value)" = sshd ] || continue
   leader=$(loginctl show-session "$id" -p Leader --value)
-  grant=$(journalctl -q -o cat _PID="$leader" | sed -n 's/.* ID grant=\(gnt_[0-9a-f]\{32\}\),.*/\1/p' | tail -n 1)
+  grant=$(journalctl -b -q -o cat _PID="$leader" | grep '^Accepted publickey for agent ' | tail -n 1 | sed -n 's/^Accepted publickey for agent from [^ ]* port [0-9]* ssh2: [^ ]* [^ ]* ID grant=\(gnt_[0-9a-f]\{32\}\),.*/\1/p')
   if [ -z "$grant" ]; then
     [ "$KEEP_AUTHORIZED_KEYS" = 1 ] && continue
     echo "no approval found: ending session $id"
@@ -141,20 +148,7 @@ TIMER
   systemctl daemon-reload
   systemctl enable --now phoenix-ssh-window.timer >/dev/null
 
-  # Recorded so a session can be replayed with sudoreplay after the fact. A machine
-  # that already gives the agent user sudo (xidax) keeps its own rule.
-  if ! sudo -n -l -U agent 2>/dev/null | grep -q 'NOPASSWD: ALL'; then
-    tmp=$(mktemp)
-    cat > "$tmp" <<SUDO
-Defaults:agent use_pty, log_output, iolog_dir=/var/log/sudo-io, iolog_file=%{user}/%{seq}, logfile=/var/log/sudo-agent.log, log_year, log_host
-agent ALL=(ALL:ALL) NOPASSWD: ALL
-SUDO
-    visudo -cf "$tmp" >/dev/null
-    install -m 0440 -o root -g root "$tmp" "$SUDOERS"
-    rm -f "$tmp"
-  fi
-
-  # Last on purpose: login turns on only once everything that limits it is running.
+  # Login turns on only once everything that limits it is running.
   keys_line="    AuthorizedKeysFile none"
   [ "$keep_keys" = 1 ] && keys_line="    # AuthorizedKeysFile none (KEEP_AUTHORIZED_KEYS=1)"
   had_conf=0
@@ -181,6 +175,21 @@ CONF
   fi
   rm -f "$SSHD_CONF.prev"
   reload_sshd
+
+  # Root comes last, once the certificate-only policy above is confirmed live. If
+  # anything before this fails, the agent user has login at most, never root.
+  # Recorded so a session can be replayed with sudoreplay after the fact. A machine
+  # that already gives the agent user sudo (xidax) keeps its own rule.
+  if ! sudo -n -l -U agent 2>/dev/null | grep -q 'NOPASSWD: ALL'; then
+    tmp=$(mktemp)
+    cat > "$tmp" <<SUDO
+Defaults:agent use_pty, log_output, iolog_dir=/var/log/sudo-io, iolog_file=%{user}/%{seq}, logfile=/var/log/sudo-agent.log, log_year, log_host
+agent ALL=(ALL:ALL) NOPASSWD: ALL
+SUDO
+    visudo -cf "$tmp" >/dev/null
+    install -m 0440 -o root -g root "$tmp" "$SUDOERS"
+    rm -f "$tmp"
+  fi
   echo "ready: $machine"
 }
 
@@ -188,6 +197,17 @@ CONF
 # else already removed, so a machine can't be left half set up.
 remove_all() {
   status=0
+  # Noted now, ended last. With the timer gone nothing else would end them, and going
+  # last means removing from inside such a session still finishes. Plain-key sessions
+  # (no grant in their login line) are not ours and stay.
+  certificate_sessions=
+  for id in $(loginctl list-sessions --no-legend | awk '$3 == "agent" { print $1 }'); do
+    [ "$(loginctl show-session "$id" -p Service --value)" = sshd ] || continue
+    leader=$(loginctl show-session "$id" -p Leader --value)
+    if journalctl -b -q -o cat _PID="$leader" | grep '^Accepted publickey for agent ' | tail -n 1 | grep -q ' ID grant=gnt_'; then
+      certificate_sessions="$certificate_sessions $id"
+    fi
+  done
   # Login off first. The timer stops only after that, so nothing is left unlimited.
   rm -f "$SSHD_CONF"
   reload_sshd || status=1
@@ -195,6 +215,9 @@ remove_all() {
   rm -f "$UNIT.service" "$UNIT.timer" "$WINDOW_BIN" "$AUTHZ_BIN" "$ENV_FILE" "$SUDOERS" "$CA_PUB" "$TLS_CA"
   systemctl daemon-reload
   [ "$status" = 0 ] && echo "removed. The agent user and its files are left in place."
+  for id in $certificate_sessions; do
+    loginctl terminate-session "$id" || true
+  done
   return "$status"
 }
 
