@@ -29,6 +29,8 @@ type Config struct {
 	// AccessRequests is nil when the block is missing, which means the
 	// request-use feature is off (safe default for upgraded installs).
 	AccessRequests *AccessRequestsConfig `json:"access_requests,omitempty"`
+	// SSHCA is nil when the block is missing, which means SSH certificates are off.
+	SSHCA *SSHCAConfig `json:"ssh_ca,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -498,6 +500,9 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.validateAccessRequests(); err != nil {
+		return err
+	}
+	if err := c.validateSSHCA(); err != nil {
 		return err
 	}
 	// Always, even without an access_requests block: the store always opens.

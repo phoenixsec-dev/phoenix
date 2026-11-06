@@ -38,6 +38,7 @@ and secret values on the network in cleartext.
 | `session.ttl` | Default session lifetime | `1h` |
 | `session.roles` | Named role definitions (see below) | — |
 | `access_requests.*` | Request-use grants: agents ask a human for temporary use of exact secrets (see below) | block missing = off |
+| `ssh_ca.*` | Short-lived SSH login certificates, approved through grants. See [SSH certificates](ssh-certificates.md) | block missing = off |
 | `onepassword.vault` | 1Password vault name | — |
 | `onepassword.service_account_token_env` | Token env var name | `OP_SERVICE_ACCOUNT_TOKEN` |
 | `onepassword.cache_ttl` | Runtime read/list cache duration | `60s` |

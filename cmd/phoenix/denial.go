@@ -75,7 +75,7 @@ var knownDenialCodes = map[string]bool{
 	"ROLE_NOT_FOUND": true, "ROLE_NOT_ALLOWED": true, "BOOTSTRAP_FAILED": true,
 	"ATTESTATION_FAILED": true, "ADMIN_AUTH_REQUIRED": true,
 	// Request-use grants.
-	"GRANT_EXPIRED": true, "GRANT_REVOKED": true, "NOT_REQUESTABLE": true,
+	"GRANT_EXPIRED": true, "GRANT_REVOKED": true, "NOT_REQUESTABLE": true, "SSH_GRANT_REQUIRED": true,
 	"SESSION_CANNOT_REQUEST": true, "REQUESTS_DISABLED": true, "REQUESTS_DEGRADED": true,
 	"ALREADY_ALLOWED": true, "SEAL_KEY_NOT_REGISTERED": true, "APPROVER_REQUIRED": true,
 	"INVALID_REQUEST": true, "ACTION_NOT_GRANTABLE": true, "SELF_APPROVAL": true,

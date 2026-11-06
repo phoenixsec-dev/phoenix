@@ -131,7 +131,11 @@ func notifyMessage(cfg config.AccessRequestsSettings, rq grant.Request, link str
 		noun = "secret"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s asks for %s on %d %s.\n", rq.Agent, rq.Action, len(rq.Paths), noun)
+	if isSSHRequest(rq.Paths) {
+		fmt.Fprintf(&b, "%s asks for a root login on a machine.\n", rq.Agent)
+	} else {
+		fmt.Fprintf(&b, "%s asks for %s on %d %s.\n", rq.Agent, rq.Action, len(rq.Paths), noun)
+	}
 	if cfg.NotifyIncludePaths {
 		for _, p := range rq.Paths {
 			fmt.Fprintf(&b, "- %s\n", p)

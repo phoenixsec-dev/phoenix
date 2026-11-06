@@ -36,6 +36,7 @@
                 <label class="path-item">
                     <input type="checkbox" name="path" value="{{.Path}}" checked>
                     <span class="mono path-full">{{.Path}}</span>
+                    {{if .SSHLogin}}<span class="flag flag-warn">root login on this machine</span>{{end}}
                     {{if .Missing}}<span class="flag flag-warn">does not exist</span>{{end}}
                     {{if .Hidden}}<span class="flag flag-warn">hidden from this agent</span>{{end}}
                     {{if .AlreadyAllowed}}<span class="flag flag-ttl">already allowed</span>{{end}}

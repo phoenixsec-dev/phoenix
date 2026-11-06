@@ -200,6 +200,12 @@ func printRequest(rq accessRequestView) {
 // active grant it names the exact phoenix exec command.
 func requestNextHint(rq accessRequestView) string {
 	if rq.NextStep == "use_exec" && len(rq.GrantedPaths) > 0 {
+		if strings.HasPrefix(rq.GrantedPaths[0], "ssh/") {
+			if p := hintPath(strings.TrimPrefix(rq.GrantedPaths[0], "ssh/")); p != "" {
+				return "phoenix ssh " + p + " -- <command>"
+			}
+			return nextStepHint("ask_user")
+		}
 		if p := hintPath(rq.GrantedPaths[0]); p != "" {
 			return "phoenix exec --redact-output --env NAME=phoenix://" + p + " -- <command>"
 		}

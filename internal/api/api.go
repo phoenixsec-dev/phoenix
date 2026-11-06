@@ -20,6 +20,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
@@ -170,6 +172,8 @@ type Server struct {
 	// opened; accessCfg holds the current access_requests settings (nil =
 	// feature off). now is the clock used for grant views; tests replace it.
 	grants    *grant.Store
+	sshCA     ssh.Signer                // ssh.go; nil = SSH certificates off
+	sshHosts  map[string]config.SSHHost // machines Phoenix can sign logins for
 	accessCfg atomic.Pointer[config.AccessRequestsSettings]
 	now       func() time.Time
 	// notifyTimeout limits one access-request notification (notify.go).
@@ -297,6 +301,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 	s.accessRoutes()
+	s.sshRoutes()
 }
 
 // authInfo contains authentication result and attestation evidence.

@@ -36,6 +36,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
+	"github.com/phoenixsec/phoenix/internal/sshca"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
 	"github.com/phoenixsec/phoenix/internal/transport"
@@ -334,6 +335,14 @@ func main() {
 	defer stopGrants()
 	go grantStore.Run(grantCtx, 30*time.Second)
 	logAccessRequests(cfg, a)
+	if cfg.SSHCAEnabled() {
+		ca, created, err := sshca.LoadOrCreate(cfg.SSHCAKeyPath())
+		if err != nil {
+			log.Fatalf("loading SSH CA key: %v", err)
+		}
+		srv.SetSSHCA(ca, cfg.SSHCAHosts())
+		log.Printf("SSH certificates: enabled for %d host(s), new key=%v, CA %s", len(cfg.SSHCA.Hosts), created, sshca.PublicKey(ca))
+	}
 
 	// Initialize dashboard if enabled
 	if cfg.Dashboard.Enabled {

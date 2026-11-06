@@ -1,5 +1,14 @@
 # Release Notes
 
+## Unreleased
+
+### SSH Certificates: Temporary Root Login, Approved Like a Grant
+
+`phoenix ssh <machine>` logs an agent in with a human's approval and a certificate
+that expires with it. The signing key stays on the server, the agent's key is
+thrown away, and revoking ends open sessions within about 30 seconds. Off unless
+you add an `ssh_ca` block. See [SSH certificates](docs/ssh-certificates.md).
+
 ## v0.19.0 (2026-11-01)
 
 ### Request-Use Grants: an Agent Asks, a Human Approves, Access Expires

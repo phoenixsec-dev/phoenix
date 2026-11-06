@@ -49,6 +49,7 @@ type pathFact struct {
 	Missing        bool // no secret at this path
 	Hidden         bool // the agent's ACL has no "list" on it, so it cannot see the name
 	AlreadyAllowed bool // the agent's ACL already allows the action
+	SSHLogin       bool // not a secret: approving lets the agent log in to this machine
 }
 
 // attestFact is one hard attestation requirement from the path's policy
@@ -144,6 +145,11 @@ func (h *Handler) buildCard(rq grant.Request, cfg config.AccessRequestsSettings)
 	} else {
 		c.Delivery = "plaintext or sealed, as the agent asks"
 	}
+	sshLogin := slices.ContainsFunc(rq.Paths, isSSHPath)
+	if sshLogin {
+		c.SealRequired = false
+		c.Delivery = "a login certificate that ends with this approval, usable only from the IP above"
+	}
 	for _, p := range rq.Paths {
 		c.Paths = append(c.Paths, h.pathFacts(rq, p))
 		c.Attestation = append(c.Attestation, h.attestFacts(rq, p, c.SealKeyOK)...)
@@ -169,8 +175,14 @@ func (h *Handler) buildCard(rq grant.Request, cfg config.AccessRequestsSettings)
 	return c
 }
 
+// isSSHPath reports whether a requested path is a machine login ("ssh/<name>").
+func isSSHPath(p string) bool { return strings.HasPrefix(p, "ssh/") }
+
 // pathFacts works out the three badges for one path.
 func (h *Handler) pathFacts(rq grant.Request, p string) pathFact {
+	if isSSHPath(p) {
+		return pathFact{Path: p, SSHLogin: true}
+	}
 	f := pathFact{Path: p}
 	if h.deps.Backend != nil {
 		// List, not Get: no secret value is decrypted to draw a badge.

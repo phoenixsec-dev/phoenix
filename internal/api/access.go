@@ -73,6 +73,9 @@ func (s *Server) requestable(path, action string) bool {
 		return false
 	}
 	cfg := s.accessSettings()
+	if isSSHPath(path) {
+		return actionGrantable(cfg, action) && s.sshRequestAllowed([]string{path})
+	}
 	return actionGrantable(cfg, action) && !pathDenied(cfg, path)
 }
 
@@ -137,7 +140,8 @@ func (s *Server) dataAccess(info *authInfo, path, sessionAction string, aclActio
 	if reason == "" || info.UsedSession {
 		return accessDecision{Reason: reason}
 	}
-	if !s.grantsOn() || !actionGrantable(s.accessSettings(), string(aclAction)) {
+	// A login grant ("ssh/<machine>") never opens a secret stored at that path.
+	if !s.grantsOn() || !actionGrantable(s.accessSettings(), string(aclAction)) || isSSHPath(path) {
 		return accessDecision{Reason: reason}
 	}
 	m := s.grants.Match(s.grantCaller(info, ip), path, string(aclAction))
@@ -377,6 +381,10 @@ func requestNextStep(rq grant.Request, g *grant.Grant, now time.Time) (step, msg
 	}
 	switch g.State(now) {
 	case grant.GrantActive:
+		if isSSHRequest(g.Paths) {
+			return NextUseExec, fmt.Sprintf("Log in with phoenix ssh %s until %s.",
+				strings.TrimPrefix(g.Paths[0], sshPathPrefix), fmtTime(g.ExpiresAt))
+		}
 		return NextUseExec, fmt.Sprintf("Use it with phoenix exec --redact-output --env NAME=phoenix://%s -- <command> until %s.",
 			g.Paths[0], fmtTime(g.ExpiresAt))
 	case grant.GrantRevoked:
@@ -440,7 +448,7 @@ func (s *Server) requestView(rq grant.Request, full bool) map[string]any {
 		// Per-path badge an approver needs: the agent's ACL already allows it.
 		var allowed []string
 		for _, p := range rq.Paths {
-			if s.acl.Authorize(rq.Agent, p, acl.Action(rq.Action)) == nil {
+			if !isSSHPath(p) && s.acl.Authorize(rq.Agent, p, acl.Action(rq.Action)) == nil {
 				allowed = append(allowed, p)
 			}
 		}
@@ -539,26 +547,34 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	body.Paths = paths
-	for _, p := range paths {
-		if pathDenied(cfg, p) {
-			reject(CodeNotRequestable, "one or more paths can never be requested; ask the user", http.StatusForbidden)
+	// A login is not a secret: deny_paths, the ACL and sealing do not apply to it.
+	if isSSHRequest(paths) {
+		if !s.sshRequestAllowed(paths) {
+			reject(CodeNotRequestable, "ask for one configured SSH host per request, with no other paths", http.StatusForbidden)
 			return
 		}
-	}
-	allAllowed := true
-	for _, p := range paths {
-		if s.acl.Authorize(info.Agent, p, acl.Action(body.Action)) != nil {
-			allAllowed = false
-			break
+	} else {
+		for _, p := range paths {
+			if pathDenied(cfg, p) {
+				reject(CodeNotRequestable, "one or more paths can never be requested; ask the user", http.StatusForbidden)
+				return
+			}
 		}
-	}
-	if allAllowed {
-		reject(CodeAlreadyAllowed, "your ACL already allows this; no request needed", http.StatusConflict)
-		return
-	}
-	if cfg.RequireSealed && !s.hasSealKey(info.Agent) {
-		reject(CodeSealKeyNotRegistered, "granted values are served sealed, and this agent has no registered seal key", http.StatusBadRequest)
-		return
+		allAllowed := true
+		for _, p := range paths {
+			if s.acl.Authorize(info.Agent, p, acl.Action(body.Action)) != nil {
+				allAllowed = false
+				break
+			}
+		}
+		if allAllowed {
+			reject(CodeAlreadyAllowed, "your ACL already allows this; no request needed", http.StatusConflict)
+			return
+		}
+		if cfg.RequireSealed && !s.hasSealKey(info.Agent) {
+			reject(CodeSealKeyNotRegistered, "granted values are served sealed, and this agent has no registered seal key", http.StatusBadRequest)
+			return
+		}
 	}
 	ttl, ok := parseTTL(w, body.TTL)
 	if !ok {
@@ -790,17 +806,24 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 	if paths != nil {
 		check = paths
 	}
-	for _, p := range check {
-		if pathDenied(cfg, p) {
-			return reject(CodeNotRequestable, "a path in this request now matches deny_paths", http.StatusForbidden)
+	sshLogin := isSSHRequest(rq.Paths)
+	if sshLogin {
+		if !s.sshRequestAllowed(rq.Paths) {
+			return reject(CodeNotRequestable, "this SSH host is no longer configured", http.StatusForbidden)
 		}
-	}
-	if cfg.RequireSealed && !s.hasSealKey(rq.Agent) {
-		return reject(CodeSealKeyNotRegistered, "sealed delivery is required and the agent has no registered seal key", http.StatusBadRequest)
+	} else {
+		for _, p := range check {
+			if pathDenied(cfg, p) {
+				return reject(CodeNotRequestable, "a path in this request now matches deny_paths", http.StatusForbidden)
+			}
+		}
+		if cfg.RequireSealed && !s.hasSealKey(rq.Agent) {
+			return reject(CodeSealKeyNotRegistered, "sealed delivery is required and the agent has no registered seal key", http.StatusBadRequest)
+		}
 	}
 	nr, g, err := s.grants.Approve(grant.ApproveInput{
 		RequestID: id, Approver: approver, ApproverIP: ip, Paths: paths, TTL: ttl,
-		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed, BindSourceIP: cfg.BindSourceIP,
+		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed && !sshLogin, BindSourceIP: cfg.BindSourceIP,
 	})
 	if err != nil {
 		if grant.CodeOf(err) != grant.CodeNotPending {
