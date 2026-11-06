@@ -193,31 +193,36 @@ SUDO
   echo "ready: $machine"
 }
 
-# Never stops partway: a problem with sshd is reported at the end, with everything
-# else already removed, so a machine can't be left half set up.
+# Never stops partway: a problem is reported at the end, with everything else already
+# removed, so a machine can't be left half set up.
 remove_all() {
   status=0
-  # Noted now, ended last. With the timer gone nothing else would end them, and going
-  # last means removing from inside such a session still finishes. Plain-key sessions
-  # (no grant in their login line) are not ours and stay.
-  certificate_sessions=
-  for id in $(loginctl list-sessions --no-legend | awk '$3 == "agent" { print $1 }'); do
-    [ "$(loginctl show-session "$id" -p Service --value)" = sshd ] || continue
-    leader=$(loginctl show-session "$id" -p Leader --value)
-    if journalctl -b -q -o cat _PID="$leader" | grep '^Accepted publickey for agent ' | tail -n 1 | grep -q ' ID grant=gnt_'; then
-      certificate_sessions="$certificate_sessions $id"
-    fi
-  done
-  # Login off first. The timer stops only after that, so nothing is left unlimited.
+  # Login off first, so no new certificate session can start.
   rm -f "$SSHD_CONF"
   reload_sshd || status=1
+  # With the timer gone nothing else would end the certificate sessions still open, so
+  # they end here. Plain-key sessions (no grant in their login line) are not ours and
+  # stay. Our own session goes last, in case this is running inside one.
+  own=$(sed -n 's/.*session-\([^.]*\)\.scope.*/\1/p' /proc/self/cgroup)
+  others= own_is_certificate=0
+  for id in $(loginctl list-sessions --no-legend | awk '$3 == "agent" { print $1 }'); do
+    [ "$(loginctl show-session "$id" -p Service --value 2>/dev/null)" = sshd ] || continue
+    leader=$(loginctl show-session "$id" -p Leader --value 2>/dev/null) || continue
+    journalctl -b -q -o cat _PID="$leader" | grep '^Accepted publickey for agent ' | tail -n 1 | grep -q ' ID grant=gnt_' || continue
+    if [ "$id" = "$own" ]; then own_is_certificate=1; else others="$others $id"; fi
+  done
+  for id in $others; do
+    loginctl terminate-session "$id" || status=1
+  done
   systemctl disable --now phoenix-ssh-window.timer 2>/dev/null || true
   rm -f "$UNIT.service" "$UNIT.timer" "$WINDOW_BIN" "$AUTHZ_BIN" "$ENV_FILE" "$SUDOERS" "$CA_PUB" "$TLS_CA"
-  systemctl daemon-reload
-  [ "$status" = 0 ] && echo "removed. The agent user and its files are left in place."
-  for id in $certificate_sessions; do
-    loginctl terminate-session "$id" || true
-  done
+  systemctl daemon-reload || status=1
+  if [ "$status" = 0 ]; then
+    echo "removed. The agent user and its files are left in place."
+  else
+    echo "removed, but with the problems above: check sshd and systemd." >&2
+  fi
+  [ "$own_is_certificate" = 0 ] || loginctl terminate-session "$own" || true
   return "$status"
 }
 
