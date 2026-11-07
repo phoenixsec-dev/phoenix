@@ -326,3 +326,20 @@ func TestSSHSignRejectsSessionsAndBadKeys(t *testing.T) {
 		t.Fatalf("ca = %q", pk)
 	}
 }
+
+// The bare server address goes to the dashboard when there is one, and stays a
+// 404 when there isn't. Not SSH, but this file already has the fixture.
+func TestRootGoesToDashboard(t *testing.T) {
+	e := newGrantEnv(t)
+	if w := e.do("GET", "/", "", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("no dashboard: / = %d, want 404", w.Code)
+	}
+	e.srv.SetDashboard(http.NotFoundHandler())
+	w := e.do("GET", "/", "", "")
+	if w.Code != http.StatusMovedPermanently || w.Header().Get("Location") != "/dashboard/" {
+		t.Fatalf("/ = %d to %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := e.do("GET", "/v1/nope", "", ""); w.Code == http.StatusMovedPermanently {
+		t.Fatal("only the exact root may redirect")
+	}
+}

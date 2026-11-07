@@ -261,12 +261,16 @@ func (s *Server) SetApprovalStore(as *approval.Store) {
 	s.approvals = as
 }
 
-// SetDashboard registers the dashboard handler under /dashboard/.
+// SetDashboard registers the dashboard handler under /dashboard/. The bare
+// server address and /dashboard both send a browser there, so typing just the
+// host name lands on the login page instead of a 404.
 func (s *Server) SetDashboard(h http.Handler) {
 	s.mux.Handle("/dashboard/", h)
-	s.mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+	toDashboard := func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
-	})
+	}
+	s.mux.HandleFunc("GET /dashboard", toDashboard)
+	s.mux.HandleFunc("GET /{$}", toDashboard)
 }
 
 // ServeHTTP implements http.Handler.
