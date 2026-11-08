@@ -19,10 +19,10 @@ func TestFind(t *testing.T) {
 	}`)
 	got := Find(data, fields)
 	want := []string{
-		"auth.mtls: removed, client certificates are gone; use https_listener",
-		"roles.b.step_up: removed, step-up is gone",
-		`roles.b.trust "mtls": removed, mtls is gone`,
-		"rules[1].deny_tools: removed, tool rules checked nothing",
+		"auth.mtls: removed. Why: client certificates are gone. Instead: use https_listener.",
+		"roles.b.step_up: removed. Why: step-up is gone.",
+		`roles.b.trust "mtls": removed. Why: mtls is gone.`,
+		"rules[1].deny_tools: removed. Why: tool rules checked nothing.",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("Find:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

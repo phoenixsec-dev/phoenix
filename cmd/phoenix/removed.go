@@ -15,7 +15,16 @@ type removedCommand struct {
 }
 
 // removedCommands is keyed by "command" or "command subcommand".
+// clientCertRemovedNote is printed when PHOENIX_CLIENT_CERT or
+// PHOENIX_CLIENT_KEY is still set, so a wrapper relying on them hears why
+// they no longer do anything.
+const clientCertRemovedNote = "warning: PHOENIX_CLIENT_CERT and PHOENIX_CLIENT_KEY are ignored: client certificates (mTLS) were removed. Use PHOENIX_TOKEN over https:// with PHOENIX_CA_CERT."
+
 var removedCommands = map[string]removedCommand{
+	"cert": {
+		why:     "client certificates (mTLS) were removed: hard to run, unused, and HTTPS already protects tokens in transit",
+		instead: "give the agent a bearer token (phoenix agent create) and use https:// with PHOENIX_CA_CERT",
+	},
 	"token": {
 		why:     "short-lived tokens trusted whatever process details the caller sent, so they proved nothing",
 		instead: "use a role session (PHOENIX_ROLE) for a short-lived credential",

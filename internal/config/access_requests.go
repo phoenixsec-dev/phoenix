@@ -282,7 +282,6 @@ func (c *Config) ValidateGrantStorePath() error {
 		{"store.path", c.Store.Path},
 		{"store.master_key", c.Store.MasterKey},
 		{"policy.path", c.Policy.Path},
-		{"auth.mtls.crl_path", c.Auth.MTLS.CRLPath},
 	}
 	for _, pr := range protected {
 		if pr.path == "" {

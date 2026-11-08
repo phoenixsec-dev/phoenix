@@ -220,20 +220,8 @@ func (h *Handler) attestFacts(rq grant.Request, p string, sealKeyOK bool) []atte
 		out = append(out, attestFact{Path: p, Requirement: req, Status: st})
 	}
 	is := func(b bool) *bool { return &b }
-	if rule.RequireMTLS {
-		add("mTLS client certificate", is(rq.AuthMethod == grant.AuthMTLS))
-	}
-	if rule.DenyBearer {
-		add("no bearer tokens", is(rq.AuthMethod != grant.AuthBearer))
-	}
 	if len(rule.AllowedIPs) > 0 {
 		add("source IP in "+strings.Join(rule.AllowedIPs, ", "), is(ipAllowed(rq.SourceIP, rule.AllowedIPs)))
-	}
-	if rule.CertFingerprint != "" {
-		// An mTLS request saved its certificate fingerprint, so this one is
-		// knowable now. Bearer and token requests have no certificate.
-		add("specific client certificate", is(rq.AuthMethod == grant.AuthMTLS &&
-			strings.EqualFold(rq.CredentialFP, rule.CertFingerprint)))
 	}
 	if rule.RequireSealed {
 		add("sealed delivery", is(sealKeyOK))

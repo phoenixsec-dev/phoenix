@@ -2,12 +2,10 @@
 package api
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -21,7 +19,6 @@ import (
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
-	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/grant"
@@ -46,9 +43,9 @@ const callerAuditMetadataMaxValueLen = 256
 // Adding a header to this table must not create a path into authentication,
 // ACL, policy/attestation, session identity, role mapping, or sealing.
 //
-// In particular, X-Phoenix-Tool is deliberately absent: it is an attestation
-// policy input read by attestFull, and must not be conflated with the
-// audit-only X-Hermes-Tool hint.
+// X-Phoenix-Tool is deliberately absent. It used to feed the removed
+// allowed_tools/deny_tools rules; it is now ignored, and must not come back
+// as a policy input under another name.
 //
 // Session keys (e.g. X-OpenClaw-Session-Key) are credentials and must never
 // appear here — capturing one would write it to the audit log in cleartext.
@@ -150,7 +147,6 @@ type Server struct {
 	audit         *audit.Logger
 	auditPath     string
 	masterKeyPath string         // path to master.key file (needed for KEK rotation)
-	ca            *ca.CA         // nil when mTLS is disabled
 	policy        *policy.Engine // nil when no attestation policy configured
 	bearerEnabled bool           // whether bearer token auth is allowed
 	startTime     time.Time      // server start time for uptime reporting
@@ -201,13 +197,6 @@ func NewServer(b store.SecretBackend, a *acl.ACL, al *audit.Logger, auditPath st
 	return srv
 }
 
-// SetCA configures the CA for mTLS authentication.
-// When set, the server will accept client certificates as an alternative
-// to bearer tokens. The certificate CN is used as the agent identity.
-func (s *Server) SetCA(c *ca.CA) {
-	s.ca = c
-}
-
 // SetBearerEnabled controls whether bearer token authentication is allowed.
 func (s *Server) SetBearerEnabled(enabled bool) {
 	s.bearerEnabled = enabled
@@ -221,8 +210,7 @@ func (s *Server) SetMasterKeyPath(path string) {
 
 // SetPolicy configures the attestation policy engine.
 // When set, secret access is subject to attestation requirements
-// (source IP binding, cert fingerprint pinning, mTLS enforcement)
-// in addition to ACL checks.
+// (source IP binding, sealed delivery) in addition to ACL checks.
 func (s *Server) SetPolicy(p *policy.Engine) {
 	s.policy = p
 }
@@ -263,8 +251,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/agents", s.handleCreateAgent)
 	s.mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	s.mux.HandleFunc("DELETE /v1/agents/", s.handleDeleteAgent)
-	s.mux.HandleFunc("POST /v1/certs/issue", s.handleIssueCert)
-	s.mux.HandleFunc("POST /v1/certs/revoke", s.handleRevokeCert)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
@@ -282,12 +268,10 @@ func (s *Server) routes() {
 
 // authInfo contains authentication result and attestation evidence.
 type authInfo struct {
-	Agent           string
-	UsedMTLS        bool
-	UsedBearer      bool
-	IsLocal         bool   // true when client IP is loopback
-	CertFingerprint string // "sha256:<hex>" or empty
-	BearerFP        string // grant.BearerFingerprint of the presented token's hash (bearer auth only)
+	Agent      string
+	UsedBearer bool
+	IsLocal    bool   // true when client IP is loopback
+	BearerFP   string // grant.BearerFingerprint of the presented token's hash (bearer auth only)
 
 	// Session identity (set when authenticated via session token)
 	UsedSession       bool
@@ -316,15 +300,10 @@ func (s *Server) authenticate(r *http.Request) (string, error) {
 	return info.Agent, nil
 }
 
-// authenticateInfo identifies the calling agent and collects attestation
-// evidence from the request (auth method, cert fingerprint, etc.).
+// authenticateInfo identifies the calling agent and collects what the
+// request shows about it (auth method, loopback, token fingerprint).
 //
-// Auth priority: session token > mTLS > bearer.
-// Session tokens are checked first so that a renewal request carrying both
-// a phxs_ token and a client certificate authenticates via the session.
-// When a session is authenticated and a verified client cert is also present,
-// the cert evidence (UsedMTLS, CertFingerprint) is layered onto the authInfo
-// so that role attestation checks can inspect the current TLS state.
+// Auth priority: session token (phxs_) > bearer token.
 func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	ip := clientIP(r)
 	local := session.IsLoopback(ip)
@@ -334,7 +313,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	// --- Session token authentication (phxs_ prefix) ---
 	// Checked first: session tokens are scoped credentials that agents use
 	// for all operations after bootstrap. If present, session auth is
-	// authoritative for identity; mTLS evidence is layered on as attestation.
+	// authoritative for identity.
 	if s.sessions != nil && tok != "" && strings.HasPrefix(tok, session.TokenPrefix) {
 		sess, err := s.sessions.Validate(tok)
 		if err != nil {
@@ -359,33 +338,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			SessionNamespaces: sess.Namespaces,
 			SessionActions:    sess.Actions,
 		}
-		// Layer on mTLS attestation evidence from the current TLS connection.
-		// The session token is the auth method; the cert is attestation context.
-		if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			if _, verifyErr := s.ca.VerifyClientCert(r.TLS.PeerCertificates); verifyErr == nil {
-				info.UsedMTLS = true
-				info.CertFingerprint = certFingerprint(r.TLS.PeerCertificates[0].Raw)
-			}
-		}
 		return info, nil
-	}
-
-	// --- mTLS authentication ---
-	// Rate limiting is NOT applied to mTLS — it uses cryptographic auth, not secrets.
-	if s.ca != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-		agentName, err := s.ca.VerifyClientCert(r.TLS.PeerCertificates)
-		if err == nil {
-			s.authRL.recordSuccess(ip) // clear any prior bearer failures from this IP
-			fp := certFingerprint(r.TLS.PeerCertificates[0].Raw)
-			return &authInfo{
-				Agent:           agentName,
-				UsedMTLS:        true,
-				IsLocal:         local,
-				CertFingerprint: fp,
-			}, nil
-		}
-		// mTLS verification failed — log but fall through to bearer
-		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
 	}
 
 	// --- Bearer token authentication ---
@@ -414,12 +367,6 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	}, nil
 }
 
-// certFingerprint computes "sha256:<hex>" from raw DER certificate bytes.
-func certFingerprint(raw []byte) string {
-	hash := sha256.Sum256(raw)
-	return fmt.Sprintf("sha256:%X", hash[:])
-}
-
 // attestFull checks the attestation policy for path. Returns nil if no policy
 // is configured or the request passes.
 func (s *Server) attestFull(r *http.Request, path string, info *authInfo, sealKeyValidated bool) error {
@@ -427,10 +374,7 @@ func (s *Server) attestFull(r *http.Request, path string, info *authInfo, sealKe
 		return nil
 	}
 	ctx := &policy.RequestContext{
-		UsedMTLS:         info.UsedMTLS,
-		UsedBearer:       info.UsedBearer,
 		SourceIP:         clientIP(r),
-		CertFingerprint:  info.CertFingerprint,
 		SealKeyPresented: sealKeyValidated,
 		SessionID:        info.SessionID,
 		SessionRole:      info.SessionRole,
@@ -1152,58 +1096,6 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok", "agent": target, "action": "deleted"})
 }
 
-// issueCertRequest is the JSON body for certificate issuance.
-type issueCertRequest struct {
-	AgentName string `json:"agent_name"`
-}
-
-func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
-	if s.ca == nil {
-		jsonError(w, "mTLS is not enabled", http.StatusNotImplemented)
-		return
-	}
-
-	agentName, err := s.authenticate(r)
-	if err != nil {
-		handleAuthError(w, err)
-		return
-	}
-
-	// Only admin agents can issue certificates
-	if err := s.acl.Authorize(agentName, "certs", acl.ActionAdmin); err != nil {
-		jsonError(w, "access denied: admin required", http.StatusForbidden)
-		return
-	}
-
-	var req issueCertRequest
-	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.AgentName == "" {
-		jsonError(w, "agent_name is required", http.StatusBadRequest)
-		return
-	}
-
-	bundle, err := s.ca.IssueAgentCert(req.AgentName)
-	if err != nil {
-		log.Printf("error issuing cert for %q: %v", req.AgentName, err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	s.auditLogAllowed(r, agentName, "issue-cert", req.AgentName, clientIP(r))
-	jsonOK(w, map[string]interface{}{
-		"status":  "ok",
-		"agent":   req.AgentName,
-		"cert":    string(bundle.CertPEM),
-		"key":     string(bundle.KeyPEM),
-		"ca_cert": string(bundle.CACert),
-	})
-}
-
 func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
@@ -1444,68 +1336,6 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, resp)
 }
 
-// revokeCertRequest is the JSON body for certificate revocation.
-type revokeCertRequest struct {
-	SerialNumber string `json:"serial_number"`
-	AgentName    string `json:"agent_name"`
-}
-
-// handleRevokeCert revokes a certificate by serial number.
-func (s *Server) handleRevokeCert(w http.ResponseWriter, r *http.Request) {
-	if s.ca == nil {
-		jsonError(w, "mTLS is not enabled", http.StatusNotImplemented)
-		return
-	}
-
-	agentName, err := s.authenticate(r)
-	if err != nil {
-		handleAuthError(w, err)
-		return
-	}
-
-	// Only admin agents can revoke certificates
-	if err := s.acl.Authorize(agentName, "certs", acl.ActionAdmin); err != nil {
-		jsonError(w, "access denied: admin required", http.StatusForbidden)
-		return
-	}
-
-	var req revokeCertRequest
-	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.SerialNumber == "" {
-		jsonError(w, "serial_number is required", http.StatusBadRequest)
-		return
-	}
-
-	serial := new(big.Int)
-	if _, ok := serial.SetString(req.SerialNumber, 10); !ok {
-		jsonError(w, "invalid serial_number format", http.StatusBadRequest)
-		return
-	}
-
-	revokeAgent := req.AgentName
-	if revokeAgent == "" {
-		revokeAgent = "unknown"
-	}
-
-	if err := s.ca.RevokeCert(serial, revokeAgent); err != nil {
-		log.Printf("error revoking cert serial %s: %v", req.SerialNumber, err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	s.auditLogAllowed(r, agentName, "revoke-cert", req.SerialNumber, clientIP(r))
-	jsonOK(w, map[string]string{
-		"status":        "ok",
-		"serial_number": req.SerialNumber,
-		"agent_name":    revokeAgent,
-	})
-}
-
 // handleStatus returns a comprehensive server status overview.
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
@@ -1536,17 +1366,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		policySummary := make(map[string]interface{}, len(rules))
 		for pattern, rule := range rules {
 			var checks []string
-			if rule.RequireMTLS {
-				checks = append(checks, "mTLS")
-			}
-			if rule.DenyBearer {
-				checks = append(checks, "deny-bearer")
-			}
 			if len(rule.AllowedIPs) > 0 {
 				checks = append(checks, "IP-bound")
-			}
-			if rule.CertFingerprint != "" {
-				checks = append(checks, "cert-pinned")
 			}
 			if rule.RequireSealed {
 				checks = append(checks, "sealed-required")
@@ -1558,13 +1379,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		status["policy_rules"] = len(rules)
 		status["policy"] = policySummary
-	}
-
-	// CA status
-	if s.ca != nil {
-		status["mtls"] = "enabled"
-	} else {
-		status["mtls"] = "disabled"
 	}
 
 	// Request-use grants: degraded store and audit lines still pending.
@@ -1884,7 +1698,7 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	actions := role.Actions // nil -> store defaults to ["list", "read_value"]
 
 	// Mint session
-	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, info.CertFingerprint, ip, ttl)
+	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, ip, ttl)
 	if err != nil {
 		log.Printf("session mint error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1957,10 +1771,8 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Re-check role attestation requirements against the CURRENT request.
-	// authenticateInfo() layers mTLS evidence onto session authInfo when a
-	// verified client cert is present on the TLS connection, so info already
-	// carries the real current-request attestation state.
+	// Re-check role attestation requirements against the CURRENT request
+	// (for example, a source_ip role renewed from a non-loopback address).
 	if len(role.Attestation) > 0 {
 		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
 			writeSessionAttestationFailed(w)
@@ -1968,12 +1780,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 				denialAuditMetadata(r, fmt.Sprintf("%s; role %q requires attestation: %v", reason, info.SessionRole, role.Attestation))))
 			return
 		}
-		if slicesContains(role.Attestation, "cert_fingerprint") && sess.CertFingerprint != "" && info.CertFingerprint != sess.CertFingerprint {
-			writeSessionAttestationFailed(w)
-			s.logAudit(s.audit.LogSessionDeniedWithMetadata(info.Agent, "session.renew", info.SessionRole, ip, "cert_continuity_failed", info.SessionID,
-				denialAuditMetadata(r, "role requires the same client certificate fingerprint used when the session was minted")))
-			return
-		}
+
 	}
 
 	ttl := s.sessionTTL(role.MaxTTL)
@@ -2010,45 +1817,21 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// checkRoleAttestation verifies that the request satisfies the role's attestation
-// requirements. Returns a non-empty reason string if any check fails.
+// checkRoleAttestation checks a role's attestation list against the request.
+// "source_ip" means the caller must be on loopback; "require_sealed" is
+// enforced by the role's seal key binding, not here. It returns a non-empty
+// reason when a check fails.
 func (s *Server) checkRoleAttestation(attestation []string, info *authInfo, ip string) string {
 	for _, req := range attestation {
-		switch req {
-		case "require_mtls":
-			if !info.UsedMTLS {
-				return "role requires mTLS authentication"
-			}
-		case "source_ip":
-			// source_ip attestation on a role means the caller must be local
-			if !info.IsLocal {
-				return "role requires local (loopback) access"
-			}
-		case "cert_fingerprint":
-			if info.CertFingerprint == "" {
-				return "role requires client certificate fingerprint"
-			}
-		case "require_sealed":
-			// Seal key is checked separately at mint time
+		if req == "source_ip" && !info.IsLocal {
+			return "role requires local (loopback) access"
 		}
 	}
 	return ""
 }
 
-func slicesContains(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
-}
-
 // bootstrapMethod returns the primary auth method string from authInfo.
 func (s *Server) bootstrapMethod(info *authInfo) string {
-	if info.UsedMTLS {
-		return "mtls"
-	}
 	if info.UsedBearer {
 		return "bearer"
 	}
@@ -2083,7 +1866,7 @@ func (s *Server) sessionTTL(maxTTL string) time.Duration {
 
 // handleSessionList returns sessions visible to the caller.
 // Session-token callers see only their own session. Admins see all.
-// Non-admin bearer/mTLS callers see sessions belonging to their agent.
+// Non-admin bearer callers see sessions belonging to their agent.
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	if s.sessions == nil {
 		jsonError(w, "session identity not enabled", http.StatusNotImplemented)
@@ -2193,7 +1976,7 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// Authorization: session-token callers can only see their exact session
-	// (scoped credentials never escalate to admin). Bearer/mTLS callers can
+	// (scoped credentials never escalate to admin). Bearer callers can
 	// see sessions belonging to their agent, or all sessions if admin.
 	if info.UsedSession {
 		if info.SessionID != id {
@@ -2229,7 +2012,7 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// Authorization: session-token callers can only revoke their exact session
-	// (scoped credentials never escalate to admin). Bearer/mTLS callers can
+	// (scoped credentials never escalate to admin). Bearer callers can
 	// revoke sessions belonging to their agent, or all sessions if admin.
 	if info.UsedSession {
 		if info.SessionID != id {

@@ -6,6 +6,12 @@ import "github.com/phoenixsec/phoenix/internal/removed"
 // "attestation" map format and the legacy "rules" list. Load refuses a file
 // that still uses one, so nobody keeps trusting a rule that checks nothing.
 var removedRuleFields = ruleFields(
+	removed.Field{Path: "require_mtls", Why: "client certificates (mTLS) were removed",
+		Instead: "use source_ip"},
+	removed.Field{Path: "cert_fingerprint", Why: "client certificates (mTLS) were removed",
+		Instead: "use source_ip"},
+	removed.Field{Path: "deny_bearer", Why: "with client certificates gone, bearer tokens are the only way to log in, so it could only lock everyone out",
+		Instead: "use source_ip"},
 	removed.Field{Path: "time_window", Why: "unused, and a rule that only limits the hour adds little",
 		Instead: "use source_ip, or revoke access when it is not needed"},
 	removed.Field{Path: "time_zone", Why: "it only applied to time_window, which is gone"},

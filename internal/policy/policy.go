@@ -1,9 +1,10 @@
 // Package policy implements attestation policy evaluation for Phoenix.
 //
-// Attestation policies bind secrets to specific identity evidence beyond
-// basic ACL checks. They enforce requirements like mTLS authentication,
-// source IP restrictions, certificate fingerprint pinning, tool-scoped
-// access.
+// A policy adds checks on top of the ACL for secrets matching a path
+// pattern: the caller's source IP (source_ip) and sealed delivery
+// (require_sealed, allow_unseal). Everything here is something the server
+// can check itself; rules that trusted what the caller said were removed
+// (see removed.go).
 //
 // Policies are keyed by secret path patterns (using the same glob syntax
 // as ACL rules) and evaluated after ACL authorization succeeds.
@@ -13,10 +14,8 @@
 //	{
 //	  "attestation": {
 //	    "openclaw/*": {
-//	      "require_mtls": true,
-//	      "source_ip": ["192.168.0.115"],
-//	      "cert_fingerprint": "sha256:abc123",
-//	      "deny_bearer": true,
+//	      "source_ip": ["192.168.0.115", "10.0.0.0/24"],
+//	      "require_sealed": true
 //	    }
 //	  }
 //	}
@@ -36,23 +35,16 @@ import (
 
 // Rule defines attestation requirements for secrets matching a path pattern.
 type Rule struct {
-	// L0-L3: existing attestation checks
-	RequireMTLS     bool     `json:"require_mtls"`
-	AllowedIPs      []string `json:"source_ip,omitempty"`
-	CertFingerprint string   `json:"cert_fingerprint,omitempty"`
-	DenyBearer      bool     `json:"deny_bearer"`
+	AllowedIPs []string `json:"source_ip,omitempty"` // exact IPs or CIDRs
 
-	// L9: sealed response requirements
+	// Sealed response requirements
 	RequireSealed bool `json:"require_sealed,omitempty"` // deny if no valid seal key presented
 	AllowUnseal   bool `json:"allow_unseal,omitempty"`   // gate for MCP unseal tool
 }
 
 // RequestContext contains attestation evidence extracted from an HTTP request.
 type RequestContext struct {
-	UsedMTLS        bool
-	UsedBearer      bool
-	SourceIP        string
-	CertFingerprint string // "sha256:<hex>"
+	SourceIP string
 
 	// Seal key validation (set when X-Phoenix-Seal-Key is present and validated)
 	SealKeyPresented bool
@@ -74,7 +66,7 @@ type policyFile struct {
 }
 
 // legacyPolicyFile preserves compatibility with early list-style policy files:
-// {"rules":[{"path":"secure/*","require_mtls":true,"allowed_ips":["10.0.0.0/24"]}]}
+// {"rules":[{"path":"secure/*","allowed_ips":["10.0.0.0/24"]}]}
 type legacyPolicyFile struct {
 	Rules []legacyRule `json:"rules"`
 }
@@ -82,13 +74,10 @@ type legacyPolicyFile struct {
 type legacyRule struct {
 	Path string `json:"path"`
 
-	RequireMTLS     bool     `json:"require_mtls"`
-	AllowedIPs      []string `json:"allowed_ips,omitempty"` // legacy name
-	SourceIP        []string `json:"source_ip,omitempty"`   // canonical name
-	CertFingerprint string   `json:"cert_fingerprint,omitempty"`
-	DenyBearer      bool     `json:"deny_bearer"`
-	RequireSealed   bool     `json:"require_sealed,omitempty"`
-	AllowUnseal     bool     `json:"allow_unseal,omitempty"`
+	AllowedIPs    []string `json:"allowed_ips,omitempty"` // legacy name
+	SourceIP      []string `json:"source_ip,omitempty"`   // canonical name
+	RequireSealed bool     `json:"require_sealed,omitempty"`
+	AllowUnseal   bool     `json:"allow_unseal,omitempty"`
 }
 
 // NewEngine creates a policy engine with no rules (all requests pass).
@@ -153,12 +142,9 @@ func Load(data []byte) (*Engine, error) {
 				ips = r.AllowedIPs
 			}
 			rules[pattern] = Rule{
-				RequireMTLS:     r.RequireMTLS,
-				AllowedIPs:      ips,
-				CertFingerprint: r.CertFingerprint,
-				DenyBearer:      r.DenyBearer,
-				RequireSealed:   r.RequireSealed,
-				AllowUnseal:     r.AllowUnseal,
+				AllowedIPs:    ips,
+				RequireSealed: r.RequireSealed,
+				AllowUnseal:   r.AllowUnseal,
 			}
 		}
 		return &Engine{rules: rules}, nil
@@ -192,23 +178,7 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		return nil // no policy = allow
 	}
 
-	// L0: Check deny_bearer first
-	if rule.DenyBearer && ctx.UsedBearer {
-		return &DeniedError{
-			Pattern: pattern,
-			Reason:  "bearer token authentication not allowed; mTLS required",
-		}
-	}
-
-	// L1: Check require_mtls
-	if rule.RequireMTLS && !ctx.UsedMTLS {
-		return &DeniedError{
-			Pattern: pattern,
-			Reason:  "mTLS client certificate required",
-		}
-	}
-
-	// L2: Check source_ip
+	// Check source_ip
 	if len(rule.AllowedIPs) > 0 {
 		if !matchIP(ctx.SourceIP, rule.AllowedIPs) {
 			return &DeniedError{
@@ -218,23 +188,7 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		}
 	}
 
-	// L3: Check cert_fingerprint
-	if rule.CertFingerprint != "" {
-		if ctx.CertFingerprint == "" {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  "certificate fingerprint required but no client certificate presented",
-			}
-		}
-		if !strings.EqualFold(ctx.CertFingerprint, rule.CertFingerprint) {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  fmt.Sprintf("certificate fingerprint mismatch: got %s", ctx.CertFingerprint),
-			}
-		}
-	}
-
-	// L9: Check sealed response requirement
+	// Check sealed response requirement
 	if rule.RequireSealed && !ctx.SealKeyPresented {
 		return &DeniedError{
 			Pattern:        pattern,

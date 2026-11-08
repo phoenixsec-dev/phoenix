@@ -38,7 +38,6 @@ const ActionSSHLogin = "ssh_login"
 // ("phxs_" tokens) can never create or use a grant.
 const (
 	AuthBearer = "bearer"
-	AuthMTLS   = "mtls"
 )
 
 // Fixed limits from the plan (section 5 and the abuse limits table).

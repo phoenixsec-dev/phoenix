@@ -32,7 +32,6 @@ func cmdStatus(args []string) error {
 		Secrets     int                          `json:"secrets"`
 		Agents      int                          `json:"agents"`
 		Time        string                       `json:"time"`
-		MTLS        string                       `json:"mtls"`
 		PolicyRules int                          `json:"policy_rules"`
 		Policy      map[string]string            `json:"policy"`
 		RecentAudit []map[string]json.RawMessage `json:"recent_audit"`
@@ -58,9 +57,6 @@ func cmdStatus(args []string) error {
 
 	// Agents
 	fmt.Printf("  Agents: %d registered\n", status.Agents)
-
-	// mTLS
-	fmt.Printf("  mTLS: %s\n", status.MTLS)
 
 	// Policy
 	if status.PolicyRules > 0 {

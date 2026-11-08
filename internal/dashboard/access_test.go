@@ -399,34 +399,6 @@ func TestOverviewPendingAccessBadge(t *testing.T) {
 	}
 }
 
-// R1 U2: a path pinned to one client certificate shows met / not met from
-// the fingerprint the mTLS request was made with.
-func TestAttestFactsCertPin(t *testing.T) {
-	p, err := policy.Load([]byte(`{"attestation": {"infra/*": {"cert_fingerprint": "sha256:AA11"}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := &Handler{deps: Deps{Policy: p}}
-	status := func(rq grant.Request) string {
-		for _, f := range h.attestFacts(rq, "infra/a", true) {
-			if f.Requirement == "specific client certificate" {
-				return f.Status
-			}
-		}
-		t.Fatal("no certificate fact")
-		return ""
-	}
-	if got := status(grant.Request{AuthMethod: grant.AuthMTLS, CredentialFP: "sha256:aa11"}); got != "met" {
-		t.Errorf("matching cert: %q", got)
-	}
-	if got := status(grant.Request{AuthMethod: grant.AuthMTLS, CredentialFP: "sha256:bb22"}); got != "not met" {
-		t.Errorf("other cert: %q", got)
-	}
-	if got := status(grant.Request{AuthMethod: grant.AuthBearer, CredentialFP: "sha256:aa11"}); got != "not met" {
-		t.Errorf("bearer: %q", got)
-	}
-}
-
 // P5 review S1: when a failed approval may still be on disk, the dashboard
 // says so instead of "nothing changed".
 func TestApprovalMaybeSavedShownHonestly(t *testing.T) {
@@ -444,7 +416,7 @@ func TestApprovalMaybeSavedShownHonestly(t *testing.T) {
 // check, because signing a login does not run those checks.
 func TestSSHLoginCard(t *testing.T) {
 	e := newAccessEnv(t)
-	pe, err := policy.Load([]byte(`{"attestation": {"ssh/*": {"cert_fingerprint": "sha256:AA11"}}}`))
+	pe, err := policy.Load([]byte(`{"attestation": {"ssh/*": {"source_ip": ["10.9.9.9"]}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}

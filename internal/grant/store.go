@@ -426,8 +426,8 @@ type CreateInput struct {
 	Reason       string
 	TTL          time.Duration // 0 = DefaultGrantTTL; clamped to [1m, MaxGrantTTL]
 	SourceIP     string
-	AuthMethod   string // AuthBearer or AuthMTLS
-	CredentialFP string // bearer: BearerFingerprint(hash); mtls: cert fingerprint
+	AuthMethod   string // AuthBearer (the only method left)
+	CredentialFP string // BearerFingerprint(hash) of the agent's token
 }
 
 // Create files a new pending request. It returns created=true for a new
@@ -439,12 +439,12 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 		return Request{}, false, newErr(CodeInvalidRequest, "agent is required")
 	}
 	switch in.AuthMethod {
-	case AuthBearer, AuthMTLS:
+	case AuthBearer:
 		if in.CredentialFP == "" {
 			return Request{}, false, newErr(CodeInvalidRequest, "credential fingerprint is required")
 		}
 	default:
-		return Request{}, false, newErr(CodeInvalidRequest, "requests need the agent's own bearer token or mTLS certificate")
+		return Request{}, false, newErr(CodeInvalidRequest, "requests need the agent's own bearer token")
 	}
 	if in.Action != ActionReadValue && in.Action != ActionSSHLogin {
 		return Request{}, false, newErr(CodeActionNotGrantable, "only %s can be requested", ActionReadValue)
@@ -865,7 +865,7 @@ func (s *Store) DeleteAgent(agent, by, ip string, removeACL func() error) (Delet
 type Caller struct {
 	Agent        string
 	SourceIP     string
-	AuthMethod   string // AuthBearer or AuthMTLS
+	AuthMethod   string // AuthBearer
 	CredentialFP string // same format as CreateInput.CredentialFP
 }
 
@@ -945,7 +945,7 @@ func credentialMatches(g *Grant, c Caller) bool {
 		return false
 	}
 	switch g.AuthMethod {
-	case AuthBearer, AuthMTLS:
+	case AuthBearer:
 		return g.CredentialFP != "" &&
 			subtle.ConstantTimeCompare([]byte(c.CredentialFP), []byte(g.CredentialFP)) == 1
 	}

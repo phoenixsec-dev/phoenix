@@ -156,7 +156,7 @@ func warnPlaintextOnce(server string) {
 	fmt.Fprintf(plaintextWarnOut,
 		"phoenix: WARNING: server URL is plaintext http:// to a non-loopback address (%s).\n"+
 			"phoenix: Bearer tokens and secret values will cross the network unencrypted.\n"+
-			"phoenix: Enable the server's \"tls\" config block and use https:// (see docs/lan-deployment.md).\n"+
+			"phoenix: Turn on the server's https_listener and use its https:// address (see docs/lan-deployment.md).\n"+
 			"phoenix: Only if this traffic never leaves the host, silence this with PHOENIX_ALLOW_PLAINTEXT=<host>.\n",
 		server)
 }

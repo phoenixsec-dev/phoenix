@@ -293,7 +293,7 @@ func denialAuditMetadata(r *http.Request, detail string) map[string]string {
 }
 
 // maxDenialDetailBytes caps the stored denial.detail. The detail can embed
-// caller-controlled text (for example the X-Phoenix-Tool header), and
+// caller-controlled text (for example a source IP or role name), and
 // /v1/resolve logs it once per ref, so it must stay small.
 const maxDenialDetailBytes = 512
 

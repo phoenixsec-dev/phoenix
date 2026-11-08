@@ -16,7 +16,7 @@ import (
 // Request-use grants on the CLI (plan section 12): an agent asks a human for
 // temporary use of exact secret paths, an approver decides, and the agent
 // uses the grant through phoenix exec. Everything here runs on the agent's
-// OWN identity (PHOENIX_TOKEN bootstrap token or mTLS cert): the server
+// OWN identity (its PHOENIX_TOKEN bootstrap token): the server
 // refuses session tokens for requests and grants. All text that came from
 // the server is passed through cleanServerText before it is printed.
 
@@ -63,15 +63,12 @@ type grantView struct {
 // minted) and a phxs_ session token is refused before anything is sent.
 func requireBootstrapAuth() error {
 	if strings.HasPrefix(token, "phxs_") {
-		return fmt.Errorf("access requests and grants use the agent's own identity (bootstrap PHOENIX_TOKEN or mTLS cert), not a phxs_ session token")
+		return fmt.Errorf("access requests and grants use the agent's own identity (bootstrap PHOENIX_TOKEN), not a phxs_ session token")
 	}
 	if token != "" {
 		return nil
 	}
-	if os.Getenv("PHOENIX_CLIENT_CERT") != "" && os.Getenv("PHOENIX_CLIENT_KEY") != "" {
-		return nil
-	}
-	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN or PHOENIX_CLIENT_CERT + PHOENIX_CLIENT_KEY")
+	return fmt.Errorf("no auth configured: set PHOENIX_TOKEN")
 }
 
 // apiJSON sends a request and decodes a 200/201 JSON reply into out. Any

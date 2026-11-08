@@ -1,19 +1,12 @@
 package ca
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -66,182 +59,13 @@ func TestCASaveAndLoad(t *testing.T) {
 	}
 }
 
-func TestIssueAgentCert(t *testing.T) {
-	ca, _ := GenerateCA("TestOrg")
-
-	bundle, err := ca.IssueAgentCert("vector")
-	if err != nil {
-		t.Fatalf("IssueAgentCert: %v", err)
-	}
-
-	if len(bundle.CertPEM) == 0 {
-		t.Fatal("cert PEM is empty")
-	}
-	if len(bundle.KeyPEM) == 0 {
-		t.Fatal("key PEM is empty")
-	}
-	if len(bundle.CACert) == 0 {
-		t.Fatal("CA cert is empty")
-	}
-
-	// Parse and verify the agent cert
-	block, _ := pem.Decode(bundle.CertPEM)
-	if block == nil {
-		t.Fatal("failed to decode cert PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatalf("parse cert: %v", err)
-	}
-
-	if cert.Subject.CommonName != "vector" {
-		t.Fatalf("expected CN 'vector', got %q", cert.Subject.CommonName)
-	}
-	if cert.IsCA {
-		t.Fatal("agent cert should not be CA")
-	}
-
-	// Verify against CA
-	pool := x509.NewCertPool()
-	pool.AddCert(ca.cert)
-	opts := x509.VerifyOptions{
-		Roots:     pool,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	if _, err := cert.Verify(opts); err != nil {
-		t.Fatalf("cert verification failed: %v", err)
-	}
-}
-
-func TestVerifyClientCert(t *testing.T) {
-	ca, _ := GenerateCA("TestOrg")
-	bundle, _ := ca.IssueAgentCert("openclaw")
-
-	// Parse the cert
-	block, _ := pem.Decode(bundle.CertPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	// Verify
-	name, err := ca.VerifyClientCert([]*x509.Certificate{cert})
-	if err != nil {
-		t.Fatalf("VerifyClientCert: %v", err)
-	}
-	if name != "openclaw" {
-		t.Fatalf("expected agent name 'openclaw', got %q", name)
-	}
-}
-
-func TestVerifyClientCertNoCerts(t *testing.T) {
-	ca, _ := GenerateCA("TestOrg")
-
-	_, err := ca.VerifyClientCert(nil)
-	if err == nil {
-		t.Fatal("expected error for no certs")
-	}
-}
-
-func TestCRLRevocation(t *testing.T) {
-	ca, _ := GenerateCA("TestOrg")
-	bundle, _ := ca.IssueAgentCert("badagent")
-
-	// Parse cert to get serial
-	block, _ := pem.Decode(bundle.CertPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	// Should verify before revocation
-	name, err := ca.VerifyClientCert([]*x509.Certificate{cert})
-	if err != nil {
-		t.Fatalf("expected success before revocation: %v", err)
-	}
-	if name != "badagent" {
-		t.Fatalf("wrong name: %q", name)
-	}
-
-	// Revoke
-	if err := ca.RevokeCert(cert.SerialNumber, "badagent"); err != nil {
-		t.Fatalf("RevokeCert: %v", err)
-	}
-
-	// Should fail after revocation
-	_, err = ca.VerifyClientCert([]*x509.Certificate{cert})
-	if err != ErrCertRevoked {
-		t.Fatalf("expected ErrCertRevoked, got %v", err)
-	}
-}
-
-func TestCRLIsRevoked(t *testing.T) {
-	crl := &CRL{}
-
-	serial := big.NewInt(12345)
-	if crl.IsRevoked(serial) {
-		t.Fatal("should not be revoked initially")
-	}
-
-	if err := crl.Revoke(serial, "test"); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	if !crl.IsRevoked(serial) {
-		t.Fatal("should be revoked after Revoke()")
-	}
-
-	// Different serial should not be revoked
-	if crl.IsRevoked(big.NewInt(99999)) {
-		t.Fatal("unrelated serial should not be revoked")
-	}
-}
-
-func TestMultipleAgentCerts(t *testing.T) {
-	ca, _ := GenerateCA("TestOrg")
-
-	agents := []string{"vector", "openclaw", "homepage", "monitoring"}
-	for _, name := range agents {
-		bundle, err := ca.IssueAgentCert(name)
-		if err != nil {
-			t.Fatalf("issue cert for %s: %v", name, err)
-		}
-
-		block, _ := pem.Decode(bundle.CertPEM)
-		cert, _ := x509.ParseCertificate(block.Bytes)
-
-		got, err := ca.VerifyClientCert([]*x509.Certificate{cert})
-		if err != nil {
-			t.Fatalf("verify %s: %v", name, err)
-		}
-		if got != name {
-			t.Fatalf("expected %q, got %q", name, got)
-		}
-	}
-}
-
-func TestAgentCertValidity(t *testing.T) {
-	ca, _ := GenerateCA("TestOrg")
-	bundle, _ := ca.IssueAgentCert("test")
-
-	block, _ := pem.Decode(bundle.CertPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	// Should be valid now
-	now := time.Now()
-	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
-		t.Fatal("cert should be currently valid")
-	}
-
-	// Check validity period is approximately 90 days
-	validity := cert.NotAfter.Sub(cert.NotBefore)
-	expected := time.Duration(AgentValidityDays) * 24 * time.Hour
-	diff := validity - expected
-	if diff < -time.Hour || diff > time.Hour {
-		t.Fatalf("validity %v is not ~%d days", validity, AgentValidityDays)
-	}
-}
-
 func TestBundleSave(t *testing.T) {
 	ca, _ := GenerateCA("TestOrg")
-	bundle, _ := ca.IssueAgentCert("test")
+	bundle, _ := ca.IssueServerCert([]string{"localhost"})
 
 	dir := t.TempDir()
-	certPath := filepath.Join(dir, "agent.crt")
-	keyPath := filepath.Join(dir, "agent.key")
+	certPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
 	caPath := filepath.Join(dir, "ca.crt")
 
 	if err := bundle.Save(certPath, keyPath, caPath); err != nil {
@@ -257,40 +81,6 @@ func TestBundleSave(t *testing.T) {
 		if info.Size() == 0 {
 			t.Fatalf("%s is empty", p)
 		}
-	}
-}
-
-func TestTLSConfig(t *testing.T) {
-	ca, _ := GenerateCA("TestOrg")
-	tlsCfg := ca.TLSConfig()
-
-	if tlsCfg.ClientAuth != 3 { // tls.VerifyClientCertIfGiven
-		t.Fatalf("expected VerifyClientCertIfGiven, got %d", tlsCfg.ClientAuth)
-	}
-	if tlsCfg.MinVersion != 0x0304 { // tls.VersionTLS13
-		t.Fatalf("expected TLS 1.3 min, got %#x", tlsCfg.MinVersion)
-	}
-	if tlsCfg.ClientCAs == nil {
-		t.Fatal("ClientCAs pool is nil")
-	}
-}
-
-func TestWrongCARejectsAgentCert(t *testing.T) {
-	ca1, _ := GenerateCA("Org1")
-	ca2, _ := GenerateCA("Org2")
-
-	// Issue cert from CA1
-	bundle, _ := ca1.IssueAgentCert("agent")
-	block, _ := pem.Decode(bundle.CertPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	// VerifyClientCert on CA2 should reject cert from CA1
-	_, err := ca2.VerifyClientCert([]*x509.Certificate{cert})
-	if err == nil {
-		t.Fatal("cert from CA1 should not verify against CA2")
-	}
-	if !strings.Contains(err.Error(), "certificate chain verification failed") {
-		t.Fatalf("expected chain verification error, got: %v", err)
 	}
 }
 
@@ -356,126 +146,6 @@ func TestIssueServerCert(t *testing.T) {
 	}
 }
 
-func TestCRLPersistence(t *testing.T) {
-	dir := t.TempDir()
-	crlPath := filepath.Join(dir, "crl.json")
-
-	// Create CRL, revoke a serial, check it persists
-	crl, err := NewCRL(crlPath)
-	if err != nil {
-		t.Fatalf("NewCRL: %v", err)
-	}
-
-	serial := big.NewInt(42)
-	if err := crl.Revoke(serial, "badagent"); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-
-	// File should exist now
-	data, err := os.ReadFile(crlPath)
-	if err != nil {
-		t.Fatalf("CRL file not written: %v", err)
-	}
-	if len(data) == 0 {
-		t.Fatal("CRL file is empty")
-	}
-
-	// Verify JSON is valid
-	var parsed CRL
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("CRL file is not valid JSON: %v", err)
-	}
-	if len(parsed.Revoked) != 1 {
-		t.Fatalf("expected 1 revoked entry, got %d", len(parsed.Revoked))
-	}
-
-	// Load CRL from file and check revocation survives
-	crl2, err := NewCRL(crlPath)
-	if err != nil {
-		t.Fatalf("NewCRL reload: %v", err)
-	}
-	if !crl2.IsRevoked(serial) {
-		t.Fatal("revocation should persist across reload")
-	}
-	if crl2.IsRevoked(big.NewInt(999)) {
-		t.Fatal("unrevoked serial should not be revoked")
-	}
-}
-
-func TestCRLPersistenceNoPath(t *testing.T) {
-	// CRL without a path should not fail on Revoke
-	crl, err := NewCRL("")
-	if err != nil {
-		t.Fatalf("NewCRL empty: %v", err)
-	}
-	if err := crl.Revoke(big.NewInt(1), "test"); err != nil {
-		t.Fatalf("Revoke without path should not error: %v", err)
-	}
-	if !crl.IsRevoked(big.NewInt(1)) {
-		t.Fatal("should be revoked in memory")
-	}
-}
-
-func TestVerifyExpiredCert(t *testing.T) {
-	authority, _ := GenerateCA("TestOrg")
-
-	// Issue a cert, then manually create an expired one
-	agentKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	serial, _ := randomSerial()
-
-	// Cert that expired yesterday
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "expired-agent"},
-		NotBefore:    now.AddDate(0, 0, -30),
-		NotAfter:     now.AddDate(0, 0, -1), // expired yesterday
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, template, authority.cert, &agentKey.PublicKey, authority.key)
-	if err != nil {
-		t.Fatalf("create expired cert: %v", err)
-	}
-
-	expiredCert, _ := x509.ParseCertificate(certDER)
-
-	_, err = authority.VerifyClientCert([]*x509.Certificate{expiredCert})
-	if err == nil {
-		t.Fatal("expected error for expired certificate")
-	}
-	if !strings.Contains(err.Error(), "certificate chain verification failed") {
-		t.Fatalf("expected chain verification error, got: %v", err)
-	}
-}
-
-func TestVerifyNotYetValidCert(t *testing.T) {
-	authority, _ := GenerateCA("TestOrg")
-
-	agentKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	serial, _ := randomSerial()
-
-	// Cert valid starting tomorrow
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "future-agent"},
-		NotBefore:    now.AddDate(0, 0, 1), // not yet valid
-		NotAfter:     now.AddDate(0, 0, 91),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-
-	certDER, _ := x509.CreateCertificate(rand.Reader, template, authority.cert, &agentKey.PublicKey, authority.key)
-	futureCert, _ := x509.ParseCertificate(certDER)
-
-	_, err := authority.VerifyClientCert([]*x509.Certificate{futureCert})
-	if err == nil {
-		t.Fatal("expected error for not-yet-valid certificate")
-	}
-}
-
 func TestLoadCAFromPEMInvalidPEM(t *testing.T) {
 	_, err := LoadCAFromPEM([]byte("not a pem"), []byte("not a pem"))
 	if err == nil {
@@ -501,32 +171,9 @@ func TestFingerprintIsSHA256(t *testing.T) {
 	}
 }
 
-func TestValidateAgentName(t *testing.T) {
-	valid := []string{"agent1", "my-agent", "my.agent", "agent_1", "a"}
-	for _, name := range valid {
-		if err := ValidateAgentName(name); err != nil {
-			t.Errorf("ValidateAgentName(%q) unexpected error: %v", name, err)
-		}
-	}
-	invalid := []string{"", "../etc", "agent/bad", "agent\x00name", "a b", strings.Repeat("a", 254)}
-	for _, name := range invalid {
-		if err := ValidateAgentName(name); err == nil {
-			t.Errorf("ValidateAgentName(%q) should have failed", name)
-		}
-	}
-}
-
-func TestIssueAgentCertInvalidName(t *testing.T) {
-	authority, _ := GenerateCA("Test")
-	_, err := authority.IssueAgentCert("bad/name")
-	if err == nil {
-		t.Fatal("expected error for invalid agent name")
-	}
-}
-
 func TestLoadCAFromPEM_RejectsNonCA(t *testing.T) {
 	authority, _ := GenerateCA("Test")
-	bundle, _ := authority.IssueAgentCert("agent")
+	bundle, _ := authority.IssueServerCert([]string{"localhost"})
 	_, err := LoadCAFromPEM(bundle.CertPEM, bundle.KeyPEM)
 	if err == nil {
 		t.Fatal("LoadCAFromPEM should reject non-CA certificates")

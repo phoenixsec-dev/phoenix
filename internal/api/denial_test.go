@@ -106,7 +106,7 @@ func TestACLDenialHasCodeAndDoesNotRevealExistence(t *testing.T) {
 func TestAttestationDenialDetailGoesToAuditOnly(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 	seedSecret(t, srv, adminToken, "secure/key", "v")
-	p, err := policy.Load([]byte(`{"attestation": {"secure/*": {"deny_bearer": true, "require_mtls": true}}}`))
+	p, err := policy.Load([]byte(`{"attestation": {"secure/*": {"source_ip": ["10.9.9.9"]}}}`))
 	if err != nil {
 		t.Fatalf("load policy: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestAttestationDenialDetailGoesToAuditOnly(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status %d, want 403", w.Code)
 	}
-	if strings.Contains(w.Body.String(), "secure/*") || strings.Contains(w.Body.String(), "mTLS") {
+	if strings.Contains(w.Body.String(), "secure/*") || strings.Contains(w.Body.String(), "10.9.9.9") {
 		t.Fatalf("response leaks policy text: %s", w.Body.String())
 	}
 
@@ -231,7 +231,7 @@ func TestSessionMintAttestationFailureIsGeneric(t *testing.T) {
 		"secure": {
 			Namespaces:     []string{"prod/*"},
 			BootstrapTrust: []string{"bearer"},
-			Attestation:    []string{"require_mtls", "source_ip", "cert_fingerprint"},
+			Attestation:    []string{"source_ip"},
 		},
 	})
 
@@ -249,13 +249,13 @@ func TestSessionMintAttestationFailureIsGeneric(t *testing.T) {
 
 	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
 	e := findAPIAuditEntry(entries, "session.mint", "secure", "denied", "attestation_failed")
-	if e == nil || !strings.Contains(e.Metadata["denial.detail"], "mTLS") || !strings.Contains(e.Metadata["denial.detail"], "require_mtls") {
+	if e == nil || !strings.Contains(e.Metadata["denial.detail"], "loopback") || !strings.Contains(e.Metadata["denial.detail"], "source_ip") {
 		t.Fatalf("audit entry missing attestation detail: %+v", e)
 	}
 }
 
 func TestSessionRenewAttestationFailureIsGeneric(t *testing.T) {
-	srv, authority, adminToken := setupTestServerWithCA(t)
+	srv, adminToken := setupTestServer(t)
 	ss, err := session.NewStore(time.Hour)
 	if err != nil {
 		t.Fatalf("session store: %v", err)
@@ -265,15 +265,17 @@ func TestSessionRenewAttestationFailureIsGeneric(t *testing.T) {
 	srv.SetSessionRoles(map[string]config.RoleConfig{
 		"secure": {
 			Namespaces:     []string{"test/*"},
-			BootstrapTrust: []string{"mtls"},
-			Attestation:    []string{"require_mtls", "cert_fingerprint"},
+			BootstrapTrust: []string{"bearer"},
+			Attestation:    []string{"source_ip"},
 		},
 	})
-	bundle1, _ := authority.IssueAgentCert("admin")
-	bundle2, _ := authority.IssueAgentCert("reader")
 
+	// Mint from loopback, then renew from a LAN address.
+	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(`{"role":"secure"}`))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.RemoteAddr = "127.0.0.1:4000"
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, makeMTLSRequest("POST", "/v1/session/mint", []byte(`{"role":"secure"}`), bundle1.CertPEM))
+	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("mint: %d %s", w.Code, w.Body.String())
 	}
@@ -282,31 +284,21 @@ func TestSessionRenewAttestationFailureIsGeneric(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &mint)
 
-	cases := []struct {
-		name, reason, auditMatch string
-		req                      *http.Request
-	}{
-		{"missing mTLS", "attestation_failed", "require_mtls", httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader(`{}`))},
-		{"different cert", "cert_continuity_failed", "fingerprint", makeMTLSRequest("POST", "/v1/session/renew", []byte(`{}`), bundle2.CertPEM)},
+	req = httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			c.req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
-			w := httptest.NewRecorder()
-			srv.ServeHTTP(w, c.req)
-			if w.Code != http.StatusForbidden {
-				t.Fatalf("status %d: %s", w.Code, w.Body.String())
-			}
-			if d := decodeDenial(t, w); d["code"] != "ATTESTATION_FAILED" {
-				t.Fatalf("denial = %v", d)
-			}
-			assertNoPolicyTerms(t, w.Body.String())
-			entries, _ := queryAPIAuditEntries(t, srv, adminToken)
-			e := findAPIAuditEntry(entries, "session.renew", "secure", "denied", c.reason)
-			if e == nil || !strings.Contains(e.Metadata["denial.detail"], c.auditMatch) {
-				t.Fatalf("audit entry missing detail %q: %+v", c.auditMatch, e)
-			}
-		})
+	if d := decodeDenial(t, w); d["code"] != "ATTESTATION_FAILED" {
+		t.Fatalf("denial = %v", d)
+	}
+	assertNoPolicyTerms(t, w.Body.String())
+	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
+	e := findAPIAuditEntry(entries, "session.renew", "secure", "denied", "attestation_failed")
+	if e == nil || !strings.Contains(e.Metadata["denial.detail"], "loopback") {
+		t.Fatalf("audit entry missing detail: %+v", e)
 	}
 }
 

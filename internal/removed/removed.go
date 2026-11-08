@@ -34,9 +34,9 @@ func Find(data []byte, fields []Field) []string {
 	var out []string
 	for _, f := range fields {
 		for _, hit := range match(root, strings.Split(f.Path, "."), "", f.Value) {
-			line := fmt.Sprintf("%s: removed, %s", hit, f.Why)
+			line := fmt.Sprintf("%s: removed. Why: %s.", hit, f.Why)
 			if f.Instead != "" {
-				line += "; " + f.Instead
+				line += " Instead: " + f.Instead + "."
 			}
 			out = append(out, line)
 		}

@@ -2,10 +2,7 @@ package api
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +13,6 @@ import (
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
-	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/policy"
@@ -395,146 +391,10 @@ func TestOversizedRequestBody(t *testing.T) {
 	}
 }
 
-// setupTestServerWithCA creates a test server with mTLS support.
-func setupTestServerWithCA(t *testing.T) (*Server, *ca.CA, string) {
-	t.Helper()
-	srv, adminToken := setupTestServer(t)
-
-	authority, err := ca.GenerateCA("TestOrg")
-	if err != nil {
-		t.Fatalf("generating CA: %v", err)
-	}
-	srv.SetCA(authority)
-
-	return srv, authority, adminToken
-}
-
-// makeMTLSRequest creates an HTTP request that simulates a verified mTLS client cert.
-// In real mTLS the TLS handshake populates r.TLS; in tests we set it directly.
-func makeMTLSRequest(method, url string, body []byte, certPEM []byte) *http.Request {
-	var req *http.Request
-	if body != nil {
-		req = httptest.NewRequest(method, url, bytes.NewReader(body))
-	} else {
-		req = httptest.NewRequest(method, url, nil)
-	}
-
-	block, _ := pem.Decode(certPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	req.TLS = &tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{cert},
-	}
-	return req
-}
-
-func TestMTLSAuthentication(t *testing.T) {
-	srv, authority, adminToken := setupTestServerWithCA(t)
-
-	// Create a secret via bearer token first
-	body, _ := json.Marshal(setSecretRequest{Value: "mtls-test-value"})
-	req := httptest.NewRequest("PUT", "/v1/secrets/test/mtls-key", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("setup SET: expected 200, got %d", w.Code)
-	}
-
-	// Issue a client cert for "reader" agent
-	bundle, err := authority.IssueAgentCert("reader")
-	if err != nil {
-		t.Fatalf("issuing cert: %v", err)
-	}
-
-	// Read the secret using mTLS auth (no bearer token)
-	req = makeMTLSRequest("GET", "/v1/secrets/test/mtls-key", nil, bundle.CertPEM)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("mTLS GET: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var secret store.Secret
-	json.NewDecoder(w.Body).Decode(&secret)
-	if secret.Value != "mtls-test-value" {
-		t.Fatalf("expected 'mtls-test-value', got %q", secret.Value)
-	}
-}
-
-func TestMTLSAdminCanIssueCerts(t *testing.T) {
-	srv, authority, _ := setupTestServerWithCA(t)
-
-	// Issue an admin cert
-	adminBundle, err := authority.IssueAgentCert("admin")
-	if err != nil {
-		t.Fatalf("issuing admin cert: %v", err)
-	}
-
-	// Use mTLS admin cert to issue another cert via the API
-	body, _ := json.Marshal(issueCertRequest{AgentName: "newagent"})
-	req := makeMTLSRequest("POST", "/v1/certs/issue", body, adminBundle.CertPEM)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("issue cert: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["agent"] != "newagent" {
-		t.Fatalf("expected agent 'newagent', got %v", resp["agent"])
-	}
-	if resp["cert"] == nil || resp["cert"] == "" {
-		t.Fatal("expected cert in response")
-	}
-	if resp["key"] == nil || resp["key"] == "" {
-		t.Fatal("expected key in response")
-	}
-}
-
-func TestBearerTokenStillWorksWithCA(t *testing.T) {
-	srv, _, adminToken := setupTestServerWithCA(t)
-
-	// Bearer token should still work even when CA is configured
-	req := httptest.NewRequest("GET", "/v1/health", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("bearer with CA: expected 200, got %d", w.Code)
-	}
-}
-
-func TestMTLSRevokedCertFallsBackToBearer(t *testing.T) {
-	srv, authority, adminToken := setupTestServerWithCA(t)
-
-	// Issue and then revoke a cert for "admin"
-	bundle, _ := authority.IssueAgentCert("admin")
-	block, _ := pem.Decode(bundle.CertPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-	if err := authority.RevokeCert(cert.SerialNumber, "admin"); err != nil {
-		t.Fatalf("RevokeCert: %v", err)
-	}
-
-	// Request with revoked mTLS cert + valid bearer token → should succeed via bearer fallback
-	req := makeMTLSRequest("GET", "/v1/health", nil, bundle.CertPEM)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("revoked cert + bearer: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
 func TestNoAuthReturns401(t *testing.T) {
-	srv, _, _ := setupTestServerWithCA(t)
+	srv, _ := setupTestServer(t)
 
-	// No mTLS cert, no bearer token
+	// No bearer token
 	req := httptest.NewRequest("GET", "/v1/secrets/test/key", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -544,23 +404,8 @@ func TestNoAuthReturns401(t *testing.T) {
 	}
 }
 
-func TestIssueCertWithoutCA(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-
-	// No CA configured — should return 501
-	body, _ := json.Marshal(issueCertRequest{AgentName: "test"})
-	req := httptest.NewRequest("POST", "/v1/certs/issue", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 501 {
-		t.Fatalf("issue cert without CA: expected 501, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
 func TestBearerDisabledRejectsTokenAuth(t *testing.T) {
-	srv, _, adminToken := setupTestServerWithCA(t)
+	srv, adminToken := setupTestServer(t)
 	srv.SetBearerEnabled(false)
 
 	// Bearer token should be rejected when bearer auth is disabled
@@ -571,50 +416,6 @@ func TestBearerDisabledRejectsTokenAuth(t *testing.T) {
 
 	if w.Code != 401 {
 		t.Fatalf("bearer disabled: expected 401, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestBearerDisabledStillAllowsMTLS(t *testing.T) {
-	srv, authority, adminToken := setupTestServerWithCA(t)
-	srv.SetBearerEnabled(false)
-
-	// First set a secret with bearer (re-enable temporarily)
-	srv.SetBearerEnabled(true)
-	body, _ := json.Marshal(setSecretRequest{Value: "mtls-only"})
-	req := httptest.NewRequest("PUT", "/v1/secrets/test/mtls-key", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("setup: expected 200, got %d", w.Code)
-	}
-	srv.SetBearerEnabled(false)
-
-	// mTLS should still work
-	bundle, _ := authority.IssueAgentCert("reader")
-	req = makeMTLSRequest("GET", "/v1/secrets/test/mtls-key", nil, bundle.CertPEM)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("mTLS with bearer disabled: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestIssueCertRequiresAdmin(t *testing.T) {
-	srv, authority, _ := setupTestServerWithCA(t)
-
-	// Issue cert for reader agent
-	readerBundle, _ := authority.IssueAgentCert("reader")
-
-	// Reader tries to issue a cert — should be denied
-	body, _ := json.Marshal(issueCertRequest{AgentName: "sneaky"})
-	req := makeMTLSRequest("POST", "/v1/certs/issue", body, readerBundle.CertPEM)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 403 {
-		t.Fatalf("reader issue cert: expected 403, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1271,7 +1072,7 @@ func TestOpenClawHeadersDoNotSatisfyAttestationPolicy(t *testing.T) {
 		t.Fatalf("setup: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	p, err := policy.Load([]byte(`{"attestation":{"locked/*":{"deny_bearer":true}}}`))
+	p, err := policy.Load([]byte(`{"attestation":{"locked/*":{"source_ip":["10.9.9.9"]}}}`))
 	if err != nil {
 		t.Fatalf("load policy: %v", err)
 	}
@@ -1284,7 +1085,7 @@ func TestOpenClawHeadersDoNotSatisfyAttestationPolicy(t *testing.T) {
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("OpenClaw headers should not satisfy deny_bearer policy: got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("OpenClaw headers should not satisfy a source_ip policy: got %d: %s", w.Code, w.Body.String())
 	}
 
 	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
@@ -1781,53 +1582,6 @@ func TestResolveDryRunAuditsAllPaths(t *testing.T) {
 
 // --- Attestation policy tests ---
 
-func TestAttestationDenyBearerOnGet(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-
-	// Seed a secret
-	body, _ := json.Marshal(setSecretRequest{Value: "secret-value"})
-	req := httptest.NewRequest("PUT", "/v1/secrets/secure/key", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("setup: expected 200, got %d", w.Code)
-	}
-
-	// Configure policy: secure/* denies bearer
-	p, err := policy.Load([]byte(`{
-		"attestation": {
-			"secure/*": {
-				"deny_bearer": true,
-				"require_mtls": true
-			}
-		}
-	}`))
-	if err != nil {
-		t.Fatalf("load policy: %v", err)
-	}
-	srv.SetPolicy(p)
-
-	// Try to GET with bearer — should be denied
-	req = httptest.NewRequest("GET", "/v1/secrets/secure/key", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 403 {
-		t.Fatalf("expected 403 for bearer-denied policy, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var errResp map[string]string
-	json.NewDecoder(w.Body).Decode(&errResp)
-	if errResp["code"] != "ATTESTATION_REQUIRED" || errResp["next_step"] != "ask_user" {
-		t.Fatalf("expected attestation error, got: %s", errResp)
-	}
-	if strings.Contains(errResp["detail"], "policy") {
-		t.Fatalf("attestation denial leaked policy text: %v", errResp)
-	}
-}
-
 func TestAttestationSourceIPOnResolve(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
@@ -1914,7 +1668,7 @@ func TestAttestationUnmatchedPathPasses(t *testing.T) {
 	p, _ := policy.Load([]byte(`{
 		"attestation": {
 			"secure/*": {
-				"deny_bearer": true
+				"source_ip": ["10.9.9.9"]
 			}
 		}
 	}`))
@@ -2156,122 +1910,6 @@ func TestAttestationEnforcedOnDelete(t *testing.T) {
 
 // --- Wave 2: Revoke cert endpoint tests ---
 
-func TestRevokeCertEndpoint(t *testing.T) {
-	srv, authority, _ := setupTestServerWithCA(t)
-
-	// Issue a cert for "target-agent"
-	bundle, err := authority.IssueAgentCert("target-agent")
-	if err != nil {
-		t.Fatalf("IssueAgentCert: %v", err)
-	}
-
-	// Get the serial number
-	block, _ := pem.Decode(bundle.CertPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-	serialStr := cert.SerialNumber.String()
-
-	// Issue admin cert for authentication
-	adminBundle, _ := authority.IssueAgentCert("admin")
-
-	// Revoke via API
-	body, _ := json.Marshal(revokeCertRequest{
-		SerialNumber: serialStr,
-		AgentName:    "target-agent",
-	})
-	req := makeMTLSRequest("POST", "/v1/certs/revoke", body, adminBundle.CertPEM)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("revoke: expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]string
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["status"] != "ok" {
-		t.Fatalf("status = %q, want ok", resp["status"])
-	}
-	if resp["serial_number"] != serialStr {
-		t.Fatalf("serial = %q, want %q", resp["serial_number"], serialStr)
-	}
-
-	// Verify the cert is now revoked
-	if !authority.IsRevoked(cert.SerialNumber) {
-		t.Fatal("cert should be revoked")
-	}
-}
-
-func TestRevokeCertWithoutCA(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-
-	body, _ := json.Marshal(revokeCertRequest{
-		SerialNumber: "12345",
-		AgentName:    "test",
-	})
-	req := httptest.NewRequest("POST", "/v1/certs/revoke", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 501 {
-		t.Fatalf("expected 501 without CA, got %d", w.Code)
-	}
-}
-
-func TestRevokeCertRequiresAdmin(t *testing.T) {
-	srv, authority, _ := setupTestServerWithCA(t)
-
-	readerBundle, _ := authority.IssueAgentCert("reader")
-
-	body, _ := json.Marshal(revokeCertRequest{
-		SerialNumber: "12345",
-		AgentName:    "test",
-	})
-	req := makeMTLSRequest("POST", "/v1/certs/revoke", body, readerBundle.CertPEM)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 403 {
-		t.Fatalf("expected 403 for non-admin, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestRevokeCertInvalidSerial(t *testing.T) {
-	srv, authority, _ := setupTestServerWithCA(t)
-
-	adminBundle, _ := authority.IssueAgentCert("admin")
-
-	body, _ := json.Marshal(revokeCertRequest{
-		SerialNumber: "not-a-number",
-		AgentName:    "test",
-	})
-	req := makeMTLSRequest("POST", "/v1/certs/revoke", body, adminBundle.CertPEM)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 400 {
-		t.Fatalf("expected 400 for invalid serial, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestRevokeCertMissingSerial(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-	authority, _ := ca.GenerateCA("Test")
-	srv.SetCA(authority)
-
-	body, _ := json.Marshal(revokeCertRequest{
-		AgentName: "test",
-	})
-	req := httptest.NewRequest("POST", "/v1/certs/revoke", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 400 {
-		t.Fatalf("expected 400 for missing serial, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
 // --- Wave 2: Status endpoint tests ---
 
 func TestStatusEndpoint(t *testing.T) {
@@ -2289,8 +1927,8 @@ func TestStatusEndpoint(t *testing.T) {
 	// Set a policy
 	p, _ := policy.Load([]byte(`{
 		"attestation": {
-			"test/*": { "require_mtls": true },
-			"prod/*": { "require_mtls": true, "source_ip": ["10.0.0.1"] }
+			"test/*": { "source_ip": ["10.0.0.2"] },
+			"prod/*": { "require_sealed": true, "source_ip": ["10.0.0.1"] }
 		}
 	}`))
 	srv.SetPolicy(p)
@@ -3448,11 +3086,11 @@ func TestSessionMintAttestationEnforced(t *testing.T) {
 		"secure": {
 			Namespaces:     []string{"prod/*"},
 			BootstrapTrust: []string{"bearer"},
-			Attestation:    []string{"require_mtls"},
+			Attestation:    []string{"source_ip"},
 		},
 	})
 
-	// Try to mint with bearer auth (should fail because role requires mTLS)
+	// Mint from a LAN address (should fail because the role requires loopback)
 	body := `{"role":"secure"}`
 	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
@@ -3509,72 +3147,6 @@ func TestSessionRenewLocalityRecheck(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &result)
 	if result.Code != "BOOTSTRAP_FAILED" {
 		t.Errorf("code = %q, want BOOTSTRAP_FAILED", result.Code)
-	}
-}
-
-func TestSessionRenewCertFingerprintContinuity(t *testing.T) {
-	srv, authority, _ := setupTestServerWithCA(t)
-
-	ss, err := session.NewStore(time.Hour)
-	if err != nil {
-		t.Fatalf("session store: %v", err)
-	}
-	t.Cleanup(ss.Stop)
-	srv.SetSessionStore(ss)
-	srv.SetSessionRoles(map[string]config.RoleConfig{
-		"secure": {
-			Namespaces:     []string{"test/*"},
-			BootstrapTrust: []string{"mtls"},
-			Attestation:    []string{"cert_fingerprint"},
-		},
-	})
-
-	bundle1, err := authority.IssueAgentCert("admin")
-	if err != nil {
-		t.Fatalf("issuing cert1: %v", err)
-	}
-	bundle2, err := authority.IssueAgentCert("reader")
-	if err != nil {
-		t.Fatalf("issuing cert2: %v", err)
-	}
-
-	// Mint with cert1.
-	req := makeMTLSRequest("POST", "/v1/session/mint", []byte(`{"role":"secure"}`), bundle1.CertPEM)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("mint: status %d, body: %s", w.Code, w.Body.String())
-	}
-	var mint struct {
-		SessionToken string `json:"session_token"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &mint); err != nil {
-		t.Fatalf("unmarshal mint: %v", err)
-	}
-
-	// Renew with a different cert: should fail continuity check.
-	req = makeMTLSRequest("POST", "/v1/session/renew", []byte(`{}`), bundle2.CertPEM)
-	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != 403 {
-		t.Fatalf("renew with wrong cert: status %d, body: %s", w.Code, w.Body.String())
-	}
-	var denied struct {
-		Code string `json:"code"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &denied)
-	if denied.Code != "ATTESTATION_FAILED" {
-		t.Fatalf("code = %q, want ATTESTATION_FAILED", denied.Code)
-	}
-
-	// Renew with the original cert: should succeed.
-	req = makeMTLSRequest("POST", "/v1/session/renew", []byte(`{}`), bundle1.CertPEM)
-	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("renew with original cert: status %d, body: %s", w.Code, w.Body.String())
 	}
 }
 

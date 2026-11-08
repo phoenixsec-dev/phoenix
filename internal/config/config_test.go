@@ -39,7 +39,7 @@ func TestHTTPSListenerConfig(t *testing.T) {
 			if err != nil && !strings.Contains(err.Error(), "https_listener") {
 				t.Fatalf("error does not name https_listener: %v", err)
 			}
-			if cfg.TLSEnabled() || cfg.Server.Listen != "127.0.0.1:9090" {
+			if cfg.Server.Listen != "127.0.0.1:9090" {
 				t.Fatal("optional config changed primary transport")
 			}
 			data, err := json.Marshal(cfg)
@@ -66,38 +66,10 @@ func TestHTTPSListenerConfig(t *testing.T) {
 func TestValidateRequiresAuthMode(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Auth.Bearer.Enabled = false
-	cfg.Auth.MTLS.Enabled = false
 
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error when no auth mode enabled")
-	}
-}
-
-func TestValidateMTLSRequiresPaths(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Auth.MTLS.Enabled = true
-	cfg.Auth.MTLS.CACert = "/data/ca.crt"
-	cfg.Auth.MTLS.CAKey = "/data/ca.key"
-	// Missing server cert/key
-
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error when mTLS enabled without server cert paths")
-	}
-}
-
-func TestValidateMTLSComplete(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Auth.MTLS.Enabled = true
-	cfg.Auth.MTLS.CACert = "/data/ca.crt"
-	cfg.Auth.MTLS.CAKey = "/data/ca.key"
-	cfg.Auth.MTLS.ServerCert = "/data/server.crt"
-	cfg.Auth.MTLS.ServerKey = "/data/server.key"
-
-	err := cfg.Validate()
-	if err != nil {
-		t.Fatalf("complete mTLS config should validate: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "auth.bearer.enabled") {
+		t.Fatalf("expected an error naming auth.bearer.enabled, got %v", err)
 	}
 }
 
@@ -112,7 +84,6 @@ func TestValidateDefaultPasses(t *testing.T) {
 func TestValidateBearerOnlyPasses(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Auth.Bearer.Enabled = true
-	cfg.Auth.MTLS.Enabled = false
 
 	err := cfg.Validate()
 	if err != nil {
@@ -432,110 +403,6 @@ func TestOPConfigJSON(t *testing.T) {
 	}
 }
 
-func TestTLSEnabledCombinations(t *testing.T) {
-	cfg := DefaultConfig()
-	if cfg.TLSEnabled() {
-		t.Fatal("default config should not enable TLS")
-	}
-
-	cfg.TLS.Enabled = true
-	if !cfg.TLSEnabled() {
-		t.Fatal("tls.enabled=true should enable TLS")
-	}
-
-	cfg = DefaultConfig()
-	cfg.Auth.MTLS.Enabled = true
-	if !cfg.TLSEnabled() {
-		t.Fatal("auth.mtls.enabled=true should imply TLS (backward compat)")
-	}
-}
-
-func TestTLSCertKeyFallsBackToMTLSPaths(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Auth.MTLS.ServerCert = "/data/server.crt"
-	cfg.Auth.MTLS.ServerKey = "/data/server.key"
-
-	cert, key := cfg.TLSCertKey()
-	if cert != "/data/server.crt" || key != "/data/server.key" {
-		t.Fatalf("expected mTLS leaf fallback, got cert=%q key=%q", cert, key)
-	}
-
-	cfg.TLS.Cert = "/custom/tls.crt"
-	cfg.TLS.Key = "/custom/tls.key"
-	cert, key = cfg.TLSCertKey()
-	if cert != "/custom/tls.crt" || key != "/custom/tls.key" {
-		t.Fatalf("explicit tls paths should win, got cert=%q key=%q", cert, key)
-	}
-}
-
-func TestValidateTLSEnabledRequiresPaths(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.TLS.Enabled = true
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error: tls.enabled with no cert/key anywhere")
-	}
-
-	// mTLS leaf paths present (as written by --init) satisfy the requirement
-	// even with mTLS disabled.
-	cfg.Auth.MTLS.ServerCert = "/data/server.crt"
-	cfg.Auth.MTLS.ServerKey = "/data/server.key"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("tls.enabled with --init mTLS leaf paths should pass: %v", err)
-	}
-
-	// Explicit tls paths also satisfy it.
-	cfg = DefaultConfig()
-	cfg.TLS.Enabled = true
-	cfg.TLS.Cert = "/custom/tls.crt"
-	cfg.TLS.Key = "/custom/tls.key"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("tls.enabled with explicit paths should pass: %v", err)
-	}
-}
-
-func TestValidateTLSCertKeyMustBeSetTogether(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.TLS.Cert = "/custom/tls.crt"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error: tls.cert without tls.key")
-	}
-	cfg = DefaultConfig()
-	cfg.TLS.Key = "/custom/tls.key"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error: tls.key without tls.cert")
-	}
-}
-
-func TestTLSConfigJSON(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.TLS.Enabled = true
-	cfg.TLS.Cert = "/data/server.crt"
-	cfg.TLS.Key = "/data/server.key"
-
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	var parsed Config
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !parsed.TLS.Enabled || parsed.TLS.Cert != "/data/server.crt" || parsed.TLS.Key != "/data/server.key" {
-		t.Fatalf("tls block did not round-trip: %+v", parsed.TLS)
-	}
-
-	// The tls block must appear in generated configs even when disabled,
-	// so operators can discover the one-line fix.
-	data, err = json.Marshal(DefaultConfig())
-	if err != nil {
-		t.Fatalf("marshal default: %v", err)
-	}
-	if !strings.Contains(string(data), `"tls"`) {
-		t.Fatal("default config JSON should include the tls block")
-	}
-}
-
 func TestAccessRequestsConfig(t *testing.T) {
 	load := func(t *testing.T, block string) (*Config, error) {
 		t.Helper()
@@ -723,7 +590,7 @@ func TestGrantStorePathCollisions(t *testing.T) {
 	t.Run("odd unresolvable paths terminate", func(t *testing.T) {
 		for _, p := range []string{"/missing-dir-r3/", "/missing-dir-r3/.", "/missing-dir-r3/.."} {
 			cfg := base(t.TempDir())
-			cfg.Auth.MTLS.CRLPath = p
+			cfg.Policy.Path = p
 			done := make(chan struct{})
 			go func() { _ = cfg.ValidateGrantStorePath(); close(done) }()
 			select {

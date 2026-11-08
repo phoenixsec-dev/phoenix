@@ -1,10 +1,10 @@
 // Package session implements v1 session identity for Phoenix.
 //
-// Agents mint session tokens by authenticating via an existing channel
-// (mTLS, bearer, or local) and requesting a role. The session token is
-// scoped to the role's namespaces and optionally bound to a seal key
-// fingerprint. Tokens are HMAC-SHA256 signed and carry a "phxs_" prefix
-// to distinguish them from short-lived attestation tokens.
+// Agents mint session tokens by authenticating with their bearer token
+// (optionally only from loopback, "local") and requesting a role. The
+// session token is scoped to the role's namespaces and optionally bound to
+// a seal key fingerprint. Tokens are HMAC-SHA256 signed and carry a "phxs_"
+// prefix. They are Phoenix's one short-lived credential.
 package session
 
 import (
@@ -48,7 +48,6 @@ type Session struct {
 	Role               string    `json:"role"`
 	Agent              string    `json:"agent"`
 	SealKeyFingerprint string    `json:"seal_key_fingerprint,omitempty"`
-	CertFingerprint    string    `json:"-"`
 	Namespaces         []string  `json:"namespaces"`
 	Actions            []string  `json:"actions"`
 	BootstrapMethod    string    `json:"bootstrap_method"`

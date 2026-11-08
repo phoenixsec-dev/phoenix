@@ -33,7 +33,7 @@ func TestCmdPolicyTestNoTimeFlag(t *testing.T) {
 func TestCmdPolicyTestNoMatch(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
-	os.WriteFile(policyPath, []byte(`{"attestation":{"prod/*":{"require_mtls":true}}}`), 0644)
+	os.WriteFile(policyPath, []byte(`{"attestation":{"prod/*":{"source_ip":["10.0.0.1"]}}}`), 0644)
 
 	origPolicy := os.Getenv("PHOENIX_POLICY")
 	os.Setenv("PHOENIX_POLICY", policyPath)
@@ -82,7 +82,6 @@ func TestCmdPolicyShowLegacyRulesFormat(t *testing.T) {
 		"rules": [
 			{
 				"path": "secure/*",
-				"require_mtls": true,
 				"allowed_ips": ["192.168.0.0/24"]
 			}
 		]

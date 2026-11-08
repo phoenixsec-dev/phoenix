@@ -19,13 +19,10 @@ func TestLoadAndEvaluate(t *testing.T) {
 	cfg := `{
 		"attestation": {
 			"openclaw/*": {
-				"require_mtls": true,
-				"source_ip": ["192.168.0.115", "192.168.0.117"],
-				"deny_bearer": true
+				"source_ip": ["192.168.0.115", "192.168.0.117"]
 			},
-			"monitoring/*": {
-				"require_mtls": true,
-				"deny_bearer": false
+			"sealed/*": {
+				"require_sealed": true
 			}
 		}
 	}`
@@ -40,57 +37,11 @@ func TestLoadAndEvaluate(t *testing.T) {
 		ctx     RequestContext
 		wantErr bool
 	}{
-		{
-			name: "mTLS from allowed IP passes",
-			path: "openclaw/api-key",
-			ctx: RequestContext{
-				UsedMTLS: true,
-				SourceIP: "192.168.0.115",
-			},
-			wantErr: false,
-		},
-		{
-			name: "bearer denied for openclaw",
-			path: "openclaw/api-key",
-			ctx: RequestContext{
-				UsedBearer: true,
-				SourceIP:   "192.168.0.115",
-			},
-			wantErr: true,
-		},
-		{
-			name: "wrong IP denied",
-			path: "openclaw/api-key",
-			ctx: RequestContext{
-				UsedMTLS: true,
-				SourceIP: "10.0.0.1",
-			},
-			wantErr: true,
-		},
-		{
-			name: "no mTLS denied",
-			path: "openclaw/api-key",
-			ctx: RequestContext{
-				SourceIP: "192.168.0.115",
-			},
-			wantErr: true,
-		},
-		{
-			name: "monitoring allows bearer with mTLS",
-			path: "monitoring/grafana-admin",
-			ctx: RequestContext{
-				UsedMTLS:   true,
-				UsedBearer: true,
-				SourceIP:   "192.168.0.107",
-			},
-			wantErr: false,
-		},
-		{
-			name:    "unmatched path passes (no policy)",
-			path:    "other/secret",
-			ctx:     RequestContext{},
-			wantErr: false,
-		},
+		{"allowed IP passes", "openclaw/api-key", RequestContext{SourceIP: "192.168.0.115"}, false},
+		{"wrong IP denied", "openclaw/api-key", RequestContext{SourceIP: "10.0.0.1"}, true},
+		{"no seal key denied", "sealed/key", RequestContext{SourceIP: "10.0.0.1"}, true},
+		{"seal key passes", "sealed/key", RequestContext{SealKeyPresented: true}, false},
+		{"unmatched path passes (no policy)", "other/secret", RequestContext{}, false},
 	}
 
 	for _, tt := range tests {
@@ -100,68 +51,6 @@ func TestLoadAndEvaluate(t *testing.T) {
 				t.Errorf("Evaluate(%q): err=%v, wantErr=%v", tt.path, err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestCertFingerprintPinning(t *testing.T) {
-	cfg := `{
-		"attestation": {
-			"secure/*": {
-				"require_mtls": true,
-				"cert_fingerprint": "sha256:abcdef1234567890"
-			}
-		}
-	}`
-	e, err := Load([]byte(cfg))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	// Correct fingerprint
-	err = e.Evaluate("secure/key", &RequestContext{
-		UsedMTLS:        true,
-		CertFingerprint: "sha256:abcdef1234567890",
-	})
-	if err != nil {
-		t.Fatalf("correct fingerprint should pass: %v", err)
-	}
-
-	// Wrong fingerprint
-	err = e.Evaluate("secure/key", &RequestContext{
-		UsedMTLS:        true,
-		CertFingerprint: "sha256:wrong",
-	})
-	if err == nil {
-		t.Fatal("wrong fingerprint should fail")
-	}
-
-	// No fingerprint
-	err = e.Evaluate("secure/key", &RequestContext{
-		UsedMTLS: true,
-	})
-	if err == nil {
-		t.Fatal("missing fingerprint should fail")
-	}
-}
-
-func TestCertFingerprintCaseInsensitive(t *testing.T) {
-	cfg := `{
-		"attestation": {
-			"secure/*": {
-				"cert_fingerprint": "sha256:ABCDEF"
-			}
-		}
-	}`
-	e, err := Load([]byte(cfg))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	err = e.Evaluate("secure/key", &RequestContext{
-		CertFingerprint: "sha256:abcdef",
-	})
-	if err != nil {
-		t.Fatalf("case-insensitive match should pass: %v", err)
 	}
 }
 
@@ -201,10 +90,10 @@ func TestSpecificityMostSpecificWins(t *testing.T) {
 	cfg := `{
 		"attestation": {
 			"*": {
-				"deny_bearer": false
+				"source_ip": ["10.0.0.0/8"]
 			},
 			"openclaw/*": {
-				"deny_bearer": true
+				"source_ip": ["192.168.0.115"]
 			}
 		}
 	}`
@@ -213,16 +102,17 @@ func TestSpecificityMostSpecificWins(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	// openclaw/* is more specific than *, so deny_bearer should be true
-	err = e.Evaluate("openclaw/key", &RequestContext{UsedBearer: true})
-	if err == nil {
-		t.Fatal("more specific rule should deny bearer")
+	// openclaw/* is more specific than *, so only its IP list applies
+	if err := e.Evaluate("openclaw/key", &RequestContext{SourceIP: "10.0.0.1"}); err == nil {
+		t.Fatal("more specific rule should deny 10.0.0.1")
+	}
+	if err := e.Evaluate("openclaw/key", &RequestContext{SourceIP: "192.168.0.115"}); err != nil {
+		t.Fatalf("more specific rule should allow its IP: %v", err)
 	}
 
-	// other paths match only *, which allows bearer
-	err = e.Evaluate("other/key", &RequestContext{UsedBearer: true})
-	if err != nil {
-		t.Fatalf("wildcard rule should allow bearer: %v", err)
+	// other paths match only *
+	if err := e.Evaluate("other/key", &RequestContext{SourceIP: "10.0.0.1"}); err != nil {
+		t.Fatalf("wildcard rule should allow 10.0.0.1: %v", err)
 	}
 }
 
@@ -230,7 +120,7 @@ func TestRuleFor(t *testing.T) {
 	cfg := `{
 		"attestation": {
 			"openclaw/*": {
-				"require_mtls": true,
+				"require_sealed": true,
 				"source_ip": ["192.168.0.115"]
 			}
 		}
@@ -247,8 +137,8 @@ func TestRuleFor(t *testing.T) {
 	if pattern != "openclaw/*" {
 		t.Fatalf("pattern = %q, want openclaw/*", pattern)
 	}
-	if !rule.RequireMTLS {
-		t.Fatal("expected RequireMTLS=true")
+	if !rule.RequireSealed {
+		t.Fatal("expected RequireSealed=true")
 	}
 
 	rule, _ = e.RuleFor("other/key")
@@ -307,7 +197,7 @@ func TestLoadLegacyRulesFormat(t *testing.T) {
 		"rules": [
 			{
 				"path": "secure/*",
-				"require_mtls": true,
+				"require_sealed": true,
 				"allowed_ips": ["192.168.0.0/24"]
 			}
 		]
@@ -320,8 +210,8 @@ func TestLoadLegacyRulesFormat(t *testing.T) {
 	if rule == nil || pattern != "secure/*" {
 		t.Fatalf("expected secure/* match, got rule=%v pattern=%q", rule, pattern)
 	}
-	if !rule.RequireMTLS {
-		t.Fatal("expected require_mtls=true")
+	if !rule.RequireSealed {
+		t.Fatal("expected require_sealed=true")
 	}
 	if len(rule.AllowedIPs) != 1 || rule.AllowedIPs[0] != "192.168.0.0/24" {
 		t.Fatalf("expected allowed IP copied from allowed_ips, got %v", rule.AllowedIPs)
@@ -333,7 +223,7 @@ func TestLoadRejectsUnknownRuleField(t *testing.T) {
 	cfg := `{
 		"attestation": {
 			"secure/*": {
-				"require_mtls": true,
+				"require_sealed": true,
 				"allowed_ips": ["192.168.0.0/24"]
 			}
 		}
@@ -346,7 +236,7 @@ func TestLoadRejectsUnknownRuleField(t *testing.T) {
 
 func TestNewEngineAllowsAll(t *testing.T) {
 	e := NewEngine()
-	if err := e.Evaluate("any/path", &RequestContext{UsedBearer: true}); err != nil {
+	if err := e.Evaluate("any/path", &RequestContext{SourceIP: "10.0.0.1"}); err != nil {
 		t.Fatalf("NewEngine should allow all: %v", err)
 	}
 }
@@ -358,10 +248,10 @@ func TestEqualSpecificityDeterministic(t *testing.T) {
 	cfg := `{
 		"attestation": {
 			"secure/**": {
-				"deny_bearer": false
+				"source_ip": ["10.0.0.1"]
 			},
 			"secure/*": {
-				"deny_bearer": true
+				"source_ip": ["10.0.0.2"]
 			}
 		}
 	}`
@@ -372,7 +262,7 @@ func TestEqualSpecificityDeterministic(t *testing.T) {
 
 	// Run many times to catch map iteration nondeterminism
 	for i := 0; i < 100; i++ {
-		err := e.Evaluate("secure/key", &RequestContext{UsedBearer: true})
+		err := e.Evaluate("secure/key", &RequestContext{SourceIP: "10.0.0.1"})
 		if err == nil {
 			t.Fatalf("iteration %d: expected deny (secure/* should always win), but got allow", i)
 		}
@@ -382,7 +272,7 @@ func TestEqualSpecificityDeterministic(t *testing.T) {
 func TestRulesReturnsCopy(t *testing.T) {
 	cfg := `{
 		"attestation": {
-			"ns/*": {"require_mtls": true}
+			"ns/*": {"source_ip": ["10.0.0.1"]}
 		}
 	}`
 	e, _ := Load([]byte(cfg))
@@ -397,19 +287,7 @@ func TestRulesReturnsCopy(t *testing.T) {
 	}
 }
 
-// --- Wave 2: Tool-scoped policy tests ---
-
-// --- Wave 2: Time-window policy tests ---
-
-// --- Wave 2: Process attestation tests ---
-
-// --- Wave 2: Nonce requirement tests ---
-
-// --- Wave 2: Credential freshness tests ---
-
-// --- Wave 2: Combined attestation level tests ---
-
-// --- L9: Sealed Response Policy Tests ---
+// --- Sealed response policy tests ---
 
 func TestRequireSealedDeniesWithoutKey(t *testing.T) {
 	policyJSON := `{"attestation":{"secure/*":{"require_sealed":true}}}`
@@ -484,13 +362,13 @@ func TestAllowUnsealParseBackwardCompat(t *testing.T) {
 
 func TestNoNewFieldsNoChange(t *testing.T) {
 	// Existing policy without any sealed fields should work as before
-	policyJSON := `{"attestation":{"ns/*":{"require_mtls":true}}}`
+	policyJSON := `{"attestation":{"ns/*":{"source_ip":["10.0.0.1"]}}}`
 	e, err := Load([]byte(policyJSON))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
-	ctx := &RequestContext{UsedMTLS: true}
+	ctx := &RequestContext{SourceIP: "10.0.0.1"}
 	if err := e.Evaluate("ns/key", ctx); err != nil {
 		t.Fatalf("expected allow, got: %v", err)
 	}
@@ -520,5 +398,33 @@ func TestRequireSealedLegacyFormat(t *testing.T) {
 	}
 	if !rule.AllowUnseal {
 		t.Error("expected AllowUnseal=true from legacy format")
+	}
+}
+
+// A policy file that still uses removed rule fields is refused with one line
+// per field (both file formats), not loaded with the rule quietly ignored.
+func TestLoadRefusesRemovedFields(t *testing.T) {
+	data := `{"attestation": {
+		"a/*": {"source_ip": ["10.0.0.1"], "require_mtls": true, "allowed_tools": ["x"]},
+		"b/*": {"time_window": "09:00-17:00", "process": {"uid": 1}}
+	}}`
+	_, err := Load([]byte(data))
+	if err == nil {
+		t.Fatal("policy with removed fields loaded")
+	}
+	for _, want := range []string{"attestation.a/*.require_mtls: removed", "attestation.a/*.allowed_tools: removed",
+		"attestation.b/*.time_window: removed", "attestation.b/*.process: removed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q:\n%v", want, err)
+		}
+	}
+	if _, err := Load([]byte(`{"rules": [{"path": "x/*", "require_nonce": true}]}`)); err == nil ||
+		!strings.Contains(err.Error(), "rules[0].require_nonce: removed") {
+		t.Errorf("legacy format: %v", err)
+	}
+	for _, f := range removedRuleFields {
+		if f.Why == "" {
+			t.Errorf("%s has no reason", f.Path)
+		}
 	}
 }

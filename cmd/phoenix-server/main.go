@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -301,35 +300,6 @@ func main() {
 		log.Printf("  Local agent: disabled")
 	}
 
-	// Initialize CA for mTLS if enabled
-	var tlsCfg *tls.Config
-	if cfg.Auth.MTLS.Enabled {
-		authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
-		if err != nil {
-			log.Fatalf("loading CA for mTLS: %v", err)
-		}
-
-		// Load CRL for revocation persistence
-		if cfg.Auth.MTLS.CRLPath != "" {
-			crl, err := ca.NewCRL(cfg.Auth.MTLS.CRLPath)
-			if err != nil {
-				log.Fatalf("loading CRL: %v", err)
-			}
-			authority.SetCRL(crl)
-		}
-
-		srv.SetCA(authority)
-		tlsCfg = authority.TLSConfig()
-		if cfg.Auth.MTLS.Require {
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		}
-		log.Printf("  mTLS: enabled (require=%v)", cfg.Auth.MTLS.Require)
-		log.Printf("  Bearer: %v", cfg.Auth.Bearer.Enabled)
-	} else if cfg.TLSEnabled() {
-		// TLS without mTLS: encrypt the pipe, no client certificates.
-		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS13}
-	}
-
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
 	if rb := cfg.AuditRotateBytes(); rb > 0 {
@@ -338,22 +308,15 @@ func main() {
 		log.Printf("  Audit: %s (rotation off)", cfg.Audit.Path)
 	}
 
-	httpSrv := newHTTPServer(cfg.Server.Listen, srv, tlsCfg)
+	httpSrv := newHTTPServer(cfg.Server.Listen, srv, nil)
 
-	if cfg.TLSEnabled() {
-		// Use the dedicated server leaf cert for TLS identity (NOT the CA cert)
-		serverCert, _ := cfg.TLSCertKey()
-		log.Printf("  TLS: enabled (server cert: %s)", serverCert)
-	} else {
-		log.Printf("  TLS: disabled (plaintext HTTP)")
-		if !transport.IsLoopbackListen(cfg.Server.Listen) {
-			// Loud, never fatal: loopback plaintext is the supported default,
-			// but a non-loopback bind without TLS puts bearer tokens and
-			// secret values on the wire in cleartext.
-			log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
-		}
+	if !transport.IsLoopbackListen(cfg.Server.Listen) {
+		// Loud, never fatal: loopback plaintext is the supported default,
+		// but a non-loopback bind puts bearer tokens and secret values on
+		// the wire in cleartext. HTTPS is https_listener's job.
+		log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
 	}
-	if err := serveListeners(httpSrv, cfg, optionalHTTPS, log.Printf); err != nil {
+	if err := serveListeners(httpSrv, optionalHTTPS, log.Printf); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
@@ -476,18 +439,21 @@ func runInit(dir, passphrase string) error {
 	fmt.Printf("Generated server certificate: %s\n", serverCertPath)
 
 	// Write config with actual paths
-	crlPath := filepath.Join(dir, "crl.json")
 	cfgPath := filepath.Join(dir, "config.json")
 	cfg := config.DefaultConfig()
 	cfg.Store.Path = filepath.Join(dir, "store.json")
 	cfg.Store.MasterKey = keyPath
 	cfg.ACL.Path = aclPath
 	cfg.Audit.Path = filepath.Join(dir, "audit.log")
-	cfg.Auth.MTLS.CACert = caCertPath
-	cfg.Auth.MTLS.CAKey = caKeyPath
-	cfg.Auth.MTLS.ServerCert = serverCertPath
-	cfg.Auth.MTLS.ServerKey = serverKeyPath
-	cfg.Auth.MTLS.CRLPath = crlPath
+	// HTTPS is written off: turning it on is one setting ("enabled": true)
+	// once clients have ca.crt. --reissue-cert uses ca_cert/ca_key.
+	cfg.HTTPSListener = config.HTTPSListenerConfig{
+		Listen: "0.0.0.0:9443",
+		Cert:   serverCertPath,
+		Key:    serverKeyPath,
+		CACert: caCertPath,
+		CAKey:  caKeyPath,
+	}
 	// New installs get request-use grants switched on (plan Q1); configs
 	// written before this release have no block and stay off.
 	cfg.AccessRequests = config.NewInstallAccessRequests()
@@ -578,18 +544,21 @@ func runHashPassword() error {
 	return nil
 }
 
+// runReissueCert is --reissue-cert: it signs a new server certificate for
+// https_listener with the internal CA, adding the given names (SANs).
 func runReissueCert(cfg *config.Config, sans []string) error {
-	if cfg.Auth.MTLS.CACert == "" || cfg.Auth.MTLS.CAKey == "" {
-		return fmt.Errorf("config is missing auth.mtls.ca_cert and auth.mtls.ca_key paths — run --init first")
+	hl := cfg.HTTPSListener
+	if hl.CACert == "" || hl.CAKey == "" {
+		return fmt.Errorf("config is missing https_listener.ca_cert and https_listener.ca_key (--init writes them; older configs had them under auth.mtls)")
 	}
-	if cfg.Auth.MTLS.ServerCert == "" || cfg.Auth.MTLS.ServerKey == "" {
-		return fmt.Errorf("config is missing auth.mtls.server_cert and auth.mtls.server_key paths")
+	if hl.Cert == "" || hl.Key == "" {
+		return fmt.Errorf("config is missing https_listener.cert and https_listener.key paths")
 	}
 
 	// Always include localhost and loopback
 	allSANs := append([]string{"localhost", "127.0.0.1"}, sans...)
 
-	authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
+	authority, err := ca.LoadCA(hl.CACert, hl.CAKey)
 	if err != nil {
 		return fmt.Errorf("loading CA: %w", err)
 	}
@@ -599,11 +568,11 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 		return fmt.Errorf("issuing server cert: %w", err)
 	}
 
-	if err := bundle.Save(cfg.Auth.MTLS.ServerCert, cfg.Auth.MTLS.ServerKey, cfg.Auth.MTLS.CACert); err != nil {
+	if err := bundle.Save(hl.Cert, hl.Key, hl.CACert); err != nil {
 		return fmt.Errorf("saving server cert: %w", err)
 	}
 
-	fmt.Printf("Server certificate reissued: %s\n", cfg.Auth.MTLS.ServerCert)
+	fmt.Printf("Server certificate reissued: %s\n", hl.Cert)
 	fmt.Printf("SANs: %s\n", strings.Join(allSANs, ", "))
 	fmt.Println("Restart the server for the new certificate to take effect.")
 	return nil

@@ -244,13 +244,13 @@ func TestMatch(t *testing.T) {
 		path   string
 		action string
 	}{
-		"other path":      {ok, "infra/nope", ActionReadValue},
-		"other action":    {ok, "infra/key", "write"},
-		"other agent":     {bearerCaller("echo"), "infra/key", ActionReadValue},
-		"wrong token fp":  {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: AuthBearer, CredentialFP: "fp-rotated"}, "infra/key", ActionReadValue},
-		"wrong ip":        {Caller{Agent: "vector", SourceIP: "10.0.0.6", AuthMethod: AuthBearer, CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
-		"mtls not bearer": {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: AuthMTLS, CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
-		"session":         {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "session", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
+		"other path":     {ok, "infra/nope", ActionReadValue},
+		"other action":   {ok, "infra/key", "write"},
+		"other agent":    {bearerCaller("echo"), "infra/key", ActionReadValue},
+		"wrong token fp": {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: AuthBearer, CredentialFP: "fp-rotated"}, "infra/key", ActionReadValue},
+		"wrong ip":       {Caller{Agent: "vector", SourceIP: "10.0.0.6", AuthMethod: AuthBearer, CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
+		"other method":   {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "mtls", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
+		"session":        {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "session", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
 	}
 	for name, tc := range misses {
 		if m := nm(tc.c, tc.path, tc.action); m.Grant != nil || m.Reason != "" {
@@ -263,9 +263,9 @@ func TestMatch(t *testing.T) {
 	}
 	e.setGone("vector", false)
 
-	// mTLS binding: same cert fingerprint required; bind_source_ip off allows other IPs.
+	// Token binding: same token fingerprint required; bind_source_ip off allows other IPs.
 	in := bearerIn("mtls-agent", "infra/key")
-	in.AuthMethod, in.CredentialFP = AuthMTLS, "sha256:cert1"
+	in.CredentialFP = "fp-other1"
 	mr, _, err := e.s.Create(in)
 	if err != nil {
 		t.Fatal(err)
@@ -275,13 +275,13 @@ func TestMatch(t *testing.T) {
 	if _, _, err := e.s.Approve(a); err != nil {
 		t.Fatal(err)
 	}
-	mc := Caller{Agent: "mtls-agent", SourceIP: "10.9.9.9", AuthMethod: AuthMTLS, CredentialFP: "sha256:cert1"}
+	mc := Caller{Agent: "mtls-agent", SourceIP: "10.9.9.9", AuthMethod: AuthBearer, CredentialFP: "fp-other1"}
 	if nm(mc, "infra/key", ActionReadValue).Grant == nil {
-		t.Fatal("mtls with same cert from another IP (binding off) should match")
+		t.Fatal("same token from another IP (binding off) should match")
 	}
-	mc.CredentialFP = "sha256:cert2"
+	mc.CredentialFP = "fp-other2"
 	if nm(mc, "infra/key", ActionReadValue).Grant != nil {
-		t.Fatal("different cert matched")
+		t.Fatal("different token matched")
 	}
 
 	// Expiry at exact clock edges, then the 24h "recently ended" window.
