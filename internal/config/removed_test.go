@@ -91,3 +91,15 @@ func TestValidateAcceptsCleanedConfig(t *testing.T) {
 		t.Fatalf("cleaned config: %v", err)
 	}
 }
+
+// config.example.json is what new users copy; it must load and validate
+// cleanly, so it can never carry a removed setting.
+func TestExampleConfigHasNoRemovedSettings(t *testing.T) {
+	cfg, err := Load("../../config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config.example.json: %v", err)
+	}
+}

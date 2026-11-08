@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+### Removed: features that checked nothing, dead code, mTLS, MCP over HTTP, step-up
+
+Phoenix is getting ready to be released as open source. Several features
+looked like security but believed what the caller said, some were dead, and
+some had no users. They are gone, so there is less to read, configure and
+trust.
+
+**Upgrading:** a config, policy file or role that still uses a removed
+setting now stops the server at startup, with one line per setting saying
+why it went and what to use instead. Nothing is silently ignored. Check a
+config before you deploy:
+
+```
+phoenix-server --check-config --config /data/config.json
+```
+
+It checks the config, the policy file it names and the HTTPS certificate,
+and exits 0 ("config OK") or 1 with the list. It does not need the master
+key or bind a port. Removed API routes answer `410 Gone` with the reason;
+removed CLI commands and flags print why they went.
+
+| Removed | Why | Instead |
+|---|---|---|
+| Process rules: policy `process` (`uid`, `binary_hash`), `require_fresh_attestation`, `credential_ttl` | The server took the process details from whatever an admin caller put in a token request. | `source_ip`. Real caller checks come with the local Phoenix service. |
+| Short-lived tokens: `POST /v1/token/mint`, `attestation.token`, bootstrap method `"token"`, `phoenix token mint`, `phoenix agent-sock token` / `resolve` | Same: the tokens only carried caller claims. | Session roles (`PHOENIX_ROLE`). Session tokens (`phxs_`) are the one short-lived credential. |
+| Tool rules: `allowed_tools`, `deny_tools`, the `X-Phoenix-Tool` header, `PHOENIX_TOOL` | They matched a header the client sets itself. | ACL paths and session roles. |
+| Nonce challenges: `POST /v1/challenge`, `attestation.nonce`, `require_nonce`, `nonce_max_age`, `require_signed`, `phoenix resolve --signed` | Only signed resolve with a client certificate could pass; `exec`, MCP and the SDKs never could. `nonce_max_age` was never enforced. `/v1/resolve` now answers 400 if a client sends a nonce or signature. | `source_ip`. |
+| `POST /v1/proxy` | Never built; always answered 501. | Nothing. |
+| `phoenix init` | It only printed a pointer. | `phoenix-server --init <dir>`. |
+| `onepassword.enabled` | Nothing read it. The 1Password connector stays. | The connector is on when `store.backend` is `"1password"`. |
+| Policy `time_window` / `time_zone`, `phoenix policy test --time` | Unused. | `source_ip`, or revoke access when it is not needed. |
+| Client certificates (mTLS): `auth.mtls`, `phoenix cert issue`, `POST /v1/certs/issue` and `/revoke`, the CRL, policy `require_mtls` / `cert_fingerprint` / `deny_bearer`, bootstrap method `"mtls"`, role attestation `require_mtls` / `cert_fingerprint`, `PHOENIX_CLIENT_CERT` / `PHOENIX_CLIENT_KEY` | Off here, hard to run, unused. HTTPS already protects tokens in transit. With mTLS gone, `deny_bearer` could only lock everyone out. | Bearer tokens over HTTPS. The internal CA, the server certificate, `--reissue-cert`, seal key pairs and the SSH certificate CA all stay. The CLI warns if `PHOENIX_CLIENT_CERT` is still set. |
+| MCP over HTTP: `phoenix mcp-server --http`, `PHOENIX_MCP_TOKEN`, `PHOENIX_MCP_TLS_CERT` / `KEY` | Half-built (no sealed mode, no session renewal) and unused. | `phoenix mcp-server` over stdio, started by the agent's harness. |
+| Step-up: role `step_up`, `step_up_ttl`, `elevates_acl`, `allowed_agents`, `GET /v1/approvals`, `/v1/approval/...`, `apr_` IDs in `phoenix approve` / `deny` / `pending`, the step-up cards on the Approvals page, codes `APPROVAL_REQUIRED`, `STEP_UP_REAPPROVAL_REQUIRED`, `ROLE_NOT_ALLOWED` | 14 requests ever, mostly upgrade tests, and it overlapped with access requests. | Access requests and grants: the agent runs `phoenix request`, a human approves exact paths for a limited time. Roles and sessions stay. |
+| The `tls` config block | Three ways to turn on HTTPS (`tls.enabled`, `https_listener`, mTLS implying TLS) became one. | `https_listener`. Keep `server.listen` on `127.0.0.1`. |
+
+Kept on purpose: the local agent socket (`attestation.local_agent`,
+`phoenix agent-sock attest`), switched off; it becomes the local Phoenix
+service. Sessions and roles, access requests and grants, `source_ip` rules,
+sealed delivery and its settings, and the audit log format are unchanged.
+
+### HTTPS: one switch
+
+`https_listener` is now the only way to serve HTTPS. It gained optional
+`ca_cert` and `ca_key`, which only `--reissue-cert` uses (they used to live
+under `auth.mtls`). `--init` writes the block switched off with every path
+filled in, so turning HTTPS on is `"enabled": true`. `server.listen` always
+serves plain HTTP; the startup warning for a non-loopback `server.listen`
+now points at `https_listener`.
+
+### Fixed: `phoenix exec` passed Phoenix credentials to the command it ran
+
+`phoenix exec` stripped seven variables from the child's environment but
+passed `PHOENIX_MCP_TOKEN`, `PHOENIX_MASTER_PASSPHRASE`, `PHOENIX_ROLE`
+(enough for the child to mint its own session) and
+`OP_SERVICE_ACCOUNT_TOKEN` through. It now strips every `PHOENIX_*`
+variable and the 1Password service account token (also under the name
+`PHOENIX_OP_TOKEN_ENV` points at). Values mapped with `--env` still arrive.
+`phoenix ssh` runs `ssh` with the same filtered environment.
+
 ### SSH Certificates: Temporary Root Login, Approved Like a Grant
 
 `phoenix ssh <machine>` logs an agent in with a human's approval and a certificate
