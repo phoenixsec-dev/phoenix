@@ -231,7 +231,12 @@ params handled server-side.
 
 Table of audit entries: timestamp, agent, action, path, status (green/red
 dot), IP, session ID, reason. Filters for agent, status (allowed/denied),
-and result limit (50/100/500).
+and result limit (50/100/500). Filters run on the server while it reads the
+log backwards from the newest entry, so "denied, 50" shows the newest 50
+denied entries. The search covers the current file and the newest archive,
+up to 64 MB; when that cut it short a note above the table says older
+entries were not searched (see
+[Audit log rotation](configuration.md#audit-log-rotation)).
 
 The audit page auto-refreshes every 30 seconds via client-side fetch.
 

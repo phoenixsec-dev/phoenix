@@ -1084,23 +1084,31 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		opts.Agent = agent
 	}
 
+	// No limit, or one above the cap, returns the newest maxAuditQueryLimit
+	// entries: "everything" from a multi-GB log would not fit in memory.
+	opts.Limit = maxAuditQueryLimit
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		var limit int
 		fmt.Sscanf(limitStr, "%d", &limit)
-		if limit > 0 {
+		if limit > 0 && limit < maxAuditQueryLimit {
 			opts.Limit = limit
 		}
 	}
 
-	entries, err := audit.Query(s.auditPath, opts)
+	res, err := audit.Search(s.auditPath, opts)
 	if err != nil {
 		log.Printf("error querying audit log: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	jsonOK(w, map[string]interface{}{"entries": entries})
+	// truncated: the search stopped at its read cap or the newest archive
+	// before it found `limit` matches; older entries may exist.
+	jsonOK(w, map[string]interface{}{"entries": res.Entries, "truncated": res.Truncated})
 }
+
+// maxAuditQueryLimit caps how many entries one GET /v1/audit returns.
+const maxAuditQueryLimit = 10000
 
 // createAgentRequest is the JSON body for agent registration.
 type createAgentRequest struct {

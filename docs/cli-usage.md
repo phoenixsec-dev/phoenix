@@ -149,6 +149,10 @@ phoenix audit --agent deployer --since 2026-02-26T00:00:00Z
 
 Secret values are never written to the audit log.
 
+`phoenix audit` returns at most 10,000 entries (the newest), and searches only
+the current log file and the newest archive. See
+[Audit log rotation](configuration.md#audit-log-rotation).
+
 ## Import and export
 
 ### Import from `.env`

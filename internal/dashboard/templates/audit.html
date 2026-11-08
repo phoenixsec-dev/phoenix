@@ -17,6 +17,12 @@
     <button type="submit" class="btn btn-sm">Filter</button>
 </form>
 
+{{if .Truncated}}
+<div class="flash flash-info flash-sticky" id="audit-truncated">
+    Only the newest part of the audit log was searched (the current file and the newest archive, at most {{.ScanMB}} MB).
+    Older entries may match but are not shown.
+</div>
+{{end}}
 {{if .Entries}}
 <div class="table-wrap" id="audit-table">
 <table class="data-table">

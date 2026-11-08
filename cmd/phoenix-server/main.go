@@ -219,7 +219,7 @@ func main() {
 	}
 
 	// Initialize audit logger
-	al, err := audit.NewLogger(cfg.Audit.Path)
+	al, err := audit.NewRotatingLogger(cfg.Audit.Path, cfg.AuditRotateBytes())
 	if err != nil {
 		log.Fatalf("initializing audit logger: %v", err)
 	}
@@ -410,7 +410,11 @@ func main() {
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
-	log.Printf("  Audit: %s", cfg.Audit.Path)
+	if rb := cfg.AuditRotateBytes(); rb > 0 {
+		log.Printf("  Audit: %s (rotates at %d MB; archives are kept)", cfg.Audit.Path, rb>>20)
+	} else {
+		log.Printf("  Audit: %s (rotation off)", cfg.Audit.Path)
+	}
 
 	httpSrv := newHTTPServer(cfg.Server.Listen, srv, tlsCfg)
 
