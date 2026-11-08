@@ -17,6 +17,9 @@
     <button type="submit" class="btn btn-sm">Filter</button>
 </form>
 
+{{/* Auto-refresh replaces everything inside #audit-table, so the
+     truncation note and the empty state stay in step with the rows. */}}
+<div id="audit-table">
 {{if .Truncated}}
 <div class="flash flash-info flash-sticky" id="audit-truncated">
     Only the newest part of the audit log was searched (the current file and the newest archive, at most {{.ScanMB}} MB).
@@ -24,7 +27,7 @@
 </div>
 {{end}}
 {{if .Entries}}
-<div class="table-wrap" id="audit-table">
+<div class="table-wrap">
 <table class="data-table">
     <thead>
         <tr>
@@ -59,4 +62,5 @@
     <p>No audit entries</p>
 </div>
 {{end}}
+</div>
 {{end}}

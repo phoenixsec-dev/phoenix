@@ -92,3 +92,19 @@ func TestCmdAuditUsesURLEncoding(t *testing.T) {
 		}
 	})
 }
+
+// A search the server cut short prints a note on stderr, not silence.
+func TestCmdAuditWarnsWhenTruncated(t *testing.T) {
+	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"entries":[],"truncated":true}`))
+	}, func() {
+		out := captureStderr(t, func() {
+			if err := cmdAudit([]string{"--agent", "nobody"}); err != nil {
+				t.Fatalf("cmdAudit error: %v", err)
+			}
+		})
+		if !strings.Contains(out, "only the newest part") {
+			t.Fatalf("stderr = %q", out)
+		}
+	})
+}

@@ -787,7 +787,8 @@ func TestAuditPageStatusFilterAndTruncation(t *testing.T) {
 	if !strings.Contains(body, "p/denied-old") || strings.Contains(body, "p/new") {
 		t.Fatalf("status filter not applied in the search:\n%s", body)
 	}
-	if !strings.Contains(body, `id="audit-truncated"`) {
-		t.Fatal("truncation notice missing")
+	// The note must sit inside #audit-table, the part auto-refresh replaces.
+	if i, j := strings.Index(body, `id="audit-table"`), strings.Index(body, `id="audit-truncated"`); i < 0 || j < i {
+		t.Fatal("truncation notice missing or outside #audit-table")
 	}
 }

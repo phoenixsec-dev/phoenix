@@ -93,8 +93,8 @@ func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessio
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Stamped under the lock so file order is time order, which lets a
-	// since-query stop reading early.
+	// Stamped under the lock so file order follows the clock (unless the
+	// clock itself steps back; Search does not rely on it).
 	entry.Timestamp = time.Now().UTC()
 	line, err := json.Marshal(entry)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // paths returns the Path of each entry, for compact comparisons.
@@ -94,5 +95,39 @@ func TestSearchScanCap(t *testing.T) {
 	res, _ = Search(path, QueryOptions{Limit: 3, MaxScanBytes: 1000})
 	if len(res.Entries) != 3 || res.Truncated {
 		t.Fatalf("limit inside cap = %+v", res)
+	}
+}
+
+// After the clock steps back, an older-looking line follows a newer one.
+// A since-query must skip it, not stop there and miss the newer match.
+func TestSearchSinceSurvivesClockStepBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	os.WriteFile(path, []byte(
+		`{"ts":"2026-11-08T12:00:00Z","agent":"a","path":"p/new","status":"allowed"}`+"\n"+
+			`{"ts":"2026-11-08T11:00:00Z","agent":"a","path":"p/after-step-back","status":"allowed"}`+"\n"), 0600)
+	since, _ := time.Parse(time.RFC3339, "2026-11-08T11:30:00Z")
+	res, err := Search(path, QueryOptions{Since: &since})
+	if err != nil || fmt.Sprint(paths(res.Entries)) != "[p/new]" || res.Truncated {
+		t.Fatalf("since = %v truncated %v, err %v", paths(res.Entries), res.Truncated, err)
+	}
+}
+
+// A rotation between reading audit.log and listing archives leaves the file
+// just read as the newest archive. It must not be read twice.
+func TestSearchSkipsArchiveItAlreadyRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	l, _ := NewLogger(path)
+	for i := 0; i < 3; i++ {
+		l.LogAllowed("a", "read", fmt.Sprintf("p/%d", i), "1.1.1.1")
+	}
+	l.Close()
+	// Same inode under both names: what Search sees mid-rotation.
+	if err := os.Link(path, filepath.Join(dir, "audit-20261108T000000.000Z.log")); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	res, _ := Search(path, QueryOptions{Limit: 10})
+	if fmt.Sprint(paths(res.Entries)) != "[p/0 p/1 p/2]" || res.Truncated {
+		t.Fatalf("got %v truncated %v", paths(res.Entries), res.Truncated)
 	}
 }

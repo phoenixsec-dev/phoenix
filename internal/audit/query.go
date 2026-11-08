@@ -3,8 +3,10 @@ package audit
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"time"
 )
@@ -14,8 +16,10 @@ import (
 // The log is append-only JSON lines, so the newest entries are at the end.
 // Search reads it backwards from the end in fixed-size chunks and stops as
 // soon as it has Limit matching entries: a page that shows 10 entries costs
-// the same whether the log is 1 MB or 1 GB. Two limits stop a filter that
-// rarely matches from reading the whole history:
+// the same whether the log is 1 MB or 1 GB. It never stops on a timestamp,
+// because a clock stepped back can put a newer-looking line after older
+// ones. Two limits stop a filter that rarely matches from reading the whole
+// history:
 //
 //   - only the current file and the newest archive are read (see rotate.go);
 //   - one query reads at most MaxScanBytes (default DefaultMaxScanBytes).
@@ -27,11 +31,6 @@ import (
 // QueryOptions.MaxScanBytes is not set. With the prefilter in matcher.maybe
 // a query that matches nothing reads this much in well under a second.
 const DefaultMaxScanBytes = 64 << 20
-
-// sinceSlack: lines are appended in time order, but a clock step or the
-// offline emergency CLI (whole seconds) can put one slightly out of order.
-// A since-query keeps reading this far past the cutoff before it stops.
-const sinceSlack = time.Minute
 
 // chunkSize is how much one backward read takes. A var so tests can force
 // lines to straddle chunk edges.
@@ -66,11 +65,15 @@ func Query(path string, opts QueryOptions) ([]Entry, error) {
 // Search reads the log at path backwards (current file, then the newest
 // archive) and returns the newest entries matching opts, oldest first.
 func Search(path string, opts QueryOptions) (Result, error) {
-	f, err := os.Open(path)
+	f, err := openCurrent(path)
 	if err != nil {
 		return Result{}, fmt.Errorf("opening audit log for query: %w", err)
 	}
 	defer f.Close()
+	cur, err := f.Stat()
+	if err != nil {
+		return Result{}, fmt.Errorf("reading audit log: %w", err)
+	}
 
 	s := newScan(opts)
 	done, err := s.file(f)
@@ -84,7 +87,13 @@ func Search(path string, opts QueryOptions) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		if n := len(arcs); n > 0 {
+		// If a rotation renamed the file we just read, it is now the newest
+		// archive; skip it so no entry is returned twice.
+		n := len(arcs)
+		for n > 0 && sameFile(arcs[n-1].path, cur) {
+			n--
+		}
+		if n > 0 {
 			newest := arcs[n-1]
 			olderLeft = n > 1
 			if newest.compressed {
@@ -96,7 +105,7 @@ func Search(path string, opts QueryOptions) (Result, error) {
 					return Result{}, fmt.Errorf("reading audit archive: %w", err)
 				}
 			} else {
-				olderLeft = true // rotated away mid-query, or unreadable
+				olderLeft = true // compressed away mid-query, or unreadable
 			}
 		}
 	}
@@ -109,33 +118,45 @@ func Search(path string, opts QueryOptions) (Result, error) {
 	return Result{Entries: out, Truncated: !done && (s.capped || olderLeft)}, nil
 }
 
+// openCurrent opens the live log. A rotation renames it and creates the new
+// one a moment later; a search landing in that gap retries instead of failing.
+func openCurrent(path string) (*os.File, error) {
+	f, err := os.Open(path)
+	for i := 0; i < 3 && errors.Is(err, fs.ErrNotExist); i++ {
+		time.Sleep(time.Millisecond)
+		f, err = os.Open(path)
+	}
+	return f, err
+}
+
+// sameFile reports whether path is the file described by fi.
+func sameFile(path string, fi os.FileInfo) bool {
+	st, err := os.Stat(path)
+	return err == nil && os.SameFile(st, fi)
+}
+
 // scan is the state of one backward search across one or two files.
 type scan struct {
-	m          matcher
-	limit      int
-	since      *time.Time
-	stopBefore time.Time // since - sinceSlack: older lines end the search
-	budget     int64     // bytes still allowed to read
-	capped     bool      // budget ran out with part of a file unread
-	found      []Entry   // newest first
-	work       []byte    // chunk + carried line, reused
-	carry      []byte    // start of a line whose beginning is further back
+	m      matcher
+	limit  int
+	budget int64   // bytes still allowed to read
+	capped bool    // budget ran out with part of a file unread
+	found  []Entry // newest first
+	work   []byte  // chunk + carried line, reused
+	carry  []byte  // start of a line whose beginning is further back
 }
 
 // newScan prepares a search for opts.
 func newScan(opts QueryOptions) *scan {
-	s := &scan{m: newMatcher(opts), limit: opts.Limit, since: opts.Since, budget: opts.MaxScanBytes}
+	s := &scan{m: newMatcher(opts), limit: opts.Limit, budget: opts.MaxScanBytes}
 	if s.budget <= 0 {
 		s.budget = DefaultMaxScanBytes
-	}
-	if s.since != nil {
-		s.stopBefore = s.since.Add(-sinceSlack)
 	}
 	return s
 }
 
 // file walks f's lines from last to first. It returns true when the search
-// is finished (Limit reached or the since cutoff passed). A last line with
+// has Limit matches. A last line with
 // no newline yet (a write in progress) is tried like any other: if it is
 // not complete JSON it is skipped.
 func (s *scan) file(f *os.File) (bool, error) {
@@ -186,9 +207,10 @@ func (s *scan) line(line []byte) bool {
 	if len(line) == 0 {
 		return false
 	}
-	if s.since != nil {
-		if ts, ok := lineTime(line); ok && ts.Before(s.stopBefore) {
-			return true
+	if since := s.m.opts.Since; since != nil {
+		// Skip, never stop: an older line can follow a newer one.
+		if ts, ok := lineTime(line); ok && ts.Before(*since) {
+			return false
 		}
 	}
 	if !s.m.maybe(line) {
@@ -198,9 +220,6 @@ func (s *scan) line(line []byte) bool {
 	if err := json.Unmarshal(line, &e); err != nil {
 		return false // malformed or half-written line
 	}
-	if s.since != nil && e.Timestamp.Before(s.stopBefore) {
-		return true
-	}
 	if !s.m.match(e) {
 		return false
 	}
@@ -209,7 +228,7 @@ func (s *scan) line(line []byte) bool {
 }
 
 // lineTime reads the timestamp at the start of a line without decoding the
-// rest. Every writer puts "ts" first.
+// rest, so a since-query skips old lines cheaply. Every writer puts "ts" first.
 func lineTime(line []byte) (time.Time, bool) {
 	const prefix = `{"ts":"`
 	if !bytes.HasPrefix(line, []byte(prefix)) {

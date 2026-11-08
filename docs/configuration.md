@@ -196,8 +196,10 @@ audit-20261101T093000.000Z.log.gz          older archives, gzipped
   after its `.gz` is complete. Read them with `zcat`.
 - An existing log larger than the limit is rotated on the first write after
   upgrading.
-- Set `"rotate_mb": -1` if you rotate the file another way. External tools must
-  use copy-and-truncate: Phoenix keeps its file open.
+- Set `"rotate_mb": -1` only if you rotate the file another way, and then
+  only while Phoenix is stopped. Phoenix keeps its file open, and
+  copy-and-truncate on a running server can lose a line written between the
+  copy and the truncate.
 
 Queries (dashboard Audit page, Overview, `GET /v1/audit`, `phoenix audit`)
 read from the end of the log and stop once they have enough entries, so they

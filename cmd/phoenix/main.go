@@ -1019,6 +1019,7 @@ func cmdAudit(args []string) error {
 			IP        string `json:"ip"`
 			Reason    string `json:"reason"`
 		} `json:"entries"`
+		Truncated bool `json:"truncated"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
@@ -1029,6 +1030,9 @@ func cmdAudit(args []string) error {
 		}
 		fmt.Printf("%s  %-10s %-8s %-40s %s  %s\n",
 			e.Timestamp, e.Agent, e.Action, e.Path, status, e.IP)
+	}
+	if result.Truncated {
+		fmt.Fprintln(os.Stderr, "note: only the newest part of the audit log was searched; older entries may match (see the archived audit-*.log files)")
 	}
 	return nil
 }
