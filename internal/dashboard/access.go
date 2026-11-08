@@ -235,9 +235,6 @@ func (h *Handler) attestFacts(rq grant.Request, p string, sealKeyOK bool) []atte
 		add("specific client certificate", is(rq.AuthMethod == grant.AuthMTLS &&
 			strings.EqualFold(rq.CredentialFP, rule.CertFingerprint)))
 	}
-	if rule.TimeWindow != "" {
-		add("time window "+rule.TimeWindow, nil)
-	}
 	if rule.RequireSealed {
 		add("sealed delivery", is(sealKeyOK))
 	}

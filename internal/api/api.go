@@ -275,7 +275,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
-	s.mux.HandleFunc("POST /v1/proxy", s.handleProxy)
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
 	s.mux.HandleFunc("GET /v1/policy/check", s.handlePolicyCheck)
@@ -287,6 +286,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 	s.accessRoutes()
 	s.sshRoutes()
+	s.removedRouteRoutes()
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -1562,9 +1562,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if rule.CertFingerprint != "" {
 				checks = append(checks, "cert-pinned")
 			}
-			if rule.TimeWindow != "" {
-				checks = append(checks, "time-window")
-			}
 			if rule.RequireSealed {
 				checks = append(checks, "sealed-required")
 			}
@@ -1803,32 +1800,6 @@ func (s *Server) handleGetSealKey(w http.ResponseWriter, r *http.Request, agentT
 		"agent_name":      agentTarget,
 		"seal_public_key": pubKey,
 	})
-}
-
-// handleProxy is a stub for the future orchestrator proxy endpoint.
-// The orchestrator will accept templated HTTP requests containing phoenix://
-// references, resolve them server-side, execute the outbound request, and
-// return the response — keeping secret values entirely within the server.
-//
-// Agents using the proxy only need "list" permission to discover and reference
-// secrets. The server performs privileged internal resolution, so agents never
-// need "read_value" and secrets never enter agent context.
-//
-// Expected future request schema:
-//
-//	{
-//	  "method": "POST",
-//	  "url": "https://api.example.com/v1/deploy",
-//	  "headers": {"Authorization": "Bearer phoenix://myapp/api-key"},
-//	  "body": "{\"token\": \"phoenix://myapp/deploy-token\"}"
-//	}
-func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	_, err := s.authenticateInfo(r)
-	if err != nil {
-		handleAuthError(w, err)
-		return
-	}
-	jsonError(w, "proxy endpoint not yet implemented", http.StatusNotImplemented)
 }
 
 // sessionMintRequest is the JSON body for minting a session token.

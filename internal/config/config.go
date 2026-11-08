@@ -161,9 +161,9 @@ type LocalAgentConfig struct {
 	SocketPath string `json:"socket_path,omitempty"` // default: /tmp/phoenix-agent.sock
 }
 
-// OPConfig controls the optional 1Password backend.
+// OPConfig controls the optional 1Password backend (store.backend
+// "1password"); it is used only when that backend is selected.
 type OPConfig struct {
-	Enabled                bool   `json:"enabled"`
 	Vault                  string `json:"vault,omitempty"`                     // 1Password vault name
 	ServiceAccountTokenEnv string `json:"service_account_token_env,omitempty"` // env var name (default: OP_SERVICE_ACCOUNT_TOKEN)
 	CacheTTL               string `json:"cache_ttl,omitempty"`                 // duration string, e.g. "60s" (default)
@@ -257,7 +257,6 @@ func DefaultConfig() *Config {
 			Path: "/data/audit.log",
 		},
 		OnePassword: OPConfig{
-			Enabled:                false,
 			ServiceAccountTokenEnv: "OP_SERVICE_ACCOUNT_TOKEN",
 		},
 	}

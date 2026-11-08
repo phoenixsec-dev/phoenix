@@ -9,38 +9,6 @@ import (
 	"testing"
 )
 
-func TestCmdPolicyTestTimeWindow(t *testing.T) {
-	// Create a policy file with time_window
-	dir := t.TempDir()
-	policyPath := filepath.Join(dir, "policy.json")
-	policyData := `{
-		"attestation": {
-			"prod/*": {
-				"time_window": "09:00-17:00",
-				"time_zone": "UTC"
-			}
-		}
-	}`
-	os.WriteFile(policyPath, []byte(policyData), 0644)
-
-	// Set PHOENIX_POLICY
-	origPolicy := os.Getenv("PHOENIX_POLICY")
-	os.Setenv("PHOENIX_POLICY", policyPath)
-	defer os.Setenv("PHOENIX_POLICY", origPolicy)
-
-	// Test within window — should pass
-	err := cmdPolicyTest([]string{"--time", "2026-03-01T12:00:00Z", "prod/db-password"})
-	if err != nil {
-		t.Fatalf("expected pass within time window: %v", err)
-	}
-
-	// Test outside window — should print FAIL but not return error
-	err = cmdPolicyTest([]string{"--time", "2026-03-01T03:00:00Z", "prod/db-password"})
-	if err != nil {
-		t.Fatalf("cmdPolicyTest should not return error (it prints FAIL): %v", err)
-	}
-}
-
 func TestCmdPolicyTestNoTimeFlag(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")
@@ -55,25 +23,10 @@ func TestCmdPolicyTestNoTimeFlag(t *testing.T) {
 	os.Setenv("PHOENIX_POLICY", policyPath)
 	defer os.Setenv("PHOENIX_POLICY", origPolicy)
 
-	// Without --time should use current time and pass
+	// An empty rule passes
 	err := cmdPolicyTest([]string{"open/key"})
 	if err != nil {
 		t.Fatalf("expected pass: %v", err)
-	}
-}
-
-func TestCmdPolicyTestInvalidTime(t *testing.T) {
-	dir := t.TempDir()
-	policyPath := filepath.Join(dir, "policy.json")
-	os.WriteFile(policyPath, []byte(`{"attestation":{}}`), 0644)
-
-	origPolicy := os.Getenv("PHOENIX_POLICY")
-	os.Setenv("PHOENIX_POLICY", policyPath)
-	defer os.Setenv("PHOENIX_POLICY", origPolicy)
-
-	err := cmdPolicyTest([]string{"--time", "not-a-time", "test/key"})
-	if err == nil {
-		t.Fatal("expected error for invalid --time value")
 	}
 }
 

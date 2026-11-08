@@ -3,7 +3,7 @@
 // Attestation policies bind secrets to specific identity evidence beyond
 // basic ACL checks. They enforce requirements like mTLS authentication,
 // source IP restrictions, certificate fingerprint pinning, tool-scoped
-// access and time-window restrictions.
+// access.
 //
 // Policies are keyed by secret path patterns (using the same glob syntax
 // as ACL rules) and evaluated after ACL authorization succeeds.
@@ -17,8 +17,6 @@
 //	      "source_ip": ["192.168.0.115"],
 //	      "cert_fingerprint": "sha256:abc123",
 //	      "deny_bearer": true,
-//	      "time_window": "06:00-23:00",
-//	      "time_zone": "America/New_York",
 //	    }
 //	  }
 //	}
@@ -32,7 +30,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/phoenixsec/phoenix/internal/removed"
 )
@@ -45,10 +42,6 @@ type Rule struct {
 	CertFingerprint string   `json:"cert_fingerprint,omitempty"`
 	DenyBearer      bool     `json:"deny_bearer"`
 
-	// L6: time-window restrictions
-	TimeWindow string `json:"time_window,omitempty"` // "HH:MM-HH:MM"
-	TimeZone   string `json:"time_zone,omitempty"`   // IANA timezone (e.g. "America/New_York")
-
 	// L9: sealed response requirements
 	RequireSealed bool `json:"require_sealed,omitempty"` // deny if no valid seal key presented
 	AllowUnseal   bool `json:"allow_unseal,omitempty"`   // gate for MCP unseal tool
@@ -60,9 +53,6 @@ type RequestContext struct {
 	UsedBearer      bool
 	SourceIP        string
 	CertFingerprint string // "sha256:<hex>"
-
-	// Override evaluation time (for testing; zero means use time.Now())
-	EvalTime time.Time
 
 	// Seal key validation (set when X-Phoenix-Seal-Key is present and validated)
 	SealKeyPresented bool
@@ -97,8 +87,6 @@ type legacyRule struct {
 	SourceIP        []string `json:"source_ip,omitempty"`   // canonical name
 	CertFingerprint string   `json:"cert_fingerprint,omitempty"`
 	DenyBearer      bool     `json:"deny_bearer"`
-	TimeWindow      string   `json:"time_window,omitempty"`
-	TimeZone        string   `json:"time_zone,omitempty"`
 	RequireSealed   bool     `json:"require_sealed,omitempty"`
 	AllowUnseal     bool     `json:"allow_unseal,omitempty"`
 }
@@ -169,8 +157,6 @@ func Load(data []byte) (*Engine, error) {
 				AllowedIPs:      ips,
 				CertFingerprint: r.CertFingerprint,
 				DenyBearer:      r.DenyBearer,
-				TimeWindow:      r.TimeWindow,
-				TimeZone:        r.TimeZone,
 				RequireSealed:   r.RequireSealed,
 				AllowUnseal:     r.AllowUnseal,
 			}
@@ -248,30 +234,6 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		}
 	}
 
-	// L6: Check time-window
-	if rule.TimeWindow != "" {
-		now := ctx.EvalTime
-		if now.IsZero() {
-			now = time.Now()
-		}
-		if rule.TimeZone != "" {
-			loc, err := time.LoadLocation(rule.TimeZone)
-			if err != nil {
-				return &DeniedError{
-					Pattern: pattern,
-					Reason:  fmt.Sprintf("invalid time zone %q: %v", rule.TimeZone, err),
-				}
-			}
-			now = now.In(loc)
-		}
-		if err := checkTimeWindow(rule.TimeWindow, now); err != nil {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  err.Error(),
-			}
-		}
-	}
-
 	// L9: Check sealed response requirement
 	if rule.RequireSealed && !ctx.SealKeyPresented {
 		return &DeniedError{
@@ -292,57 +254,6 @@ func containsString(slice []string, s string) bool {
 		}
 	}
 	return false
-}
-
-// checkTimeWindow verifies that the given time falls within the HH:MM-HH:MM window.
-// Handles midnight crossover (e.g., "22:00-06:00").
-func checkTimeWindow(window string, now time.Time) error {
-	parts := strings.SplitN(window, "-", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid time_window format %q (expected HH:MM-HH:MM)", window)
-	}
-
-	startH, startM, err := parseHHMM(parts[0])
-	if err != nil {
-		return fmt.Errorf("invalid time_window start: %w", err)
-	}
-	endH, endM, err := parseHHMM(parts[1])
-	if err != nil {
-		return fmt.Errorf("invalid time_window end: %w", err)
-	}
-
-	startMin := startH*60 + startM
-	endMin := endH*60 + endM
-	nowMin := now.Hour()*60 + now.Minute()
-
-	var inWindow bool
-	if startMin <= endMin {
-		// Normal range: 06:00-23:00
-		inWindow = nowMin >= startMin && nowMin < endMin
-	} else {
-		// Midnight crossover: 22:00-06:00
-		inWindow = nowMin >= startMin || nowMin < endMin
-	}
-
-	if !inWindow {
-		return fmt.Errorf("access denied outside time window %s (current time %02d:%02d)",
-			window, now.Hour(), now.Minute())
-	}
-	return nil
-}
-
-// parseHHMM parses "HH:MM" into hours and minutes.
-func parseHHMM(s string) (int, int, error) {
-	s = strings.TrimSpace(s)
-	var h, m int
-	n, err := fmt.Sscanf(s, "%d:%d", &h, &m)
-	if err != nil || n != 2 {
-		return 0, 0, fmt.Errorf("invalid time %q (expected HH:MM)", s)
-	}
-	if h < 0 || h > 23 || m < 0 || m > 59 {
-		return 0, 0, fmt.Errorf("time %q out of range", s)
-	}
-	return h, m, nil
 }
 
 // RuleFor returns the attestation rule and pattern matching a secret path,

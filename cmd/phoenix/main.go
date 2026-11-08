@@ -320,8 +320,6 @@ func main() {
 		} else {
 			err = cmdMCP(args)
 		}
-	case "init":
-		err = cmdInit(args)
 	case "keypair":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: phoenix keypair <generate|show>")
@@ -416,7 +414,7 @@ Usage:
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
   phoenix mcp-server --http 127.0.0.1:8080    Run MCP server (Streamable HTTP)
   phoenix mcp-server --http <addr> --tls-cert <crt> --tls-key <key>  Serve MCP over HTTPS
-  phoenix init <dir>                          Initialize data directory
+  (Initialize a server data directory with: phoenix-server --init <dir>)
 
 Environment:
   PHOENIX_SERVER       Server URL (default: http://127.0.0.1:9090)
@@ -2004,21 +2002,13 @@ func printPolicyRule(rule *policy.Rule) {
 	if rule.DenyBearer {
 		fmt.Printf("  deny_bearer: true\n")
 	}
-	if rule.TimeWindow != "" {
-		b, _ := json.Marshal(rule.TimeWindow)
-		fmt.Printf("  time_window: %s\n", string(b))
-	}
-	if rule.TimeZone != "" {
-		b, _ := json.Marshal(rule.TimeZone)
-		fmt.Printf("  time_zone: %s\n", string(b))
-	}
 	if rule.RequireSealed {
 		fmt.Printf("  require_sealed: true\n")
 	}
 }
 
 func cmdPolicyTest(args []string) error {
-	var agent, ip, path, timeStr string
+	var agent, ip, path string
 	i := 0
 	for i < len(args) {
 		switch args[i] {
@@ -2033,10 +2023,7 @@ func cmdPolicyTest(args []string) error {
 				ip = args[i]
 			}
 		case "-t", "--time":
-			i++
-			if i < len(args) {
-				timeStr = args[i]
-			}
+			exitRemoved("phoenix policy test --time", removedCommands["policy test --time"])
 		default:
 			if path == "" {
 				path = args[i]
@@ -2046,7 +2033,7 @@ func cmdPolicyTest(args []string) error {
 	}
 
 	if path == "" {
-		return fmt.Errorf("usage: phoenix policy test --agent <name> --ip <ip> [--time <RFC3339>] <secret-path>")
+		return fmt.Errorf("usage: phoenix policy test --agent <name> --ip <ip> <secret-path>")
 	}
 
 	policyPath := os.Getenv("PHOENIX_POLICY")
@@ -2060,21 +2047,6 @@ func cmdPolicyTest(args []string) error {
 		return fmt.Errorf("loading policy: %w", err)
 	}
 
-	// Build request context from CLI flags
-	ctx := &policy.RequestContext{
-		SourceIP:   ip,
-		UsedBearer: true, // CLI test assumes bearer unless overridden
-	}
-
-	// Parse --time for time-window evaluation
-	if timeStr != "" {
-		evalTime, parseErr := time.Parse(time.RFC3339, timeStr)
-		if parseErr != nil {
-			return fmt.Errorf("invalid --time value %q (expected RFC3339): %w", timeStr, parseErr)
-		}
-		ctx.EvalTime = evalTime
-	}
-
 	// Show matching rule info
 	rule, pattern := pe.RuleFor(path)
 
@@ -2084,11 +2056,6 @@ func cmdPolicyTest(args []string) error {
 	}
 	if ip != "" {
 		fmt.Printf("  Source IP: %s\n", ip)
-	}
-	if timeStr != "" {
-		fmt.Printf("  Eval time: %s\n", timeStr)
-	} else {
-		fmt.Printf("  Eval time: %s (now)\n", time.Now().Format(time.RFC3339))
 	}
 	fmt.Println()
 
@@ -2116,13 +2083,6 @@ func cmdPolicyTest(args []string) error {
 	if rule.CertFingerprint != "" {
 		fmt.Printf("  [INFO] cert_fingerprint: %s (not testable from CLI)\n", rule.CertFingerprint)
 	}
-	if rule.TimeWindow != "" {
-		tz := rule.TimeZone
-		if tz == "" {
-			tz = "UTC"
-		}
-		fmt.Printf("  [TEST] time_window: %s (%s)\n", rule.TimeWindow, tz)
-	}
 
 	// Run engine evaluation (skip checks we can't test: mTLS, cert)
 	// We override the context to mark untestable items as passed to isolate testable checks
@@ -2130,7 +2090,6 @@ func cmdPolicyTest(args []string) error {
 		UsedMTLS:   true, // assume mTLS for testing purposes
 		UsedBearer: false,
 		SourceIP:   ip,
-		EvalTime:   ctx.EvalTime,
 	}
 
 	err = pe.Evaluate(path, testCtx)
@@ -2511,15 +2470,6 @@ func renewSessionIfNeeded() {
 	tokenMu.Lock()
 	token = newToken
 	tokenMu.Unlock()
-}
-
-func cmdInit(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: phoenix init <dir>")
-	}
-	// Delegate to server's init
-	fmt.Println("Use phoenix-server --init", args[0])
-	return nil
 }
 
 // emergencyAuditEntry is the structured audit log entry for emergency access.

@@ -6,6 +6,9 @@ import "github.com/phoenixsec/phoenix/internal/removed"
 // "attestation" map format and the legacy "rules" list. Load refuses a file
 // that still uses one, so nobody keeps trusting a rule that checks nothing.
 var removedRuleFields = ruleFields(
+	removed.Field{Path: "time_window", Why: "unused, and a rule that only limits the hour adds little",
+		Instead: "use source_ip, or revoke access when it is not needed"},
+	removed.Field{Path: "time_zone", Why: "it only applied to time_window, which is gone"},
 	removed.Field{Path: "allowed_tools", Why: "it matched the X-Phoenix-Tool header, which the caller sets itself, so it checked nothing",
 		Instead: "use ACL paths or session roles to limit what an agent can read"},
 	removed.Field{Path: "deny_tools", Why: "it matched the X-Phoenix-Tool header, which the caller sets itself, so it checked nothing",

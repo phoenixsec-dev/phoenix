@@ -28,6 +28,13 @@ var removedCommands = map[string]removedCommand{
 		why:     "the nonce challenge it answered only worked with client certificates, and nothing else could satisfy it",
 		instead: "use phoenix resolve without --signed; source_ip rules still apply",
 	},
+	"init": {
+		why:     "it only printed a pointer to the server command",
+		instead: "run phoenix-server --init <dir>",
+	},
+	"policy test --time": {
+		why: "time_window policy rules were removed, so there is no time to test",
+	},
 	"agent-sock resolve": {
 		why:     "it used short-lived tokens, which were removed",
 		instead: "use phoenix resolve or phoenix exec",

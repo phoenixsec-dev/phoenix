@@ -3,7 +3,6 @@ package policy
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestLoadEmpty(t *testing.T) {
@@ -401,124 +400,6 @@ func TestRulesReturnsCopy(t *testing.T) {
 // --- Wave 2: Tool-scoped policy tests ---
 
 // --- Wave 2: Time-window policy tests ---
-
-func TestTimeWindowNormalRange(t *testing.T) {
-	cfg := `{
-		"attestation": {
-			"prod/*": {
-				"time_window": "06:00-23:00"
-			}
-		}
-	}`
-	e, err := Load([]byte(cfg))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	// 14:00 is within range
-	at14 := time.Date(2026, 2, 27, 14, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at14}); err != nil {
-		t.Fatalf("14:00 should be within 06:00-23:00: %v", err)
-	}
-
-	// 03:00 is outside range
-	at03 := time.Date(2026, 2, 27, 3, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at03}); err == nil {
-		t.Fatal("03:00 should be outside 06:00-23:00")
-	}
-
-	// 06:00 is at boundary (inclusive start)
-	at06 := time.Date(2026, 2, 27, 6, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at06}); err != nil {
-		t.Fatalf("06:00 should be within window (inclusive start): %v", err)
-	}
-
-	// 23:00 is at boundary (exclusive end)
-	at23 := time.Date(2026, 2, 27, 23, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at23}); err == nil {
-		t.Fatal("23:00 should be at boundary (exclusive end)")
-	}
-}
-
-func TestTimeWindowMidnightCrossover(t *testing.T) {
-	cfg := `{
-		"attestation": {
-			"night/*": {
-				"time_window": "22:00-06:00"
-			}
-		}
-	}`
-	e, err := Load([]byte(cfg))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	// 23:00 is within range (after start)
-	at23 := time.Date(2026, 2, 27, 23, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("night/key", &RequestContext{EvalTime: at23}); err != nil {
-		t.Fatalf("23:00 should be within 22:00-06:00: %v", err)
-	}
-
-	// 03:00 is within range (before end)
-	at03 := time.Date(2026, 2, 27, 3, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("night/key", &RequestContext{EvalTime: at03}); err != nil {
-		t.Fatalf("03:00 should be within 22:00-06:00: %v", err)
-	}
-
-	// 12:00 is outside range
-	at12 := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("night/key", &RequestContext{EvalTime: at12}); err == nil {
-		t.Fatal("12:00 should be outside 22:00-06:00")
-	}
-}
-
-func TestTimeWindowWithTimezone(t *testing.T) {
-	cfg := `{
-		"attestation": {
-			"prod/*": {
-				"time_window": "09:00-17:00",
-				"time_zone": "America/New_York"
-			}
-		}
-	}`
-	e, err := Load([]byte(cfg))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	// 14:00 EST = within window
-	ny, _ := time.LoadLocation("America/New_York")
-	at14NY := time.Date(2026, 2, 27, 14, 0, 0, 0, ny)
-	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at14NY}); err != nil {
-		t.Fatalf("14:00 NY should be within 09:00-17:00 NY: %v", err)
-	}
-
-	// 14:00 UTC = 09:00 EST = within window
-	at14UTC := time.Date(2026, 2, 27, 14, 0, 0, 0, time.UTC)
-	if err := e.Evaluate("prod/key", &RequestContext{EvalTime: at14UTC}); err != nil {
-		t.Fatalf("14:00 UTC (09:00 EST) should be within window: %v", err)
-	}
-}
-
-func TestTimeWindowInvalidFormat(t *testing.T) {
-	cfg := `{
-		"attestation": {
-			"bad/*": {
-				"time_window": "not-a-time"
-			}
-		}
-	}`
-	e, err := Load([]byte(cfg))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if err := e.Evaluate("bad/key", &RequestContext{
-		EvalTime: time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC),
-	}); err == nil {
-		t.Fatal("invalid time_window should fail")
-	}
-}
 
 // --- Wave 2: Process attestation tests ---
 

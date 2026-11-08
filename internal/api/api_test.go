@@ -2552,19 +2552,16 @@ func TestLegacyReadAgentBackcompat(t *testing.T) {
 	}
 }
 
-func TestProxyStub(t *testing.T) {
+// Removed routes answer 410 Gone with the reason, not a bare 404.
+func TestRemovedRoutesAnswerGone(t *testing.T) {
 	srv := setupTestServerWithGranularACL(t)
-
-	req := httptest.NewRequest("POST", "/v1/proxy", nil)
-	req.Header.Set("Authorization", "Bearer admin-token")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 501 {
-		t.Fatalf("proxy: expected 501, got %d: %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "not yet implemented") {
-		t.Fatalf("proxy should say not yet implemented, got: %s", w.Body.String())
+	for pattern := range removedRoutes {
+		method, path, _ := strings.Cut(pattern, " ")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, httptest.NewRequest(method, path, nil))
+		if w.Code != http.StatusGone || !strings.Contains(w.Body.String(), "removed") {
+			t.Errorf("%s: got %d %s, want 410 with the reason", pattern, w.Code, w.Body.String())
+		}
 	}
 }
 
