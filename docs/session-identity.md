@@ -56,7 +56,7 @@ Enable sessions in your server config:
 | `bootstrap_trust` | `[]string` | Required. Auth methods that can mint this role: `bearer`, `local` |
 | `require_seal_key` | `bool` | Require seal public key at mint time |
 | `max_ttl` | `string` | Per-role TTL override (e.g. `"30m"`) |
-| `attestation` | `[]string` | `source_ip` (the caller must be on loopback) and/or `require_sealed`. Checked at mint and renewal |
+| `attestation` | `[]string` | `source_ip` (the caller must be on loopback, checked at mint and renewal) and/or `require_sealed` (needs `require_seal_key: true`; the seal key binding is what enforces it) |
 
 The role fields `step_up`, `step_up_ttl`, `elevates_acl` and `allowed_agents`
 were removed along with step-up approval; a config that still has one stops

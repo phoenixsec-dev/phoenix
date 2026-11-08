@@ -391,6 +391,11 @@ func (c *Config) Validate() error {
 				if a != "source_ip" && a != "require_sealed" {
 					return fmt.Errorf("session.roles.%s: unknown attestation %q (valid: source_ip, require_sealed)", name, a)
 				}
+				// require_sealed is enforced only through the role's seal key
+				// binding; on its own it checked nothing.
+				if a == "require_sealed" && !role.RequireSealKey {
+					return fmt.Errorf("session.roles.%s: attestation \"require_sealed\" needs \"require_seal_key\": true (on its own it checks nothing)", name)
+				}
 			}
 			for _, action := range role.Actions {
 				if !validSessionActions[action] {

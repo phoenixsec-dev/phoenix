@@ -265,10 +265,8 @@ func main() {
 	case "grants":
 		err = cmdGrants(args)
 	case "mcp-server":
-		for _, arg := range args {
-			if arg == "--http" || strings.HasPrefix(arg, "--http=") {
-				exitRemoved("phoenix mcp-server --http", removedCommands["mcp-server --http"])
-			}
+		if flag := removedMCPFlag(args); flag != "" {
+			exitRemoved("phoenix mcp-server "+flag, removedCommands["mcp-server --http"])
 		}
 		err = cmdMCP(args)
 	case "keypair":

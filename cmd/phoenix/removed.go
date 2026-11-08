@@ -58,6 +58,24 @@ var removedCommands = map[string]removedCommand{
 	},
 }
 
+// removedMCPFlags belonged to MCP over HTTP. They are refused rather than
+// ignored, so a launcher still passing them hears why.
+var removedMCPFlags = []string{"--http", "--tls-cert", "--tls-key", "--mcp-token"}
+
+// removedMCPFlag returns the first removed MCP-over-HTTP flag in args
+// ("--flag" or "--flag=value"), or "".
+func removedMCPFlag(args []string) string {
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		for _, f := range removedMCPFlags {
+			if name == f {
+				return f
+			}
+		}
+	}
+	return ""
+}
+
 // checkRemovedCommand exits with a short explanation when args name a removed
 // command. It looks up "cmd sub" first, then "cmd".
 func checkRemovedCommand(cmd string, args []string) {

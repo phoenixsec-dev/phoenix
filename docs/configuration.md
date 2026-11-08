@@ -410,7 +410,7 @@ Removed in this release (see `RELEASE_NOTES.md` for why each went):
 | config | `attestation.token`, `attestation.nonce` | session roles; `source_ip` rules |
 | config | `onepassword.enabled` | `store.backend: "1password"` (the connector stays) |
 | role | `step_up`, `step_up_ttl`, `elevates_acl`, `allowed_agents` | [access requests](access-requests.md) |
-| role | `bootstrap_trust` `"mtls"` / `"token"`; `attestation` `"require_mtls"` / `"cert_fingerprint"` | `"bearer"` / `"local"`; `"source_ip"` / `"require_sealed"` |
+| role | `bootstrap_trust` `"mtls"` / `"token"`; `attestation` `"require_mtls"` / `"cert_fingerprint"` | `"bearer"` / `"local"`; attestation `"source_ip"` (loopback only), or `require_seal_key: true` |
 | policy | `require_mtls`, `cert_fingerprint`, `deny_bearer`, `process`, `require_fresh_attestation`, `credential_ttl`, `allowed_tools`, `deny_tools`, `require_nonce`, `nonce_max_age`, `require_signed`, `time_window`, `time_zone` | `source_ip`, `require_sealed` |
 
 Removed API routes (`/v1/token/mint`, `/v1/challenge`, `/v1/proxy`,

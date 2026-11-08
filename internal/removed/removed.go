@@ -5,6 +5,7 @@
 package removed
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -24,13 +25,23 @@ type Field struct {
 }
 
 // Find returns one line per removed field present in data, sorted, each naming
-// the concrete path, why it went, and what to use instead. Data that is not a
-// JSON object returns nothing; the normal parser reports that error.
+// the concrete path, why it went, and what to use instead. It reads the JSON
+// the way the config decoder does: keys match case-insensitively, a key that
+// appears twice is checked in every occurrence (the decoder merges repeated
+// objects), and numbers of any size are fine. JSON it cannot read gives one
+// refusal line, so a file is never treated as clean by accident. Empty or
+// whitespace-only data returns nothing.
 func Find(data []byte, fields []Field) []string {
-	var root any
-	if err := json.Unmarshal(data, &root); err != nil {
+	if len(bytes.TrimSpace(data)) == 0 {
 		return nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	root, err := readNode(dec)
+	if err != nil {
+		return []string{fmt.Sprintf("(file): could not be checked for removed settings: %v", err)}
+	}
+	seen := map[string]bool{}
 	var out []string
 	for _, f := range fields {
 		for _, hit := range match(root, strings.Split(f.Path, "."), "", f.Value) {
@@ -38,15 +49,71 @@ func Find(data []byte, fields []Field) []string {
 			if f.Instead != "" {
 				line += " Instead: " + f.Instead + "."
 			}
-			out = append(out, line)
+			if !seen[line] {
+				seen[line] = true
+				out = append(out, line)
+			}
 		}
 	}
 	sort.Strings(out)
 	return out
 }
 
-// match walks node along keys and returns the concrete paths that exist.
-func match(node any, keys []string, prefix, value string) []string {
+// node is one JSON value. Objects keep every key in file order, duplicates
+// included, which a Go map would lose.
+type node struct {
+	keys []string
+	vals []*node
+	arr  []*node
+	str  *string
+}
+
+// readNode reads one JSON value from dec's token stream.
+func readNode(dec *json.Decoder) (*node, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	n := &node{}
+	switch t := tok.(type) {
+	case json.Delim:
+		switch t {
+		case '{':
+			for dec.More() {
+				kt, err := dec.Token()
+				if err != nil {
+					return nil, err
+				}
+				k, _ := kt.(string)
+				v, err := readNode(dec)
+				if err != nil {
+					return nil, err
+				}
+				n.keys, n.vals = append(n.keys, k), append(n.vals, v)
+			}
+		case '[':
+			n.arr = []*node{}
+			for dec.More() {
+				v, err := readNode(dec)
+				if err != nil {
+					return nil, err
+				}
+				n.arr = append(n.arr, v)
+			}
+		}
+		if _, err := dec.Token(); err != nil { // closing delimiter
+			return nil, err
+		}
+	case string:
+		n.str = &t
+	}
+	return n, nil
+}
+
+// match walks n along keys and returns the concrete paths that exist. A
+// literal key matches case-insensitively, like the config decoder; "*"
+// matches any key and "[]" every array element.
+func match(n *node, keys []string, prefix, value string) []string {
 	if len(keys) == 0 {
 		if value == "" {
 			return []string{prefix}
@@ -55,50 +122,30 @@ func match(node any, keys []string, prefix, value string) []string {
 	}
 	key, rest := keys[0], keys[1:]
 	if key == "[]" {
-		arr, ok := node.([]any)
-		if !ok {
-			return nil
-		}
 		var out []string
-		for i, el := range arr {
-			p := fmt.Sprintf("%s[%d]", prefix, i)
+		for i, el := range n.arr {
 			if len(rest) == 0 && value != "" {
-				if s, ok := el.(string); ok && s == value {
+				if el.str != nil && *el.str == value {
 					out = append(out, fmt.Sprintf("%s %q", prefix, value))
 				}
 				continue
 			}
-			out = append(out, match(el, rest, p, value)...)
+			out = append(out, match(el, rest, fmt.Sprintf("%s[%d]", prefix, i), value)...)
 		}
 		return out
 	}
-	obj, ok := node.(map[string]any)
-	if !ok {
-		return nil
-	}
-	join := func(k string) string {
-		if prefix == "" {
-			return k
+	var out []string
+	for i, k := range n.keys {
+		if key != "*" && !strings.EqualFold(k, key) {
+			continue
 		}
-		return prefix + "." + k
-	}
-	if key == "*" {
-		names := make([]string, 0, len(obj))
-		for k := range obj {
-			names = append(names, k)
+		p := k
+		if prefix != "" {
+			p = prefix + "." + k
 		}
-		sort.Strings(names)
-		var out []string
-		for _, k := range names {
-			out = append(out, match(obj[k], rest, join(k), value)...)
-		}
-		return out
+		out = append(out, match(n.vals[i], rest, p, value)...)
 	}
-	child, ok := obj[key]
-	if !ok {
-		return nil
-	}
-	return match(child, rest, join(key), value)
+	return out
 }
 
 // Error joins Find's lines into one startup error, or returns nil when there

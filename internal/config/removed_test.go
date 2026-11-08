@@ -103,3 +103,22 @@ func TestExampleConfigHasNoRemovedSettings(t *testing.T) {
 		t.Fatalf("config.example.json: %v", err)
 	}
 }
+
+// Review H3: role attestation "require_sealed" checks nothing without
+// require_seal_key, so that combination is refused instead of trusted.
+func TestRoleRequireSealedNeedsSealKey(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Session.Enabled = true
+	cfg.Session.Roles = map[string]RoleConfig{
+		"r": {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, Attestation: []string{"require_sealed"}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_seal_key") {
+		t.Fatalf("require_sealed without require_seal_key: %v", err)
+	}
+	r := cfg.Session.Roles["r"]
+	r.RequireSealKey = true
+	cfg.Session.Roles["r"] = r
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("require_sealed with require_seal_key: %v", err)
+	}
+}
