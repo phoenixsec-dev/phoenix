@@ -29,7 +29,7 @@
     {{range .Grants}}
         <tr>
             <td>{{.Agent}}</td>
-            <td class="mono">{{join .Paths ", "}}</td>
+            <td class="mono path-full">{{join .Paths ", "}}</td>
             <td class="mono">{{.Action}}</td>
             {{if eq $.View "active"}}
             <td>{{ttlRemain .ExpiresAt}}</td>

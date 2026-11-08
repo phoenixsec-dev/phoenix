@@ -59,7 +59,7 @@
             <td class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
             <td>{{.Agent}}</td>
             <td class="mono">{{.Action}}</td>
-            <td class="mono">{{truncate .Path 40}}</td>
+            <td class="mono path-full">{{.Path}}</td>
             <td><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
         </tr>
     {{end}}

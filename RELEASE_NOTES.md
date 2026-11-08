@@ -28,6 +28,8 @@ loads in under 150 ms with the same log.
   the newest 50 denied entries, not the denied ones among the newest 50.
 - `GET /v1/audit` without `limit` (and `phoenix audit` without `--last`)
   returns the newest 10,000 entries instead of the whole log.
+- Secret paths are shown in full on every dashboard page (Overview and Audit
+  used to cut them at 40 and 30 characters) and wrap on narrow screens.
 
 ## v0.19.0 (2026-11-01)
 

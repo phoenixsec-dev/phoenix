@@ -47,7 +47,7 @@
             <div class="attest-list">
                 <div class="detail-label">Attestation (never waived; checked at every use)</div>
                 {{range .Attestation}}
-                <div class="detail-row"><span class="mono">{{.Path}}</span><span>{{.Requirement}}: <strong>{{.Status}}</strong></span></div>
+                <div class="detail-row"><span class="mono path-full">{{.Path}}</span><span>{{.Requirement}}: <strong>{{.Status}}</strong></span></div>
                 {{end}}
             </div>
             {{end}}
@@ -69,7 +69,7 @@
         </form>
         <div class="history">
             <div class="detail-label">This agent, last 24h: {{len .History}} other request(s), {{.HistoryDenied}} denied</div>
-            {{range .History}}<div class="mono history-item">{{.Status}} &middot; {{.Paths}}</div>{{end}}
+            {{range .History}}<div class="mono history-item path-full">{{.Status}} &middot; {{.Paths}}</div>{{end}}
         </div>
         <div class="approval-id mono">{{.ID}}</div>
     </div>

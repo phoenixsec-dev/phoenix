@@ -792,3 +792,24 @@ func TestAuditPageStatusFilterAndTruncation(t *testing.T) {
 		t.Fatal("truncation notice missing or outside #audit-table")
 	}
 }
+
+// Overview and Audit show a secret path in full, in a cell that can wrap,
+// not cut to 30-40 characters.
+func TestPagesShowFullSecretPath(t *testing.T) {
+	h, _, _ := testHandler(t)
+	cookie := login(t, h)
+	long := "homelab/proxmox/cluster-api-tokens/automation/terraform-provisioner-token"
+	path := filepath.Join(t.TempDir(), "audit.log")
+	os.WriteFile(path, []byte(`{"ts":"2026-11-08T00:00:00Z","agent":"a","action":"read","path":"`+long+`","status":"allowed","sealed":false}`+"\n"), 0600)
+	h.deps.AuditPath = path
+
+	for _, page := range []string{"/dashboard/", "/dashboard/audit"} {
+		req := httptest.NewRequest("GET", page, nil)
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if !strings.Contains(w.Body.String(), `<td class="mono path-full">`+long+`</td>`) {
+			t.Fatalf("%s: full path not shown in a path-full cell", page)
+		}
+	}
+}

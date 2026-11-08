@@ -47,7 +47,7 @@
             <td class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
             <td>{{.Agent}}</td>
             <td class="mono">{{.Action}}</td>
-            <td class="mono">{{truncate .Path 30}}</td>
+            <td class="mono path-full">{{.Path}}</td>
             <td><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
             <td class="mono">{{.IP}}</td>
             <td class="mono">{{truncate .SessionID 12}}</td>
