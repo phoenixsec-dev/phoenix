@@ -91,7 +91,7 @@ func (s *Server) isApprover(info *authInfo) bool {
 }
 
 // grantCaller describes the caller's credential for grant binding: the auth
-// method plus the bearer/cert fingerprint or short-lived token issue time.
+// method plus the bearer/cert fingerprint.
 // Sessions get an empty Caller, which matches no grant and is refused by
 // Create (a second guard behind dataAccess step 1: a session over mTLS
 // carries the cert fingerprint, so it must never be described as "mtls").
@@ -105,8 +105,6 @@ func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 		c.CredentialFP = info.BearerFP
 	case grant.AuthMTLS:
 		c.CredentialFP = info.CertFingerprint
-	case grant.AuthToken:
-		c.TokenIssuedAt = *info.TokenIssuedAt
 	}
 	return c
 }

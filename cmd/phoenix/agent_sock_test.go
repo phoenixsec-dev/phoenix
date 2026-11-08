@@ -205,30 +205,3 @@ func TestTokenCacheMissingAgent(t *testing.T) {
 		t.Fatalf("expected empty for missing agent, got %q", tok)
 	}
 }
-
-func TestAttestViaSocket(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "attest-test.sock")
-	ag := agent.New(sockPath)
-	if err := ag.Start(); err != nil {
-		t.Fatalf("starting agent: %v", err)
-	}
-	defer ag.Stop()
-
-	uid, hash, err := attestViaSocket(sockPath, "test")
-	if err != nil {
-		t.Fatalf("attestViaSocket: %v", err)
-	}
-
-	if uid != os.Getuid() {
-		t.Errorf("UID = %d, want %d", uid, os.Getuid())
-	}
-	// Binary hash may or may not be available depending on /proc
-	_ = hash
-}
-
-func TestAttestViaSocketNoAgent(t *testing.T) {
-	_, _, err := attestViaSocket("/tmp/phoenix-nonexistent-test.sock", "test")
-	if err == nil {
-		t.Fatal("expected error for non-existent socket")
-	}
-}

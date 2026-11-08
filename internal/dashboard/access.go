@@ -235,28 +235,8 @@ func (h *Handler) attestFacts(rq grant.Request, p string, sealKeyOK bool) []atte
 		add("specific client certificate", is(rq.AuthMethod == grant.AuthMTLS &&
 			strings.EqualFold(rq.CredentialFP, rule.CertFingerprint)))
 	}
-	if rule.RequireNonce {
-		add("nonce challenge", nil)
-	}
-	if rule.RequireSigned {
-		add("signed resolve", nil)
-	}
-	if rule.Process != nil {
-		add("process attestation (local agent socket)", nil)
-	}
 	if rule.TimeWindow != "" {
 		add("time window "+rule.TimeWindow, nil)
-	}
-	switch {
-	case rule.RequireFreshAttestation && rq.AuthMethod != grant.AuthToken:
-		// Only a short-lived token carries an issue time, so a bearer token
-		// or cert can never pass this: the grant would be unusable.
-		add("short-lived credential", is(false))
-	case rule.CredentialTTL != "" || rule.RequireFreshAttestation:
-		add("short-lived credential", nil) // token age is checked at each use
-	}
-	if len(rule.AllowedTools) > 0 || len(rule.DenyTools) > 0 {
-		add("tool restriction", nil)
 	}
 	if rule.RequireSealed {
 		add("sealed delivery", is(sealKeyOK))

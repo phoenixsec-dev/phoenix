@@ -2,9 +2,7 @@
 package api
 
 import (
-	"crypto/ecdsa"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,12 +26,10 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/grant"
-	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/ref"
 	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
-	"github.com/phoenixsec/phoenix/internal/token"
 )
 
 // MaxRequestBodyBytes limits the size of request bodies to prevent DoS.
@@ -159,8 +154,6 @@ type Server struct {
 	ca            *ca.CA         // nil when mTLS is disabled
 	policy        *policy.Engine // nil when no attestation policy configured
 	bearerEnabled bool           // whether bearer token auth is allowed
-	nonces        *nonce.Store   // nil when nonce challenge is not configured
-	tokens        *token.Issuer  // nil when short-lived tokens are not configured
 	startTime     time.Time      // server start time for uptime reporting
 	authRL        *rateLimiter
 	sessions      *session.Store               // nil when sessions are not configured
@@ -236,16 +229,6 @@ func (s *Server) SetPolicy(p *policy.Engine) {
 	s.policy = p
 }
 
-// SetNonceStore configures the nonce store for challenge-response flows.
-func (s *Server) SetNonceStore(ns *nonce.Store) {
-	s.nonces = ns
-}
-
-// SetTokenIssuer configures the short-lived token issuer.
-func (s *Server) SetTokenIssuer(ti *token.Issuer) {
-	s.tokens = ti
-}
-
 // SetSessionStore configures the session identity store.
 func (s *Server) SetSessionStore(ss *session.Store) {
 	s.sessions = ss
@@ -291,9 +274,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/certs/revoke", s.handleRevokeCert)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
-	s.mux.HandleFunc("POST /v1/challenge", s.handleChallenge)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
-	s.mux.HandleFunc("POST /v1/token/mint", s.handleMintToken)
 	s.mux.HandleFunc("POST /v1/proxy", s.handleProxy)
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
@@ -313,11 +294,9 @@ type authInfo struct {
 	Agent           string
 	UsedMTLS        bool
 	UsedBearer      bool
-	IsLocal         bool                   // true when client IP is loopback
-	CertFingerprint string                 // "sha256:<hex>" or empty
-	BearerFP        string                 // grant.BearerFingerprint of the presented token's hash (bearer auth only)
-	TokenIssuedAt   *time.Time             // set when authenticated via short-lived token
-	Process         *policy.ProcessContext // set when token carries process attestation claims
+	IsLocal         bool   // true when client IP is loopback
+	CertFingerprint string // "sha256:<hex>" or empty
+	BearerFP        string // grant.BearerFingerprint of the presented token's hash (bearer auth only)
 
 	// Session identity (set when authenticated via session token)
 	UsedSession        bool
@@ -350,7 +329,7 @@ func (s *Server) authenticate(r *http.Request) (string, error) {
 // authenticateInfo identifies the calling agent and collects attestation
 // evidence from the request (auth method, cert fingerprint, etc.).
 //
-// Auth priority: session token > mTLS > short-lived token > bearer.
+// Auth priority: session token > mTLS > bearer.
 // Session tokens are checked first so that a renewal request carrying both
 // a phxs_ token and a client certificate authenticates via the session.
 // When a session is authenticated and a verified client cert is also present,
@@ -420,31 +399,6 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		log.Printf("mTLS auth failed for %s: %v", clientIP(r), err)
 	}
 
-	// --- Short-lived token authentication ---
-	if s.tokens != nil && tok != "" {
-		claims, err := s.tokens.Validate(tok)
-		if err == nil {
-			iat := claims.IssuedAt
-			info := &authInfo{
-				Agent:         claims.Agent,
-				IsLocal:       local,
-				TokenIssuedAt: &iat,
-			}
-			// Propagate process attestation claims from the token
-			if claims.ProcessUID != nil || claims.BinaryHash != "" {
-				pc := &policy.ProcessContext{
-					BinaryHash: claims.BinaryHash,
-				}
-				if claims.ProcessUID != nil {
-					pc.UID = *claims.ProcessUID
-				}
-				info.Process = pc
-			}
-			return info, nil
-		}
-		// Not a valid short-lived token — fall through to bearer
-	}
-
 	// --- Bearer token authentication ---
 	if err := s.authRL.check(ip); err != nil {
 		return nil, err
@@ -477,48 +431,22 @@ func certFingerprint(raw []byte) string {
 	return fmt.Sprintf("sha256:%X", hash[:])
 }
 
-// attest checks attestation policy for the given secret path.
-// Returns nil if no policy is configured or if the request passes.
-// nonceValidated indicates whether a nonce was submitted and validated for this request.
-func (s *Server) attest(r *http.Request, path string, info *authInfo, nonceValidated bool) error {
-	return s.attestFull(r, path, info, nonceValidated, false, false)
-}
-
-func (s *Server) attestFull(r *http.Request, path string, info *authInfo, nonceValidated, signatureVerified, sealKeyValidated bool) error {
+// attestFull checks the attestation policy for path. Returns nil if no policy
+// is configured or the request passes.
+func (s *Server) attestFull(r *http.Request, path string, info *authInfo, sealKeyValidated bool) error {
 	if s.policy == nil {
 		return nil
 	}
 	ctx := &policy.RequestContext{
-		UsedMTLS:          info.UsedMTLS,
-		UsedBearer:        info.UsedBearer,
-		SourceIP:          clientIP(r),
-		CertFingerprint:   info.CertFingerprint,
-		Tool:              r.Header.Get("X-Phoenix-Tool"),
-		Process:           info.Process,
-		NonceValidated:    nonceValidated,
-		SignatureVerified: signatureVerified,
-		TokenIssuedAt:     info.TokenIssuedAt,
-		SealKeyPresented:  sealKeyValidated,
-		SessionID:         info.SessionID,
-		SessionRole:       info.SessionRole,
+		UsedMTLS:         info.UsedMTLS,
+		UsedBearer:       info.UsedBearer,
+		SourceIP:         clientIP(r),
+		CertFingerprint:  info.CertFingerprint,
+		SealKeyPresented: sealKeyValidated,
+		SessionID:        info.SessionID,
+		SessionRole:      info.SessionRole,
 	}
 	return s.policy.Evaluate(path, ctx)
-}
-
-// buildCanonicalPayload constructs the deterministic JSON payload used
-// for signed resolve verification. Fields are sorted alphabetically.
-func buildCanonicalPayload(nonce, timestamp string, refs []string) []byte {
-	sortedRefs := make([]string, len(refs))
-	copy(sortedRefs, refs)
-	sort.Strings(sortedRefs)
-
-	canonical := map[string]interface{}{
-		"nonce":     nonce,
-		"refs":      sortedRefs,
-		"timestamp": timestamp,
-	}
-	data, _ := json.Marshal(canonical)
-	return data
 }
 
 // extractToken gets the bearer token from the Authorization header.
@@ -890,7 +818,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
-			if s.attestFull(r, p, info, false, false, sealKeyValidated) != nil {
+			if s.attestFull(r, p, info, sealKeyValidated) != nil {
 				continue
 			}
 			visible = append(visible, p)
@@ -912,7 +840,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attestation policy check (with validated seal key state)
-	if err := s.attestFull(r, path, info, false, false, sealKeyValidated); err != nil {
+	if err := s.attestFull(r, path, info, sealKeyValidated); err != nil {
 		s.denyAttestation(w, r, info, "read_value", path, ip, err)
 		return
 	}
@@ -976,7 +904,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attestation policy check
-	if err := s.attest(r, path, info, false); err != nil {
+	if err := s.attestFull(r, path, info, false); err != nil {
 		s.denyAttestation(w, r, info, "write", path, ip, err)
 		return
 	}
@@ -1028,7 +956,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attestation policy check
-	if err := s.attest(r, path, info, false); err != nil {
+	if err := s.attestFull(r, path, info, false); err != nil {
 		s.denyAttestation(w, r, info, "delete", path, ip, err)
 		return
 	}
@@ -1367,15 +1295,13 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveRequest is the JSON body for batch reference resolution.
+// Nonce and Signature are only read to refuse them: nonce challenges and
+// signed resolve were removed, and a client still sending them should hear so.
 type resolveRequest struct {
 	Refs      []string `json:"refs"`
-	Nonce     string   `json:"nonce,omitempty"`     // optional nonce from /v1/challenge
-	Timestamp string   `json:"timestamp,omitempty"` // RFC3339 timestamp for signed resolve
-	Signature string   `json:"signature,omitempty"` // base64 detached ECDSA signature
+	Nonce     string   `json:"nonce,omitempty"`
+	Signature string   `json:"signature,omitempty"`
 }
-
-// signedResolveMaxSkew is the maximum allowed clock skew for signed resolve timestamps.
-const signedResolveMaxSkew = 60 * time.Second
 
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
@@ -1408,67 +1334,9 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate nonce if provided
-	nonceValidated := false
-	if req.Nonce != "" {
-		if s.nonces == nil {
-			jsonError(w, "nonce challenge not enabled", http.StatusBadRequest)
-			return
-		}
-		if err := s.nonces.Validate(req.Nonce); err != nil {
-			s.denyResolveAttestation(w, r, info, ip, req.Refs, "nonce validation failed: "+err.Error())
-			return
-		}
-		nonceValidated = true
-	}
-
-	// Verify signed resolve payload if provided
-	signatureVerified := false
-	if req.Signature != "" {
-		// Require nonce and timestamp alongside signature
-		if req.Nonce == "" || req.Timestamp == "" {
-			jsonError(w, "signed resolve requires nonce and timestamp", http.StatusBadRequest)
-			return
-		}
-
-		// Parse and validate timestamp freshness
-		ts, tsErr := time.Parse(time.RFC3339, req.Timestamp)
-		if tsErr != nil {
-			jsonError(w, "invalid timestamp format (expected RFC3339)", http.StatusBadRequest)
-			return
-		}
-		if time.Since(ts).Abs() > signedResolveMaxSkew {
-			s.denyResolveAttestation(w, r, info, ip, req.Refs, "signed resolve timestamp outside allowed skew window")
-			return
-		}
-
-		// Build canonical payload for verification
-		canonical := buildCanonicalPayload(req.Nonce, req.Timestamp, req.Refs)
-
-		// Decode signature
-		sigBytes, decErr := base64.StdEncoding.DecodeString(req.Signature)
-		if decErr != nil {
-			jsonError(w, "invalid signature encoding", http.StatusBadRequest)
-			return
-		}
-
-		// Verify against mTLS client cert public key
-		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			s.denyResolveAttestation(w, r, info, ip, req.Refs, "signed resolve requires mTLS client certificate")
-			return
-		}
-		pubKey, ok := r.TLS.PeerCertificates[0].PublicKey.(*ecdsa.PublicKey)
-		if !ok {
-			jsonError(w, "client certificate must use ECDSA key for signed resolve", http.StatusBadRequest)
-			return
-		}
-
-		hash := sha256.Sum256(canonical)
-		if !ecdsa.VerifyASN1(pubKey, hash[:], sigBytes) {
-			s.denyResolveAttestation(w, r, info, ip, req.Refs, "signed resolve signature verification failed")
-			return
-		}
-		signatureVerified = true
+	if req.Nonce != "" || req.Signature != "" {
+		jsonError(w, "nonce challenges and signed resolve were removed; send refs only", http.StatusBadRequest)
+		return
 	}
 
 	values := make(map[string]string)
@@ -1516,7 +1384,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Attestation policy check (per-ref)
-		if err := s.attestFull(r, path, info, nonceValidated, signatureVerified, sealKey != nil); err != nil {
+		if err := s.attestFull(r, path, info, sealKey != nil); err != nil {
 			s.auditDeniedDetail(r, info, "resolve", path, ip, "attestation", err.Error())
 			deny(refStr, attestationDenialCode(err), "attestation required")
 			continue
@@ -1588,33 +1456,6 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	jsonOK(w, resp)
-}
-
-// handleChallenge issues a one-time nonce for challenge-response attestation.
-func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
-	if s.nonces == nil {
-		jsonError(w, "nonce challenge not enabled", http.StatusNotImplemented)
-		return
-	}
-
-	// Authentication required to get a challenge
-	_, err := s.authenticate(r)
-	if err != nil {
-		handleAuthError(w, err)
-		return
-	}
-
-	entry, err := s.nonces.Generate()
-	if err != nil {
-		log.Printf("error generating nonce: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	jsonOK(w, map[string]interface{}{
-		"nonce":   entry.Nonce,
-		"expires": entry.Expires.UTC().Format(time.RFC3339),
-	})
 }
 
 // revokeCertRequest is the JSON body for certificate revocation.
@@ -1721,20 +1562,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if rule.CertFingerprint != "" {
 				checks = append(checks, "cert-pinned")
 			}
-			if len(rule.AllowedTools) > 0 {
-				checks = append(checks, "tool-scoped")
-			}
 			if rule.TimeWindow != "" {
 				checks = append(checks, "time-window")
-			}
-			if rule.Process != nil {
-				checks = append(checks, "process-attested")
-			}
-			if rule.RequireNonce {
-				checks = append(checks, "nonce-required")
-			}
-			if rule.RequireFreshAttestation {
-				checks = append(checks, "fresh-credential")
 			}
 			if rule.RequireSealed {
 				checks = append(checks, "sealed-required")
@@ -1755,11 +1584,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		status["mtls"] = "disabled"
 	}
 
-	// Nonce store status
-	if s.nonces != nil {
-		status["nonce_pending"] = s.nonces.Pending()
-	}
-
 	// Request-use grants: degraded store and audit lines still pending.
 	if ar := s.accessStatus(); ar != nil {
 		status["access_requests"] = ar
@@ -1773,13 +1597,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, status)
-}
-
-// mintTokenRequest is the JSON body for token minting.
-type mintTokenRequest struct {
-	Agent      string `json:"agent"`
-	ProcessUID *int   `json:"process_uid,omitempty"`
-	BinaryHash string `json:"binary_hash,omitempty"`
 }
 
 // handlePolicyCheck returns whether a specific policy check passes for a path.
@@ -1825,54 +1642,6 @@ func (s *Server) handlePolicyCheck(w http.ResponseWriter, r *http.Request) {
 		"path":    path,
 		"check":   check,
 		"allowed": allowed,
-	})
-}
-
-// handleMintToken creates a short-lived token for an agent.
-func (s *Server) handleMintToken(w http.ResponseWriter, r *http.Request) {
-	if s.tokens == nil {
-		jsonError(w, "short-lived tokens not enabled", http.StatusNotImplemented)
-		return
-	}
-
-	agentName, err := s.authenticate(r)
-	if err != nil {
-		handleAuthError(w, err)
-		return
-	}
-
-	// Only admin agents can mint tokens for other agents
-	if err := s.acl.Authorize(agentName, "tokens", acl.ActionAdmin); err != nil {
-		jsonError(w, "access denied: admin required", http.StatusForbidden)
-		return
-	}
-
-	var req mintTokenRequest
-	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.Agent == "" {
-		jsonError(w, "agent is required", http.StatusBadRequest)
-		return
-	}
-
-	tok, claims, err := s.tokens.Mint(req.Agent, req.ProcessUID, req.BinaryHash)
-	if err != nil {
-		log.Printf("error minting token for %q: %v", req.Agent, err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	s.auditLogAllowed(r, agentName, "mint-token", req.Agent, clientIP(r))
-	jsonOK(w, map[string]interface{}{
-		"token":      tok,
-		"agent":      claims.Agent,
-		"issued_at":  claims.IssuedAt.Format(time.RFC3339),
-		"expires_at": claims.ExpiresAt.Format(time.RFC3339),
-		"ttl":        s.tokens.TTL().String(),
 	})
 }
 
@@ -2390,9 +2159,6 @@ func (s *Server) bootstrapMethod(info *authInfo) string {
 	}
 	if info.UsedBearer {
 		return "bearer"
-	}
-	if info.TokenIssuedAt != nil {
-		return "token"
 	}
 	return "unknown"
 }

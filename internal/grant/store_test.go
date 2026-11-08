@@ -299,56 +299,6 @@ func TestMatch(t *testing.T) {
 	}
 }
 
-func TestShortLivedTokenAndTombstone(t *testing.T) {
-	e := newEnv(t)
-	tokenIn := func() CreateInput {
-		in := bearerIn("kit", "infra/key")
-		in.AuthMethod, in.CredentialFP = AuthToken, ""
-		return in
-	}
-	r, _, err := e.s.Create(tokenIn())
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.approve(r.ID)
-
-	// Delete the agent: grant revoked, tombstone recorded. Recreate the name.
-	e.clock.Advance(time.Minute)
-	deletedAt := e.clock.Now()
-	if _, err := e.s.DeleteAgent("kit", "admin", "10.0.0.9", nil); err != nil {
-		t.Fatal(err)
-	}
-	e.clock.Advance(time.Minute)
-	r2, _, err := e.s.Create(tokenIn())
-	if err != nil {
-		t.Fatal(err)
-	}
-	g2 := e.approve(r2.ID)
-	if !g2.NotBeforeTombstone.Equal(deletedAt) {
-		t.Fatalf("not_before_tombstone = %v, want %v", g2.NotBeforeTombstone, deletedAt)
-	}
-
-	c := Caller{Agent: "kit", SourceIP: "10.0.0.5", AuthMethod: AuthToken}
-	for _, tc := range []struct {
-		iat  time.Time
-		want bool
-	}{
-		{time.Time{}, false},                 // no iat
-		{deletedAt.Add(-time.Second), false}, // old token from before the delete
-		{deletedAt, false},                   // must be strictly after
-		{deletedAt.Add(time.Second), true},   // token issued to the recreated agent
-	} {
-		c.TokenIssuedAt = tc.iat
-		if got := e.s.Match(c, "infra/key", ActionReadValue).Grant != nil; got != tc.want {
-			t.Errorf("iat %v: match = %v, want %v", tc.iat, got, tc.want)
-		}
-	}
-	// A bearer caller cannot use a token-bound grant.
-	if e.s.Match(bearerCaller("kit"), "infra/key", ActionReadValue).Grant != nil {
-		t.Fatal("bearer caller used a token-bound grant")
-	}
-}
-
 func TestRevoke(t *testing.T) {
 	e := newEnv(t)
 	g := e.approve(e.create("vector", "infra/key").ID)
@@ -456,23 +406,6 @@ func TestTickExpiryUsageRetention(t *testing.T) {
 	}
 	if _, ok := e.s.GetRequest(p.ID); ok {
 		t.Fatal("expired request not pruned after 30 days")
-	}
-}
-
-func TestTombstonePrune(t *testing.T) {
-	e := newEnv(t)
-	if _, err := e.s.DeleteAgent("gone", "admin", "", nil); err != nil {
-		t.Fatal(err)
-	}
-	e.clock.Advance(DefaultTombstoneRetention - time.Second)
-	e.s.Tick()
-	if _, ok := e.s.snapshot().Tombstones["gone"]; !ok {
-		t.Fatal("tombstone pruned too early")
-	}
-	e.clock.Advance(time.Second)
-	e.s.Tick()
-	if _, ok := e.s.snapshot().Tombstones["gone"]; ok {
-		t.Fatal("tombstone kept past retention")
 	}
 }
 

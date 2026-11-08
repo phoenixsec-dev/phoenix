@@ -149,12 +149,9 @@ type PolicyConfig struct {
 	Path string `json:"path,omitempty"` // Path to attestation policy JSON file
 }
 
-// AttestationConfig controls optional attestation components
-// (nonce challenge-response, short-lived tokens, and local agent).
-// All are disabled by default and enabled explicitly.
+// AttestationConfig controls the local agent socket. It is off by default;
+// it stays (unused) as the base for the local Phoenix service.
 type AttestationConfig struct {
-	Nonce      NonceConfig      `json:"nonce,omitempty"`
-	Token      TokenConfig      `json:"token,omitempty"`
 	LocalAgent LocalAgentConfig `json:"local_agent,omitempty"`
 }
 
@@ -162,18 +159,6 @@ type AttestationConfig struct {
 type LocalAgentConfig struct {
 	Enabled    bool   `json:"enabled"`
 	SocketPath string `json:"socket_path,omitempty"` // default: /tmp/phoenix-agent.sock
-}
-
-// NonceConfig controls the nonce challenge-response store.
-type NonceConfig struct {
-	Enabled bool   `json:"enabled"`
-	MaxAge  string `json:"max_age,omitempty"` // duration string, e.g. "30s" (default)
-}
-
-// TokenConfig controls short-lived token minting.
-type TokenConfig struct {
-	Enabled bool   `json:"enabled"`
-	TTL     string `json:"ttl,omitempty"` // duration string, e.g. "15m" (default)
 }
 
 // OPConfig controls the optional 1Password backend.
@@ -237,7 +222,6 @@ var validBootstrapMethods = map[string]bool{
 	"mtls":   true,
 	"bearer": true,
 	"local":  true,
-	"token":  true,
 }
 
 // validSessionActions lists the allowed values for RoleConfig.Actions.
@@ -297,10 +281,6 @@ func ExampleConfig() *Config {
 	// in cleartext.
 	cfg.Server.Listen = "127.0.0.1:9090"
 	cfg.Store.Backend = "file"
-	cfg.Attestation.Nonce.Enabled = false
-	cfg.Attestation.Nonce.MaxAge = "30s"
-	cfg.Attestation.Token.Enabled = false
-	cfg.Attestation.Token.TTL = "15m"
 	cfg.Attestation.LocalAgent.Enabled = false
 	cfg.Attestation.LocalAgent.SocketPath = "/tmp/phoenix-agent.sock"
 	cfg.OnePassword.Vault = "Engineering"
@@ -446,16 +426,6 @@ func (c *Config) Validate() error {
 		}
 	}
 	// Validate attestation duration strings
-	if c.Attestation.Nonce.Enabled && c.Attestation.Nonce.MaxAge != "" {
-		if _, err := time.ParseDuration(c.Attestation.Nonce.MaxAge); err != nil {
-			return fmt.Errorf("attestation.nonce.max_age: invalid duration %q: %w", c.Attestation.Nonce.MaxAge, err)
-		}
-	}
-	if c.Attestation.Token.Enabled && c.Attestation.Token.TTL != "" {
-		if _, err := time.ParseDuration(c.Attestation.Token.TTL); err != nil {
-			return fmt.Errorf("attestation.token.ttl: invalid duration %q: %w", c.Attestation.Token.TTL, err)
-		}
-	}
 	if c.Attestation.LocalAgent.Enabled && c.Attestation.LocalAgent.SocketPath == "" {
 		return errors.New("attestation.local_agent.socket_path is required when local_agent is enabled")
 	}

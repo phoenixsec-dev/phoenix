@@ -32,13 +32,11 @@ import (
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/dashboard"
 	"github.com/phoenixsec/phoenix/internal/grant"
-	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/sshca"
 	"github.com/phoenixsec/phoenix/internal/store"
-	"github.com/phoenixsec/phoenix/internal/token"
 	"github.com/phoenixsec/phoenix/internal/transport"
 	"github.com/phoenixsec/phoenix/internal/version"
 )
@@ -228,36 +226,6 @@ func main() {
 		log.Printf("  Policy: %s (%d rules)", cfg.Policy.Path, len(pe.Rules()))
 	}
 
-	// Initialize nonce store if enabled
-	if cfg.Attestation.Nonce.Enabled {
-		maxAge := nonce.DefaultMaxAge
-		if cfg.Attestation.Nonce.MaxAge != "" {
-			maxAge, _ = time.ParseDuration(cfg.Attestation.Nonce.MaxAge) // validated above
-		}
-		ns := nonce.NewStore(maxAge)
-		srv.SetNonceStore(ns)
-		defer ns.Stop()
-		log.Printf("  Nonce challenge: enabled (max_age=%s)", maxAge)
-	} else {
-		log.Printf("  Nonce challenge: disabled")
-	}
-
-	// Initialize short-lived token issuer if enabled
-	if cfg.Attestation.Token.Enabled {
-		ttl := token.DefaultTTL
-		if cfg.Attestation.Token.TTL != "" {
-			ttl, _ = time.ParseDuration(cfg.Attestation.Token.TTL) // validated above
-		}
-		ti, err := token.NewIssuer(ttl)
-		if err != nil {
-			log.Fatalf("initializing token issuer: %v", err)
-		}
-		srv.SetTokenIssuer(ti)
-		log.Printf("  Short-lived tokens: enabled (ttl=%s)", ttl)
-	} else {
-		log.Printf("  Short-lived tokens: disabled")
-	}
-
 	// Initialize session identity if enabled
 	var sessionStore *session.Store
 	var approvalStore *approval.Store
@@ -308,11 +276,7 @@ func main() {
 	// Request-use grants. The store is always opened (it only creates
 	// grants.json on the first change), so listing and revoking keep working
 	// while the feature is disabled. A missing access_requests block = off.
-	tokenTTL := token.DefaultTTL
-	if cfg.Attestation.Token.Enabled && cfg.Attestation.Token.TTL != "" {
-		tokenTTL, _ = time.ParseDuration(cfg.Attestation.Token.TTL) // validated above
-	}
-	grantStore, err := openGrantStore(cfg, a, al, tokenTTL)
+	grantStore, err := openGrantStore(cfg, a, al)
 	if err != nil {
 		log.Fatalf("opening grant store: %v", err)
 	}
@@ -675,10 +639,8 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 }
 
 // openGrantStore opens grants.json (access_requests.store_path, default next
-// to the ACL file). Tombstones for deleted agents are kept for
-// max(short-lived token TTL, max_grant_ttl) plus an hour, so no credential
-// issued before a delete can outlive its tombstone.
-func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger, tokenTTL time.Duration) (*grant.Store, error) {
+// to the ACL file).
+func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger) (*grant.Store, error) {
 	// Checked again here (Validate already did) so no caller can open a
 	// store that would overwrite or quarantine another Phoenix file.
 	if err := cfg.ValidateGrantStorePath(); err != nil {
@@ -692,10 +654,9 @@ func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger, tokenTTL t
 			_, err := a.GetAgent(name)
 			return err == nil
 		},
-		RequestTTL:         set.RequestTTL,
-		DefaultGrantTTL:    set.DefaultGrantTTL,
-		MaxGrantTTL:        set.MaxGrantTTL,
-		TombstoneRetention: max(tokenTTL, set.MaxGrantTTL) + time.Hour,
+		RequestTTL:      set.RequestTTL,
+		DefaultGrantTTL: set.DefaultGrantTTL,
+		MaxGrantTTL:     set.MaxGrantTTL,
 	})
 }
 

@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
@@ -38,7 +37,7 @@ func TestOpenGrantStoreRefusesCollisionWithoutTouchingFiles(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate accepted a grants path that is the secrets data file")
 	}
-	st, err := openGrantStore(cfg, a, al, time.Hour)
+	st, err := openGrantStore(cfg, a, al)
 	if err == nil || st != nil || !strings.Contains(err.Error(), "store_path") {
 		t.Fatalf("openGrantStore = %v, %v; want a refusal naming store_path", st, err)
 	}

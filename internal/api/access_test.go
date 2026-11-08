@@ -22,7 +22,6 @@ import (
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
-	"github.com/phoenixsec/phoenix/internal/token"
 )
 
 // --- fixture -----------------------------------------------------------------
@@ -810,34 +809,6 @@ func TestOldCredentialsCannotReachRecreatedAgentsGrants(t *testing.T) {
 		// A bearer token of the same agent is a different credential kind.
 		expect(t, e.do("GET", "/v1/secrets/infra/other", "vector-token-2", ""), 403, CodeACLDenied)
 	})
-	t.Run("short-lived token", func(t *testing.T) {
-		e := newGrantEnv(t)
-		e.clock = nil // tombstones use the real clock so they compare with token iat
-		e.set(func(s *config.AccessRequestsSettings) { s.RequireSealed = false })
-		st, err := grant.Open(grant.Options{
-			Path:        filepath.Join(t.TempDir(), "grants.json"),
-			AgentExists: func(n string) bool { _, err := e.srv.acl.GetAgent(n); return err == nil },
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		e.store = st
-		e.srv.SetGrantStore(st)
-		e.srv.now = time.Now
-		iss, _ := token.NewIssuer(time.Hour)
-		e.srv.SetTokenIssuer(iss)
-
-		oldTok, _, _ := iss.Mint("vector", nil, "")
-		time.Sleep(2 * time.Millisecond)
-		e.delVector(t)
-		e.addVector(t, "vector-token-2")
-		time.Sleep(2 * time.Millisecond)
-		newTok, _, _ := iss.Mint("vector", nil, "")
-		e.approve(t, e.request(t, newTok, "infra/other"), "")
-
-		expect(t, e.do("GET", "/v1/secrets/infra/other", newTok, ""), 200, "")
-		expect(t, e.do("GET", "/v1/secrets/infra/other", oldTok, ""), 403, CodeACLDenied)
-	})
 }
 
 // setCA turns on mTLS with a fresh test CA.
@@ -948,15 +919,12 @@ func TestEveryDenialCodeIsDocumented(t *testing.T) {
 	}
 }
 
-// R1 H2: a deleted approver's still-valid short-lived token or mTLS cert
-// (both authenticate by name) must lose every approver power.
+// R1 H2: a deleted approver's still-valid mTLS cert (it authenticates by
+// name) must lose every approver power.
 func TestDeletedApproverLosesApproverPowers(t *testing.T) {
 	e := newGrantEnv(t)
 	authority := setCA(t, e.srv)
 	cert := issueCertPEM(t, authority, "approver")
-	iss, _ := token.NewIssuer(time.Hour)
-	e.srv.SetTokenIssuer(iss)
-	tok, _, _ := iss.Mint("approver", nil, "")
 
 	gid := e.approve(t, e.request(t, vectorTok, "infra/other"), "")
 	pending := e.request(t, vectorTok, "infra/b2/app-key")
@@ -967,8 +935,7 @@ func TestDeletedApproverLosesApproverPowers(t *testing.T) {
 		e.srv.ServeHTTP(w, makeMTLSRequest(method, path, nil, cert))
 		return w
 	}
-	viaToken := func(method, path string) *httptest.ResponseRecorder { return e.do(method, path, tok, "") }
-	for name, call := range map[string]func(string, string) *httptest.ResponseRecorder{"short-lived token": viaToken, "mtls cert": viaCert} {
+	for name, call := range map[string]func(string, string) *httptest.ResponseRecorder{"mtls cert": viaCert} {
 		t.Run(name, func(t *testing.T) {
 			expect(t, call("POST", "/v1/access-requests/"+pending+"/approve"), 403, CodeApproverRequired)
 			expect(t, call("POST", "/v1/access-requests/"+pending+"/deny"), 403, CodeApproverRequired)

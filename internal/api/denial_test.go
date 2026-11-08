@@ -2,21 +2,15 @@ package api
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/phoenixsec/phoenix/internal/config"
-	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
 )
@@ -209,98 +203,6 @@ func TestSessionDenialCarriesNextStep(t *testing.T) {
 	d := decodeDenial(t, w)
 	if d["code"] != CodeScopeExceeded || d["next_step"] != NextRemintSession {
 		t.Fatalf("denial = %v", d)
-	}
-}
-
-// Request-level attestation failures in /v1/resolve (nonce, timestamp skew,
-// missing mTLS cert, bad signature) must use the denial contract and keep
-// the specific reason in the audit log only.
-func TestResolveEarlyAttestationFailuresAreCoded(t *testing.T) {
-	srv, authority, adminToken := setupTestServerWithCA(t)
-	ns := nonce.NewStore(30 * time.Second)
-	defer ns.Stop()
-	srv.SetNonceStore(ns)
-	seedSecret(t, srv, adminToken, "signed/key", "v")
-
-	bundle, err := authority.IssueAgentCert("admin")
-	if err != nil {
-		t.Fatalf("issue cert: %v", err)
-	}
-	block, _ := pem.Decode(bundle.CertPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-	keyBlock, _ := pem.Decode(bundle.KeyPEM)
-	ecKey, _ := x509.ParseECPrivateKey(keyBlock.Bytes)
-	refs := []string{"phoenix://signed/key", "phoenix://signed/key", "phoenix://signed/other"}
-	fresh := func() string { return time.Now().UTC().Format(time.RFC3339) }
-	newNonce := func() string {
-		e, err := ns.Generate()
-		if err != nil {
-			t.Fatalf("nonce: %v", err)
-		}
-		return e.Nonce
-	}
-
-	cases := []struct {
-		name       string
-		body       func() map[string]interface{}
-		withCert   bool
-		auditMatch string
-	}{
-		{"bad nonce", func() map[string]interface{} {
-			return map[string]interface{}{"refs": refs, "nonce": "not-a-real-nonce"}
-		}, false, "nonce validation failed"},
-		{"stale timestamp", func() map[string]interface{} {
-			n, ts := newNonce(), time.Now().Add(-5*time.Minute).UTC().Format(time.RFC3339)
-			return map[string]interface{}{"refs": refs, "nonce": n, "timestamp": ts, "signature": signResolvePayload(t, ecKey, n, ts, refs)}
-		}, true, "skew"},
-		{"no mTLS cert", func() map[string]interface{} {
-			n, ts := newNonce(), fresh()
-			return map[string]interface{}{"refs": refs, "nonce": n, "timestamp": ts, "signature": signResolvePayload(t, ecKey, n, ts, refs)}
-		}, false, "mTLS client certificate"},
-		{"bad signature", func() map[string]interface{} {
-			return map[string]interface{}{"refs": refs, "nonce": newNonce(), "timestamp": fresh(), "signature": base64.StdEncoding.EncodeToString([]byte("bad-sig"))}
-		}, true, "signature verification failed"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			body, _ := json.Marshal(c.body())
-			req := httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
-			if c.withCert {
-				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
-			} else {
-				req.Header.Set("Authorization", "Bearer "+adminToken)
-			}
-			w := httptest.NewRecorder()
-			srv.ServeHTTP(w, req)
-			if w.Code != http.StatusForbidden {
-				t.Fatalf("status %d, want 403: %s", w.Code, w.Body.String())
-			}
-			d := decodeDenial(t, w)
-			if d["code"] != CodeAttestationRequired || d["next_step"] != NextAskUser {
-				t.Fatalf("denial = %v", d)
-			}
-			if strings.Contains(w.Body.String(), c.auditMatch) {
-				t.Fatalf("response leaks specific reason %q: %s", c.auditMatch, w.Body.String())
-			}
-			entries, _ := queryAPIAuditEntries(t, srv, adminToken)
-			e := findAPIAuditEntry(entries, "resolve", "signed/key", "denied", "attestation")
-			if e == nil || !strings.Contains(e.Metadata["denial.detail"], c.auditMatch) {
-				t.Fatalf("audit entry missing detail %q: %+v", c.auditMatch, e)
-			}
-			// One entry per request, not per ref, so a caller cannot inflate the log.
-			n := 0
-			for _, en := range entries {
-				if strings.Contains(en.Metadata["denial.detail"], c.auditMatch) {
-					n++
-					if en.Metadata["resolve.refs"] != strconv.Itoa(len(refs)) {
-						t.Fatalf("resolve.refs = %q, want %d", en.Metadata["resolve.refs"], len(refs))
-					}
-				}
-			}
-			if n != 1 {
-				t.Fatalf("%d audit entries for one request, want 1", n)
-			}
-		})
 	}
 }
 

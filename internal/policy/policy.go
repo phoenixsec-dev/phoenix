@@ -3,7 +3,7 @@
 // Attestation policies bind secrets to specific identity evidence beyond
 // basic ACL checks. They enforce requirements like mTLS authentication,
 // source IP restrictions, certificate fingerprint pinning, tool-scoped
-// access, time-window restrictions, process identity, and nonce challenges.
+// access and time-window restrictions.
 //
 // Policies are keyed by secret path patterns (using the same glob syntax
 // as ACL rules) and evaluated after ACL authorization succeeds.
@@ -17,18 +17,8 @@
 //	      "source_ip": ["192.168.0.115"],
 //	      "cert_fingerprint": "sha256:abc123",
 //	      "deny_bearer": true,
-//	      "allowed_tools": ["git-sync", "api-call"],
-//	      "deny_tools": ["shell", "file-write"],
 //	      "time_window": "06:00-23:00",
 //	      "time_zone": "America/New_York",
-//	      "process": {
-//	        "uid": 1001,
-//	        "binary_hash": "sha256:DEF456..."
-//	      },
-//	      "require_nonce": true,
-//	      "nonce_max_age": "30s",
-//	      "credential_ttl": "15m",
-//	      "require_fresh_attestation": true
 //	    }
 //	  }
 //	}
@@ -47,12 +37,6 @@ import (
 	"github.com/phoenixsec/phoenix/internal/removed"
 )
 
-// ProcessRule defines process-level attestation requirements.
-type ProcessRule struct {
-	UID        *int   `json:"uid,omitempty"`
-	BinaryHash string `json:"binary_hash,omitempty"`
-}
-
 // Rule defines attestation requirements for secrets matching a path pattern.
 type Rule struct {
 	// L0-L3: existing attestation checks
@@ -61,39 +45,13 @@ type Rule struct {
 	CertFingerprint string   `json:"cert_fingerprint,omitempty"`
 	DenyBearer      bool     `json:"deny_bearer"`
 
-	// L4: tool-scoped policies
-	AllowedTools []string `json:"allowed_tools,omitempty"`
-	DenyTools    []string `json:"deny_tools,omitempty"`
-
-	// L5: process identity attestation
-	Process *ProcessRule `json:"process,omitempty"`
-
 	// L6: time-window restrictions
 	TimeWindow string `json:"time_window,omitempty"` // "HH:MM-HH:MM"
 	TimeZone   string `json:"time_zone,omitempty"`   // IANA timezone (e.g. "America/New_York")
 
-	// L7: short-lived credential requirements
-	CredentialTTL           string `json:"credential_ttl,omitempty"` // e.g. "15m"
-	RequireFreshAttestation bool   `json:"require_fresh_attestation,omitempty"`
-
-	// L8: nonce challenge-response
-	RequireNonce bool   `json:"require_nonce"`
-	NonceMaxAge  string `json:"nonce_max_age,omitempty"` // e.g. "30s"
-
-	// L8b: signed resolve (anti-replay completion)
-	// When true, require_nonce resolves must include a detached signature
-	// over the canonical payload, verified against the mTLS cert public key.
-	RequireSigned bool `json:"require_signed,omitempty"`
-
 	// L9: sealed response requirements
 	RequireSealed bool `json:"require_sealed,omitempty"` // deny if no valid seal key presented
 	AllowUnseal   bool `json:"allow_unseal,omitempty"`   // gate for MCP unseal tool
-}
-
-// ProcessContext contains process-level attestation evidence.
-type ProcessContext struct {
-	UID        int
-	BinaryHash string // "sha256:<hex>"
 }
 
 // RequestContext contains attestation evidence extracted from an HTTP request.
@@ -102,20 +60,6 @@ type RequestContext struct {
 	UsedBearer      bool
 	SourceIP        string
 	CertFingerprint string // "sha256:<hex>"
-
-	// Tool context (set by MCP server or skills adapter)
-	Tool string
-
-	// Process attestation (set by Unix socket agent)
-	Process *ProcessContext
-
-	// Nonce validation (set by challenge-response flow)
-	NonceValidated    bool
-	SignatureVerified bool // set when signed resolve payload is validated
-
-	// Token freshness (set by short-lived token validator)
-	TokenIssuedAt *time.Time
-	TokenTTL      time.Duration
 
 	// Override evaluation time (for testing; zero means use time.Now())
 	EvalTime time.Time
@@ -148,24 +92,15 @@ type legacyPolicyFile struct {
 type legacyRule struct {
 	Path string `json:"path"`
 
-	RequireMTLS     bool         `json:"require_mtls"`
-	AllowedIPs      []string     `json:"allowed_ips,omitempty"` // legacy name
-	SourceIP        []string     `json:"source_ip,omitempty"`   // canonical name
-	CertFingerprint string       `json:"cert_fingerprint,omitempty"`
-	DenyBearer      bool         `json:"deny_bearer"`
-	AllowedTools    []string     `json:"allowed_tools,omitempty"`
-	DenyTools       []string     `json:"deny_tools,omitempty"`
-	Process         *ProcessRule `json:"process,omitempty"`
-	TimeWindow      string       `json:"time_window,omitempty"`
-	TimeZone        string       `json:"time_zone,omitempty"`
-
-	CredentialTTL           string `json:"credential_ttl,omitempty"`
-	RequireFreshAttestation bool   `json:"require_fresh_attestation,omitempty"`
-	RequireNonce            bool   `json:"require_nonce"`
-	NonceMaxAge             string `json:"nonce_max_age,omitempty"`
-	RequireSigned           bool   `json:"require_signed,omitempty"`
-	RequireSealed           bool   `json:"require_sealed,omitempty"`
-	AllowUnseal             bool   `json:"allow_unseal,omitempty"`
+	RequireMTLS     bool     `json:"require_mtls"`
+	AllowedIPs      []string `json:"allowed_ips,omitempty"` // legacy name
+	SourceIP        []string `json:"source_ip,omitempty"`   // canonical name
+	CertFingerprint string   `json:"cert_fingerprint,omitempty"`
+	DenyBearer      bool     `json:"deny_bearer"`
+	TimeWindow      string   `json:"time_window,omitempty"`
+	TimeZone        string   `json:"time_zone,omitempty"`
+	RequireSealed   bool     `json:"require_sealed,omitempty"`
+	AllowUnseal     bool     `json:"allow_unseal,omitempty"`
 }
 
 // NewEngine creates a policy engine with no rules (all requests pass).
@@ -230,22 +165,14 @@ func Load(data []byte) (*Engine, error) {
 				ips = r.AllowedIPs
 			}
 			rules[pattern] = Rule{
-				RequireMTLS:             r.RequireMTLS,
-				AllowedIPs:              ips,
-				CertFingerprint:         r.CertFingerprint,
-				DenyBearer:              r.DenyBearer,
-				AllowedTools:            r.AllowedTools,
-				DenyTools:               r.DenyTools,
-				Process:                 r.Process,
-				TimeWindow:              r.TimeWindow,
-				TimeZone:                r.TimeZone,
-				CredentialTTL:           r.CredentialTTL,
-				RequireFreshAttestation: r.RequireFreshAttestation,
-				RequireNonce:            r.RequireNonce,
-				NonceMaxAge:             r.NonceMaxAge,
-				RequireSigned:           r.RequireSigned,
-				RequireSealed:           r.RequireSealed,
-				AllowUnseal:             r.AllowUnseal,
+				RequireMTLS:     r.RequireMTLS,
+				AllowedIPs:      ips,
+				CertFingerprint: r.CertFingerprint,
+				DenyBearer:      r.DenyBearer,
+				TimeWindow:      r.TimeWindow,
+				TimeZone:        r.TimeZone,
+				RequireSealed:   r.RequireSealed,
+				AllowUnseal:     r.AllowUnseal,
 			}
 		}
 		return &Engine{rules: rules}, nil
@@ -321,60 +248,6 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 		}
 	}
 
-	// L4: Check tool-scoped policies
-	if len(rule.AllowedTools) > 0 {
-		if ctx.Tool == "" {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  "tool context required but not provided",
-			}
-		}
-		if !containsString(rule.AllowedTools, ctx.Tool) {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  fmt.Sprintf("tool %q not in allowed list", ctx.Tool),
-			}
-		}
-	}
-	if len(rule.DenyTools) > 0 && ctx.Tool != "" {
-		if containsString(rule.DenyTools, ctx.Tool) {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  fmt.Sprintf("tool %q is explicitly denied", ctx.Tool),
-			}
-		}
-	}
-
-	// L5: Check process attestation
-	if rule.Process != nil {
-		if ctx.Process == nil {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  "process attestation required but not provided",
-			}
-		}
-		if rule.Process.UID != nil && ctx.Process.UID != *rule.Process.UID {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  fmt.Sprintf("process UID %d does not match required %d", ctx.Process.UID, *rule.Process.UID),
-			}
-		}
-		if rule.Process.BinaryHash != "" {
-			if ctx.Process.BinaryHash == "" {
-				return &DeniedError{
-					Pattern: pattern,
-					Reason:  "binary hash required but not provided",
-				}
-			}
-			if !strings.EqualFold(ctx.Process.BinaryHash, rule.Process.BinaryHash) {
-				return &DeniedError{
-					Pattern: pattern,
-					Reason:  fmt.Sprintf("binary hash mismatch: got %s", ctx.Process.BinaryHash),
-				}
-			}
-		}
-	}
-
 	// L6: Check time-window
 	if rule.TimeWindow != "" {
 		now := ctx.EvalTime
@@ -396,60 +269,6 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 				Pattern: pattern,
 				Reason:  err.Error(),
 			}
-		}
-	}
-
-	// L7: Check credential freshness
-	if rule.RequireFreshAttestation {
-		if ctx.TokenIssuedAt == nil {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  "fresh attestation required but no token timestamp provided",
-			}
-		}
-		maxTTL := 15 * time.Minute // default
-		if rule.CredentialTTL != "" {
-			parsed, err := time.ParseDuration(rule.CredentialTTL)
-			if err != nil {
-				return &DeniedError{
-					Pattern: pattern,
-					Reason:  fmt.Sprintf("invalid credential_ttl %q: %v", rule.CredentialTTL, err),
-				}
-			}
-			maxTTL = parsed
-		}
-		now := ctx.EvalTime
-		if now.IsZero() {
-			now = time.Now()
-		}
-		age := now.Sub(*ctx.TokenIssuedAt)
-		if age < -30*time.Second {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  fmt.Sprintf("token issued in the future (issued %s from now)", (-age).Round(time.Second)),
-			}
-		}
-		if age > maxTTL {
-			return &DeniedError{
-				Pattern: pattern,
-				Reason:  fmt.Sprintf("credential expired: age %s exceeds TTL %s", age.Round(time.Second), maxTTL),
-			}
-		}
-	}
-
-	// L8: Check nonce requirement
-	if rule.RequireNonce && !ctx.NonceValidated {
-		return &DeniedError{
-			Pattern: pattern,
-			Reason:  "nonce challenge-response required but not completed",
-		}
-	}
-
-	// L8b: Check signed resolve requirement
-	if rule.RequireSigned && !ctx.SignatureVerified {
-		return &DeniedError{
-			Pattern: pattern,
-			Reason:  "signed resolve payload required but not provided or invalid",
 		}
 	}
 

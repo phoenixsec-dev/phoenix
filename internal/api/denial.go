@@ -4,12 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
-	"github.com/phoenixsec/phoenix/internal/ref"
 )
 
 // Denial contract shared by every access denial the API returns.
@@ -267,26 +265,6 @@ func writeAttestationRequired(w http.ResponseWriter) {
 		"this path requires attestation that the request did not meet",
 		"ask the Phoenix operator which attestation this path requires",
 		http.StatusForbidden)
-}
-
-// denyResolveAttestation handles request-level attestation failures in
-// /v1/resolve (nonce, timestamp skew, client certificate, signature). These
-// happen before any ref is checked and need no access to any path, so they
-// write a single audit entry (the first ref's path, plus "resolve.refs" with
-// the ref count) rather than one per ref, which a caller could inflate.
-// The caller gets one generic ATTESTATION_REQUIRED denial.
-func (s *Server) denyResolveAttestation(w http.ResponseWriter, r *http.Request, info *authInfo, ip string, refs []string, detail string) {
-	path := ""
-	if len(refs) > 0 {
-		path = refs[0]
-		if p, err := ref.Parse(refs[0]); err == nil {
-			path = p
-		}
-	}
-	metadata := denialAuditMetadata(r, detail)
-	metadata["resolve.refs"] = strconv.Itoa(len(refs))
-	s.auditDeniedMetadata(info, "resolve", path, ip, "attestation", metadata)
-	writeAttestationRequired(w)
 }
 
 // auditDeniedDetail is auditDenied plus a "denial.detail" metadata entry for

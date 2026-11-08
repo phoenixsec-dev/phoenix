@@ -27,16 +27,15 @@ func cmdStatus(args []string) error {
 	}
 
 	var status struct {
-		Status       string                       `json:"status"`
-		Uptime       string                       `json:"uptime"`
-		Secrets      int                          `json:"secrets"`
-		Agents       int                          `json:"agents"`
-		Time         string                       `json:"time"`
-		MTLS         string                       `json:"mtls"`
-		PolicyRules  int                          `json:"policy_rules"`
-		Policy       map[string]string            `json:"policy"`
-		NoncePending int                          `json:"nonce_pending"`
-		RecentAudit  []map[string]json.RawMessage `json:"recent_audit"`
+		Status      string                       `json:"status"`
+		Uptime      string                       `json:"uptime"`
+		Secrets     int                          `json:"secrets"`
+		Agents      int                          `json:"agents"`
+		Time        string                       `json:"time"`
+		MTLS        string                       `json:"mtls"`
+		PolicyRules int                          `json:"policy_rules"`
+		Policy      map[string]string            `json:"policy"`
+		RecentAudit []map[string]json.RawMessage `json:"recent_audit"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		return fmt.Errorf("decoding status: %w", err)
@@ -74,11 +73,6 @@ func cmdStatus(args []string) error {
 		}
 	} else {
 		fmt.Printf("  Policy: no attestation rules\n")
-	}
-
-	// Nonce store
-	if status.NoncePending > 0 {
-		fmt.Printf("  Nonce challenges pending: %d\n", status.NoncePending)
 	}
 
 	// Recent audit

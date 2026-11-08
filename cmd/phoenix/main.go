@@ -35,14 +35,10 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	cryptorand "crypto/rand"
 	sha256pkg "crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -52,7 +48,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -225,18 +220,6 @@ func main() {
 		}
 	case "rotate-master":
 		err = cmdRotateMaster()
-	case "token":
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix token <mint>")
-			os.Exit(1)
-		}
-		switch args[0] {
-		case "mint":
-			err = cmdTokenMint(args[1:])
-		default:
-			fmt.Fprintf(os.Stderr, "unknown token subcommand: %s\n", args[0])
-			os.Exit(1)
-		}
 	case "cert":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: phoenix cert <issue>")
@@ -263,16 +246,12 @@ func main() {
 		}
 	case "agent-sock":
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix agent-sock <attest|token|resolve>")
+			fmt.Fprintln(os.Stderr, "usage: phoenix agent-sock attest")
 			os.Exit(1)
 		}
 		switch args[0] {
 		case "attest":
 			err = cmdAgentSockAttest(args[1:])
-		case "token":
-			err = cmdAgentSockToken(args[1:])
-		case "resolve":
-			err = cmdAgentSockResolve(args[1:])
 		default:
 			fmt.Fprintf(os.Stderr, "unknown agent-sock subcommand: %s\n", args[0])
 			os.Exit(1)
@@ -397,7 +376,7 @@ Usage:
                                               ACL path globs: ns/* = one level, ns/** = recursive
   phoenix agent list                          List agents
   phoenix agent delete <name>                 Delete an agent
-  phoenix resolve [--signed] <ref> [ref...]     Resolve phoenix:// references to values
+  phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
   phoenix resolve --stdin-json                  OpenClaw SecretRef exec provider (stdin/stdout JSON)
   phoenix openclaw-exec-provider               OpenClaw SecretRef exec provider (stdin/stdout JSON)
   phoenix secret-provider openclaw             Alias for openclaw-exec-provider
@@ -414,13 +393,10 @@ Usage:
   phoenix status                              Show server health, secrets, agents, policy
   phoenix policy show <path>                  Show attestation requirements for path
   phoenix policy test -a <agent> -i <ip> [-t time] <p>  Dry-run attestation check
-  phoenix token mint <agent>                   Mint a short-lived token for an agent
   phoenix rotate-master                       Rotate master encryption key
   phoenix cert issue <name> [-o dir]          Issue mTLS client certificate
   phoenix emergency get <path> --data-dir <d> [--confirm]  Break-glass offline secret retrieval
   phoenix agent-sock attest [--socket <path>]  Attest via local Unix socket agent
-  phoenix agent-sock token --agent <name>      Mint/cache short-lived token via socket
-  phoenix agent-sock resolve <ref...>          Resolve refs using cached socket token
   phoenix keypair generate <name> [-o path]    Generate X25519 seal key pair
   phoenix keypair show <name>                 Show public key for a seal key pair
   phoenix sessions list [--role R] [--agent A]  List active sessions
@@ -451,7 +427,6 @@ Environment:
   PHOENIX_CLIENT_KEY   Client key for mTLS authentication
   PHOENIX_SEAL_KEY     Seal private key file (enables sealed mode)
   PHOENIX_POLICY       Path to attestation policy file (JSON)
-  PHOENIX_TOOL         Tool/skill name for attestation (X-Phoenix-Tool header)
   PHOENIX_ROLE         Role name for auto-mint session identity
   PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)
   PHOENIX_MCP_TLS_CERT TLS server certificate for MCP HTTP mode (--tls-cert)
@@ -509,9 +484,6 @@ func apiRequestWithHeaders(method, path string, body io.Reader, headers map[stri
 		req.Header.Set(k, v)
 	}
 	// Pass tool/skill attestation claim if set
-	if tool := os.Getenv("PHOENIX_TOOL"); tool != "" {
-		req.Header.Set("X-Phoenix-Tool", tool)
-	}
 	return httpClient.Do(req)
 }
 
@@ -1363,18 +1335,15 @@ func cmdResolve(args []string) error {
 	}
 
 	var refs []string
-	signed := false
-
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--signed" {
-			signed = true
-		} else {
-			refs = append(refs, args[i])
+	for _, arg := range args {
+		if arg == "--signed" {
+			exitRemoved("phoenix resolve --signed", removedCommands["resolve --signed"])
 		}
+		refs = append(refs, arg)
 	}
 
 	if len(refs) < 1 {
-		return fmt.Errorf("usage: phoenix resolve [--signed] <phoenix://ns/secret> [ref...]")
+		return fmt.Errorf("usage: phoenix resolve <phoenix://ns/secret> [ref...]")
 	}
 
 	sealPrivKey, err := loadSealKeyForRequest()
@@ -1382,62 +1351,7 @@ func cmdResolve(args []string) error {
 		return fmt.Errorf("loading seal key: %w", err)
 	}
 
-	var bodyMap map[string]interface{}
-
-	if signed {
-		// Signed resolve flow:
-		// 1. Get nonce from /v1/challenge
-		// 2. Build canonical payload
-		// 3. Sign with client key
-		// 4. Send signed resolve request
-		challengeResp, err := apiRequest("POST", "/v1/challenge", nil)
-		if err != nil {
-			return fmt.Errorf("challenge request failed: %w", err)
-		}
-		defer challengeResp.Body.Close()
-		if challengeResp.StatusCode != 200 {
-			return fmt.Errorf("challenge failed: %w", handleError(challengeResp))
-		}
-
-		var challenge struct {
-			Nonce string `json:"nonce"`
-		}
-		json.NewDecoder(challengeResp.Body).Decode(&challenge)
-
-		timestamp := time.Now().UTC().Format(time.RFC3339)
-
-		// Build canonical payload (sorted keys, sorted refs)
-		sortedRefs := make([]string, len(refs))
-		copy(sortedRefs, refs)
-		sort.Strings(sortedRefs)
-		canonical, _ := json.Marshal(map[string]interface{}{
-			"nonce":     challenge.Nonce,
-			"refs":      sortedRefs,
-			"timestamp": timestamp,
-		})
-
-		// Sign with client key
-		clientKeyPath := os.Getenv("PHOENIX_CLIENT_KEY")
-		if clientKeyPath == "" {
-			return fmt.Errorf("--signed requires PHOENIX_CLIENT_KEY for signing")
-		}
-		sig, err := signPayload(clientKeyPath, canonical)
-		if err != nil {
-			return fmt.Errorf("signing payload: %w", err)
-		}
-
-		bodyMap = map[string]interface{}{
-			"refs":      refs,
-			"nonce":     challenge.Nonce,
-			"timestamp": timestamp,
-			"signature": base64.StdEncoding.EncodeToString(sig),
-		}
-	} else {
-		bodyMap = map[string]interface{}{
-			"refs": refs,
-		}
-	}
-
+	bodyMap := map[string]interface{}{"refs": refs}
 	body, _ := json.Marshal(bodyMap)
 	resp, err := apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), sealHeaders(sealPrivKey))
 	if err != nil {
@@ -1523,52 +1437,6 @@ func cmdResolve(args []string) error {
 		return fmt.Errorf("some references failed to resolve")
 	}
 	return nil
-}
-
-// signPayload signs data with the ECDSA private key at the given PEM path.
-func signPayload(keyPath string, data []byte) ([]byte, error) {
-	keyPEM, err := os.ReadFile(keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading key: %w", err)
-	}
-
-	key, err := parseECDSAPrivateKey(keyPEM)
-	if err != nil {
-		return nil, err
-	}
-
-	hash := sha256Digest(data)
-	return ecdsa.SignASN1(cryptorand.Reader, key, hash)
-}
-
-// sha256Digest returns the SHA-256 hash of data.
-func sha256Digest(data []byte) []byte {
-	h := sha256pkg.Sum256(data)
-	return h[:]
-}
-
-// parseECDSAPrivateKey parses a PEM-encoded ECDSA private key.
-func parseECDSAPrivateKey(pemData []byte) (*ecdsa.PrivateKey, error) {
-	block, _ := pem.Decode(pemData)
-	if block == nil {
-		return nil, fmt.Errorf("no PEM block found in key file")
-	}
-
-	// Try PKCS8 first (newer format), then EC (older format)
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err == nil {
-		ecKey, ok := key.(*ecdsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("PKCS8 key is not ECDSA")
-		}
-		return ecKey, nil
-	}
-
-	ecKey, err := x509.ParseECPrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parsing ECDSA private key: %w", err)
-	}
-	return ecKey, nil
 }
 
 func cmdExec(args []string) error {
@@ -2136,18 +2004,6 @@ func printPolicyRule(rule *policy.Rule) {
 	if rule.DenyBearer {
 		fmt.Printf("  deny_bearer: true\n")
 	}
-	if len(rule.AllowedTools) > 0 {
-		b, _ := json.Marshal(rule.AllowedTools)
-		fmt.Printf("  allowed_tools: %s\n", string(b))
-	}
-	if len(rule.DenyTools) > 0 {
-		b, _ := json.Marshal(rule.DenyTools)
-		fmt.Printf("  deny_tools: %s\n", string(b))
-	}
-	if rule.Process != nil {
-		b, _ := json.Marshal(rule.Process)
-		fmt.Printf("  process: %s\n", string(b))
-	}
 	if rule.TimeWindow != "" {
 		b, _ := json.Marshal(rule.TimeWindow)
 		fmt.Printf("  time_window: %s\n", string(b))
@@ -2155,23 +2011,6 @@ func printPolicyRule(rule *policy.Rule) {
 	if rule.TimeZone != "" {
 		b, _ := json.Marshal(rule.TimeZone)
 		fmt.Printf("  time_zone: %s\n", string(b))
-	}
-	if rule.CredentialTTL != "" {
-		b, _ := json.Marshal(rule.CredentialTTL)
-		fmt.Printf("  credential_ttl: %s\n", string(b))
-	}
-	if rule.RequireFreshAttestation {
-		fmt.Printf("  require_fresh_attestation: true\n")
-	}
-	if rule.RequireNonce {
-		fmt.Printf("  require_nonce: true\n")
-	}
-	if rule.NonceMaxAge != "" {
-		b, _ := json.Marshal(rule.NonceMaxAge)
-		fmt.Printf("  nonce_max_age: %s\n", string(b))
-	}
-	if rule.RequireSigned {
-		fmt.Printf("  require_signed: true\n")
 	}
 	if rule.RequireSealed {
 		fmt.Printf("  require_sealed: true\n")
@@ -2284,22 +2123,14 @@ func cmdPolicyTest(args []string) error {
 		}
 		fmt.Printf("  [TEST] time_window: %s (%s)\n", rule.TimeWindow, tz)
 	}
-	if rule.RequireNonce {
-		fmt.Printf("  [INFO] require_nonce: nonce challenge required\n")
-	}
-	if rule.RequireSigned {
-		fmt.Printf("  [INFO] require_signed: signed resolve required\n")
-	}
 
-	// Run engine evaluation (skip checks we can't test: mTLS, nonce, signature, cert)
+	// Run engine evaluation (skip checks we can't test: mTLS, cert)
 	// We override the context to mark untestable items as passed to isolate testable checks
 	testCtx := &policy.RequestContext{
-		UsedMTLS:          true, // assume mTLS for testing purposes
-		UsedBearer:        false,
-		SourceIP:          ip,
-		NonceValidated:    true, // assume nonce passed
-		SignatureVerified: true, // assume signed
-		EvalTime:          ctx.EvalTime,
+		UsedMTLS:   true, // assume mTLS for testing purposes
+		UsedBearer: false,
+		SourceIP:   ip,
+		EvalTime:   ctx.EvalTime,
 	}
 
 	err = pe.Evaluate(path, testCtx)
@@ -2309,51 +2140,6 @@ func cmdPolicyTest(args []string) error {
 	}
 
 	fmt.Printf("  Result: PASS (testable checks passed)\n")
-	return nil
-}
-
-func cmdTokenMint(args []string) error {
-	if err := requireAuth(); err != nil {
-		return err
-	}
-
-	var agent string
-	i := 0
-	if i < len(args) && !strings.HasPrefix(args[i], "-") {
-		agent = args[i]
-	}
-
-	if agent == "" {
-		return fmt.Errorf("usage: phoenix token mint <agent-name>")
-	}
-
-	body, _ := json.Marshal(map[string]string{"agent": agent})
-	resp, err := apiRequest("POST", "/v1/token/mint", strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return handleError(resp)
-	}
-
-	var result struct {
-		Token     string `json:"token"`
-		Agent     string `json:"agent"`
-		IssuedAt  string `json:"issued_at"`
-		ExpiresAt string `json:"expires_at"`
-		TTL       string `json:"ttl"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
-	}
-
-	fmt.Printf("Token minted for agent %q\n", result.Agent)
-	fmt.Printf("  Token:      %s\n", result.Token)
-	fmt.Printf("  Issued at:  %s\n", result.IssuedAt)
-	fmt.Printf("  Expires at: %s\n", result.ExpiresAt)
-	fmt.Printf("  TTL:        %s\n", result.TTL)
 	return nil
 }
 
@@ -2436,7 +2222,7 @@ func cmdAgentSockAttest(args []string) error {
 	return nil
 }
 
-// tokenCacheEntry represents a cached short-lived token.
+// tokenCacheEntry is one cached session token (key: sessionCacheKey).
 type tokenCacheEntry struct {
 	Token     string    `json:"token"`
 	Agent     string    `json:"agent"`
@@ -2725,323 +2511,6 @@ func renewSessionIfNeeded() {
 	tokenMu.Lock()
 	token = newToken
 	tokenMu.Unlock()
-}
-
-// attestViaSocket connects to the agent socket and returns peer info.
-func attestViaSocket(socketPath string, agentName string) (peerUID int, binaryHash string, err error) {
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		return 0, "", fmt.Errorf("connecting to agent socket %s: %w", socketPath, err)
-	}
-	defer conn.Close()
-
-	req := struct {
-		Agent string `json:"agent"`
-	}{Agent: agentName}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return 0, "", fmt.Errorf("sending attest request: %w", err)
-	}
-
-	var resp struct {
-		OK   bool `json:"ok"`
-		Peer *struct {
-			PID        int32  `json:"pid"`
-			UID        int32  `json:"uid"`
-			GID        int32  `json:"gid"`
-			BinaryPath string `json:"binary_path,omitempty"`
-			BinaryHash string `json:"binary_hash,omitempty"`
-		} `json:"peer,omitempty"`
-		Error string `json:"error,omitempty"`
-	}
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return 0, "", fmt.Errorf("reading attest response: %w", err)
-	}
-
-	if !resp.OK {
-		return 0, "", fmt.Errorf("attestation failed: %s", resp.Error)
-	}
-	if resp.Peer == nil {
-		return 0, "", fmt.Errorf("attestation returned no peer info")
-	}
-
-	return int(resp.Peer.UID), resp.Peer.BinaryHash, nil
-}
-
-// mintTokenViaAPI mints a short-lived token via the Phoenix API.
-func mintTokenViaAPI(agentName string, procUID *int, binaryHash string) (string, time.Time, error) {
-	body := map[string]interface{}{"agent": agentName}
-	if procUID != nil {
-		body["process_uid"] = *procUID
-	}
-	if binaryHash != "" {
-		body["binary_hash"] = binaryHash
-	}
-	bodyBytes, _ := json.Marshal(body)
-
-	resp, err := apiRequest("POST", "/v1/token/mint", strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("mint request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", time.Time{}, handleError(resp)
-	}
-
-	var result struct {
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expires_at"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", time.Time{}, fmt.Errorf("decoding mint response: %w", err)
-	}
-
-	expiresAt, _ := time.Parse(time.RFC3339, result.ExpiresAt)
-	return result.Token, expiresAt, nil
-}
-
-func cmdAgentSockToken(args []string) error {
-	if err := requireAuth(); err != nil {
-		return err
-	}
-
-	socketPath := defaultAgentSocket
-	agentName := ""
-	ttlBuffer := 30 * time.Second
-
-	i := 0
-	for i < len(args) {
-		switch args[i] {
-		case "-s", "--socket":
-			i++
-			if i < len(args) {
-				socketPath = args[i]
-			}
-		case "-a", "--agent":
-			i++
-			if i < len(args) {
-				agentName = args[i]
-			}
-		case "--ttl-buffer":
-			i++
-			if i < len(args) {
-				var parseErr error
-				ttlBuffer, parseErr = time.ParseDuration(args[i])
-				if parseErr != nil {
-					return fmt.Errorf("invalid --ttl-buffer %q: %w", args[i], parseErr)
-				}
-			}
-		default:
-			if agentName == "" {
-				agentName = args[i]
-			}
-		}
-		i++
-	}
-
-	if agentName == "" {
-		return fmt.Errorf("usage: phoenix agent-sock token --agent <name> [--socket <path>] [--ttl-buffer <dur>]")
-	}
-
-	// Check cache first
-	if cached := getCachedToken(agentName, ttlBuffer); cached != "" {
-		fmt.Printf("Token (cached): %s\n", cached)
-		return nil
-	}
-
-	// Attest via socket
-	peerUID, binaryHash, err := attestViaSocket(socketPath, agentName)
-	if err != nil {
-		return err
-	}
-
-	// Mint via API with process claims
-	tok, expiresAt, err := mintTokenViaAPI(agentName, &peerUID, binaryHash)
-	if err != nil {
-		return err
-	}
-
-	// Cache the token
-	cache, _ := loadTokenCache()
-	cache[agentName] = &tokenCacheEntry{
-		Token:     tok,
-		Agent:     agentName,
-		ExpiresAt: expiresAt,
-	}
-	if err := saveTokenCache(cache); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not cache token: %v\n", err)
-	}
-
-	fmt.Printf("Token minted for agent %q\n", agentName)
-	fmt.Printf("  Token:      %s\n", tok)
-	fmt.Printf("  Expires at: %s\n", expiresAt.Format(time.RFC3339))
-	return nil
-}
-
-func cmdAgentSockResolve(args []string) error {
-	socketPath := defaultAgentSocket
-	agentName := ""
-	ttlBuffer := 30 * time.Second
-	var refs []string
-
-	i := 0
-	for i < len(args) {
-		switch args[i] {
-		case "-s", "--socket":
-			i++
-			if i < len(args) {
-				socketPath = args[i]
-			}
-		case "-a", "--agent":
-			i++
-			if i < len(args) {
-				agentName = args[i]
-			}
-		case "--ttl-buffer":
-			i++
-			if i < len(args) {
-				var parseErr error
-				ttlBuffer, parseErr = time.ParseDuration(args[i])
-				if parseErr != nil {
-					return fmt.Errorf("invalid --ttl-buffer %q: %w", args[i], parseErr)
-				}
-			}
-		default:
-			refs = append(refs, args[i])
-		}
-		i++
-	}
-
-	if len(refs) == 0 || agentName == "" {
-		return fmt.Errorf("usage: phoenix agent-sock resolve --agent <name> <ref...> [--socket <path>]")
-	}
-
-	// Get or mint token
-	tok := getCachedToken(agentName, ttlBuffer)
-	if tok == "" {
-		// Attest and mint
-		peerUID, binaryHash, err := attestViaSocket(socketPath, agentName)
-		if err != nil {
-			return err
-		}
-
-		// Need admin auth to mint — use existing PHOENIX_TOKEN
-		if token == "" {
-			return fmt.Errorf("PHOENIX_TOKEN required to mint initial token via agent-sock resolve")
-		}
-
-		var expiresAt time.Time
-		var mintErr error
-		tok, expiresAt, mintErr = mintTokenViaAPI(agentName, &peerUID, binaryHash)
-		if mintErr != nil {
-			return fmt.Errorf("auto-minting token: %w", mintErr)
-		}
-
-		// Cache it
-		cache, _ := loadTokenCache()
-		cache[agentName] = &tokenCacheEntry{
-			Token:     tok,
-			Agent:     agentName,
-			ExpiresAt: expiresAt,
-		}
-		saveTokenCache(cache)
-	}
-
-	// Load seal key for sealed mode
-	sealPrivKey, sealErr := loadSealKey()
-	if sealErr != nil {
-		return fmt.Errorf("loading seal key: %w", sealErr)
-	}
-
-	// Resolve using the short-lived token
-	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
-	reqURL := serverURL + "/v1/resolve"
-	req, err := http.NewRequest("POST", reqURL, strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("building request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range sealHeaders(sealPrivKey) {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("resolve request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return handleError(resp)
-	}
-
-	// Decode response — handle sealed or plaintext
-	var values map[string]string
-	var errs map[string]string
-	var errCodes map[string]refDenial
-
-	if sealPrivKey != nil {
-		var result struct {
-			SealedValues map[string]interface{} `json:"sealed_values"`
-			Errors       map[string]string      `json:"errors"`
-			ErrorCodes   map[string]refDenial   `json:"error_codes"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return fmt.Errorf("decoding response: %w", err)
-		}
-		errs = result.Errors
-		errCodes = result.ErrorCodes
-		values = make(map[string]string)
-		for ref, raw := range result.SealedValues {
-			if envMap, ok := raw.(map[string]interface{}); ok {
-				if envRef, _ := envMap["ref"].(string); envRef != ref {
-					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
-				}
-			}
-			val, err := decryptSealedValue(raw, sealPrivKey)
-			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
-			}
-			values[ref] = val
-		}
-	} else {
-		var result struct {
-			Values     map[string]string    `json:"values"`
-			Errors     map[string]string    `json:"errors"`
-			ErrorCodes map[string]refDenial `json:"error_codes"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return fmt.Errorf("decoding response: %w", err)
-		}
-		values = result.Values
-		errs = result.Errors
-		errCodes = result.ErrorCodes
-	}
-
-	// Single ref: output raw value
-	if len(refs) == 1 {
-		if errMsg, ok := errs[refs[0]]; ok {
-			return fmt.Errorf("%s: %s", refs[0], formatRefError(refs[0], errMsg, errCodes))
-		}
-		fmt.Print(values[refs[0]])
-		return nil
-	}
-
-	// Multiple refs
-	var hasErr bool
-	for _, ref := range refs {
-		if errMsg, ok := errs[ref]; ok {
-			fmt.Fprintf(os.Stderr, "%s: error: %s\n", ref, formatRefError(ref, errMsg, errCodes))
-			hasErr = true
-			continue
-		}
-		fmt.Printf("%s\t%s\n", ref, values[ref])
-	}
-	if hasErr {
-		return fmt.Errorf("some references failed to resolve")
-	}
-	return nil
 }
 
 func cmdInit(args []string) error {
