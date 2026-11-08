@@ -232,3 +232,22 @@ func TestQueryLimitKeepsNewestInOrder(t *testing.T) {
 		t.Fatalf("no limit returned %d", len(all))
 	}
 }
+
+// A limit near the int maximum must not overflow and panic: it just means "all".
+func TestQueryHugeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l, err := NewLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.LogAllowed("a", "read", "p/0", "127.0.0.1")
+	l.LogAllowed("a", "read", "p/1", "127.0.0.1")
+	l.Close()
+	maxInt := int(^uint(0) >> 1)
+	for _, limit := range []int{maxInt/2 + 1, maxInt} {
+		got, err := Query(path, QueryOptions{Limit: limit})
+		if err != nil || len(got) != 2 {
+			t.Fatalf("limit %d: %d entries, err %v", limit, len(got), err)
+		}
+	}
+}

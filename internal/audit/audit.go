@@ -215,7 +215,8 @@ func Query(path string, opts QueryOptions) ([]Entry, error) {
 		// With a limit, keep only the newest entries while reading. Holding the
 		// whole log and trimming at the end took over 1 GB for a 270 MB log, and
 		// the dashboard's front page asks for 10 entries on every visit.
-		if opts.Limit > 0 && len(entries) >= 2*opts.Limit {
+		// Halving the length, not doubling the limit, so a huge limit can't overflow.
+		if opts.Limit > 0 && len(entries)/2 >= opts.Limit {
 			entries = append([]Entry(nil), entries[len(entries)-opts.Limit:]...)
 		}
 	}
