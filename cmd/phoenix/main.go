@@ -22,7 +22,7 @@
 //	phoenix request status <req_id>
 //	phoenix ssh <machine> [--reason "..."] [--ttl 15m] [-- command...]
 //	phoenix whoami | pending | grants [--all] | grants revoke <gnt_id>
-//	phoenix approve <apr_id|req_id> | deny <apr_id|req_id>
+//	phoenix approve <req_id> | deny <req_id>
 //	phoenix verify <file> [--dry-run]
 //	phoenix status
 //	phoenix token mint <agent>
@@ -373,15 +373,14 @@ Usage:
   phoenix sessions list [--role R] [--agent A]  List active sessions
   phoenix sessions info <session-id>            Show session details
   phoenix sessions revoke <session-id>          Revoke a session
-  phoenix approve <apr_id>                     Approve a step-up session request
   phoenix request <path>... --reason "..." [--ttl 30m] [--wait]
                                               Ask a human for temporary use of exact secrets
   phoenix request status <req_id>              Show a request's state and what to do next
   phoenix whoami                               Show identity, ACL rules, grants, pending requests
-  phoenix pending                              List step-up approvals and access requests (approver)
+  phoenix pending                              List access requests waiting for a human (approver)
   phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]
                                               Approve an access request (approver; may narrow)
-  phoenix deny <apr_id|req_id> [--note "..."]  Deny a step-up approval or access request
+  phoenix deny <req_id> [--note "..."]         Deny an access request
   phoenix grants [--all] [--agent <name>]      List grants (own; approvers see all)
   phoenix grants revoke <gnt_id>               Revoke a grant now
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
@@ -2282,9 +2281,6 @@ func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
 	if sealPubKeyB64 != "" {
 		body["seal_public_key"] = sealPubKeyB64
 	}
-	if tty := detectTTY(); tty != "" {
-		body["requester_tty"] = tty
-	}
 	bodyBytes, _ := json.Marshal(body)
 
 	resp, err := apiRequest("POST", "/v1/session/mint", strings.NewReader(string(bodyBytes)))
@@ -2294,18 +2290,6 @@ func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-
-	// Step-up approval: 202 means approval required
-	if resp.StatusCode == http.StatusAccepted {
-		var pending struct {
-			Status     string `json:"status"`
-			ApprovalID string `json:"approval_id"`
-			ExpiresAt  string `json:"expires_at"`
-		}
-		if err := json.Unmarshal(respBody, &pending); err == nil && pending.Status == "approval_required" {
-			return pollForApproval(pending.ApprovalID, pending.ExpiresAt)
-		}
-	}
 
 	if resp.StatusCode != 200 {
 		if d, ok := parseServerDenial(respBody); ok {
@@ -2581,78 +2565,6 @@ func handleErrorForPath(resp *http.Response, path string) error {
 	return fmt.Errorf("HTTP %d", resp.StatusCode)
 }
 
-// detectTTY returns the TTY path for the current process, or empty string.
-func detectTTY() string {
-	link, err := os.Readlink("/proc/self/fd/0")
-	if err != nil {
-		return ""
-	}
-	if strings.HasPrefix(link, "/dev/pts/") || strings.HasPrefix(link, "/dev/tty") {
-		return link
-	}
-	return ""
-}
-
-// pollForApproval polls an approval status endpoint until approved, denied, or expired.
-func pollForApproval(approvalID, expiresAtStr string) (string, time.Time, error) {
-	fmt.Fprint(os.Stderr, approvalNotice(approvalID))
-
-	deadline := time.Now().Add(10 * time.Minute) // fallback
-	if exp, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
-		deadline = exp.Add(5 * time.Second) // small grace past server expiry
-	}
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		if time.Now().After(deadline) {
-			return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window has expired")
-		}
-
-		resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  poll error: %v\n", err)
-			continue
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		var status struct {
-			Status        string `json:"status"`
-			SessionToken  string `json:"session_token"`
-			SessionExpiry string `json:"session_expiry"`
-		}
-		if err := json.Unmarshal(respBody, &status); err != nil {
-			continue
-		}
-
-		switch status.Status {
-		case "approved":
-			fmt.Fprintf(os.Stderr, "Approved.\n")
-			exp, _ := time.Parse(time.RFC3339, status.SessionExpiry)
-			return status.SessionToken, exp, nil
-		case "denied":
-			return "", time.Time{}, fmt.Errorf("[APPROVAL_DENIED] step-up approval was denied")
-		case "expired":
-			return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval window expired before human approval")
-		case "pending":
-			// continue polling
-		}
-	}
-	return "", time.Time{}, fmt.Errorf("[APPROVAL_EXPIRED] approval poll ended unexpectedly")
-}
-
-// approvalNotice is the stderr text shown while waiting for step-up
-// approval. The approve command is built locally from the approval ID, never
-// taken from the server's approve_command.
-func approvalNotice(approvalID string) string {
-	if cmd := approveCommand(approvalID); cmd != "" {
-		return fmt.Sprintf("Step-up approval required. Run:\n  %s\n\nWaiting for approval...\n", cmd)
-	}
-	return "Step-up approval required. Ask a human to approve the pending request.\n\nWaiting for approval...\n"
-}
-
 func cmdSessionList(args []string) error {
 	if err := requireAuth(); err != nil {
 		return err
@@ -2792,97 +2704,6 @@ func cmdSessionRevoke(args []string) error {
 	}
 
 	fmt.Printf("Session %s revoked.\n", result.SessionID)
-	return nil
-}
-
-// cmdApproveStepUp handles "phoenix approve <apr_id>": the original
-// step-up session approval flow, unchanged. cmdApprove (access.go) routes
-// req_ IDs elsewhere.
-func cmdApproveStepUp(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: phoenix approve <approval-id>")
-	}
-	approvalID := args[0]
-
-	if err := requireAuth(); err != nil {
-		return err
-	}
-
-	// Fetch approval details
-	resp, err := apiRequest("GET", "/v1/approval/"+approvalID, nil)
-	if err != nil {
-		return fmt.Errorf("fetching approval: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return handleError(resp)
-	}
-
-	var details struct {
-		ID        string `json:"id"`
-		Role      string `json:"role"`
-		Agent     string `json:"agent"`
-		Status    string `json:"status"`
-		ExpiresAt string `json:"expires_at"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
-		return fmt.Errorf("decoding approval: %w", err)
-	}
-
-	if details.Status != "pending" {
-		return fmt.Errorf("approval %s is already %s", approvalID, cleanServerText(details.Status))
-	}
-
-	// Prompt for confirmation via /dev/tty. Server text is cleaned so it
-	// cannot forge lines or send terminal escapes into the prompt.
-	fmt.Fprintf(os.Stderr, "\nApprove session for role '%s'?\n", cleanServerText(details.Role))
-	fmt.Fprintf(os.Stderr, "  Requested by: agent %q\n", cleanServerText(details.Agent))
-	fmt.Fprintf(os.Stderr, "  Expires at: %s\n", cleanServerText(details.ExpiresAt))
-	fmt.Fprintf(os.Stderr, "\nApprove? [y/N]: ")
-
-	answer, err := readFromTTY()
-	if err != nil {
-		return fmt.Errorf("reading confirmation: %w", err)
-	}
-
-	answer = strings.TrimSpace(strings.ToLower(answer))
-
-	myTTY := detectTTY()
-
-	if answer == "y" || answer == "yes" {
-		body, _ := json.Marshal(map[string]string{"approver_tty": myTTY})
-		resp, err := apiRequest("POST", "/v1/approval/"+approvalID+"/approve", strings.NewReader(string(body)))
-		if err != nil {
-			return fmt.Errorf("approve request: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return handleError(resp)
-		}
-
-		var result struct {
-			SameTTYWarning bool `json:"same_tty_warning"`
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		json.Unmarshal(respBody, &result)
-
-		if result.SameTTYWarning {
-			fmt.Fprintf(os.Stderr, "WARNING: approver and requester are on the same TTY — this may indicate the same operator is both requesting and approving.\n")
-		}
-		fmt.Fprintln(os.Stderr, "Session approved.")
-		return nil
-	}
-
-	// Deny
-	resp2, err := apiRequest("POST", "/v1/approval/"+approvalID+"/deny", strings.NewReader("{}"))
-	if err != nil {
-		return fmt.Errorf("deny request: %w", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != 200 {
-		return handleError(resp2)
-	}
-	fmt.Fprintln(os.Stderr, "Session denied.")
 	return nil
 }
 

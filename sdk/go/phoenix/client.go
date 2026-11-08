@@ -420,11 +420,6 @@ func (c *Client) RevokeSession(sessionID string) error {
 	return c.doRequest("POST", "/v1/sessions/"+sessionID+"/revoke", map[string]string{}, nil)
 }
 
-// IsApprovalRequired returns true if the error indicates approval is needed.
-func (e *Error) IsApprovalRequired() bool {
-	return e.Code == "APPROVAL_REQUIRED" || e.Code == "STEP_UP_REAPPROVAL_REQUIRED"
-}
-
 // IsSessionExpired returns true if the error indicates the session has expired.
 func (e *Error) IsSessionExpired() bool { return e.Code == "SESSION_EXPIRED" }
 

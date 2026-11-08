@@ -272,26 +272,6 @@ func TestValidateSessionActionNamesValid(t *testing.T) {
 	}
 }
 
-func TestValidateElevatesACLRequiresStepUp(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Session.Enabled = true
-	cfg.Session.Roles = map[string]RoleConfig{
-		"bad": {
-			Namespaces:     []string{"prod/*"},
-			BootstrapTrust: []string{"bearer"},
-			ElevatesACL:    true,
-		},
-	}
-
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error when elevates_acl is set without step_up")
-	}
-	if !strings.Contains(err.Error(), "elevates_acl") {
-		t.Fatalf("error should mention elevates_acl: %v", err)
-	}
-}
-
 // --- Dashboard config validation ---
 
 func TestValidateDashboardEnabledRequiresCredential(t *testing.T) {
@@ -788,47 +768,6 @@ func TestValidatePathGlob(t *testing.T) {
 		if err := ValidatePathGlob(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
-	}
-}
-
-// P4 (Q5): step-up roles without allowed_agents warn at startup; elevates_acl
-// roles get the stronger "next release" message. Bound roles are quiet.
-func TestRoleBindingWarnings(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Session = SessionConfig{Enabled: true, Roles: map[string]RoleConfig{
-		"plain":    {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}},
-		"stepup":   {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true},
-		"elevated": {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true, ElevatesACL: true},
-		"bound": {Namespaces: []string{"a/*"}, BootstrapTrust: []string{"bearer"}, StepUp: true, ElevatesACL: true,
-			AllowedAgents: []string{"vector", "ghost"}},
-	}}
-	exists := func(name string) bool { return name == "vector" }
-	got := strings.Join(cfg.RoleBindingWarnings(exists), "\n")
-	for _, want := range []string{
-		"session.roles.elevated has elevates_acl but no allowed_agents",
-		"next release will refuse to start",
-		"session.roles.stepup has step_up but no allowed_agents",
-		`session.roles.bound.allowed_agents: "ghost" is not an agent in the ACL`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("warnings missing %q:\n%s", want, got)
-		}
-	}
-	for _, quiet := range []string{"roles.plain", "roles.bound has"} {
-		if strings.Contains(got, quiet) {
-			t.Errorf("unexpected warning for %q:\n%s", quiet, got)
-		}
-	}
-	cfg.Session.Enabled = false
-	if w := cfg.RoleBindingWarnings(exists); len(w) != 0 {
-		t.Errorf("sessions disabled: got warnings %v", w)
-	}
-
-	if !(RoleConfig{}).AgentAllowed("anyone") {
-		t.Error("empty allowed_agents must allow any agent")
-	}
-	if (RoleConfig{AllowedAgents: []string{"vector"}}).AgentAllowed("echo") {
-		t.Error("bound role must reject other agents")
 	}
 }
 

@@ -120,7 +120,7 @@ type accessDecision struct {
 }
 
 // dataAccess decides a data request:
-//  1. session caller: today's check (scope, action, elevated-or-ACL); grants
+//  1. session caller: scope, action and the ACL; grants
 //     are never consulted, so a session with a caller-chosen seal key can
 //     never reach a grant.
 //  2. non-session caller the ACL allows: allowed.
@@ -907,11 +907,10 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	if info.UsedSession {
 		resp["auth_method"] = "session"
 		resp["session"] = map[string]any{
-			"id":           info.SessionID,
-			"role":         info.SessionRole,
-			"namespaces":   info.SessionNamespaces,
-			"actions":      info.SessionActions,
-			"elevates_acl": info.SessionElevatesACL,
+			"id":         info.SessionID,
+			"role":       info.SessionRole,
+			"namespaces": info.SessionNamespaces,
+			"actions":    info.SessionActions,
 		}
 		resp["grants"] = []any{}
 		resp["pending_requests"] = []any{}

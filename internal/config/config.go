@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -183,29 +182,7 @@ type RoleConfig struct {
 	BootstrapTrust []string `json:"bootstrap_trust"`       // allowed auth methods: "mtls", "bearer", "local"
 	RequireSealKey bool     `json:"require_seal_key"`      // must present seal pubkey at mint
 	MaxTTL         string   `json:"max_ttl,omitempty"`     // per-role session TTL override
-	Attestation    []string `json:"attestation,omitempty"` // declared, enforcement deferred to Phase 2
-	StepUp         bool     `json:"step_up,omitempty"`     // require human approval before minting
-	StepUpTTL      string   `json:"step_up_ttl,omitempty"` // approval window duration
-	ElevatesACL    bool     `json:"elevates_acl,omitempty"`
-	// AllowedAgents lists the ACL agent names that may use this role. It is
-	// checked at session mint, at step-up approval (API and dashboard) and
-	// at renewal. Empty = any agent whose auth method passes bootstrap_trust
-	// (the old behaviour); the server warns at startup for step-up roles.
-	AllowedAgents []string `json:"allowed_agents,omitempty"`
-}
-
-// AgentAllowed reports whether agent may use the role: true when
-// AllowedAgents is empty (no binding) or lists the agent.
-func (r RoleConfig) AgentAllowed(agent string) bool {
-	if len(r.AllowedAgents) == 0 {
-		return true
-	}
-	for _, a := range r.AllowedAgents {
-		if a == agent {
-			return true
-		}
-	}
-	return false
+	Attestation    []string `json:"attestation,omitempty"` // checked at mint and renewal (checkRoleAttestation)
 }
 
 // DashboardConfig controls the optional operator dashboard web UI.
@@ -298,10 +275,6 @@ func ExampleConfig() *Config {
 				Actions:        []string{"list", "read_value"},
 				BootstrapTrust: []string{"mtls"},
 				RequireSealKey: true,
-				StepUp:         true,
-				StepUpTTL:      "15m",
-				ElevatesACL:    true,
-				AllowedAgents:  []string{"deployer"},
 			},
 		},
 	}
@@ -482,19 +455,6 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("session.roles.%s.max_ttl: invalid duration %q: %w", name, role.MaxTTL, err)
 				}
 			}
-			if role.StepUpTTL != "" {
-				if _, err := time.ParseDuration(role.StepUpTTL); err != nil {
-					return fmt.Errorf("session.roles.%s.step_up_ttl: invalid duration %q: %w", name, role.StepUpTTL, err)
-				}
-			}
-			if role.ElevatesACL && !role.StepUp {
-				return fmt.Errorf("session.roles.%s.elevates_acl requires step_up=true", name)
-			}
-			for _, a := range role.AllowedAgents {
-				if strings.TrimSpace(a) == "" {
-					return fmt.Errorf("session.roles.%s.allowed_agents: empty agent name", name)
-				}
-			}
 		}
 	}
 
@@ -510,49 +470,6 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
-}
-
-// RoleBindingWarnings returns the startup warnings for session.roles
-// agent binding (allowed_agents), sorted by role name:
-//   - a step_up role with no allowed_agents: any agent whose auth method
-//     passes bootstrap_trust can ask for it. elevates_acl roles get a
-//     stronger message, because the next release will refuse to start
-//     without a binding on them (plan Q5). This release only warns.
-//   - an allowed_agents name that is not in the ACL (agentExists false).
-//
-// Nothing is returned when sessions are disabled.
-func (c *Config) RoleBindingWarnings(agentExists func(string) bool) []string {
-	if !c.Session.Enabled {
-		return nil
-	}
-	names := make([]string, 0, len(c.Session.Roles))
-	for name := range c.Session.Roles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	var out []string
-	for _, name := range names {
-		role := c.Session.Roles[name]
-		switch {
-		case len(role.AllowedAgents) > 0:
-		case role.ElevatesACL:
-			out = append(out, fmt.Sprintf("session.roles.%s has elevates_acl but no allowed_agents: "+
-				"any agent that passes bootstrap_trust can ask for it and, once a human approves, read beyond its own ACL. "+
-				"Set allowed_agents; the next release will refuse to start without it", name))
-		case role.StepUp:
-			out = append(out, fmt.Sprintf("session.roles.%s has step_up but no allowed_agents: "+
-				"any agent that passes bootstrap_trust can ask for it. Set allowed_agents to bind it", name))
-		}
-		if agentExists == nil {
-			continue
-		}
-		for _, a := range role.AllowedAgents {
-			if !agentExists(a) {
-				out = append(out, fmt.Sprintf("session.roles.%s.allowed_agents: %q is not an agent in the ACL", name, a))
-			}
-		}
-	}
-	return out
 }
 
 // SaveExample writes a default config to disk as a reference.

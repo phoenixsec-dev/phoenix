@@ -39,6 +39,10 @@ var removedCommands = map[string]removedCommand{
 		why:     "MCP over HTTP was half-built (no sealed mode, no session renewal) and unused",
 		instead: "run phoenix mcp-server over stdio, started by the agent's harness",
 	},
+	"approve apr_": {
+		why:     "step-up session approvals were removed",
+		instead: "use access requests: the agent runs phoenix request <path> --reason \"...\" and you approve the req_ ID",
+	},
 	"agent-sock resolve": {
 		why:     "it used short-lived tokens, which were removed",
 		instead: "use phoenix resolve or phoenix exec",

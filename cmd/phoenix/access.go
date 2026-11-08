@@ -321,30 +321,11 @@ func cmdWhoami(args []string) error {
 	return nil
 }
 
-// cmdPending lists step-up approvals AND access requests waiting for a
-// human. A section the caller may not see is reported, not fatal.
+// cmdPending lists access requests waiting for a human. If the caller may
+// not see them, that is reported, not fatal.
 func cmdPending(args []string) error {
 	if err := requireBootstrapAuth(); err != nil {
 		return err
-	}
-	var steps struct {
-		Approvals []struct {
-			ID        string `json:"id"`
-			Role      string `json:"role"`
-			Agent     string `json:"agent"`
-			SourceIP  string `json:"source_ip"`
-			ExpiresAt string `json:"expires_at"`
-		} `json:"approvals"`
-	}
-	fmt.Println("Step-up approvals:")
-	if _, err := apiJSON("GET", "/v1/approvals", nil, &steps); err != nil {
-		fmt.Printf("  (not available: %s)\n", oneLine(err))
-	} else if len(steps.Approvals) == 0 {
-		fmt.Println("  none")
-	}
-	for _, a := range steps.Approvals {
-		fmt.Printf("  %s  role=%s agent=%s ip=%s expires=%s\n", cleanServerText(a.ID), cleanServerText(a.Role),
-			cleanServerText(a.Agent), cleanServerText(a.SourceIP), cleanServerText(a.ExpiresAt))
 	}
 	var reqs struct {
 		Requests []accessRequestView `json:"requests"`
@@ -370,23 +351,22 @@ func oneLine(err error) string {
 	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
-// cmdApprove dispatches on the ID prefix: req_ is an access request, any
-// other ID keeps the original step-up flow (cmdApproveStepUp) unchanged.
+// cmdApprove approves an access request (req_...). Step-up session
+// approvals (apr_...) were removed; those IDs get the removal message.
 func cmdApprove(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: phoenix approve <apr_id|req_id> [--ttl 15m] [--path p ...] [--yes]")
+		return fmt.Errorf("usage: phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]")
 	}
-	if strings.HasPrefix(args[0], "req_") {
-		return cmdApproveAccess(args)
+	if strings.HasPrefix(args[0], "apr_") {
+		exitRemoved("phoenix approve apr_...", removedCommands["approve apr_"])
 	}
-	return cmdApproveStepUp(args)
+	return cmdApproveAccess(args)
 }
 
 // cmdApproveAccess approves an access request after showing every path,
 // the action, TTL and the agent's (unverified) reason. --path narrows the
 // grant, --ttl shortens it. --yes skips the y/N prompt; without it the
-// answer is read from /dev/tty, or stdin when there is no terminal (same
-// as the step-up approve).
+// answer is read from /dev/tty, or stdin when there is no terminal.
 func cmdApproveAccess(args []string) error {
 	id := args[0]
 	if !requestIDPattern.MatchString(id) {
@@ -495,13 +475,15 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// cmdDeny dispatches on the ID prefix: req_ denies an access request (with
-// an optional --note), anything else denies a step-up approval.
+// cmdDeny denies an access request (req_...), with an optional --note.
 func cmdDeny(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: phoenix deny <apr_id|req_id> [--note \"...\"]")
+		return fmt.Errorf("usage: phoenix deny <req_id> [--note \"...\"]")
 	}
 	id := args[0]
+	if strings.HasPrefix(id, "apr_") {
+		exitRemoved("phoenix deny apr_...", removedCommands["approve apr_"])
+	}
 	note := ""
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--note" && i+1 < len(args) {
@@ -514,26 +496,13 @@ func cmdDeny(args []string) error {
 	if err := requireBootstrapAuth(); err != nil {
 		return err
 	}
-	if strings.HasPrefix(id, "req_") {
-		if !requestIDPattern.MatchString(id) {
-			return fmt.Errorf("invalid request id %q", cleanServerText(id))
-		}
-		if _, err := apiJSON("POST", "/v1/access-requests/"+id+"/deny", map[string]string{"note": note}, nil); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "Denied %s. The agent cannot ask for those paths again for 10 minutes.\n", id)
-		return nil
+	if !requestIDPattern.MatchString(id) {
+		return fmt.Errorf("invalid request id %q", cleanServerText(id))
 	}
-	if !approvalIDPattern.MatchString(id) {
-		return fmt.Errorf("invalid approval id %q", cleanServerText(id))
-	}
-	if note != "" {
-		return fmt.Errorf("--note is only supported for access requests (req_...)")
-	}
-	if _, err := apiJSON("POST", "/v1/approval/"+id+"/deny", map[string]string{}, nil); err != nil {
+	if _, err := apiJSON("POST", "/v1/access-requests/"+id+"/deny", map[string]string{"note": note}, nil); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "Session denied.")
+	fmt.Fprintf(os.Stderr, "Denied %s. The agent cannot ask for those paths again for 10 minutes.\n", id)
 	return nil
 }
 

@@ -41,9 +41,6 @@ const (
 	CodeGrantExpired        = "GRANT_EXPIRED"
 	CodeGrantRevoked        = "GRANT_REVOKED"
 	CodeSSHGrantRequired    = "SSH_GRANT_REQUIRED"
-	// CodeRoleNotAllowed: a session role's allowed_agents does not list the
-	// agent (session mint, step-up approval, renewal).
-	CodeRoleNotAllowed = "ROLE_NOT_ALLOWED"
 )
 
 // Codes for the request-use API (access.go). Store errors use the
@@ -117,20 +114,17 @@ var denialNextStep = map[string]string{
 	CodeRevokeNotDurable:     NextAskUser,
 	CodeAgentDeleteACLFailed: NextAskUser,
 
-	// Session and step-up codes.
-	"SESSION_EXPIRED":             NextRemintSession,
-	"SESSION_INVALID":             NextRemintSession,
-	"SESSION_REVOKED":             NextAskUser,
-	"SESSION_REQUIRED":            NextNone,
-	"SEAL_KEY_MISMATCH":           NextRemintSession,
-	"SEAL_KEY_REQUIRED":           NextAskUser,
-	"APPROVAL_REQUIRED":           NextWait,
-	"STEP_UP_REAPPROVAL_REQUIRED": NextRemintSession,
-	"ROLE_NOT_FOUND":              NextAskUser,
-	CodeRoleNotAllowed:            NextAskUser,
-	"BOOTSTRAP_FAILED":            NextAskUser,
-	"ATTESTATION_FAILED":          NextAskUser,
-	"ADMIN_AUTH_REQUIRED":         NextAskUser,
+	// Session codes.
+	"SESSION_EXPIRED":     NextRemintSession,
+	"SESSION_INVALID":     NextRemintSession,
+	"SESSION_REVOKED":     NextAskUser,
+	"SESSION_REQUIRED":    NextNone,
+	"SEAL_KEY_MISMATCH":   NextRemintSession,
+	"SEAL_KEY_REQUIRED":   NextAskUser,
+	"ROLE_NOT_FOUND":      NextAskUser,
+	"BOOTSTRAP_FAILED":    NextAskUser,
+	"ATTESTATION_FAILED":  NextAskUser,
+	"ADMIN_AUTH_REQUIRED": NextAskUser,
 }
 
 // nextStepFor returns the next step for a denial code.
