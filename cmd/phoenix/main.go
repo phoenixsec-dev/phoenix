@@ -287,39 +287,12 @@ func main() {
 	case "grants":
 		err = cmdGrants(args)
 	case "mcp-server":
-		httpAddr := ""
-		mcpToken := os.Getenv("PHOENIX_MCP_TOKEN")
-		mcpTLSCert := os.Getenv("PHOENIX_MCP_TLS_CERT")
-		mcpTLSKey := os.Getenv("PHOENIX_MCP_TLS_KEY")
-		for i := 0; i < len(args); i++ {
-			switch {
-			case args[i] == "--http" && i+1 < len(args):
-				httpAddr = args[i+1]
-				i++
-			case strings.HasPrefix(args[i], "--http="):
-				httpAddr = strings.TrimPrefix(args[i], "--http=")
-			case args[i] == "--mcp-token" && i+1 < len(args):
-				mcpToken = args[i+1]
-				i++
-			case strings.HasPrefix(args[i], "--mcp-token="):
-				mcpToken = strings.TrimPrefix(args[i], "--mcp-token=")
-			case args[i] == "--tls-cert" && i+1 < len(args):
-				mcpTLSCert = args[i+1]
-				i++
-			case strings.HasPrefix(args[i], "--tls-cert="):
-				mcpTLSCert = strings.TrimPrefix(args[i], "--tls-cert=")
-			case args[i] == "--tls-key" && i+1 < len(args):
-				mcpTLSKey = args[i+1]
-				i++
-			case strings.HasPrefix(args[i], "--tls-key="):
-				mcpTLSKey = strings.TrimPrefix(args[i], "--tls-key=")
+		for _, arg := range args {
+			if arg == "--http" || strings.HasPrefix(arg, "--http=") {
+				exitRemoved("phoenix mcp-server --http", removedCommands["mcp-server --http"])
 			}
 		}
-		if httpAddr != "" {
-			err = cmdMCPHTTP(httpAddr, mcpToken, mcpTLSCert, mcpTLSKey)
-		} else {
-			err = cmdMCP(args)
-		}
+		err = cmdMCP(args)
 	case "keypair":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: phoenix keypair <generate|show>")
@@ -412,8 +385,6 @@ Usage:
   phoenix grants [--all] [--agent <name>]      List grants (own; approvers see all)
   phoenix grants revoke <gnt_id>               Revoke a grant now
   phoenix mcp-server                          Run MCP server (stdio JSON-RPC)
-  phoenix mcp-server --http 127.0.0.1:8080    Run MCP server (Streamable HTTP)
-  phoenix mcp-server --http <addr> --tls-cert <crt> --tls-key <key>  Serve MCP over HTTPS
   (Initialize a server data directory with: phoenix-server --init <dir>)
 
 Environment:
@@ -425,10 +396,7 @@ Environment:
   PHOENIX_CLIENT_KEY   Client key for mTLS authentication
   PHOENIX_SEAL_KEY     Seal private key file (enables sealed mode)
   PHOENIX_POLICY       Path to attestation policy file (JSON)
-  PHOENIX_ROLE         Role name for auto-mint session identity
-  PHOENIX_MCP_TOKEN    Bearer token for MCP HTTP client auth (--http mode)
-  PHOENIX_MCP_TLS_CERT TLS server certificate for MCP HTTP mode (--tls-cert)
-  PHOENIX_MCP_TLS_KEY  TLS server key for MCP HTTP mode (--tls-key)`)
+  PHOENIX_ROLE         Role name for auto-mint session identity`)
 }
 
 // requireAuth checks that at least one auth method is configured

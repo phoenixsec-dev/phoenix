@@ -35,6 +35,10 @@ var removedCommands = map[string]removedCommand{
 	"policy test --time": {
 		why: "time_window policy rules were removed, so there is no time to test",
 	},
+	"mcp-server --http": {
+		why:     "MCP over HTTP was half-built (no sealed mode, no session renewal) and unused",
+		instead: "run phoenix mcp-server over stdio, started by the agent's harness",
+	},
 	"agent-sock resolve": {
 		why:     "it used short-lived tokens, which were removed",
 		instead: "use phoenix resolve or phoenix exec",
