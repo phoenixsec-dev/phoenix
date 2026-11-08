@@ -30,8 +30,7 @@ Do **not** leave it in:
 Use the admin token only for setup tasks:
 
 - create scoped agents (`phoenix agent create ...`)
-- issue mTLS certs (`phoenix cert issue ...`)
-- configure policy/attestation
+- configure session roles and policy/attestation
 
 Example bootstrap flow (local server, default config):
 
@@ -41,14 +40,6 @@ export PHOENIX_TOKEN="<admin-token>"
 
 phoenix agent create app-runtime -t "runtime-token" --acl "myapp/**:read"
 phoenix agent create app-deployer -t "deploy-token" --acl "myapp/**:read,write"
-```
-
-If mTLS is enabled (required for `phoenix cert issue`):
-
-```bash
-export PHOENIX_SERVER="https://phoenix:9090"
-export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
-phoenix cert issue app-runtime -o /etc/phoenix/certs
 ```
 
 Then remove the admin token from your active shell:
@@ -61,25 +52,23 @@ unset PHOENIX_TOKEN
 
 - CI deploy jobs: use deployer-scoped credentials
 - App runtime: read-only runtime identity
-- Human operator workflows: use named admin identities with mTLS where possible
+- Human operator workflows: use named admin identities, not the init token
 
 Keep ACL scopes narrow (`namespace/**`, or `namespace/*` for a single level —
 see [ACL path patterns](authentication.md#acl-path-patterns)) and
 action-specific (`read`, `write`, `delete`, `admin`).
 
-## 4) Short-lived tokens (optional hardening)
+## 4) Short-lived sessions (optional hardening)
 
-If short-lived token minting is enabled (`attestation.token.enabled=true`), use:
-
-- long-lived admin identity only to mint short-lived agent tokens
-- short TTLs appropriate for task duration
-
-This limits replay value of leaked bearer material.
+Give agents a session role (`PHOENIX_ROLE`) so day-to-day requests use a
+short-lived, scoped `phxs_` session token minted from their bootstrap token.
+Use a short `max_ttl` on sensitive roles. This limits the replay value of
+leaked credentials. See [Session Identity](session-identity.md).
 
 ## 5) Rotation and recovery practices
 
 - rotate application secrets on a schedule
-- rotate agent tokens/certs when staff or infrastructure changes
+- rotate agent tokens when staff or infrastructure changes
 - keep emergency access documented and tested
 - if you suspect admin token exposure, immediately shift operations to scoped credentials and rotate dependent access paths
 
@@ -87,8 +76,9 @@ This limits replay value of leaked bearer material.
 
 For higher-assurance deployments:
 
-1. mTLS enabled and required for privileged paths
-2. strict attestation on sensitive namespaces (`deny_bearer`, `source_ip`, `cert_fingerprint`)
-3. bearer auth reduced or disabled where operationally feasible
+1. HTTPS (`https_listener`) for every client that is not on the server itself
+2. strict attestation on sensitive namespaces (`source_ip`, `require_sealed`)
+3. agents on session roles with narrow namespaces; extra access through
+   [access requests](access-requests.md) a human approves
 
 This keeps the admin token as a fallback/bootstrap mechanism, not the backbone of day-to-day access.

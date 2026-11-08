@@ -7,7 +7,7 @@ from this IP, may read this path until a clock runs out. A human can revoke it
 at any time. Every step is in the audit log.
 
 A grant holds no secret and no token. The agent keeps using its own identity
-(bearer token, mTLS certificate or short-lived token). **Session tokens
+(its bearer token). **Session tokens
 (`phxs_`) can never request or use a grant.** No session roles are needed.
 
 Humans decide on the dashboard (`/dashboard/approvals`) or, for identities
@@ -77,7 +77,7 @@ Check it with `phoenix whoami` as the agent: the `Requests:` line shows
 | `grantable_actions` | Must be `["read_value"]`. `write` is a startup error ("write grants are not supported yet"); `list`, `delete`, `admin` are never grantable. |
 | `require_sealed` | Granted values are served only sealed to the agent's **registered** seal key. Agents without one get `SEAL_KEY_NOT_REGISTERED` when they ask. |
 | `bind_source_ip` | The grant only works from the IP that made the request. |
-| `approvers` | ACL agent names allowed to approve over the API. Empty = dashboard only. ACL `admin` alone is **not** enough, and nobody can approve their own request. The name must also still be in the ACL: a deleted approver's leftover short-lived token or certificate approves nothing. Unknown names only warn at startup. |
+| `approvers` | ACL agent names allowed to approve over the API. Empty = dashboard only. ACL `admin` alone is **not** enough, and nobody can approve their own request. The name must also still be in the ACL. Unknown names only warn at startup. |
 | `deny_paths` | Globs (`phoenix/**`, `infra/*`, exact paths) that can never be requested. |
 | `notify_url` | Where to POST a short message for each new request, e.g. an ntfy topic URL. Empty = no notifications. Must be `http://` or `https://`, with no `user:password@`, query or fragment. See [Notifications](#notifications). |
 | `notify_token_ref` | A `phoenix://` reference to a token in this Phoenix store. Read at send time and sent as `Authorization: Bearer <token>`. Never write the token itself into the config. |
@@ -121,7 +121,7 @@ The agent's CLI commands:
 | `phoenix grants revoke <gnt_id>` | Give up your own grant early |
 
 All of these use the agent's **own** identity (`PHOENIX_TOKEN` bootstrap
-token or mTLS cert). `PHOENIX_ROLE` is ignored and a `phxs_` session token is
+token). `PHOENIX_ROLE` is ignored and a `phxs_` session token is
 refused before anything is sent. The exception is `phoenix whoami`, which uses
 whatever credential you have (session included) so it can show what that
 credential can do.
@@ -139,11 +139,11 @@ and `phoenix_whoami`. None of them returns a secret value.
 
 ### In the dashboard
 
-`/dashboard/approvals` shows a **Secret access requests** section above the
-step-up table. Each pending request is one card (anchor `#req_...`, so a
+`/dashboard/approvals` shows a **Secret access requests** section. Each
+pending request is one card (anchor `#req_...`, so a
 notification link can jump straight to it) showing:
 
-- agent, source IP and auth method (bearer / mtls / token)
+- agent, source IP and auth method (bearer)
 - every path in full, monospace, each with badges: **does not exist**,
   **hidden from this agent** (its ACL has no `list` there), **already allowed**
 - action, requested TTL, delivery mode (sealed only, or plaintext allowed),
@@ -180,16 +180,16 @@ Only identities listed in `approvers` (not sessions):
 
 | Command | Does |
 |---|---|
-| `phoenix pending` | Step-up approvals and access requests, with every path |
+| `phoenix pending` | Pending access requests, with every path |
 | `phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]` | Shows every path (`+` kept, `-` removed by `--path`), action, TTL and the unverified reason, then asks y/N |
 | `phoenix deny <req_id> [--note "..."]` | Deny; starts the 10-minute cooldown |
 | `phoenix grants [--all] [--agent name]` | List grants |
 | `phoenix grants revoke <gnt_id>` | Revoke now |
 
-`phoenix approve` and `phoenix deny` look at the ID: `apr_...` is the
-existing step-up flow (unchanged), `req_...` is an access request. The y/N
-answer is read from `/dev/tty`, or stdin when there is no terminal (same as
-the step-up approve); `--yes` skips the prompt for scripts.
+`phoenix approve` and `phoenix deny` take a `req_...` ID. (`apr_...` IDs
+belonged to step-up approvals, which were removed; those print why.) The y/N
+answer is read from `/dev/tty`, or stdin when there is no terminal; `--yes`
+skips the prompt for scripts.
 
 Approval re-checks the **current** config: feature on, action grantable, no
 path in `deny_paths`, TTL clamped to `max_grant_ttl`, `require_sealed` and
@@ -198,7 +198,7 @@ path in `deny_paths`, TTL clamped to `max_grant_ttl`, `require_sealed` and
 ## Using a grant
 
 `phoenix exec --redact-output --env NAME=phoenix://<path> -- <command>` with
-the agent's own `PHOENIX_TOKEN` (or cert) and `PHOENIX_SEAL_KEY`, from the
+the agent's own `PHOENIX_TOKEN` and `PHOENIX_SEAL_KEY`, from the
 same IP that asked. Exec resolves sealed, decrypts in its own process, and
 gives the child the value but no Phoenix credentials. A plain `GET` or
 `resolve` without the registered seal key gets `SEALED_REQUIRED` while
@@ -229,7 +229,7 @@ SIGHUP sent to exec go to the command; Ctrl-C reaches it from the terminal.
 What a grant never does:
 
 - It is never consulted for session tokens, for `list`, `write` or `delete`.
-- It never waives the path's attestation policy (mTLS, IP, nonce, ...).
+- It never waives the path's attestation policy (`source_ip`, `require_sealed`).
 - It never makes `GET /v1/policy/check?check=allow_unseal` true, so an
   envelope cached while the grant was active cannot be unsealed by plugin
   unseal tools later.
@@ -247,9 +247,8 @@ is denied until the next restart but not saved, so fix the disk and revoke
 again, or rotate the secret.
 
 Expiry and revoke are checked on every request (no cache). Rotating an agent's
-bearer token or certificate ends its grants. Deleting an agent revokes its
-grants and records a tombstone first, so a recreated agent with the same name
-cannot use the old grants with old credentials.
+bearer token ends its grants: a grant is bound to the exact token that asked.
+Deleting an agent revokes its grants first.
 
 ### What revoke cannot do
 
@@ -351,7 +350,7 @@ Each denial has a `code` and a `next_step`. Full table:
 | Code | What it means | What to do |
 |---|---|---|
 | `ACL_DENIED` with `ask_user` | The feature is off, the action is not `read_value`, or the path is in `deny_paths` | Turn the feature on, or change the ACL |
-| `SESSION_CANNOT_REQUEST` | Sent with a `phxs_` session token | Unset `PHOENIX_ROLE`; use the agent's own token or cert |
+| `SESSION_CANNOT_REQUEST` | Sent with a `phxs_` session token | Unset `PHOENIX_ROLE`; use the agent's own token |
 | `REQUESTS_DISABLED` (501) | `enabled` is false or the block is missing | See [Turning it on](#turning-it-on) |
 | `REQUESTS_DEGRADED` (503) | The grants file could not be saved or was quarantined | Check disk space and permissions; see `GET /v1/status` |
 | `SEAL_KEY_NOT_REGISTERED` | `require_sealed` is on and the agent has no seal key | `phoenix keypair generate <agent>`, then set `PHOENIX_SEAL_KEY` |
@@ -361,7 +360,7 @@ Each denial has a `code` and a `next_step`. Full table:
 | `APPROVER_REQUIRED` | Approve/deny from an identity not in `approvers` | Use the dashboard, or add the name to `approvers` |
 | `SELF_APPROVAL` | An agent tried to approve its own request | Another approver or the dashboard must decide |
 | `SEALED_REQUIRED` | A grant-backed read without the registered seal key | Use `phoenix exec --redact-output` with `PHOENIX_SEAL_KEY` set |
-| `ATTESTATION_REQUIRED` | The path's policy (mTLS, IP, nonce, ...) was not met | A grant never waives this; meet the policy |
+| `ATTESTATION_REQUIRED` | The path's policy (`source_ip`, ...) was not met | A grant never waives this; meet the policy |
 | `GRANT_EXPIRED` | The grant ran out of time | Request again if still needed |
 | `GRANT_REVOKED` | A human revoked it | Ask the user before requesting again |
 | `GRANT_LIMIT` | The agent has 10 active grants | Revoke some, then approve again |
@@ -370,7 +369,7 @@ Each denial has a `code` and a `next_step`. Full table:
 Other things to check:
 
 - **Grant approved but reads still fail:** same IP as the request
-  (`bind_source_ip`)? Same credential (a rotated token or cert ends grants)?
+  (`bind_source_ip`)? Same credential (a rotated token ends grants)?
   `PHOENIX_ROLE` unset?
 - **No notification:** look for `access requests: notify for req_... failed`
   in the server log. Check `notify_url`, the token reference and that the
@@ -381,7 +380,7 @@ Other things to check:
 All responses are JSON with `Cache-Control: no-store`. Errors use the denial
 shape and codes in [denial-codes.md](denial-codes.md#access-requests-and-grants).
 
-Agent side (own bearer / mTLS / short-lived token; sessions get `403 SESSION_CANNOT_REQUEST`,
+Agent side (own bearer token; sessions get `403 SESSION_CANNOT_REQUEST`,
 except `GET /v1/whoami`, which answers for a session too, showing its scope and no grants):
 
 | Method + path | Does |
@@ -419,12 +418,11 @@ A request with action `ssh_login` asks to log in to a machine, not to read a sec
 It follows this same flow with its own rules: see
 [SSH certificates](ssh-certificates.md).
 
-## Grants and step-up roles
+## Grants replace step-up roles
 
-Grants and step-up sessions are separate. A grant is for one agent and exact
-paths and needs no role. A step-up role gives a whole session a role's
-namespaces after a human approves. If you use step-up roles with
-`elevates_acl`, bind them to named agents with `allowed_agents` (see
-[session-identity.md](session-identity.md#binding-a-role-to-agents-allowed_agents)).
-This release only warns about unbound step-up roles; the next release makes
-`allowed_agents` required for `elevates_acl` roles.
+Step-up session approvals (role fields `step_up`, `step_up_ttl`,
+`elevates_acl`, `allowed_agents`) were removed; access requests are the one
+approval system. A config that still has those fields stops at startup with
+a line naming each. To replace a step-up role, give the agent's own ACL what
+it uses daily, and have it ask for the rest with `phoenix request`; a human
+approves exact paths for a limited time.

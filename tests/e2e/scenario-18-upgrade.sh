@@ -36,6 +36,31 @@ assert_eq "$(PHOENIX_TOKEN="$old_session" "$PHOENIX" get upgrade/key)" synthetic
 old_audit_count="$(wc -l <"$RUN_DIR/state/audit.log")"
 stop_server
 PHOENIX="$NEW_PHOENIX"; PHOENIX_SERVER_BIN="$NEW_SERVER"
+# An old config still carries settings that were since removed (auth.mtls,
+# attestation.nonce/token, onepassword.enabled). The new server must refuse
+# it by name, both at startup and with --check-config, until they are gone.
+rc=0; "$NEW_SERVER" --check-config --config "$RUN_DIR/config.json" >"$RUN_DIR/check-old.out" 2>&1 || rc=$?
+[[ "$rc" -eq 1 ]] || die "--check-config accepted an old config with removed settings (rc=$rc)"
+check_out="$(cat "$RUN_DIR/check-old.out")"
+assert_contains "$check_out" "auth.mtls: removed" "removed mTLS block must be named"
+assert_contains "$check_out" "onepassword.enabled: removed" "removed onepassword.enabled must be named"
+rc=0; timeout 10 "$NEW_SERVER" --config "$RUN_DIR/config.json" >"$RUN_DIR/start-old.out" 2>&1 || rc=$?
+[[ "$rc" -ne 0 && "$rc" -ne 124 ]] || die "new server started on an old config with removed settings (rc=$rc)"
+assert_contains "$(cat "$RUN_DIR/start-old.out")" "auth.mtls: removed" "startup refusal must name the field"
+# The upgrade edit: drop the removed settings, keep the CA paths for
+# --reissue-cert by moving them into https_listener.
+python3 - "$RUN_DIR/state/config.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+m=d['auth'].pop('mtls', {})
+d.pop('tls', None)
+for k in ('nonce','token'): d.get('attestation',{}).pop(k, None)
+d.get('onepassword',{}).pop('enabled', None)
+d['https_listener']={'enabled':False,'listen':'127.0.0.1:0','cert':m.get('server_cert',''),'key':m.get('server_key',''),'ca_cert':m.get('ca_cert',''),'ca_key':m.get('ca_key','')}
+json.dump(d,open(p,'w'),indent=2)
+PY
+assert_contains "$("$NEW_SERVER" --check-config --config "$RUN_DIR/config.json")" "config OK" "cleaned config must pass --check-config"
+assert_contains "$("$NEW_SERVER" --reissue-cert --san 127.0.0.1 --config "$RUN_DIR/config.json")" "Server certificate reissued" "reissue-cert with moved CA paths"
 start_server
 assert_eq "$(phoenix_admin get upgrade/key)" synthetic-upgrade "store compatibility"
 assert_eq "$(PHOENIX_TOKEN=synthetic-upgrade-agent "$PHOENIX" get upgrade/key)" synthetic-upgrade "ACL compatibility"

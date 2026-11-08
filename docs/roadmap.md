@@ -7,20 +7,20 @@
 
 - Encrypted secret storage (AES-256-GCM envelope encryption)
 - Per-agent ACL with namespace isolation and glob matching
-- Bearer token and mTLS authentication
+- Bearer token authentication
 - Sealed responses (per-agent X25519 transport encryption)
-- MCP server — stdio and Streamable HTTP transports
+- MCP server (stdio)
 - `phoenix exec` with credential stripping
-- Attestation policy engine (mTLS, IP binding, cert fingerprint, sealed requirements)
+- Attestation policy engine (IP binding, sealed requirements)
 - Session identity — role-based, short-lived session tokens with auto-renewal
-- Step-up approval — human-in-the-loop gating for sensitive roles
+- Access requests and grants — an agent asks, a human approves exact paths for a limited time
 - Operator dashboard — browser-based approval, session, audit, and role management
 - Go SDK with session support
 - 1Password broker backend (read-only)
 - Import from `.env` files and 1Password
 - Emergency offline access (break-glass)
 - Master key passphrase protection and rotation
-- Internal CA with agent certificate lifecycle and CRL
+- Internal CA for the HTTPS server certificate
 - OpenClaw SecretRef exec provider (`phoenix openclaw-exec-provider`)
 
 ## Planned (Near-Term)

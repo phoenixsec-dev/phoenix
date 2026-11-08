@@ -52,7 +52,10 @@ phoenix exec \
 
 Phoenix resolves all references, strips its own credentials from the child
 environment, and then `exec`s into the command. The child gets only the mapped
-secret values, not the broker credentials.
+secret values, not the broker credentials: every `PHOENIX_*` variable (for
+example `PHOENIX_TOKEN`, `PHOENIX_MCP_TOKEN`, `PHOENIX_MASTER_PASSPHRASE`,
+`PHOENIX_ROLE`), `OP_SERVICE_ACCOUNT_TOKEN`, and the variable named by
+`PHOENIX_OP_TOKEN_ENV` are removed from its environment.
 
 Additional exec flags:
 - `--timeout 5s`
@@ -83,7 +86,7 @@ phoenix grants revoke gnt_...
 phoenix exec --redact-output --env B2_KEY=phoenix://infra/b2/app-key -- ./backup.sh
 ```
 
-These run on the agent's own token or cert, never a session (except
+These run on the agent's own token, never a session (except
 `phoenix whoami`, which reports on whatever credential you use). See
 [Access requests](access-requests.md).
 
@@ -192,17 +195,10 @@ phoenix sessions info ses_abc123def456
 
 # Revoke a session (immediate effect)
 phoenix sessions revoke ses_abc123def456
-
-# Approve or deny a step-up session request
-phoenix approve apr_xyz789
-phoenix deny apr_xyz789
 ```
 
-If a role has `allowed_agents` and the agent asking for the session is not on
-it, mint, approval of its step-up request, and renewal fail with
-`ROLE_NOT_ALLOWED` (next step: ask the user). The list is about the agent that
-wants the role, not the human or approver who approves it. See
-[Session Identity](session-identity.md#binding-a-role-to-agents-allowed_agents).
+Step-up session approvals (`phoenix approve apr_...`) were removed; use
+[access requests](access-requests.md) for human-approved access.
 
 When `PHOENIX_ROLE` is set, the CLI auto-mints a session on the first request
 and caches it for the session lifetime:
@@ -237,18 +233,6 @@ phoenix agent delete deployer
 
 ACL paths are glob patterns: `ns/*` matches one level, `ns/**` matches
 recursively. See [ACL path patterns](authentication.md#acl-path-patterns).
-
-## Certificate management
-
-Requires `auth.mtls.enabled: true` in the server config.
-
-```bash
-# Issue a client certificate for an agent (admin only)
-phoenix cert issue deployer -o /etc/phoenix/certs/
-
-# Revoke a certificate by serial number (admin only)
-phoenix cert revoke <serial-number>
-```
 
 ## Sealed key pairs
 
@@ -316,6 +300,15 @@ phoenix policy test --agent deployer --ip 192.168.0.110 production/db-password
 ```
 
 Requires `PHOENIX_POLICY` to point to the policy JSON file.
+
+## Removed commands
+
+These print why they went and exit 1: `phoenix token mint`, `phoenix cert
+...`, `phoenix init` (use `phoenix-server --init <dir>`), `phoenix agent-sock
+token|resolve` (`agent-sock attest` stays), `phoenix resolve --signed`,
+`phoenix mcp-server --http` (stdio MCP stays), `phoenix policy test --time`,
+and `phoenix approve|deny apr_...`. See
+[removed settings](configuration.md#checking-a-config-and-removed-settings).
 
 ## Related docs
 

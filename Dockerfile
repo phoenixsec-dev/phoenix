@@ -40,7 +40,7 @@ EXPOSE 9090
 # --no-check-certificate is fine here: this only asks "is the process
 # answering on its own loopback", it never sends a token.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD wget -q --spider http://127.0.0.1:9090/v1/health || wget -q --spider --no-check-certificate https://127.0.0.1:9090/v1/health || exit 1
+  CMD wget -q --spider http://127.0.0.1:9090/v1/health || exit 1
 
 ENTRYPOINT ["phoenix-server"]
 CMD ["--config", "/data/config.json"]
