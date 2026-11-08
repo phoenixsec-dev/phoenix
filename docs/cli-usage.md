@@ -305,7 +305,7 @@ Requires `PHOENIX_POLICY` to point to the policy JSON file.
 
 These print why they went and exit 1: `phoenix token mint`, `phoenix cert
 ...`, `phoenix init` (use `phoenix-server --init <dir>`), `phoenix agent-sock
-token|resolve` (`agent-sock attest` stays), `phoenix resolve --signed`,
+...`, `phoenix resolve --signed`,
 `phoenix mcp-server --http` (stdio MCP stays), `phoenix policy test --time`,
 and `phoenix approve|deny apr_...`. See
 [removed settings](configuration.md#checking-a-config-and-removed-settings).

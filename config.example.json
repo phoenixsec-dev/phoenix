@@ -33,12 +33,6 @@
   "policy": {
     "path": "/data/phoenix/policy.json"
   },
-  "attestation": {
-    "local_agent": {
-      "enabled": false,
-      "socket_path": "/tmp/phoenix-agent.sock"
-    }
-  },
   "session": {
     "enabled": false,
     "ttl": "1h",

@@ -37,7 +37,7 @@ old_audit_count="$(wc -l <"$RUN_DIR/state/audit.log")"
 stop_server
 PHOENIX="$NEW_PHOENIX"; PHOENIX_SERVER_BIN="$NEW_SERVER"
 # An old config still carries settings that were since removed (auth.mtls,
-# attestation.nonce/token, onepassword.enabled). The new server must refuse
+# the attestation block, onepassword.enabled). The new server must refuse
 # it by name, both at startup and with --check-config, until they are gone.
 rc=0; "$NEW_SERVER" --check-config --config "$RUN_DIR/config.json" >"$RUN_DIR/check-old.out" 2>&1 || rc=$?
 [[ "$rc" -eq 1 ]] || die "--check-config accepted an old config with removed settings (rc=$rc)"
@@ -54,7 +54,7 @@ import json,sys
 p=sys.argv[1]; d=json.load(open(p))
 m=d['auth'].pop('mtls', {})
 d.pop('tls', None)
-for k in ('nonce','token'): d.get('attestation',{}).pop(k, None)
+d.pop('attestation', None)
 d.get('onepassword',{}).pop('enabled', None)
 d['https_listener']={'enabled':False,'listen':'127.0.0.1:0','cert':m.get('server_cert',''),'key':m.get('server_key',''),'ca_cert':m.get('ca_cert',''),'ca_key':m.get('ca_key','')}
 json.dump(d,open(p,'w'),indent=2)

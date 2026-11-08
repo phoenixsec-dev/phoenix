@@ -34,8 +34,6 @@ phoenix-server --check-config --config /data/config.json
 | `audit.rotate_mb` | Rotate the audit log at this size; archives are kept forever. Negative = never rotate. See [Audit log rotation](#audit-log-rotation) | `50` |
 | `auth.bearer.enabled` | Bearer token auth; must stay `true` (it is the only way to log in) | `true` |
 | `policy.path` | Attestation policy file (optional) | — |
-| `attestation.local_agent.enabled` | Local Unix-socket agent (off; groundwork for a future local Phoenix service) | `false` |
-| `attestation.local_agent.socket_path` | Unix socket path when enabled | — |
 | `session.enabled` | Enable session identity | `false` |
 | `session.ttl` | Default session lifetime | `1h` |
 | `session.roles` | Named role definitions (see below) | — |
@@ -408,6 +406,7 @@ Removed in this release (see `RELEASE_NOTES.md` for why each went):
 | config | `tls` | `https_listener` |
 | config | `auth.mtls` | bearer tokens over `https_listener`; move `ca_cert`/`ca_key` into `https_listener` to keep `--reissue-cert` |
 | config | `attestation.token`, `attestation.nonce` | session roles; `source_ip` rules |
+| config | `attestation.local_agent` | nothing yet; the planned local Phoenix service replaces it |
 | config | `onepassword.enabled` | `store.backend: "1password"` (the connector stays) |
 | role | `step_up`, `step_up_ttl`, `elevates_acl`, `allowed_agents` | [access requests](access-requests.md) |
 | role | `bootstrap_trust` `"mtls"` / `"token"`; `attestation` `"require_mtls"` / `"cert_fingerprint"` | `"bearer"` / `"local"`; attestation `"source_ip"` (loopback only), or `require_seal_key: true` |
@@ -416,7 +415,7 @@ Removed in this release (see `RELEASE_NOTES.md` for why each went):
 Removed API routes (`/v1/token/mint`, `/v1/challenge`, `/v1/proxy`,
 `/v1/certs/*`, `/v1/approvals`, `/v1/approval/...`) answer `410 Gone` with the
 reason. Removed CLI commands and flags (`phoenix token`, `phoenix cert`,
-`phoenix init`, `phoenix agent-sock token|resolve`, `phoenix resolve --signed`,
+`phoenix init`, `phoenix agent-sock`, `phoenix resolve --signed`,
 `phoenix mcp-server --http`, `phoenix policy test --time`, `phoenix approve
 apr_...`) print a short explanation and exit 1.
 

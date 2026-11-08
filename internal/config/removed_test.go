@@ -41,6 +41,7 @@ func TestValidateRefusesRemovedSettings(t *testing.T) {
 	}
 	want := []string{
 		"tls: removed", "auth.mtls: removed", "attestation.nonce: removed", "attestation.token: removed",
+		"attestation.local_agent: removed",
 		"onepassword.enabled: removed",
 		"session.roles.elevated.step_up: removed", "session.roles.elevated.step_up_ttl: removed",
 		"session.roles.elevated.elevates_acl: removed", "session.roles.elevated.allowed_agents: removed",
@@ -55,7 +56,7 @@ func TestValidateRefusesRemovedSettings(t *testing.T) {
 	if got := strings.Count(err.Error(), "\n  "); got != len(want) {
 		t.Errorf("got %d lines, want %d:\n%v", got, len(want), err)
 	}
-	if strings.Contains(err.Error(), "local_agent") || strings.Contains(err.Error(), "roles.ok") {
+	if strings.Contains(err.Error(), "roles.ok") {
 		t.Errorf("kept settings reported as removed:\n%v", err)
 	}
 	for _, f := range removedSettings {
@@ -76,7 +77,6 @@ func TestValidateAcceptsCleanedConfig(t *testing.T) {
 		"auth": {"bearer": {"enabled": true}},
 		"acl": {"path": "/data/acl.json"},
 		"audit": {"path": "/data/audit.log"},
-		"attestation": {"local_agent": {"enabled": false}},
 		"onepassword": {"service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN"},
 		"session": {"enabled": true, "roles": {"ok": {"namespaces": ["a/*"], "bootstrap_trust": ["bearer"], "attestation": ["source_ip"]}}}
 	}`

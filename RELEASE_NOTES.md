@@ -26,7 +26,7 @@ removed CLI commands and flags print why they went.
 | Removed | Why | Instead |
 |---|---|---|
 | Process rules: policy `process` (`uid`, `binary_hash`), `require_fresh_attestation`, `credential_ttl` | The server took the process details from whatever an admin caller put in a token request. | `source_ip`. Real caller checks come with the local Phoenix service. |
-| Short-lived tokens: `POST /v1/token/mint`, `attestation.token`, bootstrap method `"token"`, `phoenix token mint`, `phoenix agent-sock token` / `resolve` | Same: the tokens only carried caller claims. | Session roles (`PHOENIX_ROLE`). Session tokens (`phxs_`) are the one short-lived credential. |
+| Short-lived tokens: `POST /v1/token/mint`, `attestation.token`, bootstrap method `"token"`, `phoenix token mint` | Same: the tokens only carried caller claims. | Session roles (`PHOENIX_ROLE`). Session tokens (`phxs_`) are the one short-lived credential. |
 | Tool rules: `allowed_tools`, `deny_tools`, the `X-Phoenix-Tool` header, `PHOENIX_TOOL` | They matched a header the client sets itself. | ACL paths and session roles. |
 | Nonce challenges: `POST /v1/challenge`, `attestation.nonce`, `require_nonce`, `nonce_max_age`, `require_signed`, `phoenix resolve --signed` | Only signed resolve with a client certificate could pass; `exec`, MCP and the SDKs never could. `nonce_max_age` was never enforced. `/v1/resolve` now answers 400 if a client sends a nonce or signature. | `source_ip`. |
 | `POST /v1/proxy` | Never built; always answered 501. | Nothing. |
@@ -36,11 +36,10 @@ removed CLI commands and flags print why they went.
 | Client certificates (mTLS): `auth.mtls`, `phoenix cert issue`, `POST /v1/certs/issue` and `/revoke`, the CRL, policy `require_mtls` / `cert_fingerprint` / `deny_bearer`, bootstrap method `"mtls"`, role attestation `require_mtls` / `cert_fingerprint`, `PHOENIX_CLIENT_CERT` / `PHOENIX_CLIENT_KEY` | Off here, hard to run, unused. HTTPS already protects tokens in transit. With mTLS gone, `deny_bearer` could only lock everyone out. | Bearer tokens over HTTPS. The internal CA, the server certificate, `--reissue-cert`, seal key pairs and the SSH certificate CA all stay. The CLI warns if `PHOENIX_CLIENT_CERT` is still set. |
 | MCP over HTTP: `phoenix mcp-server --http`, `PHOENIX_MCP_TOKEN`, `PHOENIX_MCP_TLS_CERT` / `KEY` | Half-built (no sealed mode, no session renewal) and unused. | `phoenix mcp-server` over stdio, started by the agent's harness. |
 | Step-up: role `step_up`, `step_up_ttl`, `elevates_acl`, `allowed_agents`, `GET /v1/approvals`, `/v1/approval/...`, `apr_` IDs in `phoenix approve` / `deny` / `pending`, the step-up cards on the Approvals page, codes `APPROVAL_REQUIRED`, `STEP_UP_REAPPROVAL_REQUIRED`, `ROLE_NOT_ALLOWED` | 14 requests ever, mostly upgrade tests, and it overlapped with access requests. | Access requests and grants: the agent runs `phoenix request`, a human approves exact paths for a limited time. Roles and sessions stay. |
+| The local agent socket: `internal/agent`, `attestation.local_agent`, `phoenix agent-sock` (all subcommands) | It ran inside phoenix-server, so it only worked on the server's own machine. The planned local Phoenix service runs on every machine as its own process, so the same job does not belong in two places. Its kernel caller check (`internal/agent/peercred_linux.go`, SO_PEERCRED) can be recovered with `git show d9cc1a4:internal/agent/peercred_linux.go` when that service is built. | Nothing yet; delete the block. `phoenix get`, `resolve` and `exec` work as before. |
 | The `tls` config block | Three ways to turn on HTTPS (`tls.enabled`, `https_listener`, mTLS implying TLS) became one. | `https_listener`. Keep `server.listen` on `127.0.0.1`. |
 
-Kept on purpose: the local agent socket (`attestation.local_agent`,
-`phoenix agent-sock attest`), switched off; it becomes the local Phoenix
-service. Sessions and roles, access requests and grants, `source_ip` rules,
+Kept on purpose: sessions and roles, access requests and grants, `source_ip` rules,
 sealed delivery and its settings, and the audit log format are unchanged.
 
 ### HTTPS: one switch

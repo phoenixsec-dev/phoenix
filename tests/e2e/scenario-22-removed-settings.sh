@@ -20,10 +20,10 @@ rc=0
 "$PHOENIX_SERVER_BIN" --check-config --config "$RUN_DIR/config.json" >"$RUN_DIR/check.out" 2>&1 || rc=$?
 [[ "$rc" -eq 1 ]] || die "--check-config accepted removed settings (rc=$rc)"
 out="$(cat "$RUN_DIR/check.out")"
-for field in "tls: removed" "attestation.nonce: removed" "session.roles.old.step_up: removed"; do
+for field in "tls: removed" "attestation.nonce: removed" "attestation.local_agent: removed" "session.roles.old.step_up: removed"; do
   assert_contains "$out" "$field" "check-config must name $field"
 done
-assert_eq "$(grep -c ': removed. Why: ' "$RUN_DIR/check.out")" 3 "one line per removed config field"
+assert_eq "$(grep -c ': removed. Why: ' "$RUN_DIR/check.out")" 4 "one line per removed config field"
 
 # 2. Startup refuses the same config.
 rc=0
@@ -32,7 +32,7 @@ timeout 10 "$PHOENIX_SERVER_BIN" --config "$RUN_DIR/config.json" >"$RUN_DIR/star
 assert_contains "$(cat "$RUN_DIR/start.out")" "session.roles.old.step_up: removed" "startup refusal must name the field"
 
 # 3. With the config clean, the policy's removed fields are named next.
-config_patch "d.pop('tls'); d['attestation'].pop('nonce'); d['session']['roles']['old'].pop('step_up')"
+config_patch "d.pop('tls'); d.pop('attestation'); d['session']['roles']['old'].pop('step_up')"
 rc=0
 "$PHOENIX_SERVER_BIN" --check-config --config "$RUN_DIR/config.json" >"$RUN_DIR/check-policy.out" 2>&1 || rc=$?
 [[ "$rc" -eq 1 ]] || die "--check-config accepted a policy with removed fields (rc=$rc)"

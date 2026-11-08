@@ -22,7 +22,6 @@ type Config struct {
 	ACL           ACLFileConfig       `json:"acl"`
 	Audit         AuditConfig         `json:"audit"`
 	Policy        PolicyConfig        `json:"policy,omitempty"`
-	Attestation   AttestationConfig   `json:"attestation,omitempty"`
 	OnePassword   OPConfig            `json:"onepassword,omitempty"`
 	Session       SessionConfig       `json:"session,omitempty"`
 	Dashboard     DashboardConfig     `json:"dashboard,omitempty"`
@@ -129,18 +128,6 @@ type PolicyConfig struct {
 	Path string `json:"path,omitempty"` // Path to attestation policy JSON file
 }
 
-// AttestationConfig controls the local agent socket. It is off by default;
-// it stays (unused) as the base for the local Phoenix service.
-type AttestationConfig struct {
-	LocalAgent LocalAgentConfig `json:"local_agent,omitempty"`
-}
-
-// LocalAgentConfig controls the local Unix socket attestation agent.
-type LocalAgentConfig struct {
-	Enabled    bool   `json:"enabled"`
-	SocketPath string `json:"socket_path,omitempty"` // default: /tmp/phoenix-agent.sock
-}
-
 // OPConfig controls the optional 1Password backend (store.backend
 // "1password"); it is used only when that backend is selected.
 type OPConfig struct {
@@ -238,8 +225,6 @@ func ExampleConfig() *Config {
 	// network in cleartext.
 	cfg.Server.Listen = "127.0.0.1:9090"
 	cfg.Store.Backend = "file"
-	cfg.Attestation.LocalAgent.Enabled = false
-	cfg.Attestation.LocalAgent.SocketPath = "/tmp/phoenix-agent.sock"
 	cfg.OnePassword.Vault = "Engineering"
 	cfg.OnePassword.CacheTTL = "60s"
 	cfg.Session = SessionConfig{
@@ -340,9 +325,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 	// Validate attestation duration strings
-	if c.Attestation.LocalAgent.Enabled && c.Attestation.LocalAgent.SocketPath == "" {
-		return errors.New("attestation.local_agent.socket_path is required when local_agent is enabled")
-	}
 
 	// Validate dashboard config
 	if c.Dashboard.Enabled {

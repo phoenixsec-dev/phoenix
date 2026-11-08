@@ -19,6 +19,8 @@ var removedSettings = []removed.Field{
 		Instead: "use attestation \"source_ip\" (loopback only), or require_seal_key: true"},
 	{Path: "session.roles.*.attestation.[]", Value: "cert_fingerprint", Why: "client certificates (mTLS) were removed",
 		Instead: "use attestation \"source_ip\" (loopback only), or require_seal_key: true"},
+	{Path: "attestation.local_agent", Why: "it ran inside phoenix-server, so it only worked on the server's own machine; the planned local Phoenix service runs on every machine as its own process",
+		Instead: "nothing yet; delete the block (the local Phoenix service will replace it)"},
 	{Path: "attestation.nonce", Why: "nonce challenges only worked with client certificates and phoenix resolve --signed; nothing else could satisfy them",
 		Instead: "use source_ip policy rules"},
 	{Path: "onepassword.enabled", Why: "nothing ever read it",

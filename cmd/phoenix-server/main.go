@@ -22,7 +22,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
-	"github.com/phoenixsec/phoenix/internal/agent"
 	"github.com/phoenixsec/phoenix/internal/api"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
@@ -286,18 +285,6 @@ func main() {
 		}
 		srv.SetDashboard(dash)
 		log.Printf("  Dashboard: enabled at /dashboard/")
-	}
-
-	// Start local attestation agent if enabled
-	if cfg.Attestation.LocalAgent.Enabled {
-		localAgent := agent.New(cfg.Attestation.LocalAgent.SocketPath)
-		if err := localAgent.Start(); err != nil {
-			log.Fatalf("starting local attestation agent: %v", err)
-		}
-		defer localAgent.Stop()
-		log.Printf("  Local agent: %s", localAgent.SocketPath())
-	} else {
-		log.Printf("  Local agent: disabled")
 	}
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)

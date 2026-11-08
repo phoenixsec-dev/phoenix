@@ -21,16 +21,16 @@ type removedCommand struct {
 const clientCertRemovedNote = "warning: PHOENIX_CLIENT_CERT and PHOENIX_CLIENT_KEY are ignored: client certificates (mTLS) were removed. Use PHOENIX_TOKEN over https:// with PHOENIX_CA_CERT."
 
 var removedCommands = map[string]removedCommand{
+	"agent-sock": {
+		why:     "the local agent socket ran inside phoenix-server, so it only worked on the server's own machine (its token and resolve subcommands minted short-lived tokens, also removed)",
+		instead: "use phoenix get, resolve or exec; the local Phoenix service will replace the socket",
+	},
 	"cert": {
 		why:     "client certificates (mTLS) were removed: hard to run, unused, and HTTPS already protects tokens in transit",
 		instead: "give the agent a bearer token (phoenix agent create) and use https:// with PHOENIX_CA_CERT",
 	},
 	"token": {
 		why:     "short-lived tokens trusted whatever process details the caller sent, so they proved nothing",
-		instead: "use a role session (PHOENIX_ROLE) for a short-lived credential",
-	},
-	"agent-sock token": {
-		why:     "it minted short-lived tokens, which were removed",
 		instead: "use a role session (PHOENIX_ROLE) for a short-lived credential",
 	},
 	"resolve --signed": {
@@ -51,10 +51,6 @@ var removedCommands = map[string]removedCommand{
 	"approve apr_": {
 		why:     "step-up session approvals were removed",
 		instead: "use access requests: the agent runs phoenix request <path> --reason \"...\" and you approve the req_ ID",
-	},
-	"agent-sock resolve": {
-		why:     "it used short-lived tokens, which were removed",
-		instead: "use phoenix resolve or phoenix exec",
 	},
 }
 
