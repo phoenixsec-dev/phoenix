@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -195,5 +196,39 @@ func TestQuerySince(t *testing.T) {
 	}
 	if entries[0].Agent != "b" {
 		t.Fatalf("expected agent 'b', got %q", entries[0].Agent)
+	}
+}
+
+// A limited query returns the newest entries in order, with filters applied
+// before the limit, without holding the whole log while it reads.
+func TestQueryLimitKeepsNewestInOrder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l, err := NewLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 1000; i++ {
+		agent := "a"
+		if i%3 == 0 {
+			agent = "b"
+		}
+		l.LogAllowed(agent, "read", fmt.Sprintf("p/%d", i), "127.0.0.1")
+	}
+	l.Close()
+	got, err := Query(path, QueryOptions{Limit: 7})
+	if err != nil || len(got) != 7 {
+		t.Fatalf("got %d entries, err %v", len(got), err)
+	}
+	for i, e := range got {
+		if want := fmt.Sprintf("p/%d", 993+i); e.Path != want {
+			t.Fatalf("entry %d = %s, want %s", i, e.Path, want)
+		}
+	}
+	got, _ = Query(path, QueryOptions{Limit: 3, Agent: "b"})
+	if len(got) != 3 || got[0].Path != "p/993" || got[2].Path != "p/999" {
+		t.Fatalf("filtered = %+v", got)
+	}
+	if all, _ := Query(path, QueryOptions{}); len(all) != 1000 {
+		t.Fatalf("no limit returned %d", len(all))
 	}
 }
