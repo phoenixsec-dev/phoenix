@@ -130,8 +130,10 @@ Description=End agent SSH sessions when their Phoenix approval is over
 [Service]
 Type=oneshot
 ExecStart=$WINDOW_BIN
-# It runs every 30 seconds; only warnings and its own stdout are worth a disk write.
+# It runs every 30 seconds, so systemd's own start/stop lines are dropped. Its stdout,
+# the "ending session" lines, is raised to notice so the filter keeps it.
 LogLevelMax=notice
+SyslogLevel=notice
 SERVICE
   cat > "$UNIT.timer" <<TIMER
 [Unit]
