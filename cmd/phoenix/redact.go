@@ -138,17 +138,26 @@ type exitCodeError int
 
 func (e exitCodeError) Error() string { return fmt.Sprintf("command exited with status %d", int(e)) }
 
-// childEnv is the child's environment: the current one minus Phoenix broker
-// credentials (and, with maskEnv, minus anything holding a phoenix:// ref).
+// childEnv is the child's environment: the current one minus Phoenix's own
+// settings and credentials (and, with maskEnv, minus anything holding a
+// phoenix:// ref). Every PHOENIX_* variable goes: the token, PHOENIX_ROLE
+// (which would let the child mint its own session), PHOENIX_MCP_TOKEN,
+// PHOENIX_MASTER_PASSPHRASE, the seal key path and the rest. The 1Password
+// service account token goes too, under its default name and under the name
+// PHOENIX_OP_TOKEN_ENV points at. cmdExec adds the --env mappings after this,
+// so a value the user maps on purpose still reaches the child.
 func childEnv(environ []string, maskEnv bool) []string {
+	strip := map[string]bool{"OP_SERVICE_ACCOUNT_TOKEN": true}
+	for _, e := range environ {
+		if key, val, _ := strings.Cut(e, "="); key == "PHOENIX_OP_TOKEN_ENV" && val != "" {
+			strip[val] = true
+		}
+	}
 	var env []string
 	for _, e := range environ {
 		key, val, _ := strings.Cut(e, "=")
-		switch key {
-		case "PHOENIX_TOKEN", "PHOENIX_CLIENT_CERT", "PHOENIX_CLIENT_KEY",
-			"PHOENIX_CA_CERT", "PHOENIX_SERVER", "PHOENIX_POLICY",
-			"PHOENIX_SEAL_KEY":
-			continue // strip broker credentials
+		if strings.HasPrefix(key, "PHOENIX_") || strip[key] {
+			continue // strip Phoenix settings and broker credentials
 		}
 		if maskEnv && strings.Contains(val, "phoenix://") {
 			continue // strip env vars containing phoenix:// refs

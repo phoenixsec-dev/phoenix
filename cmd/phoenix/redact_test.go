@@ -85,6 +85,22 @@ func TestChildEnvStripsBrokerCredentials(t *testing.T) {
 	}
 }
 
+// The leak found in the 2026-11 review: these reached the child before.
+// PHOENIX_ROLE would let the child mint its own session; the others are
+// credentials outright. A 1Password token under a custom name (named by
+// PHOENIX_OP_TOKEN_ENV) goes too; unrelated variables stay.
+func TestChildEnvStripsEveryPhoenixCredential(t *testing.T) {
+	env := childEnv([]string{
+		"PATH=/bin", "HOME=/home/a",
+		"PHOENIX_MCP_TOKEN=m", "PHOENIX_MASTER_PASSPHRASE=p", "PHOENIX_ROLE=r",
+		"OP_SERVICE_ACCOUNT_TOKEN=o", "PHOENIX_OP_TOKEN_ENV=MY_OP", "MY_OP=o2",
+		"PHOENIX_SOMETHING_NEW=x", "NOT_PHOENIX_TOKEN=keep",
+	}, false)
+	if got := strings.Join(env, ","); got != "PATH=/bin,HOME=/home/a,NOT_PHOENIX_TOKEN=keep" {
+		t.Fatalf("child env = %s", got)
+	}
+}
+
 func TestRunRedactedStdoutStderrSplitAndExitCode(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
