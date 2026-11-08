@@ -43,6 +43,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/removed"
 )
 
 // ProcessRule defines process-level attestation requirements.
@@ -185,6 +187,10 @@ func Load(data []byte) (*Engine, error) {
 	// Treat empty/whitespace-only as no rules
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return NewEngine(), nil
+	}
+
+	if err := removed.Error("policy file", removed.Find(data, removedRuleFields)); err != nil {
+		return nil, err
 	}
 
 	// Parse top-level once so we can support both canonical and legacy formats.

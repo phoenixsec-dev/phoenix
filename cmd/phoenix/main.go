@@ -153,6 +153,8 @@ func main() {
 		}
 	}
 
+	checkRemovedCommand(cmd, args)
+
 	var err error
 	switch cmd {
 	case "get":

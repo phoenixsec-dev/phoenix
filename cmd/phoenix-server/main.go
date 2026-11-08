@@ -60,6 +60,7 @@ func main() {
 	initPassphrase := flag.String("passphrase", "", "Passphrase to protect master key (--init only)")
 	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
 	hashPassword := flag.Bool("hash-password", false, "Generate a bcrypt hash for dashboard password_hash config")
+	checkConfig := flag.Bool("check-config", false, "Check the config file, the policy file and HTTPS certificate it names, then exit without starting")
 	reissueCert := flag.Bool("reissue-cert", false, "Re-issue the server TLS certificate with new SANs")
 	var sans sanList
 	flag.Var(&sans, "san", "Subject Alternative Name for --reissue-cert (repeatable: IPs and hostnames)")
@@ -85,14 +86,7 @@ func main() {
 		if len(sans) == 0 {
 			log.Fatal("--reissue-cert requires at least one --san value")
 		}
-		cfgPath := *configPath
-		if cfgPath == "" {
-			cfgPath = os.Getenv("PHOENIX_CONFIG")
-		}
-		if cfgPath == "" {
-			cfgPath = "/data/config.json"
-		}
-		cfg, err := config.Load(cfgPath)
+		cfg, err := config.Load(resolveConfigPath(*configPath))
 		if err != nil {
 			log.Fatalf("loading config: %v", err)
 		}
@@ -110,14 +104,7 @@ func main() {
 	}
 
 	if *protectKey {
-		cfgPath := *configPath
-		if cfgPath == "" {
-			cfgPath = os.Getenv("PHOENIX_CONFIG")
-		}
-		if cfgPath == "" {
-			cfgPath = "/data/config.json"
-		}
-		cfg, err := config.Load(cfgPath)
+		cfg, err := config.Load(resolveConfigPath(*configPath))
 		if err != nil {
 			log.Fatalf("loading config: %v", err)
 		}
@@ -127,16 +114,16 @@ func main() {
 		return
 	}
 
-	// Load config
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cfgPath = os.Getenv("PHOENIX_CONFIG")
-	}
-	if cfgPath == "" {
-		cfgPath = "/data/config.json"
+	if *checkConfig {
+		if err := runCheckConfig(resolveConfigPath(*configPath)); err != nil {
+			fmt.Fprintf(os.Stderr, "config check failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
-	cfg, err := config.Load(cfgPath)
+	// Load config
+	cfg, err := config.Load(resolveConfigPath(*configPath))
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
 	}
@@ -434,6 +421,47 @@ func main() {
 	if err := serveListeners(httpSrv, cfg, optionalHTTPS, log.Printf); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// resolveConfigPath picks the config file: --config, then $PHOENIX_CONFIG,
+// then /data/config.json.
+func resolveConfigPath(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if env := os.Getenv("PHOENIX_CONFIG"); env != "" {
+		return env
+	}
+	return "/data/config.json"
+}
+
+// runCheckConfig is --check-config: it runs the same checks startup does on
+// the config file, the policy file and the HTTPS certificate, without opening
+// the store or binding any port, so an operator can check a config (including
+// one with removed settings) before deploying a new version.
+func runCheckConfig(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if cfg.Policy.Path != "" {
+		pe, err := policy.LoadFile(cfg.Policy.Path)
+		if err != nil {
+			return fmt.Errorf("policy %s: %w", cfg.Policy.Path, err)
+		}
+		fmt.Printf("policy OK: %s (%d rules)\n", cfg.Policy.Path, len(pe.Rules()))
+	}
+	if _, err := loadHTTPSListener(cfg.HTTPSListener); err != nil {
+		return err
+	}
+	fmt.Printf("config OK: %s\n", path)
+	return nil
 }
 
 func runInit(dir, passphrase string) error {

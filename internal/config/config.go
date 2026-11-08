@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/removed"
 )
 
 // Config is the top-level server configuration.
@@ -31,6 +33,10 @@ type Config struct {
 	AccessRequests *AccessRequestsConfig `json:"access_requests,omitempty"`
 	// SSHCA is nil when the block is missing, which means SSH certificates are off.
 	SSHCA *SSHCAConfig `json:"ssh_ca,omitempty"`
+
+	// removed lists the removed settings Load found in the file (removed.go);
+	// Validate refuses to start while any are left.
+	removed []string
 }
 
 // AuthConfig controls authentication methods.
@@ -343,6 +349,7 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	cfg.removed = removed.Find(data, removedSettings)
 
 	return cfg, nil
 }
@@ -373,8 +380,12 @@ func (c *Config) TLSCertKey() (cert, key string) {
 	return cert, key
 }
 
-// Validate checks that all required fields are set.
+// Validate checks that all required fields are set and that the file used
+// no removed settings.
 func (c *Config) Validate() error {
+	if err := removed.Error("config", c.removed); err != nil {
+		return err
+	}
 	if c.Server.Listen == "" {
 		return errors.New("server.listen is required")
 	}
