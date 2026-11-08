@@ -813,3 +813,21 @@ func TestPagesShowFullSecretPath(t *testing.T) {
 		}
 	}
 }
+
+// A step-up approval card shows the role's namespaces in full and wrappable;
+// a namespace can be an exact secret path.
+func TestApprovalCardNamespacesWrap(t *testing.T) {
+	h, _, as := testHandler(t)
+	cookie := login(t, h)
+	long := "homelab/proxmox/cluster-api-tokens/automation/terraform-provisioner-token"
+	if _, err := as.Create("deploy", "agent1", nil, []string{long}, []string{"list"}, "bearer", "", "10.0.0.1", "", time.Hour, 0); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/dashboard/approvals", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), `<span class="mono path-full">`+long+`</span>`) {
+		t.Fatal("namespace not shown in full in a path-full span")
+	}
+}
