@@ -57,7 +57,9 @@ returned one also returned the value. Now:
 - `phoenix set` without a description that leaves the secret with none
   prints a one-line nudge. It never fails.
 - New route `GET /v1/metadata/...`: needs only `list` permission, audited as
-  `list`, never reads the value (see the API reference).
+  `list`, never returns the value (see the API reference). `PUT
+  /v1/secrets/...` now also returns `has_description` to callers who may list
+  the path.
 - The store keeps the original `created_by` on updates and records the last
   writer in a new `updated_by`. Older versions overwrote `created_by`, so on
   existing secrets it shows the last writer until they are next updated.

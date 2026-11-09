@@ -90,23 +90,15 @@ func (b *OPBackend) Get(path string) (*Secret, error) {
 	return secret, nil
 }
 
-// Metadata reports what Phoenix knows about a 1Password path without
-// reading the value: only the op:// reference it maps to. The path must be
-// one List returns, so a missing item is ErrSecretNotFound.
+// Metadata reports what Phoenix knows about a 1Password path: only the
+// op:// reference it maps to. It runs no op command, because the API calls
+// it once per listed path and an uncached op listing walks the whole vault.
+// It does not check that the item exists; the API does that with List.
 func (b *OPBackend) Metadata(path string) (*SecretMetadata, error) {
 	if err := ValidatePath(path); err != nil {
 		return nil, err
 	}
-	paths, err := b.List(path)
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range paths {
-		if p == path {
-			return &SecretMetadata{Description: fmt.Sprintf("1Password: op://%s/%s", b.vault, path)}, nil
-		}
-	}
-	return nil, ErrSecretNotFound
+	return &SecretMetadata{Description: fmt.Sprintf("1Password: op://%s/%s", b.vault, path)}, nil
 }
 
 // List returns secret paths from 1Password items in the configured vault.

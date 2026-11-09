@@ -105,8 +105,8 @@ func TestCmdSetNudgesWhenNoDescription(t *testing.T) {
 		name, response string
 		nudge          bool
 	}{
-		{"none stored", `{"status":"ok","path":"a/b","description":""}`, true},
-		{"kept from before", `{"status":"ok","path":"a/b","description":"old one"}`, false},
+		{"none stored", `{"status":"ok","path":"a/b","has_description":false}`, true},
+		{"kept from before", `{"status":"ok","path":"a/b","has_description":true}`, false},
 		{"old server", `{"status":"ok","path":"a/b"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -12,7 +12,9 @@ type SecretBackend interface {
 	Get(path string) (*Secret, error)
 
 	// Metadata returns a secret's description, tags, times and authors
-	// without reading or decrypting its value.
+	// without reading or decrypting its value. It must be cheap: the API
+	// calls it once per listed path. It may skip the existence check
+	// (1Password does); callers that need one use List.
 	Metadata(path string) (*SecretMetadata, error)
 
 	// List returns secret paths matching a prefix.

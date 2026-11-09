@@ -61,7 +61,8 @@ func newSecretInfo(path string, m *store.SecretMetadata) secretInfo {
 // ending in "/") returns {"secrets": [...]} for every path the caller may
 // list, optionally narrowed by ?tag=<tag>. A single path returns one
 // secretInfo. Access is exactly the list permission, and both forms are
-// audited as "list". Values are never read.
+// audited as "list". Values are never returned. Each request makes one
+// backend List call (on 1Password a vault walk, as the list route does).
 func (s *Server) handleSecretMetadata(w http.ResponseWriter, r *http.Request) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
@@ -128,11 +129,22 @@ func (s *Server) handleSecretMetadata(w http.ResponseWriter, r *http.Request) {
 		s.denyAttestation(w, r, info, "list", path, ip, err)
 		return
 	}
-	m, err := s.backend.Metadata(path)
-	if err == store.ErrInvalidPath {
+	// Existence comes from List: some backends' Metadata does not check it.
+	if err := store.ValidatePath(path); err != nil {
 		jsonError(w, "invalid secret path", http.StatusBadRequest)
 		return
 	}
+	paths, err := s.backend.List(path)
+	if err != nil {
+		log.Printf("error listing secrets with prefix %q: %v", path, err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !slices.Contains(paths, path) {
+		jsonError(w, "secret not found", http.StatusNotFound)
+		return
+	}
+	m, err := s.backend.Metadata(path)
 	if err == store.ErrSecretNotFound {
 		jsonError(w, "secret not found", http.StatusNotFound)
 		return

@@ -868,11 +868,15 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditAllowed(r, info, "write", path, ip)
-	// description is what is stored after the write (an update without one
-	// keeps the old one), so `phoenix set` can nudge only when it is empty.
-	resp := map[string]string{"status": "ok", "path": path}
-	if m, err := s.backend.Metadata(path); err == nil {
-		resp["description"] = m.Description
+	// has_description: does the secret have one after this write (an update
+	// without one keeps the old one)? `phoenix set` nudges when it is false.
+	// Only for callers who may list the path, as that is the metadata
+	// permission; never the text.
+	resp := map[string]interface{}{"status": "ok", "path": path}
+	if s.baseAccessReason(info, path, "list", acl.ActionList) == "" {
+		if m, err := s.backend.Metadata(path); err == nil {
+			resp["has_description"] = m.Description != ""
+		}
 	}
 	jsonOK(w, resp)
 }

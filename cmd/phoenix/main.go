@@ -604,11 +604,13 @@ func cmdSet(args []string) error {
 	}
 
 	fmt.Printf("ok: %s\n", path)
-	// Nudge, never fail: the server echoes the stored description (older
-	// servers don't, and then we stay quiet).
-	var result map[string]string
+	// Nudge, never fail: the server reports has_description (older servers,
+	// and callers without list access, get no field, and then we stay quiet).
+	var result struct {
+		HasDescription *bool `json:"has_description"`
+	}
 	if json.NewDecoder(resp.Body).Decode(&result) == nil {
-		if d, ok := result["description"]; ok && d == "" {
+		if result.HasDescription != nil && !*result.HasDescription {
 			fmt.Fprintf(os.Stderr, "note: %s has no description. Add -d \"what it is for\" next time you set it, so phoenix list and info can show it.\n", path)
 		}
 	}

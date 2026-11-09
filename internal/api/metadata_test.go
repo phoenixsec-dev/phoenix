@@ -7,10 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/store"
 )
 
 // putSecret stores a secret through the API as the given token.
-func putSecret(t *testing.T, srv *Server, token, path string, req setSecretRequest) map[string]string {
+func putSecret(t *testing.T, srv *Server, token, path string, req setSecretRequest) map[string]interface{} {
 	t.Helper()
 	body, _ := json.Marshal(req)
 	r := httptest.NewRequest("PUT", "/v1/secrets/"+path, bytes.NewReader(body))
@@ -20,7 +23,7 @@ func putSecret(t *testing.T, srv *Server, token, path string, req setSecretReque
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT %s: %d %s", path, w.Code, w.Body.String())
 	}
-	var resp map[string]string
+	var resp map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&resp)
 	return resp
 }
@@ -110,20 +113,67 @@ func TestMetadataTagFilter(t *testing.T) {
 	}
 }
 
-// PUT returns the description stored after the write; `phoenix set` nudges
-// on it.
-func TestSetEchoesStoredDescription(t *testing.T) {
+// PUT says whether the secret ends up with a description; `phoenix set`
+// nudges on it. Never the text, and only to callers who may list the path.
+func TestSetReportsHasDescription(t *testing.T) {
 	srv, admin := setupTestServer(t)
-	resp := putSecret(t, srv, admin, "test/a", setSecretRequest{Value: "v1", Description: "first"})
-	if resp["description"] != "first" {
-		t.Fatalf("PUT should echo the stored description: %v", resp)
+	resp := putSecret(t, srv, admin, "test/a", setSecretRequest{Value: "v1", Description: "private first"})
+	if resp["has_description"] != true {
+		t.Fatalf("want has_description true: %v", resp)
 	}
 	resp = putSecret(t, srv, admin, "test/a", setSecretRequest{Value: "v2"})
-	if resp["description"] != "first" {
-		t.Fatalf("update without -d should keep and echo the old description: %v", resp)
+	if resp["has_description"] != true {
+		t.Fatalf("update without -d keeps the old description: %v", resp)
 	}
 	resp = putSecret(t, srv, admin, "test/b", setSecretRequest{Value: "v"})
-	if d, ok := resp["description"]; !ok || d != "" {
-		t.Fatalf("PUT should return an empty description field when there is none: %v", resp)
+	if resp["has_description"] != false {
+		t.Fatalf("want has_description false: %v", resp)
+	}
+
+	// R1-1: a writer without list learns nothing about the description.
+	if err := srv.acl.AddAgent("writer", "writer-token", []acl.Permission{{Path: "test/*", Actions: []acl.Action{acl.ActionWrite}}}); err != nil {
+		t.Fatal(err)
+	}
+	resp = putSecret(t, srv, "writer-token", "test/a", setSecretRequest{Value: "v3"})
+	if _, ok := resp["has_description"]; ok {
+		t.Fatalf("write-only caller got description info: %v", resp)
+	}
+	for _, v := range resp {
+		if s, _ := v.(string); strings.Contains(s, "private first") {
+			t.Fatalf("write-only caller got the description: %v", resp)
+		}
+	}
+}
+
+// countingBackend counts List calls, to pin one backend scan per request.
+type countingBackend struct {
+	stubBackend
+	lists int
+}
+
+func (b *countingBackend) List(prefix string) ([]string, error) {
+	b.lists++
+	return b.stubBackend.List(prefix)
+}
+
+// R1-2: listing metadata must not rescan the backend per secret (a scan
+// is a full 1Password vault walk).
+func TestMetadataScansBackendOncePerRequest(t *testing.T) {
+	b := &countingBackend{stubBackend: stubBackend{secrets: map[string]*store.Secret{
+		"ns/a": {Path: "ns/a"}, "ns/b": {Path: "ns/b"}, "ns/c": {Path: "ns/c"},
+	}}}
+	srv, token := setupStubServer(t, b)
+	if code, body := getMetadata(srv, token, ""); code != http.StatusOK || strings.Count(body, `"path"`) != 3 {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	if b.lists != 1 {
+		t.Fatalf("list request made %d backend scans, want 1", b.lists)
+	}
+	b.lists = 0
+	if code, _ := getMetadata(srv, token, "ns/a"); code != http.StatusOK || b.lists != 1 {
+		t.Fatalf("info: code %d, %d scans, want 200 and 1", code, b.lists)
+	}
+	if code, _ := getMetadata(srv, token, "ns/zz"); code != http.StatusNotFound {
+		t.Fatalf("missing path: want 404, got %d", code)
 	}
 }
