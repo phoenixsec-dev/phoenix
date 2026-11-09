@@ -22,6 +22,7 @@ func TestValidateRefusesRemovedSettings(t *testing.T) {
 		"audit": {"path": "/data/audit.log"},
 		"attestation": {"nonce": {"enabled": false}, "token": {"enabled": false}, "local_agent": {"enabled": false}},
 		"onepassword": {"enabled": false},
+		"dashboard": {"enabled": false, "allow_multi_login": false},
 		"session": {"enabled": true, "roles": {
 			"ok": {"namespaces": ["a/*"], "bootstrap_trust": ["bearer"]},
 			"elevated": {"namespaces": ["b/*"], "bootstrap_trust": ["bearer", "mtls"], "attestation": ["cert_fingerprint"],
@@ -43,6 +44,7 @@ func TestValidateRefusesRemovedSettings(t *testing.T) {
 		"tls: removed", "auth.mtls: removed", "attestation.nonce: removed", "attestation.token: removed",
 		"attestation.local_agent: removed",
 		"onepassword.enabled: removed",
+		"dashboard.allow_multi_login: removed",
 		"session.roles.elevated.step_up: removed", "session.roles.elevated.step_up_ttl: removed",
 		"session.roles.elevated.elevates_acl: removed", "session.roles.elevated.allowed_agents: removed",
 		`session.roles.elevated.bootstrap_trust "mtls": removed`,

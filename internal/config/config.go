@@ -155,11 +155,10 @@ type RoleConfig struct {
 
 // DashboardConfig controls the optional operator dashboard web UI.
 type DashboardConfig struct {
-	Enabled         bool   `json:"enabled"`
-	PasswordHash    string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
-	PIN             string `json:"pin,omitempty"`
-	SessionTTL      string `json:"session_ttl,omitempty"`       // default "4h"
-	AllowMultiLogin bool   `json:"allow_multi_login,omitempty"` // default false: only one active dashboard session
+	Enabled      bool   `json:"enabled"`
+	PasswordHash string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
+	PIN          string `json:"pin,omitempty"`
+	SessionTTL   string `json:"session_ttl,omitempty"` // default "4h"
 }
 
 // validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.

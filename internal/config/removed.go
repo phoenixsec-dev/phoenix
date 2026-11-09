@@ -35,4 +35,6 @@ var removedSettings = []removed.Field{
 		Instead: "give the agent the paths in its ACL, or approve an access request"},
 	{Path: "session.roles.*.bootstrap_trust.[]", Value: "token", Why: "short-lived tokens are gone",
 		Instead: "use \"bearer\" or \"local\""},
+	{Path: "dashboard.allow_multi_login", Why: "several dashboard logins at once are now always allowed (up to 5), each listed on the Sessions page where it can be signed out",
+		Instead: "delete the line"},
 }
