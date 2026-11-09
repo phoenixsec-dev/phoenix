@@ -28,12 +28,16 @@ var (
 
 // SecretMetadata holds non-sensitive metadata about a secret.
 type SecretMetadata struct {
-	Created     time.Time `json:"created"`
-	Updated     time.Time `json:"updated"`
-	CreatedBy   string    `json:"created_by"`
-	Description string    `json:"description,omitempty"`
-	Tags        []string  `json:"tags,omitempty"`
-	RotationDue string    `json:"rotation_due,omitempty"`
+	Created   time.Time `json:"created"`
+	Updated   time.Time `json:"updated"`
+	CreatedBy string    `json:"created_by"`
+	// UpdatedBy is who wrote the current value. Empty on secrets last
+	// written before it existed; then CreatedBy is the last writer, because
+	// older versions overwrote CreatedBy on every update.
+	UpdatedBy   string   `json:"updated_by,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	RotationDue string   `json:"rotation_due,omitempty"`
 }
 
 // encryptedSecret is the on-disk representation of a secret.
@@ -230,12 +234,14 @@ func (s *Store) Set(path, value, createdBy, description string, tags []string) e
 		Created:     now,
 		Updated:     now,
 		CreatedBy:   createdBy,
+		UpdatedBy:   createdBy,
 		Description: description,
 		Tags:        tags,
 	}
 
 	if exists {
 		meta.Created = existing.Metadata.Created
+		meta.CreatedBy = existing.Metadata.CreatedBy
 		if description == "" {
 			meta.Description = existing.Metadata.Description
 		}
@@ -574,6 +580,9 @@ func (s *Store) Provider() crypto.KeyProvider {
 
 // GetMetadata returns just the metadata for a secret (no decryption needed).
 func (s *Store) GetMetadata(path string) (*SecretMetadata, error) {
+	if err := ValidatePath(path); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -583,5 +592,6 @@ func (s *Store) GetMetadata(path string) (*SecretMetadata, error) {
 	}
 
 	meta := enc.Metadata
+	meta.Tags = append([]string(nil), enc.Metadata.Tags...)
 	return &meta, nil
 }

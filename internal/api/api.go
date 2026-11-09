@@ -262,6 +262,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 	s.accessRoutes()
+	s.metadataRoutes()
 	s.sshRoutes()
 	s.removedRouteRoutes()
 }
@@ -867,7 +868,13 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditAllowed(r, info, "write", path, ip)
-	jsonOK(w, map[string]string{"status": "ok", "path": path})
+	// description is what is stored after the write (an update without one
+	// keeps the old one), so `phoenix set` can nudge only when it is empty.
+	resp := map[string]string{"status": "ok", "path": path}
+	if m, err := s.backend.Metadata(path); err == nil {
+		resp["description"] = m.Description
+	}
+	jsonOK(w, resp)
 }
 
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {

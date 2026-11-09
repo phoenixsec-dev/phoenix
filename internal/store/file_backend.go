@@ -17,6 +17,10 @@ func (b *FileBackend) Get(path string) (*Secret, error) {
 	return b.store.Get(path)
 }
 
+func (b *FileBackend) Metadata(path string) (*SecretMetadata, error) {
+	return b.store.GetMetadata(path)
+}
+
 func (b *FileBackend) List(prefix string) ([]string, error) {
 	return b.store.List(prefix), nil
 }
