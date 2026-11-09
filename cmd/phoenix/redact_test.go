@@ -170,15 +170,3 @@ func TestCmdExecRedactOutput(t *testing.T) {
 		t.Fatalf("output = %q", got)
 	}
 }
-
-// Review R1-02: every MCP-over-HTTP flag is refused, in both spellings.
-func TestRemovedMCPFlags(t *testing.T) {
-	for _, args := range [][]string{{"--http", "127.0.0.1:1"}, {"--tls-cert", "x"}, {"--tls-key=x"}, {"--mcp-token", "t"}, {"-v", "--http=:1"}} {
-		if f, _ := removedFlag("mcp-server", args); f == "" {
-			t.Errorf("%v not refused", args)
-		}
-	}
-	if f, _ := removedFlag("mcp-server", []string{"--verbose"}); f != "" {
-		t.Errorf("--verbose refused as %q", f)
-	}
-}

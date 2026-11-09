@@ -7,7 +7,7 @@
 //	phoenix set <path> --multiline [--description <desc>]        (hidden, ends with Ctrl-D)
 //	phoenix set <path> --value-stdin [--description <desc>] [--tags <t1,t2>]
 //	phoenix delete <path>
-//	phoenix list [prefix]
+//	phoenix list [folder/]
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
@@ -136,6 +136,7 @@ func main() {
 	}
 
 	checkRemovedCommand(cmd, args)
+	args = checkArgs(cmd, args)
 
 	var err error
 	switch cmd {
@@ -283,7 +284,7 @@ Usage:
   phoenix set <path> --multiline              Hidden multi-line paste (PEM keys), end with Ctrl-D
   phoenix set <path> --value-stdin            Read secret value from stdin
   phoenix delete <path>                       Delete a secret
-  phoenix list [prefix]                       List secret paths
+  phoenix list [folder/]                      List secret paths in a folder (folder, folder/ or folder/*)
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
@@ -485,7 +486,7 @@ func cmdSet(args []string) error {
 	var valueStdin, multiline bool
 
 	i := 0
-	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+	if i < len(args) && !isOption("set", args[i]) {
 		path = args[i]
 		i++
 	}
@@ -602,7 +603,11 @@ func cmdList(args []string) error {
 
 	prefix := ""
 	if len(args) > 0 {
-		prefix = args[0]
+		prefix, err = listFolder(args[0])
+		if err != nil {
+			usageExit("list", cmdSpecs["list"], err.Error())
+			return err
+		}
 	}
 
 	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+prefix, nil, sealHeaders(sealPrivKey))
@@ -638,7 +643,7 @@ func cmdExport(args []string) error {
 
 	var prefix, format string
 	i := 0
-	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+	if i < len(args) && !isOption("export", args[i]) {
 		prefix = args[i]
 		i++
 	}
@@ -724,7 +729,7 @@ func cmdImport(args []string) error {
 
 	i := 0
 	// First positional arg is file path (for env import)
-	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+	if i < len(args) && !isOption("import", args[i]) {
 		filePath = args[i]
 		i++
 	}
@@ -905,7 +910,7 @@ func cmdAgentCreate(args []string) error {
 	var name, agentToken, aclStr string
 	var force bool
 	i := 0
-	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+	if i < len(args) && !isOption("agent create", args[i]) {
 		name = args[i]
 		i++
 	}
@@ -1216,9 +1221,6 @@ func cmdResolve(args []string) error {
 
 	var refs []string
 	for _, arg := range args {
-		if arg == "--signed" {
-			exitRemoved("phoenix resolve --signed", removedCommands["resolve --signed"])
-		}
 		refs = append(refs, arg)
 	}
 
@@ -1612,7 +1614,7 @@ func cmdKeypairGenerate(args []string) error {
 	var name, output string
 	force := false
 	i := 0
-	if i < len(args) && !strings.HasPrefix(args[i], "-") {
+	if i < len(args) && !isOption("keypair generate", args[i]) {
 		name = args[i]
 		i++
 	}
@@ -1835,8 +1837,6 @@ func cmdPolicyTest(args []string) error {
 			if i < len(args) {
 				ip = args[i]
 			}
-		case "-t", "--time":
-			exitRemoved("phoenix policy test --time", removedCommands["policy test --time"])
 		default:
 			if path == "" {
 				path = args[i]

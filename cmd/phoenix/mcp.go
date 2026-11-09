@@ -143,7 +143,7 @@ var mcpBaseTools = []mcpTool{
 			"properties": {
 				"prefix": {
 					"type": "string",
-					"description": "Optional namespace prefix to filter by (e.g. 'myapp/'). Omit to list all accessible secrets."
+					"description": "Optional folder to list, e.g. 'myapp/' ('myapp' and 'myapp/*' mean the same; other wildcards are refused). Omit to list all accessible secrets."
 				}
 			}
 		}`),
@@ -536,14 +536,11 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Invalid arguments: %v", err), true
 	}
 
-	path := "/v1/secrets/"
-	if params.Prefix != "" {
-		p := params.Prefix
-		if !strings.HasSuffix(p, "/") {
-			p += "/"
-		}
-		path = "/v1/secrets/" + p
+	folder, err := listFolder(params.Prefix)
+	if err != nil {
+		return err.Error(), true
 	}
+	path := "/v1/secrets/" + folder
 
 	resp, err := apiRequest("GET", path, nil)
 	if err != nil {

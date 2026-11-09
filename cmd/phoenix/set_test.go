@@ -6,32 +6,6 @@ import (
 	"testing"
 )
 
-// Second cuts: removed flags are refused before anything runs, but a flag
-// after "--" belongs to the command phoenix exec runs.
-func TestRemovedFlagsSecondPass(t *testing.T) {
-	cases := []struct {
-		cmd  string
-		args []string
-		key  string
-	}{
-		{"set", []string{"a/b", "-v", "x"}, "set --value"},
-		{"set", []string{"a/b", "--value=x"}, "set --value"},
-		{"exec", []string{"--env", "A=phoenix://a/b", "--output-env", "f", "--", "true"}, "exec --output-env"},
-		{"resolve", []string{"--stdin-json"}, "resolve --stdin-json"},
-		{"exec", []string{"--env", "A=phoenix://a/b", "--", "tool", "--output-env", "f"}, ""},
-		{"set", []string{"a/b", "--value-stdin"}, ""},
-	}
-	for _, c := range cases {
-		_, key := removedFlag(c.cmd, c.args)
-		if key != c.key {
-			t.Errorf("%s %v: key %q, want %q", c.cmd, c.args, key, c.key)
-		}
-		if key != "" && removedCommands[key].why == "" {
-			t.Errorf("%s: no removal message", key)
-		}
-	}
-}
-
 func TestCmdSetValueStdinReadsFromStdin(t *testing.T) {
 	t.Setenv("PHOENIX_TOKEN", "test-token")
 	token = "test-token"

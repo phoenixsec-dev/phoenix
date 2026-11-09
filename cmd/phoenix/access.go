@@ -134,9 +134,7 @@ func cmdRequest(args []string) error {
 		case "--wait":
 			wait = true
 		default:
-			if strings.HasPrefix(args[i], "-") {
-				return fmt.Errorf("unknown flag %s", args[i])
-			}
+			// checkArgs already refused unknown options, so this is a path.
 			paths = append(paths, strings.TrimPrefix(args[i], "phoenix://"))
 		}
 	}

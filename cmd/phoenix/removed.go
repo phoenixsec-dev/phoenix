@@ -70,32 +70,18 @@ var removedCommands = map[string]removedCommand{
 	},
 }
 
-// removedFlags lists removed flags per command, each pointing at its
-// removedCommands entry. They are refused wherever they appear before "--"
-// ("--flag" or "--flag=value"), rather than ignored, so an old script hears
-// why. MCP-over-HTTP flags all share one entry.
+// removedFlags lists removed flags per command (cmdSpecs key), each pointing
+// at its removedCommands entry. checkArgs refuses them where they appear as
+// options ("--flag" or "--flag=value"), rather than ignoring them, so an old
+// script hears why. A value that merely looks like one (set -d --value) and
+// anything after "--" are left alone.
 var removedFlags = map[string]map[string]string{
 	"mcp-server": {"--http": "mcp-server --http", "--tls-cert": "mcp-server --http",
 		"--tls-key": "mcp-server --http", "--mcp-token": "mcp-server --http"},
-	"exec":    {"--output-env": "exec --output-env"},
-	"set":     {"-v": "set --value", "--value": "set --value"},
-	"resolve": {"--stdin-json": "resolve --stdin-json"},
-}
-
-// removedFlag returns the first removed flag cmd's args use and its
-// removedCommands key, or "" when there is none. It stops at "--", so a
-// command run by phoenix exec keeps its own flags.
-func removedFlag(cmd string, args []string) (flag, key string) {
-	for _, arg := range args {
-		if arg == "--" {
-			break
-		}
-		name, _, _ := strings.Cut(arg, "=")
-		if k, ok := removedFlags[cmd][name]; ok {
-			return name, k
-		}
-	}
-	return "", ""
+	"exec":        {"--output-env": "exec --output-env"},
+	"set":         {"-v": "set --value", "--value": "set --value"},
+	"resolve":     {"--stdin-json": "resolve --stdin-json", "--signed": "resolve --signed"},
+	"policy test": {"-t": "policy test --time", "--time": "policy test --time"},
 }
 
 // checkRemovedCommand exits with a short explanation when args name a removed
@@ -110,9 +96,6 @@ func checkRemovedCommand(cmd string, args []string) {
 			exitRemoved("phoenix "+k, rc)
 		}
 	}
-	if flag, k := removedFlag(cmd, args); flag != "" {
-		exitRemoved("phoenix "+cmd+" "+flag, removedCommands[k])
-	}
 }
 
 // exitRemoved prints the removal message for name and exits 1.
@@ -122,5 +105,5 @@ func exitRemoved(name string, rc removedCommand) {
 		msg += " " + strings.ToUpper(rc.instead[:1]) + rc.instead[1:] + "."
 	}
 	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
+	osExit(1)
 }
