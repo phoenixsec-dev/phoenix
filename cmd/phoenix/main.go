@@ -1605,6 +1605,9 @@ func decryptSealedValue(raw interface{}, privKey *[32]byte) (string, error) {
 
 // --- Keypair commands ---
 
+// cmdKeypairGenerate makes an agent's seal key pair on this machine, writes
+// the private key to a 0600 file, and registers only the public key with the
+// server (POST /v1/keypair). The server never sees the private half.
 func cmdKeypairGenerate(args []string) error {
 	var name, output string
 	force := false
@@ -1644,30 +1647,11 @@ func cmdKeypairGenerate(args []string) error {
 		return err
 	}
 
-	urlPath := "/v1/keypair"
-	if force {
-		urlPath += "?force=true"
-	}
-
-	body, _ := json.Marshal(map[string]string{"agent_name": name})
-	resp, err := apiRequest("POST", urlPath, strings.NewReader(string(body)))
+	kp, err := crypto.GenerateSealKeyPair()
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return fmt.Errorf("generating seal key pair: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return handleError(resp)
-	}
-
-	var result struct {
-		AgentName      string `json:"agent_name"`
-		SealPublicKey  string `json:"seal_public_key"`
-		SealPrivateKey string `json:"seal_private_key"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
-	}
+	pubEncoded := crypto.EncodeSealKey(&kp.PublicKey)
 
 	// Determine output path
 	if output == "" {
@@ -1685,17 +1669,51 @@ func cmdKeypairGenerate(args []string) error {
 		return fmt.Errorf("creating key directory: %w", err)
 	}
 
-	if err := os.WriteFile(output, []byte(result.SealPrivateKey), 0600); err != nil {
+	// Write the private key beside its final name first, so a failed
+	// registration leaves any existing key file untouched, and a key the
+	// server accepted is never lost to a write error afterwards.
+	tmp := output + ".tmp"
+	if err := os.WriteFile(tmp, []byte(crypto.EncodeSealKey(&kp.PrivateKey)), 0600); err != nil {
 		return fmt.Errorf("writing private key: %w", err)
 	}
+	defer os.Remove(tmp)
 	// Harden permissions even if the file already existed with weaker mode
-	if err := os.Chmod(output, 0600); err != nil {
+	if err := os.Chmod(tmp, 0600); err != nil {
 		return fmt.Errorf("setting key file permissions: %w", err)
 	}
 
-	fmt.Printf("Seal keypair generated for agent %q\n", name)
+	urlPath := "/v1/keypair"
+	if force {
+		urlPath += "?force=true"
+	}
+	body, _ := json.Marshal(map[string]string{"agent_name": name, "seal_public_key": pubEncoded})
+	resp, err := apiRequest("POST", urlPath, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return handleError(resp)
+	}
+	var result struct {
+		SealPublicKey string `json:"seal_public_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+	// A server older than this CLI ignores the public key we sent and
+	// registers one it generated itself; ours would then never match.
+	if result.SealPublicKey != pubEncoded {
+		return fmt.Errorf("the server registered a different public key than this CLI made: it is older than this CLI and generated the pair itself. Update phoenix-server, then run this again with --force")
+	}
+
+	if err := os.Rename(tmp, output); err != nil {
+		return fmt.Errorf("saving private key: %w", err)
+	}
+
+	fmt.Printf("Seal keypair generated for agent %q (on this machine; only the public key went to the server)\n", name)
 	fmt.Printf("  private key: %s\n", output)
-	fmt.Printf("  public key:  %s\n", result.SealPublicKey)
+	fmt.Printf("  public key:  %s\n", pubEncoded)
 	fmt.Println()
 	fmt.Printf("Set PHOENIX_SEAL_KEY=%s to enable sealed mode\n", output)
 	return nil

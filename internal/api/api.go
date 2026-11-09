@@ -1485,11 +1485,17 @@ func (s *Server) validateSealHeader(r *http.Request, info *authInfo) (*[32]byte,
 	return pubKey, nil
 }
 
-// generateKeyPairRequest is the JSON body for keypair generation.
+// generateKeyPairRequest is the JSON body for POST /v1/keypair. The client
+// makes the key pair and sends only the public half; the server never sees
+// the private key.
 type generateKeyPairRequest struct {
-	AgentName string `json:"agent_name"`
+	AgentName     string `json:"agent_name"`
+	SealPublicKey string `json:"seal_public_key"`
 }
 
+// handleGenerateKeyPair registers (or with ?force=true replaces) an agent's
+// seal public key. It used to generate the pair and return the private key;
+// a request without seal_public_key (an older CLI) gets a 400 saying so.
 func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
@@ -1513,6 +1519,15 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "agent_name is required", http.StatusBadRequest)
 		return
 	}
+	if req.SealPublicKey == "" {
+		jsonError(w, "seal_public_key is required: the server no longer generates key pairs (it must never see the private key); update the phoenix CLI, which makes the pair locally", http.StatusBadRequest)
+		return
+	}
+	pubKey, err := crypto.DecodeSealKey(req.SealPublicKey)
+	if err != nil {
+		jsonError(w, "invalid seal_public_key: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Verify agent exists
 	_, err = s.acl.GetAgent(req.AgentName)
@@ -1529,16 +1544,7 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kp, err := crypto.GenerateSealKeyPair()
-	if err != nil {
-		log.Printf("error generating seal keypair: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	pubEncoded := crypto.EncodeSealKey(&kp.PublicKey)
-	privEncoded := crypto.EncodeSealKey(&kp.PrivateKey)
-
+	pubEncoded := crypto.EncodeSealKey(pubKey)
 	if err := s.acl.SetAgentSealKey(req.AgentName, pubEncoded); err != nil {
 		log.Printf("error storing seal key for %q: %v", req.AgentName, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1554,9 +1560,8 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]string{
-		"agent_name":       req.AgentName,
-		"seal_public_key":  pubEncoded,
-		"seal_private_key": privEncoded,
+		"agent_name":      req.AgentName,
+		"seal_public_key": pubEncoded,
 	})
 }
 
