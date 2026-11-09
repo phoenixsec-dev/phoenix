@@ -20,7 +20,9 @@ type cmdSpec struct {
 // A command that is missing here is not checked, so a new command must be
 // added here too (TestEveryCommandRejectsUnknownOptions lists them all).
 var cmdSpecs = map[string]cmdSpec{
-	"get": {usage: "phoenix get <path>"},
+	"get":     {usage: "phoenix get <path>"},
+	"version": {usage: "phoenix version"},
+	"help":    {usage: "phoenix help"},
 	// Parents of subcommands: "phoenix agent --help" works, and an option
 	// before the subcommand is refused rather than read as one.
 	"agent":     {usage: "phoenix agent <create|list|delete>"},
@@ -105,11 +107,21 @@ func checkArgs(cmd string, args []string) []string {
 			if spec.child {
 				after = rest[i:]
 			} else {
+				// Paths come first in what the command sees, and its own
+				// parser would read one named like its option as that
+				// option. Refuse that instead of guessing.
+				for _, p := range rest[i+1:] {
+					if isOption(key, p) {
+						usageExit(key, spec, fmt.Sprintf("%q after -- is named like one of this command's options; a path cannot be", p))
+					}
+				}
 				positional = append(positional, rest[i+1:]...)
 			}
 			break
 		}
-		if len(a) < 2 || a[0] != '-' {
+		// A lone "-" is not stdin for any command, so it is a mistyped
+		// option, not a path.
+		if a == "" || a[0] != '-' {
 			positional = append(positional, a)
 			continue
 		}

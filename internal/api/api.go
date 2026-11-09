@@ -836,6 +836,13 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Reads treat "*" as a listing mistake (handleGetSecret), so a secret
+	// named with one could be stored but never read back. Refuse it here.
+	if strings.Contains(path, "*") {
+		jsonError(w, "invalid secret path: \"*\" is not allowed in secret names (it is read as a wildcard)", http.StatusBadRequest)
+		return
+	}
+
 	// write is never grantable, so this is the session + ACL check only.
 	if reason := s.dataAccess(info, path, "write", acl.ActionWrite, ip).Reason; reason != "" {
 		s.writeDataDenial(w, r, info, "write", path, ip, reason)

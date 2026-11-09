@@ -14,7 +14,8 @@ days. Now:
   and `Run 'phoenix <command> --help' for more`, and exits 2. `-h` / `--help`
   works on every command. A value after an option that takes one is a value
   (`-d -v` is a description of "-v"), and `--` ends the options, so a path
-  that starts with `-` still works.
+  that starts with `-` still works (one named exactly like one of the
+  command's options is refused). A lone `-` is an unknown option, not a path.
 - `phoenix list services/browser`, `services/browser/` and
   `services/browser/*` all list `services/browser/`; any other wildcard is a
   usage error. MCP `phoenix_list` takes the same forms.
@@ -22,6 +23,9 @@ days. Now:
   "invalid secret path: wildcards are not secret names; to list a folder, end
   the path with /", decided before the ACL and attestation checks so it never
   reads as a permission problem and reveals nothing about what exists.
+  Writing a secret whose name contains `*` is refused too (400), since it
+  could not be read back. **Before deploying**, check that no stored secret
+  name contains `*` (`phoenix list | grep '\*'`); rename any that do first.
 - Removed flags (`set -v`, `exec --output-env`, ...) are recognised only
   where they are options: a description of "--value" no longer trips one,
   and `-d -- -v x` no longer slips one past.

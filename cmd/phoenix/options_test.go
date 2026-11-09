@@ -57,6 +57,7 @@ var allCommands = []string{
 	"emergency get", "sessions list", "sessions info", "sessions revoke",
 	"keypair generate", "keypair show", "request", "request status", "ssh",
 	"whoami", "pending", "approve", "deny", "grants", "grants revoke", "mcp-server",
+	"version", "help",
 }
 
 // tsk_20261108_0033: an unknown option on any command is a usage error
@@ -74,7 +75,7 @@ func TestEveryCommandRejectsUnknownOptions(t *testing.T) {
 				t.Errorf("%s: missing from cmdSpecs", c)
 				continue
 			}
-			for _, bad := range []string{"--bogus", "-z"} {
+			for _, bad := range []string{"--bogus", "-z", "-"} {
 				argv := append(strings.Fields(c), "some/path", bad)
 				code, _, stderr := runMain(t, argv...)
 				if code != 2 || !strings.Contains(stderr, "phoenix "+c+": no such option: "+bad) ||
@@ -103,6 +104,7 @@ func TestCheckArgsValuesAndDoubleDash(t *testing.T) {
 		{"set", []string{"a/b", "-d", "--value", "--value-stdin"}, []string{"a/b", "-d", "--value", "--value-stdin"}},
 		{"set", []string{"--description=-v", "--", "-x/y"}, []string{"-x/y", "--description", "-v"}},
 		{"get", []string{"--", "-x/y"}, []string{"-x/y"}},
+		{"get", []string{"--", "-"}, []string{"-"}},
 		{"exec", []string{"--env=A=phoenix://a/b", "--", "tool", "--output-env", "--bogus"}, []string{"--env", "A=phoenix://a/b", "--", "tool", "--output-env", "--bogus"}},
 		{"agent", []string{"create", "bot", "--force", "-t", "-tok-"}, []string{"create", "bot", "--force", "-t", "-tok-"}},
 	}
@@ -184,5 +186,26 @@ func TestMCPListFolderForms(t *testing.T) {
 	})
 	if len(got) != 1 || got[0] != "/v1/secrets/services/browser/" {
 		t.Fatalf("requests: %v", got)
+	}
+}
+
+// Review R1 on tsk_20261108_0033: after "--" a path named like one of the
+// command's own options is refused, never read as that option (set would
+// otherwise turn on --value-stdin and write).
+func TestDoubleDashNeverRevivesAnOption(t *testing.T) {
+	var hits atomic.Int32
+	withMockServer(t, func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }, func() {
+		for _, argv := range [][]string{
+			{"set", "k/v", "--", "--value-stdin"},
+			{"verify", "--", "--dry-run"},
+			{"export", "-f", "env", "--", "--format=x/"},
+		} {
+			if code, _, stderr := runMain(t, argv...); code != 2 || !strings.Contains(stderr, "named like one of this command's options") {
+				t.Errorf("%v: exit %d, stderr %q", argv, code, stderr)
+			}
+		}
+	})
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("%d requests reached the server", n)
 	}
 }

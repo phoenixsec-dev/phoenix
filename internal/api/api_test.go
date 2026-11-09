@@ -3769,3 +3769,19 @@ func TestGetSecretWildcardIsUsageError(t *testing.T) {
 		}
 	}
 }
+
+// Review R1 on tsk_20261108_0033: a name with "*" could be written but not
+// read back (reads answer the wildcard hint), so writes refuse it too.
+func TestSetSecretRefusesStar(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	req := httptest.NewRequest("PUT", "/v1/secrets/review/a*b", strings.NewReader(`{"value":"v"}`))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "not allowed in secret names") {
+		t.Fatalf("PUT a*b: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := srv.backend.Get("review/a*b"); err == nil {
+		t.Fatal("secret with * was stored")
+	}
+}
