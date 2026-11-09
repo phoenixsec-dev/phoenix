@@ -1659,18 +1659,6 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check role attestation requirements
-	if len(role.Attestation) > 0 {
-		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
-			// The failed requirement and the role's list go to the audit
-			// log only, so the caller does not learn the role's policy.
-			writeSessionAttestationFailed(w)
-			s.logAudit(s.audit.LogDeniedWithMetadata(info.Agent, "session.mint", req.Role, ip, "attestation_failed",
-				denialAuditMetadata(r, fmt.Sprintf("%s; role %q requires attestation: %v", reason, req.Role, role.Attestation))))
-			return
-		}
-	}
-
 	// Validate seal key if required
 	var sealPubKey []byte
 	if role.RequireSealKey {
@@ -1771,18 +1759,6 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Re-check role attestation requirements against the CURRENT request
-	// (for example, a source_ip role renewed from a non-loopback address).
-	if len(role.Attestation) > 0 {
-		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
-			writeSessionAttestationFailed(w)
-			s.logAudit(s.audit.LogSessionDeniedWithMetadata(info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID,
-				denialAuditMetadata(r, fmt.Sprintf("%s; role %q requires attestation: %v", reason, info.SessionRole, role.Attestation))))
-			return
-		}
-
-	}
-
 	ttl := s.sessionTTL(role.MaxTTL)
 
 	tokenStr, renewedSess, err := s.sessions.Renew(info.SessionID, ttl)
@@ -1815,19 +1791,6 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		"expires_at":    renewedSess.ExpiresAt.Format(time.RFC3339),
 		"renewed":       true,
 	})
-}
-
-// checkRoleAttestation checks a role's attestation list against the request.
-// "source_ip" means the caller must be on loopback; "require_sealed" is
-// enforced by the role's seal key binding, not here. It returns a non-empty
-// reason when a check fails.
-func (s *Server) checkRoleAttestation(attestation []string, info *authInfo, ip string) string {
-	for _, req := range attestation {
-		if req == "source_ip" && !info.IsLocal {
-			return "role requires local (loopback) access"
-		}
-	}
-	return ""
 }
 
 // bootstrapMethod returns the primary auth method string from authInfo.

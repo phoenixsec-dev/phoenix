@@ -192,13 +192,12 @@ func TestValidateDashboardEnabledRequiresCredential(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = true
 	cfg.Dashboard.PasswordHash = ""
-	cfg.Dashboard.PIN = ""
 
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("dashboard enabled without password_hash or pin should fail")
+		t.Fatal("dashboard enabled without password_hash should fail")
 	}
-	if !strings.Contains(err.Error(), "password_hash or pin") {
+	if !strings.Contains(err.Error(), "password_hash is required") {
 		t.Fatalf("error should mention credential requirement: %v", err)
 	}
 }
@@ -224,16 +223,6 @@ func TestValidateDashboardRejectsPlaintextPassword(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bcrypt hash") {
 		t.Fatalf("error should mention bcrypt: %v", err)
-	}
-}
-
-func TestValidateDashboardWithPIN(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Dashboard.Enabled = true
-	cfg.Dashboard.PIN = "1234"
-
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("dashboard with PIN should pass: %v", err)
 	}
 }
 
@@ -267,7 +256,6 @@ func TestValidateDashboardDisabledIgnoresFields(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Dashboard.Enabled = false
 	cfg.Dashboard.PasswordHash = ""
-	cfg.Dashboard.PIN = ""
 	cfg.Dashboard.SessionTTL = "garbage"
 
 	if err := cfg.Validate(); err != nil {

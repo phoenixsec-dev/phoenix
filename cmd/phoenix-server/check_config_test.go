@@ -46,3 +46,37 @@ func TestRunCheckConfig(t *testing.T) {
 		t.Fatal("missing config file passed")
 	}
 }
+
+// Second cuts: dashboard pin, a role attestation list, the old policy "rules"
+// list and the ACL "read" shorthand are all reported in one run.
+func TestRunCheckConfigSecondPass(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	policyPath := filepath.Join(dir, "policy.json")
+	aclPath := filepath.Join(dir, "acl.json")
+	write := func(p, s string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(s), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(cfgPath, `{"server": {"listen": "127.0.0.1:9090"},
+		"store": {"path": "`+dir+`/store.json", "master_key": "`+dir+`/missing.key"},
+		"auth": {"bearer": {"enabled": true}},
+		"acl": {"path": "`+aclPath+`"},
+		"audit": {"path": "`+dir+`/audit.log"},
+		"policy": {"path": "`+policyPath+`"},
+		"dashboard": {"enabled": true, "pin": "1234"},
+		"session": {"enabled": true, "roles": {"r": {"namespaces": ["a/*"], "bootstrap_trust": ["bearer"], "attestation": ["source_ip"]}}}}`)
+	write(policyPath, `{"rules": [{"path": "a/*", "allowed_ips": ["10.0.0.1"]}]}`)
+	write(aclPath, `{"agents": {"old": {"name": "old", "token_hash": "x", "permissions": [{"path": "a/*", "actions": ["read"]}]}}}`)
+	err := runCheckConfig(cfgPath)
+	if err == nil {
+		t.Fatal("second-pass removals passed")
+	}
+	for _, want := range []string{"dashboard.pin: removed", "session.roles.r.attestation: removed", "rules: removed", `agent "old" path "a/*"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q:\n%v", want, err)
+		}
+	}
+}

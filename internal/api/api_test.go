@@ -48,7 +48,7 @@ func setupTestServer(t *testing.T) (*Server, string) {
 				Name:      "reader",
 				TokenHash: crypto.HashToken("reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},
@@ -1995,7 +1995,7 @@ func TestCreateAgentInvalidPermissions(t *testing.T) {
 		name  string
 		perms []acl.Permission
 	}{
-		{"empty path", []acl.Permission{{Path: "", Actions: []acl.Action{acl.ActionRead}}}},
+		{"empty path", []acl.Permission{{Path: "", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}},
 		{"no actions", []acl.Permission{{Path: "ns/*", Actions: []acl.Action{}}}},
 		{"invalid action", []acl.Permission{{Path: "ns/*", Actions: []acl.Action{"bogus"}}}},
 	}
@@ -2026,7 +2026,7 @@ func TestCreateAgentValidPermissions(t *testing.T) {
 		Name:  "goodagent",
 		Token: "goodtoken",
 		Permissions: []acl.Permission{
-			{Path: "ns/*", Actions: []acl.Action{acl.ActionRead, acl.ActionWrite}},
+			{Path: "ns/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue, acl.ActionWrite}},
 		},
 	})
 	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
@@ -2080,7 +2080,7 @@ func setupTestServerWithGranularACL(t *testing.T) *Server {
 				Name:      "legacy-reader",
 				TokenHash: crypto.HashToken("legacy-reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},
@@ -2821,7 +2821,7 @@ func TestDryRunUnchangedWithSealKey(t *testing.T) {
 func TestPolicyCheckAllowUnseal(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
-	pe, _ := policy.Load([]byte(`{"rules":[{"path":"test/*","allow_unseal":true}]}`))
+	pe, _ := policy.Load([]byte(`{"attestation":{"test/*":{"allow_unseal":true}}}`))
 	srv.SetPolicy(pe)
 
 	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
@@ -2842,7 +2842,7 @@ func TestPolicyCheckAllowUnseal(t *testing.T) {
 func TestPolicyCheckDenyUnseal(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
-	pe, _ := policy.Load([]byte(`{"rules":[{"path":"other/*","allow_unseal":true}]}`))
+	pe, _ := policy.Load([]byte(`{"attestation":{"other/*":{"allow_unseal":true}}}`))
 	srv.SetPolicy(pe)
 
 	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
@@ -3073,43 +3073,6 @@ func TestSessionMintCacheControl(t *testing.T) {
 	}
 }
 
-func TestSessionMintAttestationEnforced(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-
-	ss, err := session.NewStore(time.Hour)
-	if err != nil {
-		t.Fatalf("session store: %v", err)
-	}
-	t.Cleanup(ss.Stop)
-	srv.SetSessionStore(ss)
-	srv.SetSessionRoles(map[string]config.RoleConfig{
-		"secure": {
-			Namespaces:     []string{"prod/*"},
-			BootstrapTrust: []string{"bearer"},
-			Attestation:    []string{"source_ip"},
-		},
-	})
-
-	// Mint from a LAN address (should fail because the role requires loopback)
-	body := `{"role":"secure"}`
-	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 403 {
-		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
-	}
-
-	var result struct {
-		Code string `json:"code"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.Code != "ATTESTATION_FAILED" {
-		t.Errorf("code = %q, want ATTESTATION_FAILED", result.Code)
-	}
-}
-
 func TestSessionRenewLocalityRecheck(t *testing.T) {
 	// This test verifies that renewal checks the CURRENT request's locality,
 	// not the original mint-time source IP.
@@ -3230,7 +3193,7 @@ func TestSessionListSelfOnly(t *testing.T) {
 				Name:      "reader",
 				TokenHash: crypto.HashToken("reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},
@@ -3389,7 +3352,7 @@ func TestSessionRevokeOtherDenied(t *testing.T) {
 				Name:      "reader",
 				TokenHash: crypto.HashToken("reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},

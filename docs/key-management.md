@@ -75,8 +75,16 @@ AES-256-GCM.
 ### Initialize with a passphrase
 
 ```bash
-phoenix-server --init /data/phoenix --passphrase "my-strong-passphrase"
+# Pipe it in (read from a password manager, not typed into history)
+pass show phoenix/master | phoenix-server --init /data/phoenix --passphrase-stdin
+
+# Or from the environment
+PHOENIX_MASTER_PASSPHRASE="..." phoenix-server --init /data/phoenix
 ```
+
+With neither, `--init` writes an unprotected key; add a passphrase later with
+`--protect-key`. `--passphrase <value>` was removed: a value on the command
+line is visible in the process list and shell history.
 
 ### Providing the passphrase at boot
 

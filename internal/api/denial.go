@@ -312,13 +312,3 @@ func capDenialDetail(s string) string {
 	}
 	return s[:cut] + denialDetailTruncated
 }
-
-// writeSessionAttestationFailed writes the generic ATTESTATION_FAILED denial
-// for session mint and renew. The failed requirement goes to the audit log
-// (denial.detail), not to the caller.
-func writeSessionAttestationFailed(w http.ResponseWriter) {
-	jsonDenied(w, "access_denied", "ATTESTATION_FAILED",
-		"the request did not meet this role's attestation requirements",
-		"ask the Phoenix operator which attestation this role requires",
-		http.StatusForbidden)
-}

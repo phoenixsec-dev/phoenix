@@ -146,18 +146,16 @@ type SessionConfig struct {
 // RoleConfig defines a named role that agents assume via session tokens.
 type RoleConfig struct {
 	Namespaces     []string `json:"namespaces"`
-	Actions        []string `json:"actions,omitempty"`     // default: ["list", "read_value"]
-	BootstrapTrust []string `json:"bootstrap_trust"`       // allowed auth methods: "bearer", "local"
-	RequireSealKey bool     `json:"require_seal_key"`      // must present seal pubkey at mint
-	MaxTTL         string   `json:"max_ttl,omitempty"`     // per-role session TTL override
-	Attestation    []string `json:"attestation,omitempty"` // "source_ip" (caller must be on loopback) and/or "require_sealed"
+	Actions        []string `json:"actions,omitempty"` // default: ["list", "read_value"]
+	BootstrapTrust []string `json:"bootstrap_trust"`   // allowed auth methods: "bearer", "local"
+	RequireSealKey bool     `json:"require_seal_key"`  // must present seal pubkey at mint
+	MaxTTL         string   `json:"max_ttl,omitempty"` // per-role session TTL override
 }
 
 // DashboardConfig controls the optional operator dashboard web UI.
 type DashboardConfig struct {
 	Enabled         bool   `json:"enabled"`
-	PasswordHash    string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
-	PIN             string `json:"pin,omitempty"`
+	PasswordHash    string `json:"password_hash,omitempty"`     // bcrypt hash (generate with: phoenix-server --hash-password)
 	SessionTTL      string `json:"session_ttl,omitempty"`       // default "4h"
 	AllowMultiLogin bool   `json:"allow_multi_login,omitempty"` // default false: only one active dashboard session
 }
@@ -328,8 +326,8 @@ func (c *Config) Validate() error {
 
 	// Validate dashboard config
 	if c.Dashboard.Enabled {
-		if c.Dashboard.PasswordHash == "" && c.Dashboard.PIN == "" {
-			return errors.New("dashboard: password_hash or pin is required when dashboard is enabled")
+		if c.Dashboard.PasswordHash == "" {
+			return errors.New("dashboard: password_hash is required when dashboard is enabled (generate with: phoenix-server --hash-password)")
 		}
 		if c.Dashboard.PasswordHash != "" {
 			if !strings.HasPrefix(c.Dashboard.PasswordHash, "$2") {
@@ -367,16 +365,6 @@ func (c *Config) Validate() error {
 			for _, method := range role.BootstrapTrust {
 				if !validBootstrapMethods[method] {
 					return fmt.Errorf("session.roles.%s: unknown bootstrap_trust method %q (valid: bearer, local)", name, method)
-				}
-			}
-			for _, a := range role.Attestation {
-				if a != "source_ip" && a != "require_sealed" {
-					return fmt.Errorf("session.roles.%s: unknown attestation %q (valid: source_ip, require_sealed)", name, a)
-				}
-				// require_sealed is enforced only through the role's seal key
-				// binding; on its own it checked nothing.
-				if a == "require_sealed" && !role.RequireSealKey {
-					return fmt.Errorf("session.roles.%s: attestation \"require_sealed\" needs \"require_seal_key\": true (on its own it checks nothing)", name)
 				}
 			}
 			for _, action := range role.Actions {
