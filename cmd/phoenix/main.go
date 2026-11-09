@@ -8,7 +8,8 @@
 //	phoenix set <path> --value <value> [--description <desc>] [--tags <t1,t2>]
 //	phoenix set <path> --value-stdin [--description <desc>] [--tags <t1,t2>]
 //	phoenix delete <path>
-//	phoenix list [prefix]
+//	phoenix list [prefix] [--names] [--tag <tag>]
+//	phoenix info <path>
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
@@ -149,6 +150,8 @@ func main() {
 		err = cmdDelete(args)
 	case "list":
 		err = cmdList(args)
+	case "info":
+		err = cmdInfo(args)
 	case "export":
 		err = cmdExport(args)
 	case "import":
@@ -301,7 +304,9 @@ Usage:
   phoenix set <path> --value-stdin            Read secret value from stdin
   phoenix set <path> -v <value> [-d desc]     Value on the command line (leaks to history)
   phoenix delete <path>                       Delete a secret
-  phoenix list [prefix]                       List secret paths
+  phoenix list [prefix] [--tag <tag>]         List secrets with their descriptions
+  phoenix list [prefix] --names               Bare paths only, one per line (for scripts)
+  phoenix info <path>                         Description, tags, dates, authors; never the value
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
@@ -599,6 +604,14 @@ func cmdSet(args []string) error {
 	}
 
 	fmt.Printf("ok: %s\n", path)
+	// Nudge, never fail: the server echoes the stored description (older
+	// servers don't, and then we stay quiet).
+	var result map[string]string
+	if json.NewDecoder(resp.Body).Decode(&result) == nil {
+		if d, ok := result["description"]; ok && d == "" {
+			fmt.Fprintf(os.Stderr, "note: %s has no description. Add -d \"what it is for\" next time you set it, so phoenix list and info can show it.\n", path)
+		}
+	}
 	return nil
 }
 
@@ -624,40 +637,98 @@ func cmdDelete(args []string) error {
 	return nil
 }
 
+// cmdList implements `phoenix list [prefix] [--names] [--tag <tag>]`. By
+// default each path is followed by its description; --names prints bare
+// paths, one per line, exactly as before (for scripts). --tag keeps only
+// secrets carrying that tag.
 func cmdList(args []string) error {
+	listUsage := fmt.Errorf("usage: phoenix list [prefix] [--names] [--tag <tag>]")
+	prefix, tag := "", ""
+	namesOnly := false
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--names":
+			namesOnly = true
+		case a == "--tag":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return listUsage
+			}
+			tag = args[i]
+		case strings.HasPrefix(a, "-"):
+			return fmt.Errorf("unknown option %q\n%v", a, listUsage)
+		case prefix == "":
+			prefix = a
+		default:
+			return listUsage
+		}
+	}
+
 	if err := requireAuth(); err != nil {
 		return err
 	}
 
-	sealPrivKey, err := loadSealKeyForRequest()
-	if err != nil {
-		return fmt.Errorf("loading seal key: %w", err)
+	if namesOnly && tag == "" {
+		paths, err := fetchListPaths(prefix)
+		if err != nil {
+			return err
+		}
+		for _, p := range paths {
+			fmt.Println(p)
+		}
+		return nil
 	}
 
-	prefix := ""
-	if len(args) > 0 {
-		prefix = args[0]
+	infos, err := fetchSecretInfos(prefix, tag)
+	if err == errNoMetadataRoute && tag == "" {
+		// Older server: still list the names rather than fail.
+		fmt.Fprintln(os.Stderr, "note: "+err.Error()+"; showing names only")
+		namesOnly = true
+		var paths []string
+		if paths, err = fetchListPaths(prefix); err == nil {
+			for _, p := range paths {
+				infos = append(infos, secretInfo{Path: p})
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if namesOnly {
+		for _, si := range infos {
+			fmt.Println(si.Path)
+		}
+		return nil
+	}
+	formatSecretList(os.Stdout, infos)
+	return nil
+}
+
+// fetchListPaths returns the bare paths from the list route (GET
+// /v1/secrets/<prefix>), which every server version has.
+func fetchListPaths(prefix string) ([]string, error) {
+	sealPrivKey, err := loadSealKeyForRequest()
+	if err != nil {
+		return nil, fmt.Errorf("loading seal key: %w", err)
 	}
 
 	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+prefix, nil, sealHeaders(sealPrivKey))
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return handleError(resp)
+		return nil, handleError(resp)
 	}
 
 	var result struct {
 		Paths []string `json:"paths"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	for _, p := range result.Paths {
-		fmt.Println(p)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
 	}
-	return nil
+	return result.Paths, nil
 }
 
 func cmdExport(args []string) error {

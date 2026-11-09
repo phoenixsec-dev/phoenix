@@ -42,6 +42,29 @@ removed CLI commands and flags print why they went.
 Kept on purpose: sessions and roles, access requests and grants, `source_ip` rules,
 sealed delivery and its settings, and the audit log format are unchanged.
 
+### `phoenix list` shows descriptions; new `phoenix info`
+
+Most secrets have a description, but nothing showed it: the only route that
+returned one also returned the value. Now:
+
+- `phoenix list` prints each path with its description (and tags) under it,
+  or `(no description)`. `--names` prints bare paths exactly as before, for
+  scripts. `--tag <tag>` lists only secrets with that tag.
+- `phoenix info <path>` shows description, tags, created and updated times,
+  and who created and last changed the secret. Never the value.
+- MCP `phoenix_list` returns `path — description [tags]` lines and takes an
+  optional `tag`.
+- `phoenix set` without a description that leaves the secret with none
+  prints a one-line nudge. It never fails.
+- New route `GET /v1/metadata/...`: needs only `list` permission, audited as
+  `list`, never reads the value (see the API reference).
+- The store keeps the original `created_by` on updates and records the last
+  writer in a new `updated_by`. Older versions overwrote `created_by`, so on
+  existing secrets it shows the last writer until they are next updated.
+
+**Upgrading:** update the server first. A new CLI against an old server
+still lists names (with a note) and `phoenix info` says the server is too old.
+
 ### HTTPS: one switch
 
 `https_listener` is now the only way to serve HTTPS. It gained optional

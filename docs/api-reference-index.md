@@ -19,9 +19,19 @@ This index is a concise map of currently implemented endpoints in `internal/api/
 |---|---|---|
 | GET | `/v1/secrets/{path}` | Read secret by path |
 | GET | `/v1/secrets/` or `/v1/secrets/{prefix}/` | List visible paths under prefix |
+| GET | `/v1/metadata/` or `/v1/metadata/{prefix}/` | Visible secrets with description, tags, times, authors; `?tag=` filters. Never values |
+| GET | `/v1/metadata/{path}` | Same for one secret (`phoenix info`). Never the value |
 | PUT | `/v1/secrets/{path}` | Create/update secret |
 | DELETE | `/v1/secrets/{path}` | Delete secret |
 | POST | `/v1/resolve` | Batch resolve `phoenix://` refs |
+
+`/v1/metadata` needs only `list` permission on a path, is audited as `list`,
+and never reads the value. Each entry has `path`, `description` (may be
+empty), `tags`, `created`, `updated`, `created_by` and `updated_by` (who wrote
+the current value; on secrets last written before it existed it is the same as
+`created_by`). A server without the route answers a plain-text 404; the CLI
+then lists bare paths. `PUT /v1/secrets/{path}` returns the stored
+`description` so the CLI can nudge when it is empty.
 
 `POST /v1/resolve` request fields:
 - `refs` (required): list of reference strings

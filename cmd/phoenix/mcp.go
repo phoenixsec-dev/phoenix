@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -137,13 +138,17 @@ var mcpBaseTools = []mcpTool{
 	},
 	{
 		Name:        "phoenix_list",
-		Description: "List available secret paths. Optionally filter by a namespace prefix. Returns paths only, not secret values.",
+		Description: "List the secrets you can see, each with its description and tags, to find the one you need. Never returns values.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"prefix": {
 					"type": "string",
 					"description": "Optional namespace prefix to filter by (e.g. 'myapp/'). Omit to list all accessible secrets."
+				},
+				"tag": {
+					"type": "string",
+					"description": "Optional tag; only secrets carrying it are listed."
 				}
 			}
 		}`),
@@ -527,25 +532,73 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 	return result.Value, false
 }
 
-// mcpToolList handles the phoenix_list tool.
+// mcpToolList handles the phoenix_list tool: one line per secret,
+// "path — description [tags]". Against a server without /v1/metadata it
+// falls back to bare paths.
 func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	var params struct {
 		Prefix string `json:"prefix"`
+		Tag    string `json:"tag"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return fmt.Sprintf("Invalid arguments: %v", err), true
 	}
 
-	path := "/v1/secrets/"
-	if params.Prefix != "" {
-		p := params.Prefix
-		if !strings.HasSuffix(p, "/") {
-			p += "/"
-		}
-		path = "/v1/secrets/" + p
+	prefix := params.Prefix
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
 
+	path := "/v1/metadata/" + prefix
+	if params.Tag != "" {
+		path += "?tag=" + url.QueryEscape(params.Tag)
+	}
 	resp, err := apiRequest("GET", path, nil)
+	if err != nil {
+		return fmt.Sprintf("Request failed: %v", err), true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if isMissingRoute(resp, respBody) {
+		if params.Tag != "" {
+			return errNoMetadataRoute.Error(), true
+		}
+		return mcpToolListPaths(prefix, logger)
+	}
+	if resp.StatusCode != 200 {
+		return mcpFormatDenial(respBody, resp.StatusCode), true
+	}
+
+	var result struct {
+		Secrets []secretInfo `json:"secrets"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Sprintf("Failed to decode response: %v", err), true
+	}
+	if len(result.Secrets) == 0 {
+		return "No secrets found", false
+	}
+
+	logger.Printf("listed %d secrets", len(result.Secrets))
+	lines := make([]string, len(result.Secrets))
+	for i, si := range result.Secrets {
+		desc := "(no description)"
+		if si.Description != "" {
+			desc = listPath(si.Description)
+		}
+		if len(si.Tags) > 0 {
+			desc += " [" + listPath(strings.Join(si.Tags, ", ")) + "]"
+		}
+		lines[i] = listPath(si.Path) + " — " + desc
+	}
+	return strings.Join(lines, "\n"), false
+}
+
+// mcpToolListPaths is phoenix_list for servers that predate /v1/metadata:
+// bare paths from the list route.
+func mcpToolListPaths(prefix string, logger *log.Logger) (string, bool) {
+	resp, err := apiRequest("GET", "/v1/secrets/"+prefix, nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}

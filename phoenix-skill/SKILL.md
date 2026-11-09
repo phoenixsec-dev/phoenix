@@ -47,13 +47,18 @@ phoenix exec --env KEY=phoenix://namespace/secret --output-env /path/to/envfile 
 phoenix set <namespace/key> -d "description"
 ```
 
-### List secrets
+Always give `-d`: it is how people and other agents find the secret later.
+
+### Find the secret you need
 
 ```bash
-phoenix list [prefix]
+phoenix list [prefix] [--tag <tag>]   # each path with its description
+phoenix info <namespace/key>          # description, tags, dates, who changed it
 ```
 
-Returns accessible secret paths. Use a prefix to filter by namespace.
+Use these to find a secret by what it is for. Neither shows the value, and
+both need only list access. `phoenix list --names` prints bare paths for
+scripts. MCP: `phoenix_list` returns the same descriptions.
 
 ### Delete a secret
 

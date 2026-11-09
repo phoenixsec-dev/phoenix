@@ -10,8 +10,13 @@ phoenix set myapp/api-key -d "Stripe API key"
 # Read a secret
 phoenix get myapp/db-password
 
-# List secrets
+# List secrets with their descriptions (never values)
 phoenix list myapp/
+phoenix list --tag prod          # only secrets tagged prod
+phoenix list myapp/ --names      # bare paths, one per line, for scripts
+
+# Everything about one secret except its value
+phoenix info myapp/db-password
 
 # Delete a secret
 phoenix delete myapp/old-key
