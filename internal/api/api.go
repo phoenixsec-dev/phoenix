@@ -708,6 +708,15 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// A "*" in a single-secret read is someone trying to list a folder.
+	// Say so before scope, ACL and attestation, so it never reads as a
+	// permission problem; it is decided from the path alone, so it reveals
+	// nothing about which secrets exist.
+	if path != "" && !strings.HasSuffix(path, "/") && strings.Contains(path, "*") {
+		jsonError(w, "invalid secret path: wildcards are not secret names; to list a folder, end the path with /", http.StatusBadRequest)
+		return
+	}
+
 	// Session scope enforcement (before ACL)
 	if path != "" && !strings.HasSuffix(path, "/") {
 		if !s.checkSessionScope(w, r, info, path, ip) {

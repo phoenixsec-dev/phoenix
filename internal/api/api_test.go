@@ -3750,3 +3750,22 @@ func TestResolveRefusesRemovedNonceFields(t *testing.T) {
 		}
 	}
 }
+
+// tsk_20261108_0033: a "*" in a single-secret read is a usage hint (400),
+// decided before ACL and attestation, the same for an identity with no
+// access and for an admin, and whether or not anything is stored there.
+func TestGetSecretWildcardIsUsageError(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	srv.backend.Set("services/browser/key", "v", "admin", "", nil)
+	for _, tok := range []string{"reader-token", adminToken} {
+		for _, p := range []string{"services/browser/*", "nothing/here/*", "services/br*wser"} {
+			req := httptest.NewRequest("GET", "/v1/secrets/"+p, nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+			if w.Code != 400 || !strings.Contains(w.Body.String(), "wildcards are not secret names; to list a folder, end the path with /") {
+				t.Errorf("%s as %s: %d %s", p, tok, w.Code, w.Body.String())
+			}
+		}
+	}
+}
