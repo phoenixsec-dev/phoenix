@@ -253,8 +253,10 @@ Sessions survive a server restart:
   role's settings; sessions of a role that was removed or changed in any way
   are dropped at start (the log says how many), and clients mint new ones under
   the new settings. Sessions of unchanged roles carry on.
-- The server refuses to start if another Phoenix file (secrets, master key,
-  audit log, grants file) is configured at that path.
+- The path is reserved. The server refuses to start if another Phoenix file
+  (secrets, master key, audit log, grants file) is configured there, or if a
+  file at that path is not a sessions file; it never moves or overwrites it.
+  A damaged sessions file can simply be deleted.
 
 Sessions still end when the signing key changes: after `phoenix rotate-master`
 (at the next restart) and at every restart with the 1Password backend, which

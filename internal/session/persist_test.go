@@ -141,19 +141,32 @@ func TestExpiredSessionsNotLoaded(t *testing.T) {
 	}
 }
 
-func TestUnreadableSessionsFileMovedAside(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "role-sessions.json")
-	if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s := openTestStore(t, path, testSigningKey(t))
-	if n := len(s.sessions); n != 0 {
-		t.Errorf("sessions = %d, want 0", n)
-	}
-	aside, _ := filepath.Glob(path + ".corrupt-*")
-	if len(aside) != 1 {
-		t.Errorf("corrupt file not moved aside: %v", aside)
+// Another file at the sessions path (a damaged sessions file, a TLS key,
+// a secrets store) stops startup and is never moved or overwritten.
+func TestForeignFileAtSessionsPathLeftAlone(t *testing.T) {
+	for name, content := range map[string]string{
+		"damaged":     "{not json",
+		"pem key":     "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+		"store.json":  `{"version":1,"namespaces":{},"secrets":{}}`,
+		"old version": `{"version":2,"sessions":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "role-sessions.json")
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := OpenStore(Options{TTL: time.Hour, SigningKey: testSigningKey(t), Path: path})
+			if err == nil {
+				s.Stop()
+				t.Fatal("OpenStore accepted a file that is not a sessions file")
+			}
+			if b, _ := os.ReadFile(path); string(b) != content {
+				t.Fatalf("file changed: %q", b)
+			}
+			if aside, _ := filepath.Glob(path + "*"); len(aside) != 1 {
+				t.Fatalf("extra files next to it: %v", aside)
+			}
+		})
 	}
 }
 

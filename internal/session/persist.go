@@ -59,9 +59,10 @@ type sessionsFile struct {
 
 // loadSessions reads the sessions file and returns the unexpired records
 // whose role still exists with the same settings (fingerprint in roles).
-// A missing file means no sessions. A file that cannot be parsed is moved
-// aside (path.corrupt-<time>) and the store starts empty: losing records only
-// makes clients mint new sessions, it never makes a dead token valid again.
+// A missing file means no sessions. A file that is not a Phoenix sessions
+// file (version 1 with a "sessions" list) is an error and is left untouched:
+// it may be another Phoenix file configured at this path (secrets, a TLS
+// key, the config), and moving or overwriting it would destroy it.
 func loadSessions(path string, roles map[string]string) (map[string]*Session, error) {
 	out := make(map[string]*Session)
 	data, err := os.ReadFile(path)
@@ -72,14 +73,12 @@ func loadSessions(path string, roles map[string]string) (map[string]*Session, er
 		return nil, fmt.Errorf("reading sessions file: %w", err)
 	}
 
+	var keys map[string]json.RawMessage
 	var f sessionsFile
-	if err := json.Unmarshal(data, &f); err != nil || f.Version != fileVersion {
-		aside := fmt.Sprintf("%s.corrupt-%s", path, time.Now().UTC().Format("20060102T150405Z"))
-		if renameErr := os.Rename(path, aside); renameErr != nil {
-			return nil, fmt.Errorf("sessions file %s is unreadable (%v) and could not be moved aside: %w", path, err, renameErr)
-		}
-		log.Printf("WARNING: sessions file %s was unreadable (version %d, err %v); moved to %s, starting with no sessions", path, f.Version, err, aside)
-		return out, nil
+	if err := json.Unmarshal(data, &keys); err != nil || keys["sessions"] == nil ||
+		json.Unmarshal(data, &f) != nil || f.Version != fileVersion {
+		return nil, fmt.Errorf("%s is not a Phoenix role sessions file, and that path is reserved for one; "+
+			"if it is another file, move it; if it is a damaged sessions file, delete it (that only ends sessions)", path)
 	}
 
 	now := time.Now()
