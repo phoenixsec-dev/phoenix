@@ -17,20 +17,25 @@ import (
 // Calling it twice with the same path is a server restart.
 func serverWithSavedSessions(t *testing.T, path string) (*Server, *session.Store, string) {
 	t.Helper()
+	return serverWithRole(t, path, config.RoleConfig{Namespaces: []string{"test/*"}, BootstrapTrust: []string{"bearer"}})
+}
+
+// serverWithRole is serverWithSavedSessions with the "dev" role set to role.
+func serverWithRole(t *testing.T, path string, role config.RoleConfig) (*Server, *session.Store, string) {
+	t.Helper()
+	cfg := &config.Config{Session: config.SessionConfig{Roles: map[string]config.RoleConfig{"dev": role}}}
 	srv, adminToken := setupTestServer(t)
 	key, err := session.DeriveSigningKey(bytes.Repeat([]byte{1}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ss, err := session.OpenStore(session.Options{TTL: time.Hour, SigningKey: key, Path: path})
+	ss, err := session.OpenStore(session.Options{TTL: time.Hour, SigningKey: key, Path: path, RoleFingerprints: cfg.RoleFingerprints()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(ss.Stop)
 	srv.SetSessionStore(ss)
-	srv.SetSessionRoles(map[string]config.RoleConfig{
-		"dev": {Namespaces: []string{"test/*"}, BootstrapTrust: []string{"bearer"}},
-	})
+	srv.SetSessionRoles(cfg.Session.Roles)
 	return srv, ss, adminToken
 }
 
@@ -68,5 +73,19 @@ func TestRevokedSessionStaysRevokedAfterServerRestart(t *testing.T) {
 	code, body := renewWith(after, tok)
 	if code == 200 || !strings.Contains(body, "SESSION_REVOKED") {
 		t.Fatalf("revoked session after restart: %d %s, want SESSION_REVOKED", code, body)
+	}
+}
+
+// Narrowing a role and restarting must not leave old sessions (or their
+// renewals) with the old scope.
+func TestNarrowedRoleEndsSessionsAtRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "role-sessions.json")
+	before, _, admin := serverWithSavedSessions(t, path)
+	tok := mintTestSession(t, before, admin, "dev")
+
+	after, _, _ := serverWithRole(t, path, config.RoleConfig{Namespaces: []string{"other/*"}, BootstrapTrust: []string{"bearer"}})
+	code, body := renewWith(after, tok)
+	if code != 401 || !strings.Contains(body, "SESSION_INVALID") {
+		t.Fatalf("session of a narrowed role after restart: %d %s, want 401 SESSION_INVALID", code, body)
 	}
 }

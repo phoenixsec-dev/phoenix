@@ -59,7 +59,9 @@ until someone cleared `~/.phoenix/token-cache.json` by hand. Now:
 
 - The signing key is derived from the master key, and session records are
   saved to `role-sessions.json` next to the ACL file (no tokens or keys in
-  it). Sessions and revocations survive a restart.
+  it). Sessions and revocations survive a restart. Sessions of a role that
+  was removed or changed are still ended at restart, so role edits take
+  effect as before.
 - The CLI and `phoenix mcp-server` replace a session that gets
   `SESSION_INVALID` or `SESSION_EXPIRED` once and retry the request once.
 - Revoked sessions keep answering `SESSION_REVOKED` until they expire, before

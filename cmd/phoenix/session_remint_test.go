@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -13,12 +14,12 @@ import (
 // with a token listed in dead get 401 with deadCode; others succeed. Mint
 // returns phxs_fresh and records the Authorization it was called with.
 type remintFixture struct {
-	mu        sync.Mutex
-	dead      map[string]bool
-	deadCode  string
-	mints     int
-	mintAuth  []string
-	calls     int
+	mu         sync.Mutex
+	dead       map[string]bool
+	deadCode   string
+	mints      int
+	mintAuth   []string
+	calls      int
 	callBodies []string
 }
 
@@ -128,6 +129,34 @@ func TestRevokedSessionNotRetried(t *testing.T) {
 		}
 		if got := getCachedSessionToken("r3", 0); got != "" {
 			t.Errorf("revoked session still cached: %q", got)
+		}
+	})
+}
+
+// The re-mint after a dead session honors the caller's deadline
+// (phoenix resolve/exec --timeout) instead of waiting on a stalled mint.
+func TestRemintHonorsRequestDeadline(t *testing.T) {
+	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/session/mint" {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"code":"SESSION_INVALID"}`))
+	}, func() {
+		setupCachedSession(t, "r4")
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		resp, err := apiRequestCtx(ctx, "GET", "/v1/secrets/a", nil, nil)
+		if err == nil {
+			resp.Body.Close()
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Fatalf("took %v, want the 100ms deadline to stop the re-mint", d)
 		}
 	})
 }

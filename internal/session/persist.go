@@ -31,6 +31,10 @@ type Options struct {
 	// Path is the sessions file. Empty keeps sessions in memory only, so they
 	// are gone after a restart.
 	Path string
+	// RoleFingerprints maps each configured role to a hash of its settings
+	// (config.RoleFingerprints). Saved with the sessions; at load, a session
+	// whose role is missing here or whose hash changed is dropped.
+	RoleFingerprints map[string]string
 }
 
 // DeriveSigningKey turns the master key into the session signing key with
@@ -48,15 +52,17 @@ func DeriveSigningKey(masterKey []byte) ([]byte, error) {
 // records only (who, which role, scope, expiry, revoked), never a token or
 // the signing key, so a copy of the file cannot be used to authenticate.
 type sessionsFile struct {
-	Version  int        `json:"version"`
-	Sessions []*Session `json:"sessions"`
+	Version  int               `json:"version"`
+	Roles    map[string]string `json:"roles"` // role fingerprints when saved
+	Sessions []*Session        `json:"sessions"`
 }
 
-// loadSessions reads the sessions file and returns the unexpired records.
+// loadSessions reads the sessions file and returns the unexpired records
+// whose role still exists with the same settings (fingerprint in roles).
 // A missing file means no sessions. A file that cannot be parsed is moved
 // aside (path.corrupt-<time>) and the store starts empty: losing records only
 // makes clients mint new sessions, it never makes a dead token valid again.
-func loadSessions(path string) (map[string]*Session, error) {
+func loadSessions(path string, roles map[string]string) (map[string]*Session, error) {
 	out := make(map[string]*Session)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -77,11 +83,19 @@ func loadSessions(path string) (map[string]*Session, error) {
 	}
 
 	now := time.Now()
+	changed := 0
 	for _, sess := range f.Sessions {
 		if sess == nil || sess.ID == "" || now.After(sess.ExpiresAt) {
 			continue
 		}
+		if cur, ok := roles[sess.Role]; !ok || f.Roles[sess.Role] != cur {
+			changed++
+			continue
+		}
 		out[sess.ID] = sess
+	}
+	if changed > 0 {
+		log.Printf("  Sessions: ended %d whose role was removed or changed since the last start", changed)
 	}
 	return out, nil
 }
@@ -92,7 +106,7 @@ func (s *Store) saveLocked() error {
 	if s.path == "" {
 		return nil
 	}
-	f := sessionsFile{Version: fileVersion, Sessions: make([]*Session, 0, len(s.sessions))}
+	f := sessionsFile{Version: fileVersion, Roles: s.roleFingerprints, Sessions: make([]*Session, 0, len(s.sessions))}
 	for _, sess := range s.sessions {
 		f.Sessions = append(f.Sessions, sess)
 	}

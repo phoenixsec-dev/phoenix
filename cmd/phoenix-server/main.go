@@ -247,6 +247,8 @@ func main() {
 			TTL:        sessionTTL,
 			SigningKey: sessionSigningKey,
 			Path:       cfg.SessionStorePath(),
+			// Sessions of a removed or changed role end at restart.
+			RoleFingerprints: cfg.RoleFingerprints(),
 		})
 		if err != nil {
 			log.Fatalf("initializing session store: %v", err)

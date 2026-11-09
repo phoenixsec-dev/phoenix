@@ -424,7 +424,7 @@ func apiRequestCtx(ctx context.Context, method, path string, body io.Reader, hea
 		return resp, nil
 	}
 
-	newTok, mintErr := remintSession(role, tok)
+	newTok, mintErr := remintSession(ctx, role, tok)
 	if mintErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: role session %s got %s and a new one could not be minted: %v\n", role, code, mintErr)
 		return resp, nil
@@ -2122,14 +2122,14 @@ func ensureSealKey(role string) (*[32]byte, string, error) {
 }
 
 // mintSessionViaAPI calls POST /v1/session/mint and returns the session token.
-func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
+func mintSessionViaAPI(ctx context.Context, role, sealPubKeyB64 string) (string, time.Time, error) {
 	body := map[string]string{"role": role}
 	if sealPubKeyB64 != "" {
 		body["seal_public_key"] = sealPubKeyB64
 	}
 	bodyBytes, _ := json.Marshal(body)
 
-	resp, err := sendAPIRequest(context.Background(), os.Getenv("PHOENIX_TOKEN"), "POST", "/v1/session/mint", bodyBytes, true, nil)
+	resp, err := sendAPIRequest(ctx, os.Getenv("PHOENIX_TOKEN"), "POST", "/v1/session/mint", bodyBytes, true, nil)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("session mint request: %w", err)
 	}
@@ -2180,13 +2180,13 @@ func autoMintSession() error {
 	if os.Getenv("PHOENIX_TOKEN") == "" {
 		return fmt.Errorf("PHOENIX_ROLE=%s set but no bootstrap auth available (set PHOENIX_TOKEN)", role)
 	}
-	_, err := mintAndCacheSession(role)
+	_, err := mintAndCacheSession(context.Background(), role)
 	return err
 }
 
 // mintAndCacheSession mints a role session with PHOENIX_TOKEN (sealed if a
 // seal key is set up), caches it and makes it the current token.
-func mintAndCacheSession(role string) (string, error) {
+func mintAndCacheSession(ctx context.Context, role string) (string, error) {
 	_, sealPubB64, err := ensureSealKey(role)
 	if err != nil {
 		// Non-fatal: mint without seal key
@@ -2194,7 +2194,7 @@ func mintAndCacheSession(role string) (string, error) {
 		sealPubB64 = ""
 	}
 
-	sessionToken, expiresAt, err := mintSessionViaAPI(role, sealPubB64)
+	sessionToken, expiresAt, err := mintSessionViaAPI(ctx, role, sealPubB64)
 	if err != nil {
 		return "", err
 	}
@@ -2212,14 +2212,14 @@ var remintMu sync.Mutex
 
 // remintSession replaces the dead session token stale with a fresh one and
 // returns it. If another request already replaced it, that token is reused.
-func remintSession(role, stale string) (string, error) {
+func remintSession(ctx context.Context, role, stale string) (string, error) {
 	remintMu.Lock()
 	defer remintMu.Unlock()
 	if cur := currentToken(); cur != stale {
 		return cur, nil
 	}
 	dropCachedSession(role)
-	return mintAndCacheSession(role)
+	return mintAndCacheSession(ctx, role)
 }
 
 // dropCachedSession removes the role's cached session token from

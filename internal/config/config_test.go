@@ -677,3 +677,45 @@ func TestSSHCAValidation(t *testing.T) {
 		t.Fatalf("a disabled block must not be checked: %v", err)
 	}
 }
+
+// The role sessions file (role-sessions.json next to the ACL) must not be
+// any other Phoenix file: the first session mint would overwrite it.
+func TestSessionStorePathCollisions(t *testing.T) {
+	base := func(dir string) *Config {
+		cfg := DefaultConfig()
+		cfg.ACL.Path = filepath.Join(dir, "acl.json")
+		cfg.Audit.Path = filepath.Join(dir, "audit.log")
+		cfg.Store.Path = filepath.Join(dir, "store.json")
+		cfg.Store.MasterKey = filepath.Join(dir, "master.key")
+		cfg.Session = SessionConfig{Enabled: true, Roles: map[string]RoleConfig{
+			"r": {Namespaces: []string{"x/*"}, BootstrapTrust: []string{"bearer"}},
+		}}
+		return cfg
+	}
+	if err := base(t.TempDir()).Validate(); err != nil {
+		t.Fatalf("clean config refused: %v", err)
+	}
+	for field, set := range map[string]func(c *Config, p string){
+		"store.path":       func(c *Config, p string) { c.Store.Path = p },
+		"store.master_key": func(c *Config, p string) { c.Store.MasterKey = p },
+		"audit.path":       func(c *Config, p string) { c.Audit.Path = p },
+		"grants file":      func(c *Config, p string) { c.AccessRequests = &AccessRequestsConfig{StorePath: p} },
+	} {
+		t.Run(field, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := base(dir)
+			p := filepath.Join(dir, "role-sessions.json")
+			if err := os.WriteFile(p, []byte("secrets-db"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			set(cfg, p)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), "role sessions file") {
+				t.Fatalf("err = %v, want a collision with %s", err, field)
+			}
+			if b, _ := os.ReadFile(p); string(b) != "secrets-db" {
+				t.Fatalf("file changed: %q", b)
+			}
+		})
+	}
+}

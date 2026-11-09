@@ -249,6 +249,12 @@ Sessions survive a server restart:
   new ones.
 - Revoked sessions stay in the file until they expire, so a revoked token keeps
   getting `SESSION_REVOKED` after a restart.
+- A role change still takes effect at restart. The file keeps a hash of each
+  role's settings; sessions of a role that was removed or changed in any way
+  are dropped at start (the log says how many), and clients mint new ones under
+  the new settings. Sessions of unchanged roles carry on.
+- The server refuses to start if another Phoenix file (secrets, master key,
+  audit log, grants file) is configured at that path.
 
 Sessions still end when the signing key changes: after `phoenix rotate-master`
 (at the next restart) and at every restart with the 1Password backend, which

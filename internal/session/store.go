@@ -23,9 +23,11 @@ type Store struct {
 	sessions   map[string]*Session // keyed by session ID
 	signingKey []byte
 	path       string // sessions file; "" = memory only
-	defaultTTL time.Duration
-	stopCh     chan struct{}
-	stopped    bool
+	// roleFingerprints is saved with the sessions; see Options.
+	roleFingerprints map[string]string
+	defaultTTL       time.Duration
+	stopCh           chan struct{}
+	stopped          bool
 }
 
 // NewStore creates a memory-only session store with a random signing key and
@@ -53,7 +55,7 @@ func OpenStore(opts Options) (*Store, error) {
 
 	sessions := make(map[string]*Session)
 	if opts.Path != "" {
-		loaded, err := loadSessions(opts.Path)
+		loaded, err := loadSessions(opts.Path, opts.RoleFingerprints)
 		if err != nil {
 			return nil, err
 		}
@@ -61,11 +63,18 @@ func OpenStore(opts Options) (*Store, error) {
 	}
 
 	s := &Store{
-		sessions:   sessions,
-		signingKey: key,
-		path:       opts.Path,
-		defaultTTL: defaultTTL,
-		stopCh:     make(chan struct{}),
+		sessions:         sessions,
+		signingKey:       key,
+		path:             opts.Path,
+		roleFingerprints: opts.RoleFingerprints,
+		defaultTTL:       defaultTTL,
+		stopCh:           make(chan struct{}),
+	}
+
+	// Rewrite the file now so sessions dropped at load (expired, or of a
+	// changed role) cannot come back if the role is later changed back.
+	if err := s.saveLocked(); err != nil {
+		return nil, err
 	}
 
 	go s.cleanupLoop()

@@ -13,7 +13,13 @@ import (
 // a key derived from a fixed master key, the way the server does.
 func openTestStore(t *testing.T, path string, key []byte) *Store {
 	t.Helper()
-	s, err := OpenStore(Options{TTL: time.Hour, SigningKey: key, Path: path})
+	return openTestStoreRoles(t, path, key, map[string]string{"dev": "v1"})
+}
+
+// openTestStoreRoles is openTestStore with the given role fingerprints.
+func openTestStoreRoles(t *testing.T, path string, key []byte, roles map[string]string) *Store {
+	t.Helper()
+	s, err := OpenStore(Options{TTL: time.Hour, SigningKey: key, Path: path, RoleFingerprints: roles})
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
@@ -167,5 +173,53 @@ func TestDeriveSigningKey(t *testing.T) {
 	}
 	if _, err := DeriveSigningKey(nil); err == nil {
 		t.Errorf("empty master key accepted")
+	}
+}
+
+// A role change (or removal) must still end that role's sessions at
+// restart, as it did when sessions lived in memory. Other roles keep theirs.
+func TestRestartEndsSessionsOfChangedRoles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "role-sessions.json")
+	key := testSigningKey(t)
+	roles := map[string]string{"dev": "v1", "ops": "v1", "gone": "v1"}
+
+	before := openTestStoreRoles(t, path, key, roles)
+	mint := func(role string) string {
+		tok, _, err := before.Create(role, "agent1", nil, []string{role + "/*"}, nil, "bearer", "127.0.0.1", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	devTok, opsTok, goneTok := mint("dev"), mint("ops"), mint("gone")
+	before.Stop()
+
+	after := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1", "ops": "v2"})
+	if _, err := after.Validate(devTok); err != nil {
+		t.Errorf("unchanged role: %v", err)
+	}
+	if _, err := after.Validate(opsTok); err != ErrSessionNotFound {
+		t.Errorf("changed role: got %v, want ErrSessionNotFound", err)
+	}
+	if _, err := after.Validate(goneTok); err != ErrSessionNotFound {
+		t.Errorf("removed role: got %v, want ErrSessionNotFound", err)
+	}
+}
+
+// A role changed and then changed back must not bring old sessions back.
+func TestRoleChangedBackDoesNotReviveSessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "role-sessions.json")
+	key := testSigningKey(t)
+	first := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1"})
+	tok, _, err := first.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Stop()
+	openTestStoreRoles(t, path, key, map[string]string{"dev": "v2"}).Stop()
+
+	back := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1"})
+	if _, err := back.Validate(tok); err != ErrSessionNotFound {
+		t.Fatalf("got %v, want ErrSessionNotFound", err)
 	}
 }
