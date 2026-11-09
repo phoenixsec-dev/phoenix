@@ -4,7 +4,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 10 mcp-stdio
 init_scenario 10
 start_server
-phoenix_admin set mcp/key -v synthetic-mcp >/dev/null
+printf '%s' synthetic-mcp | phoenix_admin set mcp/key --value-stdin >/dev/null
 cat >"$RUN_DIR/mcp.in" <<'JSON'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"1"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}

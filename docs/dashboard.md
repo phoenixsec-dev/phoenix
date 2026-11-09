@@ -23,8 +23,8 @@ not use bearer tokens or session tokens. Instead:
 
 - **Cookie auth**: HMAC-signed JSON payload with expiry, CSRF token, and
   session nonce. `HttpOnly`, `SameSite=Strict`, and `Secure` (when HTTPS detected).
-- **Password or PIN**: Password stored as bcrypt hash in config. PIN uses
-  constant-time comparison. Only one is needed.
+- **Password**: stored as a bcrypt hash in config; the plaintext never
+  appears there.
 - **Single active session**: By default, only one dashboard session exists
   at a time. A new login is rejected if a session is already active. A
   Force Login option re-authenticates and invalidates the prior session.
@@ -144,13 +144,12 @@ Add the hash to your server config:
 |-------|------|-------------|
 | `enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `password_hash` | `string` | bcrypt hash of operator password |
-| `pin` | `string` | Alternative: numeric or short PIN (constant-time compare) |
 | `session_ttl` | `string` | Browser session lifetime (default `4h`) |
 | `allow_multi_login` | `bool` | Allow concurrent dashboard sessions (default `false`) |
 
-Either `password_hash` or `pin` is required. Use `password_hash` for
-production deployments. `pin` is acceptable for local/loopback-only use
-where convenience matters more than brute-force resistance.
+`password_hash` is required (generate it with `phoenix-server
+--hash-password`). The old `pin` field was removed: it stored a short
+plaintext secret in config, and a config that still sets it will not start.
 
 By default, only one dashboard session is active at a time. A second
 login attempt is rejected with a message to log out from the other
@@ -267,34 +266,30 @@ Use this checklist when enabling the dashboard on an existing Phoenix server.
    - [ ] Native HTTPS (`"https_listener": {"enabled": true}`), or
    - [ ] TLS reverse proxy in front of a loopback bind
 
-2. Choose credential mode:
-   - [ ] Password (recommended for production)
-   - [ ] PIN (acceptable for loopback-only)
+2. Generate password hash: `phoenix-server --hash-password`
 
-3. Generate password hash: `phoenix-server --hash-password`
-
-4. Add config:
+3. Add config:
    ```json
    { "dashboard": { "enabled": true, "password_hash": "$2a$10$..." } }
    ```
 
-5. Protect config file: `chmod 600 /data/phoenix/config.json`
+4. Protect config file: `chmod 600 /data/phoenix/config.json`
 
-6. Restart server, verify log line: `Dashboard: enabled at /dashboard/`
+5. Restart server, verify log line: `Dashboard: enabled at /dashboard/`
 
-7. Open browser, verify login page loads at `/dashboard/login`
+6. Open browser, verify login page loads at `/dashboard/login`
 
-8. Login, verify all pages render (overview, approvals, sessions, audit, roles)
+7. Login, verify all pages render (overview, approvals, sessions, audit, roles)
 
-9. Test approval flow end-to-end if access requests are on:
+8. Test approval flow end-to-end if access requests are on:
    - Have an agent ask (`phoenix request <path> --reason "test"`)
    - Approve from the dashboard
    - Verify the grant appears on the Grants page
    - Verify audit entries for the approval
 
-10. Verify audit trail shows `dashboard@<your-ip>` entries
+9. Verify audit trail shows `dashboard@<your-ip>` entries
 
-11. From a different machine, verify the dashboard is **not** reachable
+10. From a different machine, verify the dashboard is **not** reachable
     over plain HTTP (unless you explicitly chose loopback-only)
 
 ## Related docs

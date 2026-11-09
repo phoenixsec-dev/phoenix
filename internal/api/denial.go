@@ -123,7 +123,6 @@ var denialNextStep = map[string]string{
 	"SEAL_KEY_REQUIRED":   NextAskUser,
 	"ROLE_NOT_FOUND":      NextAskUser,
 	"BOOTSTRAP_FAILED":    NextAskUser,
-	"ATTESTATION_FAILED":  NextAskUser,
 	"ADMIN_AUTH_REQUIRED": NextAskUser,
 }
 

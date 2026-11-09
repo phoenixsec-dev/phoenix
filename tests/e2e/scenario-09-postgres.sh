@@ -16,10 +16,10 @@ trap cleanup_postgres EXIT INT TERM
 for _ in $(seq 1 60); do PGPASSWORD=synthetic-pg-initial psql -h 127.0.0.1 -p "$E2E_POSTGRES_PORT" -U testuser -d testdb -c 'select 1' >/dev/null 2>&1 && break; sleep 0.5; done
 PGPASSWORD=synthetic-pg-initial psql -h 127.0.0.1 -p "$E2E_POSTGRES_PORT" -U testuser -d testdb -c 'select 1' >/dev/null
 start_server
-phoenix_admin set integration/pg-password -v synthetic-pg-initial >/dev/null
+printf '%s' synthetic-pg-initial | phoenix_admin set integration/pg-password --value-stdin >/dev/null
 PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" exec --env PGPASSWORD=phoenix://integration/pg-password -- psql -h 127.0.0.1 -p "$E2E_POSTGRES_PORT" -U testuser -d testdb -c 'select 1' >/dev/null
 PGPASSWORD=synthetic-pg-initial psql -h 127.0.0.1 -p "$E2E_POSTGRES_PORT" -U testuser -d testdb -c "alter user testuser password 'synthetic-pg-rotated'" >/dev/null
-phoenix_admin set integration/pg-password -v synthetic-pg-rotated >/dev/null
+printf '%s' synthetic-pg-rotated | phoenix_admin set integration/pg-password --value-stdin >/dev/null
 PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" exec --env PGPASSWORD=phoenix://integration/pg-password -- psql -h 127.0.0.1 -p "$E2E_POSTGRES_PORT" -U testuser -d testdb -c 'select 1' >/dev/null
 if PGPASSWORD=synthetic-pg-initial psql -h 127.0.0.1 -p "$E2E_POSTGRES_PORT" -U testuser -d testdb -c 'select 1' >/dev/null 2>&1; then die "old PostgreSQL password still works"; fi
 ok "Scenario 09 PASS"

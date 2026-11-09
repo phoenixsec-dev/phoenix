@@ -18,7 +18,7 @@ Create an agent with scoped permissions:
 ```bash
 phoenix agent create deployer \
   -t "deploy-token-abc" \
-  --acl "myapp/**:read;staging/**:read,write"
+  --acl "myapp/**:list,read_value;staging/**:list,read_value,write"
 ```
 
 The `deployer` agent can read anything under `myapp/` and read/write under `staging/`,
@@ -36,8 +36,8 @@ ACL paths are glob patterns matched against secret paths:
 | `*` | every path |
 
 `/*` is single-level by design — it grants the top of a namespace without
-exposing nested sub-trees. If an agent with `ns/*:read` is denied on
-`ns/sub/key`, that is why: use `ns/**:read` for namespace-wide access.
+exposing nested sub-trees. If an agent with `ns/*:read_value` is denied on
+`ns/sub/key`, that is why: use `ns/**:read_value` for namespace-wide access.
 
 The same pattern semantics apply to policy path patterns
 ([Policy and Attestation](policy-and-attestation.md)) and session role
@@ -103,7 +103,7 @@ variable, `OP_SERVICE_ACCOUNT_TOKEN`, and the variable named by
 
 The operator dashboard (`/dashboard/`) uses its own authentication — it does
 **not** use bearer tokens or session tokens. Instead, it uses a shared
-password or PIN with cookie-based sessions.
+password (bcrypt hash in config) with cookie-based sessions.
 
 This is intentional: the dashboard is a human operator interface, not an agent
 interface. The API auth model (bearer and session tokens) is designed for

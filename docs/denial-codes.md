@@ -50,7 +50,7 @@ gets a single `400` saying nonce challenges and signed resolve were removed.
   text: strip control and Unicode format (bidi, zero-width) characters and cap
   the length. Drop a `code` that does not match `^[A-Z0-9_]{1,64}$`.
 - `detail` never contains policy rules, other agents, or whether a secret
-  exists. Attestation failures (data access, session mint and renew) are recorded in the audit log (metadata key
+  exists. Attestation failures on data access are recorded in the audit log (metadata key
   `denial.detail`, capped at 512 bytes) but not returned to the caller.
 
 ## Next steps
@@ -110,7 +110,6 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | `SEAL_KEY_REQUIRED` | 400 | `ask_user` | Role requires a seal key at mint |
 | `ROLE_NOT_FOUND` | 403/404 | `ask_user` | Requested role does not exist |
 | `BOOTSTRAP_FAILED` | 403 | `ask_user` | Auth method not in the role's `bootstrap_trust` |
-| `ATTESTATION_FAILED` | 403 | `ask_user` | Attestation not met at session mint or renew |
 | `ADMIN_AUTH_REQUIRED` | 403 | `ask_user` | Session tokens cannot perform this action |
 
 Approval-side validation codes returned to approvers (for example
@@ -157,8 +156,9 @@ Returned by `/v1/access-requests*` and `/v1/grants*` (see
 - `APPROVAL_REQUIRED`, `STEP_UP_REAPPROVAL_REQUIRED` and `ROLE_NOT_ALLOWED`
   were removed with step-up approvals; servers no longer send them. Clients
   that still know them do no harm.
-- `ATTESTATION_FAILED` at session mint and renew no longer names the failed
-  requirement or lists the role's attestation rules.
+- `ATTESTATION_FAILED` (session mint and renew) went with the role
+  `attestation` list; servers no longer send it. Clients that still know it
+  do no harm.
 - The audit `reason` for attestation denials is still `attestation`.
 - With request-use grants, `ACL_DENIED` (and session scope/action denials on
   reads) may now say `request_use` instead of `ask_user`. Servers with no

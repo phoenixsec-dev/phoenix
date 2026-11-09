@@ -28,17 +28,22 @@ private key can decrypt.
 
 ## Key pair generation
 
-Generate an X25519 key pair per agent:
+Generate an X25519 key pair per agent (admin token required):
 
 ```bash
 phoenix keypair generate myagent
 ```
 
-This writes one file:
-- `myagent.seal.key` (private key, base64-encoded 32 bytes, mode `0600`)
+The CLI makes the key pair on your machine and registers only the public key
+with the server (`POST /v1/keypair` with `agent_name` and `seal_public_key`).
+The server never sees or returns the private key.
 
-The derived public key is printed to stdout for reference (e.g., for
-server-side registration). It is not written to a file.
+This writes one file:
+- `myagent.seal.key` (private key, base64-encoded 32 bytes, mode `0600`),
+  by default under `~/.config/phoenix/keys/`
+
+The public key is printed to stdout for reference. It is not written to a
+file.
 
 Override the output file path:
 
@@ -46,9 +51,13 @@ Override the output file path:
 phoenix keypair generate myagent -o /etc/phoenix/keys/myagent.seal.key
 ```
 
+Run it on the machine where the agent will use the key, or copy the file
+there over a secure channel.
+
 ### Rotation
 
-Generate a new key pair and reconfigure the agent. Old sealed responses
+Run `phoenix keypair generate <agent> --force` to replace the registered
+public key, then reconfigure the agent. Old sealed responses
 cannot be decrypted with the new key, but that is by design — sealed
 responses are ephemeral transport encryption, not archival.
 

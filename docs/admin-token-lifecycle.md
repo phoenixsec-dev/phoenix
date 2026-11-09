@@ -38,8 +38,8 @@ Example bootstrap flow (local server, default config):
 export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<admin-token>"
 
-phoenix agent create app-runtime -t "runtime-token" --acl "myapp/**:read"
-phoenix agent create app-deployer -t "deploy-token" --acl "myapp/**:read,write"
+phoenix agent create app-runtime -t "runtime-token" --acl "myapp/**:list,read_value"
+phoenix agent create app-deployer -t "deploy-token" --acl "myapp/**:list,read_value,write"
 ```
 
 Then remove the admin token from your active shell:
@@ -56,7 +56,7 @@ unset PHOENIX_TOKEN
 
 Keep ACL scopes narrow (`namespace/**`, or `namespace/*` for a single level —
 see [ACL path patterns](authentication.md#acl-path-patterns)) and
-action-specific (`read`, `write`, `delete`, `admin`).
+action-specific (`list`, `read_value`, `write`, `delete`, `admin`).
 
 ## 4) Short-lived sessions (optional hardening)
 

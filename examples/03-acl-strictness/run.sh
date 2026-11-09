@@ -7,8 +7,8 @@ trap stop_local_phoenix EXIT
 start_local_phoenix
 
 echo "==> Seed secrets"
-"$PHX_BIN" set app/ok -v "good"
-"$PHX_BIN" set private/nope -v "nope"
+printf '%s' "good" | "$PHX_BIN" set app/ok --value-stdin
+printf '%s' "nope" | "$PHX_BIN" set private/nope --value-stdin
 
 echo "==> Verify malformed ACL is rejected"
 if "$PHX_BIN" agent create bad-agent -t bad-token --acl "app/*read"; then
@@ -19,7 +19,7 @@ else
 fi
 
 echo "==> Create valid ACL agent (with whitespace and trailing semicolon)"
-"$PHX_BIN" agent create scanner -t scanner-token --acl " app/*:read ;"
+"$PHX_BIN" agent create scanner -t scanner-token --acl " app/*:list,read_value ;"
 
 echo "==> Allowed read"
 PHOENIX_TOKEN="scanner-token" "$PHX_BIN" get app/ok >/dev/null
