@@ -77,6 +77,9 @@ var cmdSpecs = map[string]cmdSpec{
 	"mcp-server":    {usage: "phoenix mcp-server   (MCP over stdio, started by the agent's harness)"},
 }
 
+// cmdAliases are other spellings main accepts for a command.
+var cmdAliases = map[string]string{"--version": "version", "-V": "version", "--help": "help", "-h": "help"}
+
 // osExit is os.Exit, replaceable in tests.
 var osExit = os.Exit
 
@@ -89,6 +92,9 @@ var osExit = os.Exit
 // positional arguments, then the options, so the command's own parsing finds
 // a path like "-x/y" given after "--". Commands not in cmdSpecs pass through.
 func checkArgs(cmd string, args []string) []string {
+	if alias, ok := cmdAliases[cmd]; ok {
+		cmd = alias
+	}
 	key, rest, sub := cmd, args, []string(nil)
 	if len(args) > 0 {
 		if _, ok := cmdSpecs[cmd+" "+args[0]]; ok {

@@ -57,7 +57,7 @@ var allCommands = []string{
 	"emergency get", "sessions list", "sessions info", "sessions revoke",
 	"keypair generate", "keypair show", "request", "request status", "ssh",
 	"whoami", "pending", "approve", "deny", "grants", "grants revoke", "mcp-server",
-	"version", "help",
+	"version", "help", "--version", "-V", "--help", "-h",
 }
 
 // tsk_20261108_0033: an unknown option on any command is a usage error
@@ -70,7 +70,11 @@ func TestEveryCommandRejectsUnknownOptions(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 	}, func() {
 		for _, c := range allCommands {
-			spec, ok := cmdSpecs[c]
+			name := c
+			if alias, isAlias := cmdAliases[c]; isAlias {
+				name = alias
+			}
+			spec, ok := cmdSpecs[name]
 			if !ok {
 				t.Errorf("%s: missing from cmdSpecs", c)
 				continue
@@ -78,8 +82,8 @@ func TestEveryCommandRejectsUnknownOptions(t *testing.T) {
 			for _, bad := range []string{"--bogus", "-z", "-"} {
 				argv := append(strings.Fields(c), "some/path", bad)
 				code, _, stderr := runMain(t, argv...)
-				if code != 2 || !strings.Contains(stderr, "phoenix "+c+": no such option: "+bad) ||
-					!strings.Contains(stderr, spec.usage) || !strings.Contains(stderr, "Run 'phoenix "+c+" --help'") {
+				if code != 2 || !strings.Contains(stderr, "phoenix "+name+": no such option: "+bad) ||
+					!strings.Contains(stderr, spec.usage) || !strings.Contains(stderr, "Run 'phoenix "+name+" --help'") {
 					t.Errorf("phoenix %s %s: exit %d, stderr %q", c, bad, code, stderr)
 				}
 			}
