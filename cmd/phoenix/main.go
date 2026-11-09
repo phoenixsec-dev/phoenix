@@ -1669,17 +1669,30 @@ func cmdKeypairGenerate(args []string) error {
 		return fmt.Errorf("creating key directory: %w", err)
 	}
 
-	// Write the private key beside its final name first, so a failed
-	// registration leaves any existing key file untouched, and a key the
-	// server accepted is never lost to a write error afterwards.
-	tmp := output + ".tmp"
-	if err := os.WriteFile(tmp, []byte(crypto.EncodeSealKey(&kp.PrivateKey)), 0600); err != nil {
+	// Write the private key to a fresh, uniquely named file beside its final
+	// name (created exclusively with mode 0600, so a planted file or symlink
+	// is never written through), then register the public key, then rename.
+	// The temp file is deleted only when the server clearly refused the key;
+	// if it may have registered it (lost answer) or the rename fails, the
+	// file is kept and named, because it is the only matching private key.
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(output)+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("writing private key: %w", err)
 	}
-	defer os.Remove(tmp)
-	// Harden permissions even if the file already existed with weaker mode
-	if err := os.Chmod(tmp, 0600); err != nil {
-		return fmt.Errorf("setting key file permissions: %w", err)
+	tmp := tmpFile.Name()
+	_, err = tmpFile.WriteString(crypto.EncodeSealKey(&kp.PrivateKey))
+	if err == nil {
+		err = tmpFile.Sync()
+	}
+	if cerr := tmpFile.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("writing private key: %w", err)
+	}
+	keep := func(err error) error {
+		return fmt.Errorf("%w; the server may have registered the new public key, so its private key was kept at %s (move it to %s if keypair show prints %s)", err, tmp, output, pubEncoded)
 	}
 
 	urlPath := "/v1/keypair"
@@ -1689,26 +1702,28 @@ func cmdKeypairGenerate(args []string) error {
 	body, _ := json.Marshal(map[string]string{"agent_name": name, "seal_public_key": pubEncoded})
 	resp, err := apiRequest("POST", urlPath, strings.NewReader(string(body)))
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return keep(fmt.Errorf("request failed: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		os.Remove(tmp)
 		return handleError(resp)
 	}
 	var result struct {
 		SealPublicKey string `json:"seal_public_key"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
+		return keep(fmt.Errorf("decoding response: %w", err))
 	}
 	// A server older than this CLI ignores the public key we sent and
 	// registers one it generated itself; ours would then never match.
 	if result.SealPublicKey != pubEncoded {
+		os.Remove(tmp)
 		return fmt.Errorf("the server registered a different public key than this CLI made: it is older than this CLI and generated the pair itself. Update phoenix-server, then run this again with --force")
 	}
 
 	if err := os.Rename(tmp, output); err != nil {
-		return fmt.Errorf("saving private key: %w", err)
+		return keep(fmt.Errorf("saving private key: %w", err))
 	}
 
 	fmt.Printf("Seal keypair generated for agent %q (on this machine; only the public key went to the server)\n", name)

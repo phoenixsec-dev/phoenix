@@ -132,7 +132,6 @@ body {
 .pill-ns { background: rgba(232,93,38,0.15); color: #FF8C00; }
 .pill-action { background: rgba(46,160,67,0.15); color: var(--green); }
 .pill-bootstrap { background: rgba(56,139,253,0.15); color: #58a6ff; }
-.pill-attest { background: rgba(210,153,34,0.15); color: var(--orange); }
 .role-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .flag { padding: 3px 10px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
 .flag-seal { background: rgba(210,153,34,0.15); color: var(--orange); }

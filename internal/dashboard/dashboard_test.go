@@ -196,6 +196,21 @@ func TestPagesRenderOwnContentTemplate(t *testing.T) {
 	}
 }
 
+// The Roles page renders every role card in full. Review R1: it read the
+// removed role attestation list and stopped mid-page with a template error.
+func TestRolesPageRendersRoles(t *testing.T) {
+	h, _ := testHandler(t)
+	cookie := login(t, h)
+	req := httptest.NewRequest("GET", "/dashboard/roles", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "deploy") || !strings.Contains(body, "</html>") || strings.Contains(body, "template error") {
+		t.Fatalf("roles page: %d\n%s", w.Code, body)
+	}
+}
+
 func TestCSRFValidation(t *testing.T) {
 	h, _ := testHandler(t)
 	cookie := login(t, h)
