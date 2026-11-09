@@ -178,24 +178,6 @@ func TestCmdOpenClawExecProviderStdoutShape(t *testing.T) {
 	})
 }
 
-func TestCmdResolveStdinJSONAlias(t *testing.T) {
-	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"values":{"phoenix://api/key":"key-value"}}`))
-	}, func() {
-		out := runOpenClawExecProviderCommandWithStdin(t, `{"protocolVersion":1,"provider":"phoenix","ids":["api/key"]}`, func() error {
-			return cmdResolve([]string{"--stdin-json"})
-		})
-		var resp openClawExecProviderResponse
-		if err := json.Unmarshal([]byte(out), &resp); err != nil {
-			t.Fatalf("decode stdout: %v; stdout=%q", err, out)
-		}
-		if got := resp.Values["api/key"]; got != "key-value" {
-			t.Fatalf("api/key value = %q", got)
-		}
-	})
-}
-
 func TestCmdOpenClawExecProviderPartialFailure(t *testing.T) {
 	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

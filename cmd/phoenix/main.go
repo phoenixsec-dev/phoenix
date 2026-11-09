@@ -5,7 +5,6 @@
 //	phoenix get <path>
 //	phoenix set <path> [--description <desc>] [--tags <t1,t2>]   (hidden prompt)
 //	phoenix set <path> --multiline [--description <desc>]        (hidden, ends with Ctrl-D)
-//	phoenix set <path> --value <value> [--description <desc>] [--tags <t1,t2>]
 //	phoenix set <path> --value-stdin [--description <desc>] [--tags <t1,t2>]
 //	phoenix delete <path>
 //	phoenix list [prefix]
@@ -15,9 +14,8 @@
 //	phoenix agent create <name> --token <token> --acl <path:actions,...> [--force]
 //	phoenix agent list
 //	phoenix resolve <ref> [ref...]
-//	phoenix resolve --stdin-json
 //	phoenix openclaw-exec-provider
-//	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <dur>] [--mask-env] [--redact-output] -- <command> [args...]
+//	phoenix exec --env KEY=phoenix://ns/secret [--timeout <dur>] [--mask-env] [--redact-output] -- <command> [args...]
 //	phoenix request <path>... --reason "..." [--ttl 30m] [--wait]
 //	phoenix request status <req_id>
 //	phoenix ssh <machine> [--reason "..."] [--ttl 15m] [-- command...]
@@ -175,18 +173,6 @@ func main() {
 		err = cmdResolve(args)
 	case "openclaw-exec-provider":
 		err = cmdOpenClawExecProvider(args)
-	case "secret-provider":
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix secret-provider <openclaw>")
-			os.Exit(1)
-		}
-		switch args[0] {
-		case "openclaw":
-			err = cmdOpenClawExecProvider(args[1:])
-		default:
-			fmt.Fprintf(os.Stderr, "unknown secret-provider subcommand: %s\n", args[0])
-			os.Exit(1)
-		}
 	case "exec":
 		err = cmdExec(args)
 	case "verify":
@@ -252,9 +238,6 @@ func main() {
 	case "grants":
 		err = cmdGrants(args)
 	case "mcp-server":
-		if flag := removedMCPFlag(args); flag != "" {
-			exitRemoved("phoenix mcp-server "+flag, removedCommands["mcp-server --http"])
-		}
 		err = cmdMCP(args)
 	case "keypair":
 		if len(args) < 1 {
@@ -299,7 +282,6 @@ Usage:
   phoenix set <path> [-d desc]                Create/update a secret (hidden prompt)
   phoenix set <path> --multiline              Hidden multi-line paste (PEM keys), end with Ctrl-D
   phoenix set <path> --value-stdin            Read secret value from stdin
-  phoenix set <path> -v <value> [-d desc]     Value on the command line (leaks to history)
   phoenix delete <path>                       Delete a secret
   phoenix list [prefix]                       List secret paths
   phoenix export <prefix> -f env              Export as .env format
@@ -311,12 +293,9 @@ Usage:
   phoenix agent list                          List agents
   phoenix agent delete <name>                 Delete an agent
   phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
-  phoenix resolve --stdin-json                  OpenClaw SecretRef exec provider (stdin/stdout JSON)
   phoenix openclaw-exec-provider               OpenClaw SecretRef exec provider (stdin/stdout JSON)
-  phoenix secret-provider openclaw             Alias for openclaw-exec-provider
   phoenix ssh <machine> -r "why" [-- cmd]     Log in to a machine with a human's temporary approval
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
-  phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
   phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
   phoenix exec --mask-env --env ...           Strip phoenix:// refs from child env
   phoenix exec --redact-output --env ...      Replace secret values in the command's output with
@@ -513,11 +492,6 @@ func cmdSet(args []string) error {
 
 	for i < len(args) {
 		switch args[i] {
-		case "-v", "--value":
-			i++
-			if i < len(args) {
-				value = args[i]
-			}
 		case "--value-stdin":
 			valueStdin = true
 		case "--multiline":
@@ -536,16 +510,8 @@ func cmdSet(args []string) error {
 		i++
 	}
 
-	if value != "" && !valueStdin {
-		fmt.Fprintln(os.Stderr, "WARNING: -v/--value is visible in process listings. Use --value-stdin instead.")
-	}
-
-	if value != "" && valueStdin {
-		return fmt.Errorf("cannot combine -v/--value with --value-stdin")
-	}
-
-	if multiline && (value != "" || valueStdin) {
-		return fmt.Errorf("--multiline is an interactive prompt; it cannot be combined with -v or --value-stdin")
+	if multiline && valueStdin {
+		return fmt.Errorf("--multiline is an interactive prompt; it cannot be combined with --value-stdin")
 	}
 
 	if valueStdin {
@@ -559,7 +525,7 @@ func cmdSet(args []string) error {
 		}
 	}
 
-	setUsage := fmt.Errorf("usage: phoenix set <path> [-d description] [--tags t1,t2]   (hidden prompt)\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]\n       phoenix set <path> -v <value> [-d description] [--tags t1,t2]")
+	setUsage := fmt.Errorf("usage: phoenix set <path> [-d description] [--tags t1,t2]   (hidden prompt)\n       phoenix set <path> --multiline [-d description]   (hidden, ends with Ctrl-D)\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]")
 	if path == "" {
 		return setUsage
 	}
@@ -965,7 +931,7 @@ func cmdAgentCreate(args []string) error {
 		return fmt.Errorf("usage: phoenix agent create <name> -t <token> [--acl <path:action,action;path:action>] [--force]")
 	}
 
-	// Parse ACL string: "openclaw/*:read,write;vector/*:read"
+	// Parse ACL string: "openclaw/*:list,read_value;vector/*:list"
 	// Rules separated by ";", actions within a rule separated by ","
 	var permissions []map[string]interface{}
 	if aclStr != "" {
@@ -982,8 +948,11 @@ func cmdAgentCreate(args []string) error {
 			actions := make([]string, 0, len(rawActions))
 			for _, a := range rawActions {
 				a = strings.TrimSpace(a)
+				if a == "read" {
+					return fmt.Errorf("ACL rule %q: action \"read\" was removed; write list,read_value (or just list)", rule)
+				}
 				if !acl.ValidActions[acl.Action(a)] {
-					return fmt.Errorf("invalid action %q in ACL rule %q (valid: list, read_value, read, write, delete, admin)", a, rule)
+					return fmt.Errorf("invalid action %q in ACL rule %q (valid: list, read_value, write, delete, admin)", a, rule)
 				}
 				actions = append(actions, a)
 			}
@@ -1241,15 +1210,6 @@ func cmdOpenClawExecProvider(args []string) error {
 }
 
 func cmdResolve(args []string) error {
-	if len(args) == 1 && args[0] == "--stdin-json" {
-		return cmdOpenClawExecProvider(nil)
-	}
-	for _, arg := range args {
-		if arg == "--stdin-json" {
-			return fmt.Errorf("usage: phoenix resolve --stdin-json")
-		}
-	}
-
 	if err := requireAuth(); err != nil {
 		return err
 	}
@@ -1369,10 +1329,9 @@ func cmdExec(args []string) error {
 		return fmt.Errorf("loading seal key: %w", sealErr)
 	}
 
-	// Parse --env flags and --output-env before "--", command after "--"
+	// Parse --env flags before "--", command after "--"
 	var envMappings []string
 	var cmdArgs []string
-	var outputEnvPath string
 	var timeoutStr string
 	var maskEnv, redactOutput bool
 	seenSep := false
@@ -1389,11 +1348,6 @@ func cmdExec(args []string) error {
 			if i < len(args) {
 				envMappings = append(envMappings, args[i])
 			}
-		case "--output-env":
-			i++
-			if i < len(args) {
-				outputEnvPath = args[i]
-			}
 		case "--timeout":
 			i++
 			if i >= len(args) {
@@ -1407,11 +1361,8 @@ func cmdExec(args []string) error {
 		}
 	}
 
-	if outputEnvPath == "" && (!seenSep || len(cmdArgs) == 0) {
-		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <duration>] [--mask-env] [--redact-output] -- <command> [args...]")
-	}
-	if redactOutput && outputEnvPath != "" {
-		return fmt.Errorf("--redact-output runs a command; it cannot be combined with --output-env")
+	if !seenSep || len(cmdArgs) == 0 {
+		return fmt.Errorf("usage: phoenix exec --env KEY=phoenix://ns/secret [--timeout <duration>] [--mask-env] [--redact-output] -- <command> [args...]")
 	}
 	if len(envMappings) == 0 {
 		return fmt.Errorf("at least one --env mapping is required")
@@ -1530,24 +1481,6 @@ func cmdExec(args []string) error {
 			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", displayRef(ref), formatRefError(ref, errMsg, resolveErrorCodes))
 		}
 		return fmt.Errorf("failed to resolve %d reference(s)", len(resolveErrors))
-	}
-
-	// If --output-env is set, write resolved env to file and exit
-	if outputEnvPath != "" {
-		var lines []string
-		for _, m := range mappings {
-			val, ok := resolvedValues[m.ref]
-			if !ok {
-				return fmt.Errorf("no value returned for %s", m.ref)
-			}
-			lines = append(lines, m.envVar+"="+val)
-		}
-		content := strings.Join(lines, "\n") + "\n"
-		if err := os.WriteFile(outputEnvPath, []byte(content), 0600); err != nil {
-			return fmt.Errorf("writing env file: %w", err)
-		}
-		fmt.Printf("wrote %d env vars to %s\n", len(mappings), outputEnvPath)
-		return nil
 	}
 
 	// Build env: inherit current env but strip Phoenix credentials

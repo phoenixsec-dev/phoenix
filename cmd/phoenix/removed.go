@@ -48,28 +48,54 @@ var removedCommands = map[string]removedCommand{
 		why:     "MCP over HTTP was half-built (no sealed mode, no session renewal) and unused",
 		instead: "run phoenix mcp-server over stdio, started by the agent's harness",
 	},
+	"exec --output-env": {
+		why:     "it wrote secret values to a file in plain text, where they outlive the command and end up in backups",
+		instead: "run the command under phoenix exec --env KEY=phoenix://ns/secret -- <command>, so the values only live in its environment",
+	},
+	"set --value": {
+		why:     "a value on the command line lands in shell history and is visible to every user in the process list",
+		instead: "run phoenix set <path> for a hidden prompt, add --multiline for PEM keys, or pipe the value in with --value-stdin",
+	},
+	"secret-provider": {
+		why:     "it was a second name for the OpenClaw exec provider",
+		instead: "use phoenix openclaw-exec-provider",
+	},
+	"resolve --stdin-json": {
+		why:     "it was a second name for the OpenClaw exec provider",
+		instead: "use phoenix openclaw-exec-provider",
+	},
 	"approve apr_": {
 		why:     "step-up session approvals were removed",
 		instead: "use access requests: the agent runs phoenix request <path> --reason \"...\" and you approve the req_ ID",
 	},
 }
 
-// removedMCPFlags belonged to MCP over HTTP. They are refused rather than
-// ignored, so a launcher still passing them hears why.
-var removedMCPFlags = []string{"--http", "--tls-cert", "--tls-key", "--mcp-token"}
+// removedFlags lists removed flags per command, each pointing at its
+// removedCommands entry. They are refused wherever they appear before "--"
+// ("--flag" or "--flag=value"), rather than ignored, so an old script hears
+// why. MCP-over-HTTP flags all share one entry.
+var removedFlags = map[string]map[string]string{
+	"mcp-server": {"--http": "mcp-server --http", "--tls-cert": "mcp-server --http",
+		"--tls-key": "mcp-server --http", "--mcp-token": "mcp-server --http"},
+	"exec":    {"--output-env": "exec --output-env"},
+	"set":     {"-v": "set --value", "--value": "set --value"},
+	"resolve": {"--stdin-json": "resolve --stdin-json"},
+}
 
-// removedMCPFlag returns the first removed MCP-over-HTTP flag in args
-// ("--flag" or "--flag=value"), or "".
-func removedMCPFlag(args []string) string {
+// removedFlag returns the first removed flag cmd's args use and its
+// removedCommands key, or "" when there is none. It stops at "--", so a
+// command run by phoenix exec keeps its own flags.
+func removedFlag(cmd string, args []string) (flag, key string) {
 	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
 		name, _, _ := strings.Cut(arg, "=")
-		for _, f := range removedMCPFlags {
-			if name == f {
-				return f
-			}
+		if k, ok := removedFlags[cmd][name]; ok {
+			return name, k
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // checkRemovedCommand exits with a short explanation when args name a removed
@@ -83,6 +109,9 @@ func checkRemovedCommand(cmd string, args []string) {
 		if rc, ok := removedCommands[k]; ok {
 			exitRemoved("phoenix "+k, rc)
 		}
+	}
+	if flag, k := removedFlag(cmd, args); flag != "" {
+		exitRemoved("phoenix "+cmd+" "+flag, removedCommands[k])
 	}
 }
 

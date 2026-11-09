@@ -41,10 +41,11 @@ func TestCmdAgentCreateMalformedACL(t *testing.T) {
 		errStr string
 	}{
 		{"no colon", "nocolon", "malformed ACL rule"},
-		{"empty path", ":read", "malformed ACL rule"},
+		{"empty path", ":list", "malformed ACL rule"},
 		{"empty actions", "ns/*:", "malformed ACL rule"},
 		{"invalid action", "ns/*:rread", "invalid action"},
-		{"mixed invalid", "ns/*:read,bogus", "invalid action"},
+		{"mixed invalid", "ns/*:list,bogus", "invalid action"},
+		{"removed read", "ns/*:read", `action "read" was removed`},
 	}
 
 	for _, tt := range tests {
