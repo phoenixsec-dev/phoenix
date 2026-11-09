@@ -1672,8 +1672,9 @@ func cmdKeypairGenerate(args []string) error {
 	// Write the private key to a fresh, uniquely named file beside its final
 	// name (created exclusively with mode 0600, so a planted file or symlink
 	// is never written through), then register the public key, then rename.
-	// The temp file is deleted only when the server clearly refused the key;
-	// if it may have registered it (lost answer) or the rename fails, the
+	// The temp file is deleted only when the server clearly refused the key
+	// (a 4xx answer, or it registered a different key); after a lost answer,
+	// a server error or a failed rename it may hold our key, so the
 	// file is kept and named, because it is the only matching private key.
 	tmpFile, err := os.CreateTemp(dir, filepath.Base(output)+".*.tmp")
 	if err != nil {
@@ -1705,6 +1706,11 @@ func cmdKeypairGenerate(args []string) error {
 		return keep(fmt.Errorf("request failed: %w", err))
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		// A server error can follow a registration the server already
+		// holds (it updates the ACL in memory before saving the file).
+		return keep(handleError(resp))
+	}
 	if resp.StatusCode != 200 {
 		os.Remove(tmp)
 		return handleError(resp)

@@ -432,37 +432,45 @@ func TestCmdKeypairGenerateIgnoresPlantedTmp(t *testing.T) {
 	}
 }
 
-// Review R1: when the server may have registered the key but the answer was
-// lost, the new private key is kept and its path named, not deleted.
+// Review R1/R2: when the server may have registered the key but the answer
+// was lost or a server error, the new private key is kept and its path named, not deleted.
 func TestCmdKeypairGenerateKeepsKeyOnLostResponse(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "a.seal.key")
 	os.WriteFile(outPath, []byte("old"), 0600)
-	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+	lost := func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		hj, _ := w.(http.Hijacker)
 		conn, _, _ := hj.Hijack()
 		conn.Close()
-	}, func() {
-		err := cmdKeypairGenerate([]string{"a", "--force", "-o", outPath})
-		if err == nil {
-			t.Fatal("expected an error for a lost response")
-		}
-		if data, _ := os.ReadFile(outPath); string(data) != "old" {
-			t.Fatalf("existing key file changed: %q", data)
-		}
-		m := regexp.MustCompile(`kept at (\S+)`).FindStringSubmatch(err.Error())
-		if m == nil {
-			t.Fatalf("error does not name the kept key: %v", err)
-		}
-		data, rerr := os.ReadFile(m[1])
-		if rerr != nil {
-			t.Fatalf("kept key missing: %v", rerr)
-		}
-		if _, derr := crypto.DecodeSealKey(string(data)); derr != nil {
-			t.Fatalf("kept key unreadable: %v", derr)
-		}
-	})
+	}
+	// Review R2: a 500 can come after the server already holds the new key
+	// (it updates the ACL in memory before saving the file).
+	serverError := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+	}
+	for _, handler := range []http.HandlerFunc{lost, serverError} {
+		withMockServer(t, handler, func() {
+			err := cmdKeypairGenerate([]string{"a", "--force", "-o", outPath})
+			if err == nil {
+				t.Fatal("expected an error for a lost response")
+			}
+			if data, _ := os.ReadFile(outPath); string(data) != "old" {
+				t.Fatalf("existing key file changed: %q", data)
+			}
+			m := regexp.MustCompile(`kept at (\S+)`).FindStringSubmatch(err.Error())
+			if m == nil {
+				t.Fatalf("error does not name the kept key: %v", err)
+			}
+			data, rerr := os.ReadFile(m[1])
+			if rerr != nil {
+				t.Fatalf("kept key missing: %v", rerr)
+			}
+			if _, derr := crypto.DecodeSealKey(string(data)); derr != nil {
+				t.Fatalf("kept key unreadable: %v", derr)
+			}
+		})
+	}
 }
 
 func TestCmdKeypairGenerateHardensExistingPerms(t *testing.T) {
