@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Removed (second cuts): secrets on the command line and in files, PIN login, old formats
+
+The second round of cuts, decided by the owner on 2026-11-09. Ships as its
+own version after the first cuts below. Same rule as before: a removed
+setting stops the server at startup with a line saying why and what to use
+instead, and a removed command or flag prints the same. Check before you
+deploy:
+
+```
+phoenix-server --check-config --config /data/config.json
+```
+
+It now also checks the ACL file, and lists problems from the config, policy
+and ACL files in one run instead of stopping at the first.
+
+| Removed | Why | Instead |
+|---|---|---|
+| `phoenix exec --output-env <file>` | It wrote secret values to a plain-text file that outlives the command and ends up in backups. | Run the command under `phoenix exec --env KEY=phoenix://ns/secret -- <command>`. `examples/02-exec` shows how. |
+| `phoenix set -v/--value <value>` | The value lands in shell history and the process list. | `phoenix set <path>` (hidden prompt), `--multiline` for PEM keys, or pipe it in with `--value-stdin`. |
+| `phoenix-server --init --passphrase <value>` | Same: visible in the process list and history. | `--passphrase-stdin` or `PHOENIX_MASTER_PASSPHRASE`, which `--init` now honours (before, it ignored both). |
+| Dashboard PIN: `dashboard.pin` | Stored in plain text in config.json. | `dashboard.password_hash` (`phoenix-server --hash-password`). |
+| ACL action `"read"` | Shorthand for `list` + `read_value` that hid that it let the agent read values. An ACL file using it stops startup, naming each agent and path. | `"list", "read_value"` (or just `"list"`). |
+| Policy file `"rules"` list (with `allowed_ips`) | The old format; every rule fits the `"attestation"` map. | `{"attestation": {"<path>": {"source_ip": [...]}}}`. |
+| Role `attestation` list (`source_ip`, `require_sealed`) | It duplicated other settings: `source_ip` meant loopback only, and `require_sealed` only worked alongside `require_seal_key`. The `ATTESTATION_FAILED` denial it produced is gone too. | `bootstrap_trust: ["local"]` for loopback only; `require_seal_key: true` for sealed delivery. |
+| `phoenix secret-provider openclaw`, `phoenix resolve --stdin-json` | Extra names for the OpenClaw exec provider. | `phoenix openclaw-exec-provider`. |
+
+Kept on purpose: secret tags, `crypto.provider`, `phoenix policy show` /
+`test`, `access_requests.grantable_actions` and `phoenix verify`.
+
+### Changed: seal key pairs are made on the client
+
+`phoenix keypair generate <agent>` used to have the server make the pair and
+send the private key back. Now the CLI makes it, writes the private key
+(mode `0600`), and sends only the public key to `POST /v1/keypair`
+(`agent_name` + `seal_public_key`); the server never sees the private half.
+Existing registered seal keys keep working unchanged. Upgrade the server and
+the CLI together before generating or rotating a key: an older CLI gets a 400
+from the new server saying to update, and the new CLI refuses an older
+server (which would register a key it made itself) without touching the
+existing key file.
+
 ### Removed: features that checked nothing, dead code, mTLS, MCP over HTTP, step-up
 
 Phoenix is getting ready to be released as open source. Several features
