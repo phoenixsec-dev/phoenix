@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -13,31 +14,56 @@ const (
 )
 
 // Store manages session lifecycle: creation, validation, revocation, and cleanup.
+//
+// With a sessions file (Options.Path) every change is saved, so sessions and
+// revocations survive a restart. Revoked records are kept until they expire
+// so a revoked token keeps getting SESSION_REVOKED, before and after a restart.
 type Store struct {
 	mu         sync.RWMutex
 	sessions   map[string]*Session // keyed by session ID
 	signingKey []byte
+	path       string // sessions file; "" = memory only
 	defaultTTL time.Duration
 	stopCh     chan struct{}
 	stopped    bool
 }
 
-// NewStore creates a new session store with the given default TTL.
-// If defaultTTL is zero, DefaultTTL (1h) is used.
-// Call Stop() when the store is no longer needed.
+// NewStore creates a memory-only session store with a random signing key and
+// the given default TTL (zero = DefaultTTL). Sessions do not survive a
+// restart; the server uses OpenStore. Call Stop() when done.
 func NewStore(defaultTTL time.Duration) (*Store, error) {
+	return OpenStore(Options{TTL: defaultTTL})
+}
+
+// OpenStore creates a session store, loading saved sessions from opts.Path
+// if set. Call Stop() when the store is no longer needed.
+func OpenStore(opts Options) (*Store, error) {
+	defaultTTL := opts.TTL
 	if defaultTTL <= 0 {
 		defaultTTL = DefaultTTL
 	}
 
-	key := make([]byte, SigningKeyBytes)
-	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("generating session signing key: %w", err)
+	key := append([]byte(nil), opts.SigningKey...)
+	if len(key) == 0 {
+		key = make([]byte, SigningKeyBytes)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("generating session signing key: %w", err)
+		}
+	}
+
+	sessions := make(map[string]*Session)
+	if opts.Path != "" {
+		loaded, err := loadSessions(opts.Path)
+		if err != nil {
+			return nil, err
+		}
+		sessions = loaded
 	}
 
 	s := &Store{
-		sessions:   make(map[string]*Session),
+		sessions:   sessions,
 		signingKey: key,
+		path:       opts.Path,
 		defaultTTL: defaultTTL,
 		stopCh:     make(chan struct{}),
 	}
@@ -95,8 +121,14 @@ func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, action
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.sessions[id] = sess
-	s.mu.Unlock()
+	if err := s.saveLocked(); err != nil {
+		// Not saved means it would vanish at restart; refuse the mint
+		// rather than hand out a token that silently dies later.
+		delete(s.sessions, id)
+		return "", nil, err
+	}
 
 	return token, sess, nil
 }
@@ -124,6 +156,7 @@ func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, er
 	}
 
 	now := time.Now().UTC()
+	oldExpiry := sess.ExpiresAt
 	sess.ExpiresAt = now.Add(ttl)
 
 	claims := &Claims{
@@ -137,6 +170,11 @@ func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, er
 
 	token, err := mintToken(claims, s.signingKey)
 	if err != nil {
+		sess.ExpiresAt = oldExpiry
+		return "", nil, err
+	}
+	if err := s.saveLocked(); err != nil {
+		sess.ExpiresAt = oldExpiry
 		return "", nil, err
 	}
 
@@ -172,7 +210,9 @@ func (s *Store) Validate(tokenStr string) (*Session, error) {
 	return sess, nil
 }
 
-// Revoke marks a session as revoked. Revocation is idempotent.
+// Revoke marks a session as revoked. Revocation is idempotent. The session
+// is denied at once even if saving fails; the error then means the revoke
+// would be lost at the next restart.
 func (s *Store) Revoke(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -182,6 +222,9 @@ func (s *Store) Revoke(sessionID string) error {
 		return ErrSessionNotFound
 	}
 	sess.Revoked = true
+	if err := s.saveLocked(); err != nil {
+		return fmt.Errorf("session revoked now but not saved, so a restart would undo it: %w", err)
+	}
 	return nil
 }
 
@@ -247,14 +290,23 @@ func (s *Store) cleanupLoop() {
 	}
 }
 
+// cleanup drops expired sessions. Revoked ones stay until they expire, so
+// their tokens keep getting SESSION_REVOKED rather than SESSION_INVALID.
 func (s *Store) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	removed := false
 	for id, sess := range s.sessions {
-		if sess.Revoked || now.After(sess.ExpiresAt) {
+		if now.After(sess.ExpiresAt) {
 			delete(s.sessions, id)
+			removed = true
+		}
+	}
+	if removed {
+		if err := s.saveLocked(); err != nil {
+			log.Printf("WARNING: session cleanup: %v", err)
 		}
 	}
 }

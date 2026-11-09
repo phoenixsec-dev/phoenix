@@ -143,6 +143,16 @@ type SessionConfig struct {
 	Roles   map[string]RoleConfig `json:"roles,omitempty"`
 }
 
+// sessionsFileName is the role sessions file, kept next to the ACL file.
+const sessionsFileName = "role-sessions.json"
+
+// SessionStorePath is where the server saves role sessions so they survive a
+// restart: role-sessions.json in the same directory as the ACL file. The file
+// holds session records only, never a token or key.
+func (c *Config) SessionStorePath() string {
+	return parentResolved(rawDir(c.ACL.Path) + "/" + sessionsFileName)
+}
+
 // RoleConfig defines a named role that agents assume via session tokens.
 type RoleConfig struct {
 	Namespaces     []string `json:"namespaces"`
@@ -356,6 +366,9 @@ func (c *Config) Validate() error {
 		}
 		if len(c.Session.Roles) == 0 {
 			return errors.New("session.roles: at least one role must be defined when sessions are enabled")
+		}
+		if c.SessionStorePath() == c.GrantStorePath() {
+			return fmt.Errorf("access_requests.store_path: %q is the role sessions file; pick another name", c.GrantStorePath())
 		}
 		for name, role := range c.Session.Roles {
 			if len(role.Namespaces) == 0 {

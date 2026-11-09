@@ -231,6 +231,23 @@ func TestStoreCleanup(t *testing.T) {
 	}
 }
 
+// Revoked sessions stay until they expire so they keep answering
+// SESSION_REVOKED (not SESSION_INVALID, which clients re-mint on).
+func TestStoreCleanupKeepsRevokedUntilExpiry(t *testing.T) {
+	s := newTestStore(t, time.Hour)
+	tok, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.Revoke(sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.cleanup()
+	if _, err := s.Validate(tok); err != ErrSessionRevoked {
+		t.Fatalf("after cleanup: got %v, want ErrSessionRevoked", err)
+	}
+}
+
 func TestStoreDefaultActions(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 

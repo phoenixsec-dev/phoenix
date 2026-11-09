@@ -1,0 +1,107 @@
+package session
+
+import (
+	"crypto/hkdf"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
+)
+
+// signingKeyLabel is the fixed HKDF label for the session signing key.
+// Changing it invalidates every session token issued before the change.
+const signingKeyLabel = "phoenix session signing key v1"
+
+// fileVersion is the format version of the sessions file.
+const fileVersion = 1
+
+// Options configures OpenStore.
+type Options struct {
+	// TTL is the default session lifetime. Zero means DefaultTTL.
+	TTL time.Duration
+	// SigningKey signs session tokens. Use DeriveSigningKey so the key is the
+	// same after a restart. Empty means a random key: every session token
+	// dies when the server restarts.
+	SigningKey []byte
+	// Path is the sessions file. Empty keeps sessions in memory only, so they
+	// are gone after a restart.
+	Path string
+}
+
+// DeriveSigningKey turns the master key into the session signing key with
+// HKDF-SHA256 and a fixed label. The same master key always gives the same
+// signing key, so session tokens keep working across restarts without a new
+// secret file to protect. The signing key reveals nothing about the master key.
+func DeriveSigningKey(masterKey []byte) ([]byte, error) {
+	if len(masterKey) == 0 {
+		return nil, errors.New("deriving session signing key: empty master key")
+	}
+	return hkdf.Key(sha256.New, masterKey, nil, signingKeyLabel, SigningKeyBytes)
+}
+
+// sessionsFile is the on-disk form of the sessions file. It holds session
+// records only (who, which role, scope, expiry, revoked), never a token or
+// the signing key, so a copy of the file cannot be used to authenticate.
+type sessionsFile struct {
+	Version  int        `json:"version"`
+	Sessions []*Session `json:"sessions"`
+}
+
+// loadSessions reads the sessions file and returns the unexpired records.
+// A missing file means no sessions. A file that cannot be parsed is moved
+// aside (path.corrupt-<time>) and the store starts empty: losing records only
+// makes clients mint new sessions, it never makes a dead token valid again.
+func loadSessions(path string) (map[string]*Session, error) {
+	out := make(map[string]*Session)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading sessions file: %w", err)
+	}
+
+	var f sessionsFile
+	if err := json.Unmarshal(data, &f); err != nil || f.Version != fileVersion {
+		aside := fmt.Sprintf("%s.corrupt-%s", path, time.Now().UTC().Format("20060102T150405Z"))
+		if renameErr := os.Rename(path, aside); renameErr != nil {
+			return nil, fmt.Errorf("sessions file %s is unreadable (%v) and could not be moved aside: %w", path, err, renameErr)
+		}
+		log.Printf("WARNING: sessions file %s was unreadable (version %d, err %v); moved to %s, starting with no sessions", path, f.Version, err, aside)
+		return out, nil
+	}
+
+	now := time.Now()
+	for _, sess := range f.Sessions {
+		if sess == nil || sess.ID == "" || now.After(sess.ExpiresAt) {
+			continue
+		}
+		out[sess.ID] = sess
+	}
+	return out, nil
+}
+
+// saveLocked writes every session record to the sessions file. The caller
+// must hold s.mu. Does nothing for a memory-only store.
+func (s *Store) saveLocked() error {
+	if s.path == "" {
+		return nil
+	}
+	f := sessionsFile{Version: fileVersion, Sessions: make([]*Session, 0, len(s.sessions))}
+	for _, sess := range s.sessions {
+		f.Sessions = append(f.Sessions, sess)
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding sessions file: %w", err)
+	}
+	if err := fsutil.WriteFileAtomic(s.path, data, 0600); err != nil {
+		return fmt.Errorf("saving sessions file: %w", err)
+	}
+	return nil
+}
