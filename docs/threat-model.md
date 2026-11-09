@@ -144,11 +144,12 @@ The dashboard uses a **separate auth surface** from the API:
 
 - Single shared password (bcrypt hash in config) or PIN (constant-time compare)
 - Cookie-based sessions with HMAC-SHA256 signed payloads and per-session nonce
-- Single active session by default (configurable via `allow_multi_login`)
-- Force Login as escape hatch for orphaned sessions (re-authenticates, invalidates prior)
+- Up to 5 logins at once, each listed on the Sessions page and revocable there; a
+  6th signs out the least recently used. Logins are held server-side, so logout and
+  sign-out end them on the server, not just in the browser
 - CSRF tokens embedded in the cookie and validated on every POST (including logout)
 - Exponential backoff rate limiting per source IP (5 attempts, then 1s–60s delay)
-- Full audit trail: login success/failure, force login, logout, expired/superseded
+- Full audit trail: login success/failure, logout, login sign-out and eviction, expired/signed-out
   cookie rejection, CSRF failures, and all mutations (approve, deny, revoke)
 
 This is simpler than the API's auth model by design: the dashboard targets human

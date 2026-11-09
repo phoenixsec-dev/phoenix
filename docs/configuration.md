@@ -146,7 +146,6 @@ Then add it to config:
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
 | `dashboard.pin` | `string` | Alternative: login PIN (constant-time compare, loopback only) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
-| `dashboard.allow_multi_login` | `bool` | Allow concurrent dashboard sessions (default `false`) |
 
 Either `password_hash` or `pin` is required when the dashboard is enabled.
 The password is stored as a bcrypt hash — the plaintext never appears in config.
