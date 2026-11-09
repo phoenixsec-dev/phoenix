@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed: a typo in a command looks like a typo, not a permission wall
+
+`phoenix list --prefix services/browser/` (no such option) used to send
+`--prefix` to the server as a secret name; the answer was "read_value is not
+allowed ... cannot be fixed by retrying", and an agent believed it for four
+days. Now:
+
+- Every command checks its options before contacting the server. An unknown
+  option prints `phoenix <command>: no such option: <arg>`, the usage line
+  and `Run 'phoenix <command> --help' for more`, and exits 2. `-h` / `--help`
+  works on every command. A value after an option that takes one is a value
+  (`-d -v` is a description of "-v"), and `--` ends the options, so a path
+  that starts with `-` still works.
+- `phoenix list services/browser`, `services/browser/` and
+  `services/browser/*` all list `services/browser/`; any other wildcard is a
+  usage error. MCP `phoenix_list` takes the same forms.
+- The server answers a single-secret read whose path contains `*` with 400
+  "invalid secret path: wildcards are not secret names; to list a folder, end
+  the path with /", decided before the ACL and attestation checks so it never
+  reads as a permission problem and reveals nothing about what exists.
+- Removed flags (`set -v`, `exec --output-env`, ...) are recognised only
+  where they are options: a description of "--value" no longer trips one,
+  and `-d -- -v x` no longer slips one past.
+
 ### Removed (second cuts): secrets on the command line and in files, PIN login, old formats
 
 The second round of cuts, decided by the owner on 2026-11-09. Ships as its

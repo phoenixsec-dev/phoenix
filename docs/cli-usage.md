@@ -10,12 +10,21 @@ phoenix set myapp/api-key -d "Stripe API key"
 # Read a secret
 phoenix get myapp/db-password
 
-# List secrets
+# List secrets in a folder (myapp, myapp/ and myapp/* all mean myapp/)
 phoenix list myapp/
 
 # Delete a secret
 phoenix delete myapp/old-key
 ```
+
+Every command checks its options before contacting the server. An option it
+does not have (`phoenix list --prefix x/`) prints `no such option`, the usage
+line, and exits 2; that is a typo, never a permission problem. `phoenix
+<command> --help` prints the usage. A value after an option that takes one is
+a value even if it starts with `-`, and `--` ends the options, so a path that
+starts with `-` still works: `phoenix get -- -odd/key`. Reading a single
+secret whose path contains `*` answers 400 "wildcards are not secret names; to
+list a folder, end the path with /".
 
 ## Reference resolution
 

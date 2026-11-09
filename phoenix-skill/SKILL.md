@@ -50,10 +50,18 @@ history and the process list.
 ### List secrets
 
 ```bash
-phoenix list [prefix]
+phoenix list [folder/]
 ```
 
-Returns accessible secret paths. Use a prefix to filter by namespace.
+Returns the secret paths you can see in a folder. `services/browser`,
+`services/browser/` and `services/browser/*` all list `services/browser/`;
+other wildcards are refused. There is no `--prefix` option.
+
+Every command refuses an option it does not have with
+`no such option` and exit code 2, before contacting the server: that is a
+typo, not a permission problem, so fix the command and retry. `phoenix
+<command> --help` shows its options; `--` ends options (for a path that
+starts with `-`).
 
 ### Delete a secret
 
