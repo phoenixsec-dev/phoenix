@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.21.0 (2026-11-11)
+## v0.22.0 (2026-11-11)
 
 ### Fixed: a typo in a command looks like a typo, not a permission wall
 
@@ -70,6 +70,8 @@ the CLI together before generating or rotating a key: an older CLI gets a 400
 from the new server saying to update, and the new CLI refuses an older
 server (which would register a key it made itself) without touching the
 existing key file.
+
+## v0.21.0 (2026-11-11)
 
 ### Removed: features that checked nothing, dead code, mTLS, MCP over HTTP, step-up
 
