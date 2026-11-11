@@ -749,11 +749,6 @@ func TestAgentDeleteRevokesBeforeDelete(t *testing.T) {
 	expect(t, e.sealedGet("infra/b2/app-key", "vector-token-2"), 403, CodeGrantRevoked)
 }
 
-func (e *grantEnv) delVector(t *testing.T) {
-	t.Helper()
-	expect(t, e.do("DELETE", "/v1/agents/vector", adminTok, ""), 200, "")
-}
-
 func (e *grantEnv) addVector(t *testing.T, tok string) {
 	t.Helper()
 	if err := e.srv.acl.AddAgent("vector", tok, nil); err != nil {
