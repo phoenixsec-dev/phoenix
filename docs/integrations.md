@@ -173,7 +173,7 @@ list and the guarantees that apply to it.
 Use the separate [`openclaw-phoenix`](https://github.com/phoenixsec-dev/openclaw-phoenix) plugin for agent/tool-time workflows:
 
 - `phoenix_resolve` for Phoenix-aware runtime resolution
-- `phoenix_list` for listing visible paths
+- `phoenix_list` for listing visible paths with their descriptions
 - `phoenix_status` for health/connectivity checks
 - sealed-response and approval-aware UX as the plugin evolves
 

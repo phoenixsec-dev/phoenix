@@ -940,6 +940,10 @@ func TestSetPreservesCreatedTimestamp(t *testing.T) {
 	if len(meta2.Tags) != 1 || meta2.Tags[0] != "tag1" {
 		t.Fatalf("expected preserved tags, got %v", meta2.Tags)
 	}
+	// The creator stays; the updater is recorded separately
+	if meta2.CreatedBy != "original-author" || meta2.UpdatedBy != "new-author" {
+		t.Fatalf("CreatedBy/UpdatedBy = %q/%q, want original-author/new-author", meta2.CreatedBy, meta2.UpdatedBy)
+	}
 	// Updated should change
 	if meta2.Updated.Equal(meta1.Updated) || meta2.Updated.Before(meta1.Updated) {
 		t.Fatal("Updated timestamp should advance on update")

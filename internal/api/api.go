@@ -262,6 +262,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 	s.accessRoutes()
+	s.metadataRoutes()
 	s.sshRoutes()
 	s.removedRouteRoutes()
 }
@@ -883,7 +884,17 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditAllowed(r, info, "write", path, ip)
-	jsonOK(w, map[string]string{"status": "ok", "path": path})
+	// has_description: does the secret have one after this write (an update
+	// without one keeps the old one)? `phoenix set` nudges when it is false.
+	// Only for callers who may list the path, as that is the metadata
+	// permission; never the text.
+	resp := map[string]interface{}{"status": "ok", "path": path}
+	if s.baseAccessReason(info, path, "list", acl.ActionList) == "" {
+		if m, err := s.backend.Metadata(path); err == nil {
+			resp["has_description"] = m.Description != ""
+		}
+	}
+	jsonOK(w, resp)
 }
 
 func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {

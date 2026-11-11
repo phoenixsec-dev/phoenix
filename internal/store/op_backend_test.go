@@ -335,3 +335,22 @@ func TestIsSecretField(t *testing.T) {
 		}
 	}
 }
+
+// R1-2: Metadata must not run op at all; the API calls it once per listed
+// path, and with caching off each op call is a full vault walk.
+func TestOPBackendMetadataRunsNoOP(t *testing.T) {
+	fakeOP := writeFakeOP(t, `echo "op must not run" >&2; exit 1`)
+	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "test-token")
+
+	backend := NewOPBackend(op.New("", op.WithOPPath(fakeOP)), "Vault", 0)
+	m, err := backend.Metadata("ns/key")
+	if err != nil {
+		t.Fatalf("Metadata() ran op or failed: %v", err)
+	}
+	if m.Description != "1Password: op://Vault/ns/key" {
+		t.Fatalf("description = %q", m.Description)
+	}
+	if _, err := backend.Metadata("no-slash"); !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("invalid path: %v", err)
+	}
+}
