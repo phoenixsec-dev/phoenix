@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,6 +143,30 @@ type SessionConfig struct {
 	Enabled bool                  `json:"enabled"`
 	TTL     string                `json:"ttl,omitempty"` // default "1h"
 	Roles   map[string]RoleConfig `json:"roles,omitempty"`
+}
+
+// sessionsFileName is the role sessions file, kept next to the ACL file.
+const sessionsFileName = "role-sessions.json"
+
+// SessionStorePath is where the server saves role sessions so they survive a
+// restart: role-sessions.json in the same directory as the ACL file. The file
+// holds session records only, never a token or key.
+func (c *Config) SessionStorePath() string {
+	return parentResolved(rawDir(c.ACL.Path) + "/" + sessionsFileName)
+}
+
+// RoleFingerprints returns a hash of each role's settings, keyed by role
+// name. The session store saves them and, after a restart, drops sessions
+// whose role was removed or changed, so a role change still takes effect at
+// restart as it did when sessions lived only in memory.
+func (c *Config) RoleFingerprints() map[string]string {
+	out := make(map[string]string, len(c.Session.Roles))
+	for name, role := range c.Session.Roles {
+		b, _ := json.Marshal(role) // struct of strings, bools and slices: cannot fail
+		h := sha256.Sum256(b)
+		out[name] = hex.EncodeToString(h[:])
+	}
+	return out
 }
 
 // RoleConfig defines a named role that agents assume via session tokens.
@@ -354,6 +380,9 @@ func (c *Config) Validate() error {
 		}
 		if len(c.Session.Roles) == 0 {
 			return errors.New("session.roles: at least one role must be defined when sessions are enabled")
+		}
+		if err := c.ValidateSessionStorePath(); err != nil {
+			return err
 		}
 		for name, role := range c.Session.Roles {
 			if len(role.Namespaces) == 0 {

@@ -304,7 +304,8 @@ plaintext.
 The existing HTTP health check only checks HTTP. Monitor HTTPS separately with
 certificate verification and expiry alerts. An optional HTTPS outage should not
 cause a restart loop for working HTTP consumers. Certificates load at startup;
-replacing a certificate requires a restart. In-memory sessions are lost on restart.
+replacing a certificate requires a restart. Role sessions survive restarts (see
+[Session identity](session-identity.md#restarts)).
 
 For Docker, retain the existing port mapping and add a mapping for the selected
 HTTPS port, for example `9443:9443`, plus certificate mounts if needed. The

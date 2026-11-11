@@ -234,16 +234,38 @@ and seal-key requirements also apply.
 
 ## Operational notes
 
-### In-memory state
+### Restarts
 
-Active sessions are held in server memory. A server restart clears all
-sessions. Agents with `PHOENIX_ROLE` set will auto-mint a new session on
-their next request, so this is transparent for most workflows.
+Sessions survive a server restart:
 
-This is a deliberate design choice — it avoids persisting bearer-equivalent
-tokens to disk and keeps the server stateless for simple deployments.
-Persistent session storage may be added in a future release if demand
-warrants it.
+- The signing key is derived from the master key (HKDF-SHA256 with a fixed
+  label), so it is the same after a restart. There is no extra key file.
+- Session records are saved to `role-sessions.json` in the same directory as
+  the ACL file, on every mint, renew, revoke and cleanup (mode 0600). The file
+  holds who, which role, scope and expiry, never a token or key, so a copy of
+  it cannot be used to log in. Deleting it ends every session; clients mint
+  new ones.
+- Revoked sessions stay in the file until they expire, so a revoked token keeps
+  getting `SESSION_REVOKED` after a restart.
+- A role change still takes effect at restart. The file keeps a hash of each
+  role's settings; sessions of a role that was removed or changed in any way
+  are dropped at start (the log says how many), and clients mint new ones under
+  the new settings. Sessions of unchanged roles carry on.
+- The path is reserved. The server refuses to start if another Phoenix file
+  (secrets, master key, audit log, grants file) is configured there, or if a
+  file at that path is not a sessions file; it never moves or overwrites it.
+  A damaged sessions file can simply be deleted.
+
+Sessions still end when the signing key changes: after `phoenix rotate-master`
+(at the next restart) and at every restart with the 1Password backend, which
+has no master key (the server logs a warning at start).
+
+The CLI and `phoenix mcp-server` recover from that on their own. When a role
+session gets `SESSION_INVALID` or `SESSION_EXPIRED`, they drop it from
+`~/.phoenix/token-cache.json`, mint a new one with `PHOENIX_TOKEN` and retry
+the request once. A second failure is reported, never retried. A
+`SESSION_REVOKED` session is not replaced in the same run, but it is dropped
+from the cache so the next run mints a new one.
 
 ## Related docs
 

@@ -141,6 +141,10 @@ func main() {
 
 	// Initialize backend
 	var backend store.SecretBackend
+	// Session signing key derived from the master key, so role sessions
+	// survive a restart. Stays nil without a master key (1Password backend):
+	// sessions then get a random key and die at every restart.
+	var sessionSigningKey []byte
 
 	switch cfg.Backend() {
 	case "1password":
@@ -192,6 +196,14 @@ func main() {
 		default:
 			log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
 		}
+		if fp, ok := keyProvider.(*crypto.FileKeyProvider); ok {
+			mk := fp.MasterKey()
+			sessionSigningKey, err = session.DeriveSigningKey(mk)
+			crypto.ZeroBytes(mk)
+			if err != nil {
+				log.Fatalf("%v", err)
+			}
+		}
 
 		s, err := store.NewWithProvider(cfg.Store.Path, keyProvider)
 		if err != nil {
@@ -238,14 +250,24 @@ func main() {
 			sessionTTL, _ = time.ParseDuration(cfg.Session.TTL) // validated above
 		}
 		var err error
-		sessionStore, err = session.NewStore(sessionTTL)
+		sessionStore, err = session.OpenStore(session.Options{
+			TTL:        sessionTTL,
+			SigningKey: sessionSigningKey,
+			Path:       cfg.SessionStorePath(),
+			// Sessions of a removed or changed role end at restart.
+			RoleFingerprints: cfg.RoleFingerprints(),
+		})
 		if err != nil {
 			log.Fatalf("initializing session store: %v", err)
 		}
 		srv.SetSessionStore(sessionStore)
 		srv.SetSessionRoles(cfg.Session.Roles)
 		defer sessionStore.Stop()
-		log.Printf("  Sessions: enabled (roles=%d, ttl=%s)", len(cfg.Session.Roles), sessionTTL)
+		log.Printf("  Sessions: enabled (roles=%d, ttl=%s, saved in %s, %d loaded)",
+			len(cfg.Session.Roles), sessionTTL, cfg.SessionStorePath(), sessionStore.ActiveCount())
+		if sessionSigningKey == nil {
+			log.Printf("  WARNING: no master key (backend %s): role sessions use a random key and end at every restart; clients re-mint", cfg.Backend())
+		}
 	} else {
 		log.Printf("  Sessions: disabled")
 	}

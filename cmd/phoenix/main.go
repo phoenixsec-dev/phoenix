@@ -32,6 +32,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	sha256pkg "crypto/sha256"
 	"crypto/tls"
@@ -366,25 +367,102 @@ func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
 }
 
 func apiRequestWithHeaders(method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
-	url := serverURL + path
-	req, err := http.NewRequest(method, url, body)
+	return apiRequestCtx(context.Background(), method, path, body, headers)
+}
+
+// apiRequestCtx sends one API request with the current token. If a role
+// session token gets 401 SESSION_INVALID or SESSION_EXPIRED (for example a
+// session from before a server restart), it drops the cached session, mints
+// a new one with PHOENIX_TOKEN and retries the request exactly once. A second
+// failure is returned to the caller as is. SESSION_REVOKED is never retried:
+// the cached session is dropped so the next run mints fresh.
+func apiRequestCtx(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
+	var payload []byte
+	if body != nil {
+		b, err := io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
+		payload = b
+	}
+
+	tok := currentToken()
+	resp, err := sendAPIRequest(ctx, tok, method, path, payload, body != nil, headers)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized || !canRemintSession(tok) {
+		return resp, err
+	}
+
+	var code string
+	code, resp = peekDenialCode(resp)
+	role := os.Getenv("PHOENIX_ROLE")
+	switch code {
+	case "SESSION_INVALID", "SESSION_EXPIRED":
+	case "SESSION_REVOKED":
+		dropCachedSession(role)
+		return resp, nil
+	default:
+		return resp, nil
+	}
+
+	newTok, mintErr := remintSession(ctx, role, tok)
+	if mintErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: role session %s got %s and a new one could not be minted: %v\n", role, code, mintErr)
+		return resp, nil
+	}
+	resp.Body.Close()
+	fmt.Fprintf(os.Stderr, "note: role session %s got %s; minted a new one and retried\n", role, code)
+	return sendAPIRequest(ctx, newTok, method, path, payload, body != nil, headers)
+}
+
+// sendAPIRequest sends exactly one request authenticated with tok. No retry.
+func sendAPIRequest(ctx context.Context, tok, method, path string, payload []byte, hasBody bool, headers map[string]string) (*http.Response, error) {
+	var body io.Reader
+	if hasBody {
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, serverURL+path, body)
 	if err != nil {
 		return nil, err
 	}
-	tokenMu.RLock()
-	tok := token
-	tokenMu.RUnlock()
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	if body != nil {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	// Pass tool/skill attestation claim if set
 	return httpClient.Do(req)
+}
+
+// currentToken returns the token requests are sent with right now.
+func currentToken() string {
+	tokenMu.RLock()
+	defer tokenMu.RUnlock()
+	return token
+}
+
+// canRemintSession reports whether a failed request sent with tok may be
+// retried on a fresh role session: tok must be a session token, and
+// PHOENIX_ROLE plus a non-session PHOENIX_TOKEN must be set to mint with.
+func canRemintSession(tok string) bool {
+	boot := os.Getenv("PHOENIX_TOKEN")
+	return strings.HasPrefix(tok, "phxs_") && os.Getenv("PHOENIX_ROLE") != "" &&
+		boot != "" && !strings.HasPrefix(boot, "phxs_")
+}
+
+// peekDenialCode reads the denial code from a response body and gives back a
+// response whose body can still be read in full by the caller.
+func peekDenialCode(resp *http.Response) (string, *http.Response) {
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	var d struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(data, &d)
+	return d.Code, resp
 }
 
 func cmdGet(args []string) error {
@@ -1410,19 +1488,7 @@ func cmdExec(args []string) error {
 	if timeout > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		url := serverURL + "/v1/resolve"
-		req, reqErr := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
-		if reqErr != nil {
-			return fmt.Errorf("building request: %w", reqErr)
-		}
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		for k, v := range hdrs {
-			req.Header.Set(k, v)
-		}
-		resp, err = httpClient.Do(req)
+		resp, err = apiRequestCtx(ctx, "POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	} else {
 		resp, err = apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	}
@@ -2028,14 +2094,14 @@ func ensureSealKey(role string) (*[32]byte, string, error) {
 }
 
 // mintSessionViaAPI calls POST /v1/session/mint and returns the session token.
-func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
+func mintSessionViaAPI(ctx context.Context, role, sealPubKeyB64 string) (string, time.Time, error) {
 	body := map[string]string{"role": role}
 	if sealPubKeyB64 != "" {
 		body["seal_public_key"] = sealPubKeyB64
 	}
 	bodyBytes, _ := json.Marshal(body)
 
-	resp, err := apiRequest("POST", "/v1/session/mint", strings.NewReader(string(bodyBytes)))
+	resp, err := sendAPIRequest(ctx, os.Getenv("PHOENIX_TOKEN"), "POST", "/v1/session/mint", bodyBytes, true, nil)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("session mint request: %w", err)
 	}
@@ -2083,14 +2149,16 @@ func autoMintSession() error {
 	}
 
 	// Need bootstrap auth to mint
-	tokenMu.RLock()
-	noToken := token == ""
-	tokenMu.RUnlock()
-	if noToken {
+	if os.Getenv("PHOENIX_TOKEN") == "" {
 		return fmt.Errorf("PHOENIX_ROLE=%s set but no bootstrap auth available (set PHOENIX_TOKEN)", role)
 	}
+	_, err := mintAndCacheSession(context.Background(), role)
+	return err
+}
 
-	// Load or generate seal key
+// mintAndCacheSession mints a role session with PHOENIX_TOKEN (sealed if a
+// seal key is set up), caches it and makes it the current token.
+func mintAndCacheSession(ctx context.Context, role string) (string, error) {
 	_, sealPubB64, err := ensureSealKey(role)
 	if err != nil {
 		// Non-fatal: mint without seal key
@@ -2098,16 +2166,46 @@ func autoMintSession() error {
 		sealPubB64 = ""
 	}
 
-	sessionToken, expiresAt, err := mintSessionViaAPI(role, sealPubB64)
+	sessionToken, expiresAt, err := mintSessionViaAPI(ctx, role, sealPubB64)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	cacheSessionToken(role, sessionToken, expiresAt)
 	tokenMu.Lock()
 	token = sessionToken
 	tokenMu.Unlock()
-	return nil
+	return sessionToken, nil
+}
+
+// remintMu makes concurrent requests (MCP mode) that all hit a dead session
+// share one re-mint instead of each minting its own.
+var remintMu sync.Mutex
+
+// remintSession replaces the dead session token stale with a fresh one and
+// returns it. If another request already replaced it, that token is reused.
+func remintSession(ctx context.Context, role, stale string) (string, error) {
+	remintMu.Lock()
+	defer remintMu.Unlock()
+	if cur := currentToken(); cur != stale {
+		return cur, nil
+	}
+	dropCachedSession(role)
+	return mintAndCacheSession(ctx, role)
+}
+
+// dropCachedSession removes the role's cached session token from
+// ~/.phoenix/token-cache.json so the next run mints a new one.
+func dropCachedSession(role string) {
+	cache, _ := loadTokenCache()
+	key := sessionCacheKey(role)
+	if _, ok := cache[key]; !ok {
+		return
+	}
+	delete(cache, key)
+	if err := saveTokenCache(cache); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not update token cache: %v\n", err)
+	}
 }
 
 // renewSessionViaAPI calls POST /v1/session/renew with the current session token.

@@ -122,6 +122,28 @@ filled in, so turning HTTPS on is `"enabled": true`. `server.listen` always
 serves plain HTTP; the startup warning for a non-loopback `server.listen`
 now points at `https_listener`.
 
+### Fixed: a server restart broke every role session
+
+Every restart made a new random session signing key and forgot all session
+records, so every cached role session failed with `401 SESSION_INVALID`
+until someone cleared `~/.phoenix/token-cache.json` by hand. Now:
+
+- The signing key is derived from the master key, and session records are
+  saved to `role-sessions.json` next to the ACL file (no tokens or keys in
+  it). Sessions and revocations survive a restart. Sessions of a role that
+  was removed or changed are still ended at restart, so role edits take
+  effect as before.
+- The CLI and `phoenix mcp-server` replace a session that gets
+  `SESSION_INVALID` or `SESSION_EXPIRED` once and retry the request once.
+- Revoked sessions keep answering `SESSION_REVOKED` until they expire, before
+  and after a restart.
+
+**Upgrading:** nothing to configure. The server needs write access to the
+ACL file's directory (it already writes `grants.json` there). The first
+restart onto this version still ends old sessions (they were signed with the
+old random key); clients on this CLI re-mint by themselves, older CLIs need
+the cache cleared once more.
+
 ### Fixed: `phoenix exec` passed Phoenix credentials to the command it ran
 
 `phoenix exec` stripped seven variables from the child's environment but
