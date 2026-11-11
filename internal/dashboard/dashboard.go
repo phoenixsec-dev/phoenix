@@ -753,17 +753,6 @@ func ttlRemain(t time.Time) string {
 	return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
-func sessionTTL(maxTTL string) time.Duration {
-	if maxTTL == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(maxTTL)
-	if err != nil {
-		return 0
-	}
-	return d
-}
-
 func extractClientIP(r *http.Request) string {
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		return strings.SplitN(fwd, ",", 2)[0]
