@@ -38,8 +38,6 @@ const ActionSSHLogin = "ssh_login"
 // ("phxs_" tokens) can never create or use a grant.
 const (
 	AuthBearer = "bearer"
-	AuthMTLS   = "mtls"
-	AuthToken  = "token" // short-lived token
 )
 
 // Fixed limits from the plan (section 5 and the abuse limits table).
@@ -109,24 +107,23 @@ type Request struct {
 // Grant is an approved, time-limited permission. Usable only by the same
 // agent, with the same kind of credential (and the same IP when bound).
 type Grant struct {
-	ID                 string    `json:"id"`
-	RequestID          string    `json:"request_id"`
-	Agent              string    `json:"agent"`
-	Paths              []string  `json:"paths"`
-	Action             string    `json:"action"`
-	SealedOnly         bool      `json:"sealed_only"`
-	BoundSourceIP      string    `json:"bound_source_ip,omitempty"`
-	AuthMethod         string    `json:"auth_method"`
-	CredentialFP       string    `json:"credential_fp,omitempty"`
-	NotBeforeTombstone time.Time `json:"not_before_tombstone,omitzero"`
-	CreatedAt          time.Time `json:"created_at"`
-	ExpiresAt          time.Time `json:"expires_at"`
-	ApprovedBy         string    `json:"approved_by"`
-	RevokedAt          time.Time `json:"revoked_at,omitzero"`
-	RevokedBy          string    `json:"revoked_by,omitempty"`
-	ExpiryRecorded     bool      `json:"expiry_recorded,omitempty"` // grant.expired audit event queued
-	LastUsedAt         time.Time `json:"last_used_at,omitzero"`
-	UseCount           int64     `json:"use_count,omitempty"`
+	ID             string    `json:"id"`
+	RequestID      string    `json:"request_id"`
+	Agent          string    `json:"agent"`
+	Paths          []string  `json:"paths"`
+	Action         string    `json:"action"`
+	SealedOnly     bool      `json:"sealed_only"`
+	BoundSourceIP  string    `json:"bound_source_ip,omitempty"`
+	AuthMethod     string    `json:"auth_method"`
+	CredentialFP   string    `json:"credential_fp,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	ApprovedBy     string    `json:"approved_by"`
+	RevokedAt      time.Time `json:"revoked_at,omitzero"`
+	RevokedBy      string    `json:"revoked_by,omitempty"`
+	ExpiryRecorded bool      `json:"expiry_recorded,omitempty"` // grant.expired audit event queued
+	LastUsedAt     time.Time `json:"last_used_at,omitzero"`
+	UseCount       int64     `json:"use_count,omitempty"`
 }
 
 // State returns whether the grant is active, expired or revoked at now.

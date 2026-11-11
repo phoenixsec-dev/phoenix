@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/session"
@@ -20,13 +19,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func testHandler(t *testing.T) (*Handler, *session.Store, *approval.Store) {
+func testHandler(t *testing.T) (*Handler, *session.Store) {
 	t.Helper()
-	h, ss, as, _ := testHandlerWithAudit(t)
-	return h, ss, as
+	h, ss, _ := testHandlerWithAudit(t)
+	return h, ss
 }
 
-func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *approval.Store, *bytes.Buffer) {
+func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *bytes.Buffer) {
 	t.Helper()
 	ss, err := session.NewStore(time.Hour)
 	if err != nil {
@@ -34,15 +33,11 @@ func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *approval.Sto
 	}
 	t.Cleanup(ss.Stop)
 
-	as := approval.NewStore(5 * time.Minute)
-	t.Cleanup(as.Stop)
-
 	roles := map[string]config.RoleConfig{
 		"deploy": {
 			Namespaces:     []string{"prod/*"},
 			Actions:        []string{"list", "read_value"},
 			BootstrapTrust: []string{"bearer"},
-			StepUp:         true,
 		},
 	}
 
@@ -61,7 +56,6 @@ func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *approval.Sto
 	deps := Deps{
 		Sessions:     ss,
 		SessionRoles: roles,
-		Approvals:    as,
 		StartTime:    time.Now(),
 		Audit:        al,
 	}
@@ -70,7 +64,7 @@ func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *approval.Sto
 	if err != nil {
 		t.Fatal(err)
 	}
-	return h, ss, as, &auditBuf
+	return h, ss, &auditBuf
 }
 
 // parseAuditEntries reads JSONL audit entries from a buffer.
@@ -128,7 +122,7 @@ func csrfFromCookie(t *testing.T, h *Handler, cookie *http.Cookie) string {
 }
 
 func TestLoginSuccess(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 	cookie := login(t, h)
 	if cookie.Value == "" {
 		t.Fatal("expected non-empty cookie")
@@ -136,7 +130,7 @@ func TestLoginSuccess(t *testing.T) {
 }
 
 func TestLoginFailure(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 	form := url.Values{"credential": {"wrongpass"}}
 	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -153,7 +147,7 @@ func TestLoginFailure(t *testing.T) {
 }
 
 func TestRequireAuth(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -168,7 +162,7 @@ func TestRequireAuth(t *testing.T) {
 }
 
 func TestPagesRenderOwnContentTemplate(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 	cookie := login(t, h)
 
 	req := httptest.NewRequest("GET", "/dashboard/", nil)
@@ -203,15 +197,12 @@ func TestPagesRenderOwnContentTemplate(t *testing.T) {
 }
 
 func TestCSRFValidation(t *testing.T) {
-	h, _, as := testHandler(t)
+	h, _ := testHandler(t)
 	cookie := login(t, h)
-
-	// Create an approval to have a valid target
-	apr, _ := as.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "", "10.0.0.1", "", time.Hour, 0)
 
 	// POST without CSRF should fail
 	form := url.Values{}
-	req := httptest.NewRequest("POST", "/dashboard/approvals/"+apr.ID+"/approve", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest("POST", "/dashboard/sessions/sess_x/revoke", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(cookie)
 	w := httptest.NewRecorder()
@@ -222,80 +213,13 @@ func TestCSRFValidation(t *testing.T) {
 	}
 }
 
-func TestApproveFlow(t *testing.T) {
-	h, ss, as := testHandler(t)
-	cookie := login(t, h)
-	csrf := csrfFromCookie(t, h, cookie)
-
-	// Create pending approval
-	apr, err := as.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list", "read_value"}, "bearer", "", "10.0.0.1", "", time.Hour, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Approve via dashboard
-	form := url.Values{"_csrf": {csrf}}
-	req := httptest.NewRequest("POST", "/dashboard/approvals/"+apr.ID+"/approve", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(cookie)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d (body: %s)", w.Code, w.Body.String())
-	}
-
-	// Verify approval is approved
-	resolved := as.Get(apr.ID)
-	if resolved.Status != approval.StatusApproved {
-		t.Fatalf("expected approved, got %s", resolved.Status)
-	}
-
-	// Verify session was minted
-	if resolved.SessionID == "" {
-		t.Fatal("expected session ID on approved approval")
-	}
-
-	sess := ss.Get(resolved.SessionID)
-	if sess == nil {
-		t.Fatal("expected session to exist")
-	}
-	if sess.Role != "deploy" {
-		t.Fatalf("expected role deploy, got %s", sess.Role)
-	}
-}
-
-func TestDenyFlow(t *testing.T) {
-	h, _, as := testHandler(t)
-	cookie := login(t, h)
-	csrf := csrfFromCookie(t, h, cookie)
-
-	apr, _ := as.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "", "10.0.0.1", "", time.Hour, 0)
-
-	form := url.Values{"_csrf": {csrf}}
-	req := httptest.NewRequest("POST", "/dashboard/approvals/"+apr.ID+"/deny", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(cookie)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d", w.Code)
-	}
-
-	resolved := as.Get(apr.ID)
-	if resolved.Status != approval.StatusDenied {
-		t.Fatalf("expected denied, got %s", resolved.Status)
-	}
-}
-
 func TestSessionRevoke(t *testing.T) {
-	h, ss, _ := testHandler(t)
+	h, ss := testHandler(t)
 	cookie := login(t, h)
 	csrf := csrfFromCookie(t, h, cookie)
 
 	// Create a session directly
-	_, sess, err := ss.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "", "10.0.0.1", false, time.Hour)
+	_, sess, err := ss.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "10.0.0.1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +243,7 @@ func TestSessionRevoke(t *testing.T) {
 }
 
 func TestLoginRateLimiting(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 
 	// Burn through the 5 free failures
 	for i := 0; i < loginMaxFailures; i++ {
@@ -366,7 +290,7 @@ func TestLoginRateLimiting(t *testing.T) {
 }
 
 func TestSecureCookieOnTLS(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 
 	// Login via X-Forwarded-Proto: https
 	form := url.Values{"credential": {"testpass"}}
@@ -393,7 +317,7 @@ func TestSecureCookieOnTLS(t *testing.T) {
 }
 
 func TestNonSecureCookieOnPlainHTTP(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 
 	form := url.Values{"credential": {"testpass"}}
 	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
@@ -417,7 +341,7 @@ func TestNonSecureCookieOnPlainHTTP(t *testing.T) {
 // --- Audit event tests ---
 
 func TestLoginSuccessAudit(t *testing.T) {
-	h, _, _, buf := testHandlerWithAudit(t)
+	h, _, buf := testHandlerWithAudit(t)
 
 	form := url.Values{"credential": {"testpass"}}
 	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
@@ -444,7 +368,7 @@ func TestLoginSuccessAudit(t *testing.T) {
 }
 
 func TestLoginFailureAudit(t *testing.T) {
-	h, _, _, buf := testHandlerWithAudit(t)
+	h, _, buf := testHandlerWithAudit(t)
 
 	form := url.Values{"credential": {"wrong"}}
 	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
@@ -467,7 +391,7 @@ func TestLoginFailureAudit(t *testing.T) {
 }
 
 func TestLoginRateLimitAudit(t *testing.T) {
-	h, _, _, buf := testHandlerWithAudit(t)
+	h, _, buf := testHandlerWithAudit(t)
 
 	// Exhaust free attempts
 	for i := 0; i < loginMaxFailures; i++ {
@@ -499,7 +423,7 @@ func TestLoginRateLimitAudit(t *testing.T) {
 }
 
 func TestLogoutAudit(t *testing.T) {
-	h, _, _, buf := testHandlerWithAudit(t)
+	h, _, buf := testHandlerWithAudit(t)
 	cookie := login(t, h)
 	csrf := csrfFromCookie(t, h, cookie)
 
@@ -528,7 +452,7 @@ func TestLogoutAudit(t *testing.T) {
 }
 
 func TestExpiredCookieAudit(t *testing.T) {
-	h, _, _, buf := testHandlerWithAudit(t)
+	h, _, buf := testHandlerWithAudit(t)
 
 	// Login first so there's an active nonce, then craft an expired cookie with it
 	login(t, h)
@@ -569,16 +493,14 @@ func TestExpiredCookieAudit(t *testing.T) {
 }
 
 func TestCSRFFailureAudit(t *testing.T) {
-	h, _, as, buf := testHandlerWithAudit(t)
+	h, _, buf := testHandlerWithAudit(t)
 	cookie := login(t, h)
-
-	apr, _ := as.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "", "10.0.0.1", "", time.Hour, 0)
 
 	buf.Reset()
 
 	// POST with wrong CSRF
 	form := url.Values{"_csrf": {"wrong"}}
-	req := httptest.NewRequest("POST", "/dashboard/approvals/"+apr.ID+"/approve", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest("POST", "/dashboard/sessions/sess_x/revoke", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(cookie)
 	req.RemoteAddr = "10.0.0.5:9999"
@@ -597,7 +519,7 @@ func TestCSRFFailureAudit(t *testing.T) {
 }
 
 func TestLogoutRequiresAuth(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 
 	// POST logout without any cookie should redirect to login
 	form := url.Values{}
@@ -618,7 +540,7 @@ func TestLogoutRequiresAuth(t *testing.T) {
 // --- Single-session tests ---
 
 func TestSingleSessionBlocksSecondLogin(t *testing.T) {
-	h, _, _ := testHandler(t) // default: allowMultiLogin=false
+	h, _ := testHandler(t) // default: allowMultiLogin=false
 
 	// First login succeeds
 	login(t, h)
@@ -640,7 +562,7 @@ func TestSingleSessionBlocksSecondLogin(t *testing.T) {
 }
 
 func TestSingleSessionForceLoginTakesOver(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 
 	// First login
 	cookie1 := login(t, h)
@@ -668,7 +590,7 @@ func TestSingleSessionForceLoginTakesOver(t *testing.T) {
 }
 
 func TestSingleSessionLogoutAllowsNewLogin(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 
 	cookie := login(t, h)
 	csrf := csrfFromCookie(t, h, cookie)
@@ -699,9 +621,6 @@ func TestMultiLoginAllowsConcurrentSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(ss.Stop)
-	as := approval.NewStore(5 * time.Minute)
-	t.Cleanup(as.Stop)
-
 	hash, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
@@ -715,7 +634,6 @@ func TestMultiLoginAllowsConcurrentSessions(t *testing.T) {
 	deps := Deps{
 		Sessions:     ss,
 		SessionRoles: map[string]config.RoleConfig{},
-		Approvals:    as,
 		StartTime:    time.Now(),
 	}
 	h, err := New(cfg, deps)
@@ -743,7 +661,7 @@ func TestMultiLoginAllowsConcurrentSessions(t *testing.T) {
 }
 
 func TestForceLoginRequiresValidCredential(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 	login(t, h) // create active session
 
 	form := url.Values{"credential": {"wrongpass"}}
@@ -764,7 +682,7 @@ func TestForceLoginRequiresValidCredential(t *testing.T) {
 // The audit page filters status inside the search (a denied entry older than
 // the newest 50 still shows) and says when older archives went unsearched.
 func TestAuditPageStatusFilterAndTruncation(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 	cookie := login(t, h)
 	dir := t.TempDir()
 	line := func(ts, status, path string) string {
@@ -796,7 +714,7 @@ func TestAuditPageStatusFilterAndTruncation(t *testing.T) {
 // Overview and Audit show a secret path in full, in a cell that can wrap,
 // not cut to 30-40 characters.
 func TestPagesShowFullSecretPath(t *testing.T) {
-	h, _, _ := testHandler(t)
+	h, _ := testHandler(t)
 	cookie := login(t, h)
 	long := "homelab/proxmox/cluster-api-tokens/automation/terraform-provisioner-token"
 	path := filepath.Join(t.TempDir(), "audit.log")
@@ -811,23 +729,5 @@ func TestPagesShowFullSecretPath(t *testing.T) {
 		if !strings.Contains(w.Body.String(), `<td class="mono path-full">`+long+`</td>`) {
 			t.Fatalf("%s: full path not shown in a path-full cell", page)
 		}
-	}
-}
-
-// A step-up approval card shows the role's namespaces in full and wrappable;
-// a namespace can be an exact secret path.
-func TestApprovalCardNamespacesWrap(t *testing.T) {
-	h, _, as := testHandler(t)
-	cookie := login(t, h)
-	long := "homelab/proxmox/cluster-api-tokens/automation/terraform-provisioner-token"
-	if _, err := as.Create("deploy", "agent1", nil, []string{long}, []string{"list"}, "bearer", "", "10.0.0.1", "", time.Hour, 0); err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest("GET", "/dashboard/approvals", nil)
-	req.AddCookie(cookie)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if !strings.Contains(w.Body.String(), `<span class="mono path-full">`+long+`</span>`) {
-		t.Fatal("namespace not shown in full in a path-full span")
 	}
 }

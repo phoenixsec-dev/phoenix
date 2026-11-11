@@ -35,11 +35,8 @@ and in `error_codes`:
 }
 ```
 
-If the whole resolve request fails attestation before any ref is checked (bad
-or reused nonce, timestamp outside the skew window, signed resolve without an
-mTLS client certificate, or a signature that does not verify), the response is
-a single `403` structured denial with code `ATTESTATION_REQUIRED`, not per-ref
-errors.
+A resolve body that still sends the removed `nonce` or `signature` fields
+gets a single `400` saying nonce challenges and signed resolve were removed.
 
 ## Rules for clients
 
@@ -48,15 +45,12 @@ errors.
 - Show your own text for each next step. Use the server's `next_step` only
   when both the code and the step are in the lists below; otherwise show the
   `ask_user` text.
-- Do not display `remediation` or the step-up `approve_command`. Build the
-  approve command yourself (`phoenix approve <approval_id>`) and only when the
-  ID looks like `apr_` followed by lowercase hex.
+- Do not display `remediation`.
 - Treat `detail`, `error`, and resolve error-map keys as untrusted display
   text: strip control and Unicode format (bidi, zero-width) characters and cap
   the length. Drop a `code` that does not match `^[A-Z0-9_]{1,64}$`.
 - `detail` never contains policy rules, other agents, or whether a secret
-  exists. Attestation failures (data access, resolve request checks, session
-  mint and renew) are recorded in the audit log (metadata key
+  exists. Attestation failures (data access, session mint and renew) are recorded in the audit log (metadata key
   `denial.detail`, capped at 512 bytes) but not returned to the caller.
 
 ## Next steps
@@ -96,7 +90,7 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | `GRANT_EXPIRED` | 403 | `request_use` if requestable, else `ask_user` | A grant for this path ended by time in the last 24h |
 | `GRANT_REVOKED` | 403 | `ask_user` | A human revoked the grant for this path in the last 24h |
 | `SSH_GRANT_REQUIRED` | 403 | `request_use` | `POST /v1/ssh/sign` with no approval for this machine. See [SSH certificates](ssh-certificates.md) |
-| `ATTESTATION_REQUIRED` | 403 | `ask_user` | The path's attestation policy (mTLS, IP, nonce, process, signed resolve) was not met |
+| `ATTESTATION_REQUIRED` | 403 | `ask_user` | The path's attestation policy (`source_ip`, `require_sealed`) was not met |
 | `SEALED_REQUIRED` | 403 | `use_exec` | The path (policy `require_sealed`) or the grant (`sealed_only`) is only served sealed and no valid seal key was presented |
 | `SCOPE_EXCEEDED` | 403 | `remint_session` (`request_use` on a requestable read) | Path outside the session role's namespaces |
 | `ACTION_DENIED` | 403 | `remint_session` (`request_use` on a requestable read) | Action not permitted by the session role |
@@ -104,7 +98,7 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | `INVALID_REF` | resolve only | `none` | Malformed reference or invalid path (resolve per-ref) |
 | `INTERNAL_ERROR` | resolve only | `ask_user` | Server error for this ref |
 
-### Sessions and step-up
+### Sessions
 
 | Code | HTTP | `next_step` | When |
 |---|---|---|---|
@@ -114,10 +108,7 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | `SESSION_REQUIRED` | 400 | `none` | Operation requires a session token |
 | `SEAL_KEY_MISMATCH` | 400/403 | `remint_session` | Seal key does not match the session binding |
 | `SEAL_KEY_REQUIRED` | 400 | `ask_user` | Role requires a seal key at mint |
-| `APPROVAL_REQUIRED` | 202 | `wait` | Step-up approval needed |
-| `STEP_UP_REAPPROVAL_REQUIRED` | 403 | `remint_session` | Elevated session cannot renew without fresh approval |
 | `ROLE_NOT_FOUND` | 403/404 | `ask_user` | Requested role does not exist |
-| `ROLE_NOT_ALLOWED` | 403 | `ask_user` | The role's `allowed_agents` does not list this agent. Checked at mint, at step-up approval (API and dashboard) and at renewal |
 | `BOOTSTRAP_FAILED` | 403 | `ask_user` | Auth method not in the role's `bootstrap_trust` |
 | `ATTESTATION_FAILED` | 403 | `ask_user` | Attestation not met at session mint or renew |
 | `ADMIN_AUTH_REQUIRED` | 403 | `ask_user` | Session tokens cannot perform this action |
@@ -133,7 +124,7 @@ Returned by `/v1/access-requests*` and `/v1/grants*` (see
 
 | Code | HTTP | `next_step` | When |
 |---|---|---|---|
-| `SESSION_CANNOT_REQUEST` | 403 | `request_use` if the request could succeed under the current settings, else `ask_user` | Sent with a `phxs_` session token; resend with the agent's own bearer, mTLS or short-lived token |
+| `SESSION_CANNOT_REQUEST` | 403 | `request_use` if the request could succeed under the current settings, else `ask_user` | Sent with a `phxs_` session token; resend with the agent's own bearer token |
 | `REQUESTS_DISABLED` | 501 | `ask_user` | The feature is off (or this server has no grant store) |
 | `REQUESTS_DEGRADED` | 503 | `ask_user` | The grants file could not be saved or was quarantined |
 | `NOT_REQUESTABLE` | 403 | `ask_user` | A path matches `deny_paths` (also re-checked at approval) |
@@ -163,9 +154,9 @@ Returned by `/v1/access-requests*` and `/v1/grants*` (see
   returned only `{"error": "..."}` with free text. They now use the structured
   shape above; `error` is `"access_denied"`.
 - Resolve `errors` strings are unchanged; `error_codes` is additive.
-- Request-level resolve attestation failures (nonce, timestamp, client
-  certificate, signature) used to return `{"error": "..."}` with the specific
-  reason. They now return the generic `ATTESTATION_REQUIRED` denial.
+- `APPROVAL_REQUIRED`, `STEP_UP_REAPPROVAL_REQUIRED` and `ROLE_NOT_ALLOWED`
+  were removed with step-up approvals; servers no longer send them. Clients
+  that still know them do no harm.
 - `ATTESTATION_FAILED` at session mint and renew no longer names the failed
   requirement or lists the role's attestation rules.
 - The audit `reason` for attestation denials is still `attestation`.

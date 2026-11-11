@@ -2,12 +2,10 @@
   "attestation": {
     "development/*": {},
     "staging/*": {
-      "require_mtls": true,
       "source_ip": ["127.0.0.1", "::1"]
     },
     "production/*": {
-      "require_mtls": true,
-      "deny_bearer": true,
+      "source_ip": ["127.0.0.1", "::1"],
       "require_sealed": true
     }
   }

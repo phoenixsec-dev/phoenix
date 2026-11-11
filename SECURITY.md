@@ -26,7 +26,7 @@ In scope:
 - secret disclosure risks
 - cryptographic misuse
 - audit integrity issues
-- mTLS/certificate trust issues
+- TLS/certificate trust issues
 
 Out of scope:
 - issues requiring local root/system compromise

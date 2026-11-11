@@ -1,15 +1,13 @@
 # Phoenix Secrets — Authentication
 
-Phoenix supports bearer tokens, mTLS client certificates, and sealed-response key
-pairs. These can be combined — mTLS for identity, bearer for bootstrap, sealed keys
-for context-safe delivery.
+Agents log in with a bearer token, usually to mint a short-lived session for
+a role. Sealed-response key pairs add context-safe delivery on top. (Client
+certificates (mTLS) and short-lived attestation tokens were removed.)
 
-**Transport is separate from authentication.** TLS (HTTPS) comes from the
-server's `tls` config block and does not require mTLS or client certificates —
-bearer tokens work over TLS unchanged. mTLS is an authentication method layered
-on top of TLS. Any auth method on this page can run over either transport;
-whenever requests cross a wire (any non-loopback listener), enable the `tls`
-block so tokens and secret values are encrypted in transit. See
+**Transport is separate from authentication.** HTTPS comes from the server's
+`https_listener` block; bearer and session tokens work the same over it.
+Whenever requests cross a wire, use HTTPS so tokens and secret values are
+encrypted in transit. See
 [Configuration](configuration.md#transport-security) and
 [LAN Deployment](lan-deployment.md).
 
@@ -45,27 +43,6 @@ The same pattern semantics apply to policy path patterns
 ([Policy and Attestation](policy-and-attestation.md)) and session role
 namespaces ([Session Identity](session-identity.md)).
 
-## Mutual TLS (recommended)
-
-Issue a client certificate for an agent:
-
-```bash
-phoenix cert issue deployer -o /etc/phoenix/certs/
-```
-
-This writes `deployer.crt`, `deployer.key`, and `ca.crt`.
-
-```bash
-export PHOENIX_SERVER="https://192.168.1.10:9090"
-export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
-export PHOENIX_CLIENT_CERT="/etc/phoenix/certs/deployer.crt"
-export PHOENIX_CLIENT_KEY="/etc/phoenix/certs/deployer.key"
-
-phoenix get myapp/db-password
-```
-
-No bearer token is required when the cert identifies the agent.
-
 ## Sealed-response key pairs
 
 When `PHOENIX_SEAL_KEY` points to a local private key file, Phoenix clients can:
@@ -89,18 +66,19 @@ phoenix get dev/api-key  # auto-mints session, then reads secret
 ```
 
 Session tokens use a `phxs_` prefix and are scoped to specific namespaces and
-actions. Non-elevated sessions auto-renew, and sessions can be revoked
-individually. Elevated step-up sessions require fresh approval to extend.
+actions. Sessions auto-renew and can be revoked individually.
 
 Do not combine `PHOENIX_ROLE` with a pre-minted `phxs_` session token in
 `PHOENIX_TOKEN`: role mode always re-mints a session, and a session token is
-rejected as bootstrap auth. Use a bootstrap token (or mTLS) with
+rejected as bootstrap auth. Use a bootstrap token with
 `PHOENIX_ROLE`, or a `phxs_` token alone without `PHOENIX_ROLE`.
 
-Auth priority order: session token > mTLS > short-lived token > bearer.
+Auth order: a `phxs_` token is checked as a session, anything else as a bearer
+token.
 
-See [Session Identity](session-identity.md) for full details on roles,
-step-up approval, and configuration.
+See [Session Identity](session-identity.md) for full details on roles and
+configuration. For temporary human-approved access to more paths, see
+[Access Requests](access-requests.md).
 
 ## CLI environment variables
 
@@ -108,23 +86,27 @@ step-up approval, and configuration.
 |----------|-------------|
 | `PHOENIX_SERVER` | Server URL (default: `http://127.0.0.1:9090`) |
 | `PHOENIX_TOKEN` | Bearer token |
-| `PHOENIX_CA_CERT` | CA certificate for TLS verification |
+| `PHOENIX_CA_CERT` | CA certificate for HTTPS verification (the server's `ca.crt`) |
 | `PHOENIX_ALLOW_PLAINTEXT` | Hosts (comma-separated) to skip the plaintext `http://` warning for; see [LAN deployment](lan-deployment.md#plaintext-on-a-single-host-opt-out) |
-| `PHOENIX_CLIENT_CERT` | Client certificate for mTLS |
-| `PHOENIX_CLIENT_KEY` | Client key for mTLS |
 | `PHOENIX_SEAL_KEY` | Seal private key file path |
 | `PHOENIX_ROLE` | Role name for auto-mint session identity |
 | `PHOENIX_POLICY` | Policy file path for local `phoenix policy` commands |
 | `PHOENIX_OP_TOKEN_ENV` | Import-only env var name holding 1Password token |
 
+`PHOENIX_CLIENT_CERT` and `PHOENIX_CLIENT_KEY` are ignored (client
+certificates were removed); the CLI prints a warning when they are set.
+`PHOENIX_TOOL` is gone too. `phoenix exec` removes every `PHOENIX_*`
+variable, `OP_SERVICE_ACCOUNT_TOKEN`, and the variable named by
+`PHOENIX_OP_TOKEN_ENV` from the environment of the command it runs.
+
 ## Dashboard auth (separate surface)
 
 The operator dashboard (`/dashboard/`) uses its own authentication — it does
-**not** use bearer tokens, mTLS, or session tokens. Instead, it uses a shared
+**not** use bearer tokens or session tokens. Instead, it uses a shared
 password or PIN with cookie-based sessions.
 
 This is intentional: the dashboard is a human operator interface, not an agent
-interface. The API auth model (bearer, mTLS, session tokens) is designed for
+interface. The API auth model (bearer and session tokens) is designed for
 programmatic access with per-agent identity. The dashboard auth model is
 designed for browser access with shared-credential simplicity.
 

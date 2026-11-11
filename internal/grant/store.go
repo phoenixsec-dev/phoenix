@@ -40,10 +40,9 @@ const approveMaybeOnDiskMsg = "could not confirm the approval was saved, and und
 
 // Defaults used when Options leaves a duration at zero.
 const (
-	DefaultRequestTTL         = 15 * time.Minute
-	DefaultGrantTTL           = time.Hour
-	DefaultMaxGrantTTL        = 8 * time.Hour
-	DefaultTombstoneRetention = 25 * time.Hour // max(token TTL, max grant TTL) + margin; API should pass its own
+	DefaultRequestTTL  = 15 * time.Minute
+	DefaultGrantTTL    = time.Hour
+	DefaultMaxGrantTTL = 8 * time.Hour
 )
 
 const (
@@ -64,27 +63,25 @@ type Options struct {
 	AgentExists func(name string) bool
 	Logf        func(format string, args ...any) // nil = log.Printf
 
-	RequestTTL         time.Duration // how long a request stays pending
-	DefaultGrantTTL    time.Duration // TTL when the agent does not ask for one
-	MaxGrantTTL        time.Duration // ceiling for requested TTLs at create time
-	TombstoneRetention time.Duration // how long an agent-delete tombstone is kept
+	RequestTTL      time.Duration // how long a request stays pending
+	DefaultGrantTTL time.Duration // TTL when the agent does not ask for one
+	MaxGrantTTL     time.Duration // ceiling for requested TTLs at create time
 }
 
-// state is the whole contents of grants.json.
+// state is the whole contents of grants.json. Files written before short-lived
+// tokens were removed also carry "tombstones" (deleted agents); it is ignored.
 type state struct {
-	Version      int                  `json:"version"`
-	Requests     map[string]*Request  `json:"requests"`
-	Grants       map[string]*Grant    `json:"grants"`
-	Tombstones   map[string]time.Time `json:"tombstones"` // agent name -> deleted_at
-	AuditPending []Event              `json:"audit_pending"`
+	Version      int                 `json:"version"`
+	Requests     map[string]*Request `json:"requests"`
+	Grants       map[string]*Grant   `json:"grants"`
+	AuditPending []Event             `json:"audit_pending"`
 }
 
 func emptyState() *state {
 	return &state{
-		Version:    fileVersion,
-		Requests:   map[string]*Request{},
-		Grants:     map[string]*Grant{},
-		Tombstones: map[string]time.Time{},
+		Version:  fileVersion,
+		Requests: map[string]*Request{},
+		Grants:   map[string]*Grant{},
 	}
 }
 
@@ -94,7 +91,6 @@ func (st *state) clone() *state {
 		Version:      fileVersion,
 		Requests:     make(map[string]*Request, len(st.Requests)),
 		Grants:       make(map[string]*Grant, len(st.Grants)),
-		Tombstones:   make(map[string]time.Time, len(st.Tombstones)),
 		AuditPending: slices.Clone(st.AuditPending),
 	}
 	for k, v := range st.Requests {
@@ -102,9 +98,6 @@ func (st *state) clone() *state {
 	}
 	for k, v := range st.Grants {
 		n.Grants[k] = v
-	}
-	for k, v := range st.Tombstones {
-		n.Tombstones[k] = v
 	}
 	return n
 }
@@ -171,9 +164,6 @@ func Open(opts Options) (*Store, error) {
 	if opts.MaxGrantTTL <= 0 {
 		opts.MaxGrantTTL = DefaultMaxGrantTTL
 	}
-	if opts.TombstoneRetention <= 0 {
-		opts.TombstoneRetention = DefaultTombstoneRetention
-	}
 	s := &Store{
 		opts:  opts,
 		fs:    opts.FS,
@@ -229,9 +219,6 @@ func decodeState(data []byte) (*state, error) {
 	}
 	if st.Grants == nil {
 		st.Grants = map[string]*Grant{}
-	}
-	if st.Tombstones == nil {
-		st.Tombstones = map[string]time.Time{}
 	}
 	for id, r := range st.Requests {
 		if r == nil || r.ID != id || r.Agent == "" || len(r.Paths) == 0 {
@@ -439,8 +426,8 @@ type CreateInput struct {
 	Reason       string
 	TTL          time.Duration // 0 = DefaultGrantTTL; clamped to [1m, MaxGrantTTL]
 	SourceIP     string
-	AuthMethod   string // AuthBearer, AuthMTLS or AuthToken
-	CredentialFP string // bearer: BearerFingerprint(hash); mtls: cert fingerprint; token: empty
+	AuthMethod   string // AuthBearer (the only method left)
+	CredentialFP string // BearerFingerprint(hash) of the agent's token
 }
 
 // Create files a new pending request. It returns created=true for a new
@@ -452,14 +439,12 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 		return Request{}, false, newErr(CodeInvalidRequest, "agent is required")
 	}
 	switch in.AuthMethod {
-	case AuthBearer, AuthMTLS:
+	case AuthBearer:
 		if in.CredentialFP == "" {
 			return Request{}, false, newErr(CodeInvalidRequest, "credential fingerprint is required")
 		}
-	case AuthToken:
-		in.CredentialFP = ""
 	default:
-		return Request{}, false, newErr(CodeInvalidRequest, "requests need the agent's own bearer, mTLS or short-lived token")
+		return Request{}, false, newErr(CodeInvalidRequest, "requests need the agent's own bearer token")
 	}
 	if in.Action != ActionReadValue && in.Action != ActionSSHLogin {
 		return Request{}, false, newErr(CodeActionNotGrantable, "only %s can be requested", ActionReadValue)
@@ -673,8 +658,7 @@ func (s *Store) Approve(in ApproveInput) (Request, Grant, error) {
 	g := &Grant{
 		ID: newID("gnt_"), RequestID: r.ID, Agent: r.Agent, Paths: paths, Action: r.Action,
 		SealedOnly: in.SealedOnly, AuthMethod: r.AuthMethod, CredentialFP: r.CredentialFP,
-		NotBeforeTombstone: cur.Tombstones[r.Agent],
-		CreatedAt:          now, ExpiresAt: now.Add(ttl), ApprovedBy: in.Approver,
+		CreatedAt: now, ExpiresAt: now.Add(ttl), ApprovedBy: in.Approver,
 	}
 	if in.BindSourceIP {
 		g.BoundSourceIP = r.SourceIP
@@ -809,9 +793,8 @@ type DeleteAgentResult struct {
 }
 
 // DeleteAgent is step 1 and 2 of agent deletion, under the store lock:
-// durably revoke the agent's active grants, expire its pending requests and
-// record a tombstone (name -> deleted_at); then call removeACL to drop the
-// ACL entry. If the save fails, everything is still revoked in memory, the
+// durably revoke the agent's active grants and expire its pending requests;
+// then call removeACL to drop the ACL entry. If the save fails, everything is still revoked in memory, the
 // error is REVOKE_NOT_DURABLE and removeACL is NOT called. If removeACL
 // fails the grants stay revoked (fail closed). removeACL may be nil and must
 // not call back into the Store.
@@ -857,7 +840,6 @@ func (s *Store) DeleteAgent(agent, by, ip string, removeACL func() error) (Delet
 	}
 	sort.Strings(res.RevokedGrants)
 	sort.Strings(res.ExpiredRequests)
-	next.Tombstones[agent] = now
 	summary := s.newEvent(EventAgentDeleted, PhaseCommitted, agent, by, ip)
 	summary.Detail = map[string]string{
 		"revoked_grants":   fmt.Sprint(len(res.RevokedGrants)),
@@ -881,11 +863,10 @@ func (s *Store) DeleteAgent(agent, by, ip string, removeACL func() error) (Delet
 // Caller is the authenticated identity on a data request. The API fills it
 // from authInfo; session callers must never reach Match.
 type Caller struct {
-	Agent         string
-	SourceIP      string
-	AuthMethod    string    // AuthBearer, AuthMTLS or AuthToken
-	CredentialFP  string    // same format as CreateInput.CredentialFP
-	TokenIssuedAt time.Time // for AuthToken
+	Agent        string
+	SourceIP     string
+	AuthMethod   string // AuthBearer
+	CredentialFP string // same format as CreateInput.CredentialFP
 }
 
 // MatchResult is Match's answer. Grant is a copy of the active grant that
@@ -917,7 +898,6 @@ func (s *Store) Match(c Caller, path, action string) MatchResult {
 	}
 	cur := s.cur
 	now := s.now()
-	tomb := cur.Tombstones[c.Agent]
 	var endedAt time.Time
 	var reason string
 	// When several active grants cover the path, prefer one that allows
@@ -930,7 +910,7 @@ func (s *Store) Match(c Caller, path, action string) MatchResult {
 		}
 		switch g.State(now) {
 		case GrantActive:
-			if credentialMatches(g, c, tomb) {
+			if credentialMatches(g, c) {
 				if !g.SealedOnly {
 					v := s.grantView(g)
 					return MatchResult{Grant: &v}
@@ -957,7 +937,7 @@ func (s *Store) Match(c Caller, path, action string) MatchResult {
 }
 
 // credentialMatches applies the plan's credential binding table.
-func credentialMatches(g *Grant, c Caller, tomb time.Time) bool {
+func credentialMatches(g *Grant, c Caller) bool {
 	if c.AuthMethod != g.AuthMethod {
 		return false
 	}
@@ -965,15 +945,9 @@ func credentialMatches(g *Grant, c Caller, tomb time.Time) bool {
 		return false
 	}
 	switch g.AuthMethod {
-	case AuthBearer, AuthMTLS:
+	case AuthBearer:
 		return g.CredentialFP != "" &&
 			subtle.ConstantTimeCompare([]byte(c.CredentialFP), []byte(g.CredentialFP)) == 1
-	case AuthToken:
-		notBefore := g.NotBeforeTombstone
-		if tomb.After(notBefore) {
-			notBefore = tomb
-		}
-		return !c.TokenIssuedAt.IsZero() && c.TokenIssuedAt.After(notBefore)
 	}
 	return false
 }
@@ -1193,12 +1167,6 @@ func (s *Store) prune(next *state, now time.Time) bool {
 		}
 		if !now.Before(end.Add(Retention)) {
 			delete(next.Requests, id)
-			removed = true
-		}
-	}
-	for name, at := range next.Tombstones {
-		if !now.Before(at.Add(s.opts.TombstoneRetention)) {
-			delete(next.Tombstones, name)
 			removed = true
 		}
 	}

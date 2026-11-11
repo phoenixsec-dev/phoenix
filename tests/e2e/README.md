@@ -38,18 +38,18 @@ Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run p
 
 | ID | Coverage | Status |
 |---:|---|---|
-| 01–04 | lifecycle, ACL isolation, attestation, exec stripping | implemented |
-| 05–08 | rotation under load, cert lifecycle, time/nonce, short-lived tokens | implemented |
+| 01–04 | lifecycle, ACL isolation, attestation (`source_ip`, `require_sealed`), exec credential stripping (incl. `PHOENIX_MCP_TOKEN`, `PHOENIX_MASTER_PASSPHRASE`, `OP_SERVICE_ACCOUNT_TOKEN`) | implemented |
+| 05 | rotation under load | implemented |
 | 09–11 | PostgreSQL rotation, MCP stdio, zero-plaintext config | implemented |
 | 12 | 1Password read-only backend: resolve, write rejection, missing item | implemented; opt-in, exits 77 when `OP_SERVICE_ACCOUNT_TOKEN` is unset |
 | 13 | OpenClaw exec-provider protocol and edge cases | implemented |
-| 14 | bearer-role, mTLS-role, pre-minted session, invalid auth combinations | implemented |
+| 14 | bearer-role, pre-minted session, HOME-unset bootstrap, invalid auth combinations | implemented |
 | 15 | sanitized audit metadata and spoof resistance | implemented |
-| 16 | elevated step-up deny/approve/expiry/renewal | implemented |
 | 17 | sealed-response S1–S8 plus policy/keypair regressions | implemented |
-| 18 | v0.13.5 → current in-place data/config/ACL/audit upgrade | implemented |
-| 19 | secure transport: `tls:` block, optional HTTPS alongside HTTP, shared auth/ACL/source-IP/session/rate-limit/store behavior, dashboard cookies, fatal optional misconfiguration, optional bind-failure containment, plaintext warnings, mTLS backward compat, MCP TLS | implemented; listeners stay on loopback; non-loopback warning uses an unbindable TEST-NET-1 address |
-| 20 | Hermes caller metadata: capture, sanitization/cap, unlisted-header exclusion, ACL spoof resistance, `X-Hermes-Tool` vs `X-Phoenix-Tool` | implemented |
+| 18 | v0.13.5 → current in-place data/config/ACL/audit upgrade: the old config's removed settings are refused by name (startup and `--check-config`), then removed; `--reissue-cert` works with the CA paths moved into `https_listener` | implemented |
+| 19 | secure transport: `https_listener` alongside HTTP, shared auth/ACL/source-IP/session/rate-limit/store behavior, dashboard cookies, fatal HTTPS misconfiguration, HTTPS bind-failure containment, plaintext warnings, removed `tls` block refused, `mcp-server --http` explains its removal | implemented; listeners stay on loopback; non-loopback warning uses an unbindable TEST-NET-1 address |
+| 20 | Hermes caller metadata: capture, sanitization/cap, unlisted-header exclusion, ACL spoof resistance, tool headers (`X-Hermes-Tool` hint only, `X-Phoenix-Tool` ignored) | implemented |
 | 21 | Request-use grants: ACL deny with `request_use`, request, human deny, cooldown (also after restart), narrowed API approval, sealed use via `phoenix exec`, plaintext refused, `allow_unseal` false, dashboard login + narrowed approve (CSRF enforced, reason escaped) + `phoenix exec --redact-output` (stdout/stderr redacted, exit code passed through, no `PHOENIX_TOKEN` in child) + dashboard revoke, CLI `request` / `pending` / `approve req_ --yes` / `request status`, revoke, restart keeps state, 1-minute expiry | implemented; takes ~65s (shortest legal grant is 1m) |
+| 22 | Removed settings: config and policy with removed fields fail `phoenix-server --check-config` (exit 1, one line per field) and startup; clean files pass; removed API route answers 410; removed CLI command explains itself | implemented |
 
 Active sessions are intentionally memory-only. Scenario 18 verifies that an old in-memory token is rejected after restart and that the preserved role configuration can mint a new compatible session.

@@ -8,7 +8,7 @@ are no external dependencies, no CDN loads, and no build step.
 
 ## When to use it
 
-- Approving or denying step-up requests from a phone or browser instead of CLI
+- Approving or denying access requests from a phone or browser instead of CLI
 - Reviewing active sessions and revoking compromised ones
 - Tailing the audit log without SSH access to the server
 - Inspecting role configuration at a glance
@@ -19,10 +19,10 @@ The dashboard is optional. Everything it does can also be done via the CLI
 ## Security model
 
 The dashboard is a **separate auth surface** from the Phoenix API. It does
-not use bearer tokens, mTLS, or session tokens. Instead:
+not use bearer tokens or session tokens. Instead:
 
 - **Cookie auth**: HMAC-signed JSON payload with expiry, CSRF token, and
-  session nonce. `HttpOnly`, `SameSite=Strict`, and `Secure` (when TLS detected).
+  session nonce. `HttpOnly`, `SameSite=Strict`, and `Secure` (when HTTPS detected).
 - **Password or PIN**: Password stored as bcrypt hash in config. PIN uses
   constant-time comparison. Only one is needed.
 - **Single active session**: By default, only one dashboard session exists
@@ -36,7 +36,7 @@ not use bearer tokens, mTLS, or session tokens. Instead:
   token from the signed cookie. Validated with `hmac.Equal`.
 - **No API proxy**: The dashboard reads stores directly via a `Deps`
   struct. It never calls the `/v1/` API endpoints, so API auth
-  (bearer/mTLS) is not involved.
+  (bearer tokens) is not involved.
 
 ### What the dashboard can do
 
@@ -46,21 +46,14 @@ not use bearer tokens, mTLS, or session tokens. Instead:
 | View agent names | Low | Names only, no tokens |
 | View active sessions | Medium | Exposes agent names, roles, IPs |
 | Revoke sessions | Medium | Immediate effect, audited |
-| View pending approvals | Medium | Exposes agent names, roles, IPs, namespaces |
-| Approve step-up requests | **High** | Mints a session token for an agent |
-| Deny step-up requests | Medium | Blocks an agent's session request |
+| View pending access requests | Medium | Exposes agent names, paths, IPs, reasons |
 | Approve access requests | **High** | Grants an agent temporary use of exact secret paths |
 | Deny access requests | Medium | Starts a 10-minute cooldown on those paths |
 | Revoke grants | Medium | Immediate effect; does not recall values already used |
 | View audit log | Medium | Full access to audit trail |
 | View role config | Low | Read-only |
 
-Approval is the highest-risk action. It runs the same safety checks as
-the API (`approval.ValidateForMint`): role existence, step-up still
-enabled, `allowed_agents`, bootstrap trust, attestation requirements, and
-seal key.
-
-Access-request approval goes through the API server's shared approval
+Approval is the highest-risk action. Access-request approval goes through the API server's shared approval
 function (`ApproveAccessRequestAs`), so it applies exactly the API's
 re-checks against the current config. Deny and revoke call the grant store,
 as the API does. This is the one place the dashboard reaches into the API
@@ -70,14 +63,13 @@ server rather than a store, and it is deliberate: one copy of the checks.
 
 - Read or write secret values
 - Create or modify agents
-- Issue or revoke certificates
 - Change server configuration
 - Modify ACLs or policies
 
 ## Transport security
 
 The dashboard session cookie carries admin-equivalent access to session
-and approval management. Protecting it in transit is critical.
+and access-request management. Protecting it in transit is critical.
 
 ### Default: loopback only
 
@@ -91,19 +83,18 @@ ssh -L 9090:127.0.0.1:9090 user@phoenix-host
 # Then open http://127.0.0.1:9090/dashboard/ in your browser
 ```
 
-### Network access: native TLS
+### Network access: native HTTPS
 
-If other machines need to reach the dashboard, enable the server's TLS:
+If other machines need to reach the dashboard, turn on the server's HTTPS
+endpoint (`--init` already wrote the rest of the block):
 
 ```json
-{ "tls": { "enabled": true } }
+{ "https_listener": { "enabled": true } }
 ```
 
-TLS is native (using the `--init` server certificate — import `ca.crt`
-into the browser's trust store or accept the certificate), and the
-cookie gets `Secure` automatically via `r.TLS != nil`. No client
-certificates or mTLS are required; `auth.mtls` can be layered on top for
-API client-certificate auth and also provides TLS by itself, as before.
+It uses the `--init` server certificate (import `ca.crt` into the browser's
+trust store or accept the certificate), and the cookie gets `Secure`
+automatically via `r.TLS != nil`. Browse to `https://<host>:9443/dashboard/`.
 
 ### Network access: TLS reverse proxy
 
@@ -122,7 +113,7 @@ enable the `Secure` cookie flag. The server itself binds to loopback.
 Do not expose the dashboard over plain HTTP on a network you do not
 fully control. The session cookie would be transmitted in cleartext,
 making session hijacking trivial. If the dashboard is enabled on a
-non-loopback bind without TLS, the server logs a prominent
+non-loopback plain HTTP bind, the server logs a prominent
 `INSECURE TRANSPORT` startup warning that names the dashboard cookie
 exposure — it warns and continues; fixing the config is on you.
 
@@ -177,8 +168,7 @@ sees only the hash, which cannot be used to authenticate.
 
 ### Overview (`/dashboard/`)
 
-Status cards showing secrets count, agent count, active sessions, and
-pending approvals. Server uptime and session-enabled status. Table of
+Status cards showing secrets count, agent count and active sessions. Server uptime and session-enabled status. Table of
 the 10 most recent audit entries.
 
 Also an **Access Requests** card with the pending count, and a red banner
@@ -190,15 +180,11 @@ when the grants file or grant audit events are degraded.
 every fact an approver needs (paths in full with badges, source IP and auth
 method, TTL picker limited to legal values, delivery mode, attestation
 requirements, the agent's reason labelled "not verified", the agent's last
-24 hours). Details in [Access requests](access-requests.md#dashboard).
+24 hours). Details in [Access requests](access-requests.md#in-the-dashboard).
 
-**Step-up session approvals** follow. Each pending approval is a card showing: role name, agent name, source
-IP, bootstrap method, certificate fingerprint (truncated), namespaces,
-requester TTY, created/expires timestamps with countdown. A **role has no
-agent binding** badge means the role has no `allowed_agents`: any agent whose
-auth method the role trusts could have asked for it. Approving re-checks
-`allowed_agents`; an agent that is not listed cannot be approved (see
-[Session Identity](session-identity.md#binding-a-role-to-agents-allowed_agents)).
+When `access_requests` is not configured, the page says access requests
+are turned off. (Step-up session approvals were removed; their cards are
+gone.)
 
 A new access request can also ping your phone (for example through ntfy).
 The notification links to this page with the request's `#req_...` anchor;
@@ -207,9 +193,6 @@ you still log in here to decide. Set `access_requests.notify_url` and
 
 Approve and Deny buttons with JavaScript confirmation dialogs. Both
 submit POST forms with CSRF tokens.
-
-Below: recently resolved approvals (collapsed by default) as a table
-with status badges.
 
 ### Grants (`/dashboard/grants`)
 
@@ -244,9 +227,8 @@ The audit page auto-refreshes every 30 seconds via client-side fetch.
 ### Roles (`/dashboard/roles`)
 
 Read-only cards for each configured role: name, namespace pills, action
-pills, bootstrap trust pills, allowed agents (or "any agent (no binding)"
-when `allowed_agents` is empty), and flags for step-up, seal key, max TTL,
-and attestation requirements.
+pills, bootstrap trust pills, and flags for seal key, max TTL, and
+attestation requirements.
 
 ## Audit trail
 
@@ -263,8 +245,6 @@ All dashboard actions are logged to the same audit trail as API actions.
 | `dashboard.logout` | allowed | `dashboard@<ip>` | Explicit logout |
 | `dashboard.auth` | denied | `dashboard` | Expired, invalid, or superseded cookie |
 | `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action |
-| `approval.approved` | allowed | `dashboard@<ip>` | Step-up request approved |
-| `approval.denied` | allowed | `dashboard@<ip>` | Step-up request denied |
 | `session.revoke` | allowed | `dashboard@<ip>` | Session revoked |
 | `access_request.approved` / `.denied` | allowed | `dashboard@<ip>` | Access request decided (plus an `.attempt` line before it) |
 | `access_request.approve` | denied | `dashboard@<ip>` | Approval refused by a re-check (reason = code) |
@@ -284,7 +264,7 @@ Use this checklist when enabling the dashboard on an existing Phoenix server.
 
 1. Choose transport mode:
    - [ ] Loopback only (`server.listen: "127.0.0.1:..."`, the default), or
-   - [ ] Native TLS (`"tls": {"enabled": true}`), or
+   - [ ] Native HTTPS (`"https_listener": {"enabled": true}`), or
    - [ ] TLS reverse proxy in front of a loopback bind
 
 2. Choose credential mode:
@@ -306,10 +286,10 @@ Use this checklist when enabling the dashboard on an existing Phoenix server.
 
 8. Login, verify all pages render (overview, approvals, sessions, audit, roles)
 
-9. Test approval flow end-to-end if step-up roles are configured:
-   - Trigger a step-up mint (agent sends `POST /v1/session/mint` for a step-up role)
-   - Approve from dashboard
-   - Verify session appears in sessions list
+9. Test approval flow end-to-end if access requests are on:
+   - Have an agent ask (`phoenix request <path> --reason "test"`)
+   - Approve from the dashboard
+   - Verify the grant appears on the Grants page
    - Verify audit entries for the approval
 
 10. Verify audit trail shows `dashboard@<your-ip>` entries
@@ -320,7 +300,7 @@ Use this checklist when enabling the dashboard on an existing Phoenix server.
 ## Related docs
 
 - [Configuration](configuration.md) — config field reference
-- [Session Identity](session-identity.md) — step-up approval workflow
+- [Access Requests](access-requests.md) — the approval workflow
 - [Authentication](authentication.md) — API auth model (separate from dashboard)
 - [Threat Model](threat-model.md) — dashboard attack surface
 - [LAN Deployment](lan-deployment.md) — multi-host setup

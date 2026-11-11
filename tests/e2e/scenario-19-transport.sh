@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Scenario 19 — secure transport: tls block, plaintext warnings, mTLS compat.
+# Scenario 19 — secure transport: https_listener, plaintext warnings.
 #
 # Covers the transport model:
 #   - loopback plaintext is the default and starts silently (no warning)
-#   - a non-loopback bind without TLS emits the loud INSECURE TRANSPORT
+#   - a non-loopback bind of server.listen emits the loud INSECURE TRANSPORT
 #     warning and Phoenix still proceeds (warn, never refuse)
-#   - "tls": {"enabled": true} serves HTTPS with the --init leaf, no mTLS
-#   - auth.mtls.enabled continues to serve TLS unchanged (backward compat)
 #   - CLI warns (but works) on plaintext non-loopback PHOENIX_SERVER
-#   - MCP HTTP transport serves TLS via --tls-cert/--tls-key and warns on
-#     plaintext non-loopback binds
-#   - optional HTTPS shares HTTP auth/store/session/policy/dashboard state
-#   - optional HTTPS misconfiguration (blank address, bad certificate) stops
-#     startup; an optional bind failure is logged and HTTP stays available
+#   - the removed "tls" block stops startup with a clear line, and
+#     mcp-server --http (MCP over HTTP, removed) says why instead of starting
+#   - https_listener (the one way to serve HTTPS) shares HTTP auth, store,
+#     session, policy and dashboard state
+#   - https_listener misconfiguration (blank address, bad certificate) stops
+#     startup; a bind failure is logged and HTTP stays available
 #
 # Per harness convention, nothing here binds a non-loopback interface. The
 # non-loopback warning is asserted with a TEST-NET-1 address (192.0.2.1,
@@ -21,7 +20,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-scenario_start 19 "secure transport: tls block, plaintext warnings, mTLS compat"
+scenario_start 19 "secure transport: https_listener, plaintext warnings"
 init_scenario 19
 PORT="${PHOENIX_SERVER##*:}"
 
@@ -29,7 +28,6 @@ PORT="${PHOENIX_SERVER##*:}"
 start_server
 log "loopback plaintext default"
 server_log="$(cat "$RUN_DIR/server.log")"
-assert_contains "$server_log" "TLS: disabled (plaintext HTTP)" "loopback plaintext should state TLS is off"
 assert_not_contains "$server_log" "INSECURE TRANSPORT" "loopback plaintext must not warn"
 
 cli_stderr="$(phoenix_admin status 2>&1 >/dev/null)"
@@ -62,7 +60,7 @@ warn_log="$(cat "$RUN_DIR/warn.log")"
 assert_contains "$warn_log" "INSECURE TRANSPORT: PLAINTEXT HTTP ON A NON-LOOPBACK ADDRESS" "non-loopback plaintext must warn"
 assert_contains "$warn_log" "bearer tokens" "warning must name bearer token exposure"
 assert_contains "$warn_log" "secret value" "warning must name secret value exposure"
-assert_contains "$warn_log" '"tls": { "enabled": true }' "warning must show the one-line fix"
+assert_contains "$warn_log" '"https_listener": { "enabled": true }' "warning must show the fix"
 assert_contains "$warn_log" "server error: listen" "warning must precede the bind attempt (warn, never refuse)"
 assert_not_contains "$warn_log" "dashboard" "no dashboard line when dashboard is disabled"
 ok "non-loopback plaintext: loud warning, startup not refused"
@@ -75,89 +73,30 @@ assert_contains "$warn_log" "dashboard passwords and session cookies" "dashboard
 ok "dashboard on non-loopback plaintext: warning names the cookie exposure"
 config_patch "d['dashboard']={'enabled': False}"
 
-# --- 5. tls.enabled=true: HTTPS with the --init leaf, no mTLS involved ---
+# --- 5. The removed "tls" block stops startup, by name ---
 config_patch "d['server']['listen']='127.0.0.1:$PORT'; d['tls']={'enabled': True}"
-PHOENIX_SERVER="https://127.0.0.1:$PORT"
-export PHOENIX_SERVER
-start_server
-server_log="$(cat "$RUN_DIR/server.log")"
-assert_contains "$server_log" "TLS: enabled" "tls.enabled must serve TLS"
-assert_not_contains "$server_log" "INSECURE TRANSPORT" "TLS-enabled server must not warn"
-assert_not_contains "$server_log" "mTLS: enabled" "tls block must not activate mTLS"
-
-# Plain http against the TLS listener must fail.
-if curl -fsS -m 3 "http://127.0.0.1:$PORT/v1/health" >/dev/null 2>&1; then
-  die "plaintext request succeeded against a TLS listener"
-fi
-
-# CLI over https with the CA cert: works, no warning.
-cli_out="$(PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin status 2>"$RUN_DIR/cli-tls.stderr")"
-assert_contains "$cli_out" "Server: ok" "CLI status over TLS should report ok"
-cli_stderr="$(cat "$RUN_DIR/cli-tls.stderr")"
-assert_not_contains "$cli_stderr" "WARNING" "CLI must not warn on https://"
-ok "tls.enabled serves HTTPS with the --init certificate (no mTLS)"
-stop_server
-
-# --- 6. Backward compat: mtls.enabled alone still serves TLS unchanged ---
-config_patch "d['tls']={'enabled': False}; d['auth']['mtls']['enabled']=True; d['auth']['mtls']['require']=False"
-start_server
-server_log="$(cat "$RUN_DIR/server.log")"
-assert_contains "$server_log" "mTLS: enabled (require=false)" "mtls-only config must keep enabling mTLS"
-assert_contains "$server_log" "TLS: enabled" "mtls-only config must keep serving TLS"
-ok "existing mtls-only configs serve TLS unchanged"
-stop_server
-
-# --- 7. MCP HTTP transport: TLS serving and plaintext warning ---
-MCP_PORT="$(free_port)"
-MCP_TOKEN="synthetic-mcp-token-scenario19"
-PHOENIX_SERVER="http://127.0.0.1:$PORT"
-export PHOENIX_SERVER
-config_patch "d['auth']['mtls']['enabled']=False"
-start_server
-
-PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" mcp-server \
-  --http "127.0.0.1:$MCP_PORT" --mcp-token "$MCP_TOKEN" \
-  --tls-cert "$RUN_DIR/server.crt" --tls-key "$RUN_DIR/server.key" \
-  >"$RUN_DIR/mcp.log" 2>&1 &
-MCP_PID=$!
-for i in $(seq 1 50); do
-  if curl -fsS --cacert "$RUN_DIR/ca.crt" -m 2 -o /dev/null -w '' \
-    -X POST "https://127.0.0.1:$MCP_PORT/mcp" \
-    -H "Authorization: Bearer $MCP_TOKEN" -H 'Content-Type: application/json' \
-    --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' 2>/dev/null; then
-    break
-  fi
-  kill -0 "$MCP_PID" 2>/dev/null || { cat "$RUN_DIR/mcp.log" >&2; die "MCP TLS server exited during startup"; }
-  sleep 0.1
-done
-mcp_resp="$(curl -fsS --cacert "$RUN_DIR/ca.crt" -X POST "https://127.0.0.1:$MCP_PORT/mcp" \
-  -H "Authorization: Bearer $MCP_TOKEN" -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')"
-assert_contains "$mcp_resp" '"result"' "MCP initialize over TLS should answer"
-assert_contains "$(cat "$RUN_DIR/mcp.log")" "(TLS)" "MCP log should state TLS listening"
-kill "$MCP_PID" 2>/dev/null || true
-wait "$MCP_PID" 2>/dev/null || true
-ok "MCP HTTP transport serves TLS with --tls-cert/--tls-key"
-
-# Mismatched flags fail closed.
 rc=0
-PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" mcp-server --http "127.0.0.1:$MCP_PORT" \
-  --mcp-token "$MCP_TOKEN" --tls-cert "$RUN_DIR/server.crt" >"$RUN_DIR/mcp-mismatch.log" 2>&1 || rc=$?
-[[ "$rc" -ne 0 ]] || die "mcp-server accepted --tls-cert without --tls-key"
-assert_contains "$(cat "$RUN_DIR/mcp-mismatch.log")" "--tls-cert and --tls-key must be set together" "mismatch error missing"
-ok "MCP HTTP transport rejects a lone --tls-cert"
-
-# Plaintext non-loopback MCP bind warns before the (failing) bind attempt.
+"$PHOENIX_SERVER_BIN" --check-config --config "$RUN_DIR/config.json" >"$RUN_DIR/tls-check.log" 2>&1 || rc=$?
+[[ "$rc" -eq 1 ]] || die "--check-config accepted the removed tls block (rc=$rc)"
+assert_contains "$(cat "$RUN_DIR/tls-check.log")" "tls: removed" "tls refusal must name the field"
+assert_contains "$(cat "$RUN_DIR/tls-check.log")" "https_listener" "tls refusal must name the replacement"
 rc=0
-PHOENIX_TOKEN="$ADMIN_TOKEN" timeout 10 "$PHOENIX" mcp-server --http "192.0.2.1:$MCP_PORT" \
-  --mcp-token "$MCP_TOKEN" >"$RUN_DIR/mcp-warn.log" 2>&1 || rc=$?
-[[ "$rc" -ne 0 ]] || die "MCP server unexpectedly bound a TEST-NET-1 address"
-mcp_warn="$(cat "$RUN_DIR/mcp-warn.log")"
-assert_contains "$mcp_warn" "INSECURE TRANSPORT" "MCP non-loopback plaintext must warn"
-assert_contains "$mcp_warn" "MCP bearer token" "MCP warning must name the token exposure"
-ok "MCP HTTP transport warns on non-loopback plaintext"
+timeout 10 "$PHOENIX_SERVER_BIN" --config "$RUN_DIR/config.json" >"$RUN_DIR/tls-start.log" 2>&1 || rc=$?
+[[ "$rc" -ne 0 && "$rc" -ne 124 ]] || die "server started with the removed tls block (rc=$rc)"
+assert_contains "$(cat "$RUN_DIR/tls-start.log")" "tls: removed" "startup refusal must name the field"
+config_patch "d.pop('tls')"
+ok "removed tls block refused at startup and by --check-config"
 
-# --- 8. Optional HTTPS preserves HTTP and shares application state ---
+# --- 6. MCP over HTTP was removed: --http explains instead of starting ---
+rc=0
+PHOENIX_TOKEN="$ADMIN_TOKEN" timeout 10 "$PHOENIX" mcp-server --http "127.0.0.1:$(free_port)" >"$RUN_DIR/mcp-http.log" 2>&1 </dev/null || rc=$?
+[[ "$rc" -eq 1 ]] || die "mcp-server --http did not exit 1 (rc=$rc)"
+assert_contains "$(cat "$RUN_DIR/mcp-http.log")" "was removed" "mcp-server --http must say it was removed"
+ok "mcp-server --http reports the removal"
+
+start_server
+
+# --- 7. https_listener preserves HTTP and shares application state ---
 phoenix_admin set dual/key -v synthetic-dual >/dev/null
 phoenix_admin set forbidden/key -v synthetic-denied >/dev/null
 phoenix_admin set source-denied/key -v synthetic-ip-denied >/dev/null
@@ -172,6 +111,11 @@ JSON
 config_patch "d['https_listener']={'enabled':True,'listen':'127.0.0.1:$HTTPS_PORT','cert':'$RUN_DIR/server.crt','key':'$RUN_DIR/server.key'}; d['policy']={'path':'$RUN_DIR/dual-policy.json'}; d['session']={'enabled':True,'roles':{'dual-reader':{'namespaces':['dual/*'],'actions':['read_value'],'bootstrap_trust':['bearer']}}}; d['dashboard']={'enabled':True,'pin':'123456','allow_multi_login':True}"
 start_server
 assert_contains "$(cat "$RUN_DIR/server.log")" "Optional HTTPS listener serving" "optional listener startup missing"
+if curl -fsS -m 3 "http://127.0.0.1:$HTTPS_PORT/v1/health" >/dev/null 2>&1; then
+  die "plaintext request succeeded against the HTTPS listener"
+fi
+cli_stderr="$(PHOENIX_SERVER="$HTTPS_URL" PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin status 2>&1 >/dev/null)"
+assert_not_contains "$cli_stderr" "WARNING" "CLI must not warn on https://"
 
 dual_status() {
   local url="$1" path="$2" token="${3:-}"
@@ -232,7 +176,7 @@ assert_eq "$(dual_status "$HTTPS_URL" /v1/secrets/dual/key "$ADMIN_TOKEN")" 401 
 ok "optional HTTPS shares auth, ACL, source-IP policy, store, sessions, dashboard and rate limits"
 stop_server
 
-# --- 9. Optional misconfiguration is fatal; optional bind failure is not ---
+# --- 8. https_listener misconfiguration is fatal; a bind failure is not ---
 # A static config mistake must stop startup (like every other config error),
 # so a bad deploy cannot look healthy while the HTTPS endpoint is missing.
 run_expect_fatal() {

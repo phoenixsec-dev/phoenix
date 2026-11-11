@@ -4,12 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
-	"github.com/phoenixsec/phoenix/internal/ref"
 )
 
 // Denial contract shared by every access denial the API returns.
@@ -43,9 +41,6 @@ const (
 	CodeGrantExpired        = "GRANT_EXPIRED"
 	CodeGrantRevoked        = "GRANT_REVOKED"
 	CodeSSHGrantRequired    = "SSH_GRANT_REQUIRED"
-	// CodeRoleNotAllowed: a session role's allowed_agents does not list the
-	// agent (session mint, step-up approval, renewal).
-	CodeRoleNotAllowed = "ROLE_NOT_ALLOWED"
 )
 
 // Codes for the request-use API (access.go). Store errors use the
@@ -119,20 +114,17 @@ var denialNextStep = map[string]string{
 	CodeRevokeNotDurable:     NextAskUser,
 	CodeAgentDeleteACLFailed: NextAskUser,
 
-	// Session and step-up codes.
-	"SESSION_EXPIRED":             NextRemintSession,
-	"SESSION_INVALID":             NextRemintSession,
-	"SESSION_REVOKED":             NextAskUser,
-	"SESSION_REQUIRED":            NextNone,
-	"SEAL_KEY_MISMATCH":           NextRemintSession,
-	"SEAL_KEY_REQUIRED":           NextAskUser,
-	"APPROVAL_REQUIRED":           NextWait,
-	"STEP_UP_REAPPROVAL_REQUIRED": NextRemintSession,
-	"ROLE_NOT_FOUND":              NextAskUser,
-	CodeRoleNotAllowed:            NextAskUser,
-	"BOOTSTRAP_FAILED":            NextAskUser,
-	"ATTESTATION_FAILED":          NextAskUser,
-	"ADMIN_AUTH_REQUIRED":         NextAskUser,
+	// Session codes.
+	"SESSION_EXPIRED":     NextRemintSession,
+	"SESSION_INVALID":     NextRemintSession,
+	"SESSION_REVOKED":     NextAskUser,
+	"SESSION_REQUIRED":    NextNone,
+	"SEAL_KEY_MISMATCH":   NextRemintSession,
+	"SEAL_KEY_REQUIRED":   NextAskUser,
+	"ROLE_NOT_FOUND":      NextAskUser,
+	"BOOTSTRAP_FAILED":    NextAskUser,
+	"ATTESTATION_FAILED":  NextAskUser,
+	"ADMIN_AUTH_REQUIRED": NextAskUser,
 }
 
 // nextStepFor returns the next step for a denial code.
@@ -269,26 +261,6 @@ func writeAttestationRequired(w http.ResponseWriter) {
 		http.StatusForbidden)
 }
 
-// denyResolveAttestation handles request-level attestation failures in
-// /v1/resolve (nonce, timestamp skew, client certificate, signature). These
-// happen before any ref is checked and need no access to any path, so they
-// write a single audit entry (the first ref's path, plus "resolve.refs" with
-// the ref count) rather than one per ref, which a caller could inflate.
-// The caller gets one generic ATTESTATION_REQUIRED denial.
-func (s *Server) denyResolveAttestation(w http.ResponseWriter, r *http.Request, info *authInfo, ip string, refs []string, detail string) {
-	path := ""
-	if len(refs) > 0 {
-		path = refs[0]
-		if p, err := ref.Parse(refs[0]); err == nil {
-			path = p
-		}
-	}
-	metadata := denialAuditMetadata(r, detail)
-	metadata["resolve.refs"] = strconv.Itoa(len(refs))
-	s.auditDeniedMetadata(info, "resolve", path, ip, "attestation", metadata)
-	writeAttestationRequired(w)
-}
-
 // auditDeniedDetail is auditDenied plus a "denial.detail" metadata entry for
 // detail that must reach the audit log but not the caller.
 func (s *Server) auditDeniedDetail(r *http.Request, info *authInfo, action, path, ip, reason, detail string) {
@@ -321,7 +293,7 @@ func denialAuditMetadata(r *http.Request, detail string) map[string]string {
 }
 
 // maxDenialDetailBytes caps the stored denial.detail. The detail can embed
-// caller-controlled text (for example the X-Phoenix-Tool header), and
+// caller-controlled text (for example a source IP or role name), and
 // /v1/resolve logs it once per ref, so it must stay small.
 const maxDenialDetailBytes = 512
 

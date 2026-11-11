@@ -8,14 +8,14 @@
 #
 # No ports are published: the generated config listens on the container's
 # own loopback, which is the safe default. To reach Phoenix from the host,
-# enable TLS first, then uncomment "ports" (see docs/quickstart.md,
-# "Reaching the container from the host").
+# turn on https_listener first, then uncomment "ports" (see
+# docs/quickstart.md, "Reaching the container from the host").
 services:
   phoenix:
     build: .
     container_name: phoenix
     # ports:
-    #   - "127.0.0.1:9090:9090"
+    #   - "127.0.0.1:9443:9443"
     volumes:
       - phoenix-data:/data
     restart: unless-stopped

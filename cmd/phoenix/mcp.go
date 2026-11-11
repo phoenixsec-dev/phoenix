@@ -368,7 +368,7 @@ func mcpToolResolve(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return fmt.Sprintf("Internal error: %v", err), true
 	}
 
-	hdrs := map[string]string{"X-Phoenix-Tool": "phoenix_resolve"}
+	hdrs := map[string]string{}
 	if mcpSealPrivKey != nil {
 		for k, v := range sealHeaders(mcpSealPrivKey) {
 			hdrs[k] = v
@@ -475,7 +475,7 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return "Path is required", true
 	}
 
-	hdrs := map[string]string{"X-Phoenix-Tool": "phoenix_get"}
+	hdrs := map[string]string{}
 	if mcpSealPrivKey != nil {
 		for k, v := range sealHeaders(mcpSealPrivKey) {
 			hdrs[k] = v
@@ -545,8 +545,7 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		path = "/v1/secrets/" + p
 	}
 
-	resp, err := apiRequestWithHeaders("GET", path, nil,
-		map[string]string{"X-Phoenix-Tool": "phoenix_list"})
+	resp, err := apiRequest("GET", path, nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -759,8 +758,7 @@ func mcpToolRequestUse(args json.RawMessage, logger *log.Logger) (string, bool) 
 		params.Paths[i] = strings.TrimPrefix(p, "phoenix://")
 	}
 	body, _ := json.Marshal(map[string]any{"paths": params.Paths, "action": "read_value", "reason": params.Reason, "ttl": params.TTL})
-	resp, err := apiRequestWithHeaders("POST", "/v1/access-requests", strings.NewReader(string(body)),
-		map[string]string{"X-Phoenix-Tool": "phoenix_request_use"})
+	resp, err := apiRequest("POST", "/v1/access-requests", strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}

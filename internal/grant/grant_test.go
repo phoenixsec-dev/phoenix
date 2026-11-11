@@ -100,12 +100,11 @@ func TestCreateValidation(t *testing.T) {
 			t.Errorf("ttl %v: got %v %v, want %v", tc.in, r.RequestedTTL, err, tc.want)
 		}
 	}
-	// Short-lived token requests never carry a fingerprint.
+	// Short-lived tokens are gone: a request naming that method is refused.
 	in := bearerIn("tok", "infra/key")
-	in.AuthMethod = AuthToken
-	r, _, err := e.s.Create(in)
-	if err != nil || r.CredentialFP != "" {
-		t.Fatalf("token request: fp=%q err=%v", r.CredentialFP, err)
+	in.AuthMethod = "token"
+	if _, _, err := e.s.Create(in); err == nil {
+		t.Fatal("token request accepted")
 	}
 }
 

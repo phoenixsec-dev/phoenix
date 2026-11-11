@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,22 +22,18 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
-	"github.com/phoenixsec/phoenix/internal/agent"
 	"github.com/phoenixsec/phoenix/internal/api"
-	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/dashboard"
 	"github.com/phoenixsec/phoenix/internal/grant"
-	"github.com/phoenixsec/phoenix/internal/nonce"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/sshca"
 	"github.com/phoenixsec/phoenix/internal/store"
-	"github.com/phoenixsec/phoenix/internal/token"
 	"github.com/phoenixsec/phoenix/internal/transport"
 	"github.com/phoenixsec/phoenix/internal/version"
 )
@@ -60,6 +55,7 @@ func main() {
 	initPassphrase := flag.String("passphrase", "", "Passphrase to protect master key (--init only)")
 	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
 	hashPassword := flag.Bool("hash-password", false, "Generate a bcrypt hash for dashboard password_hash config")
+	checkConfig := flag.Bool("check-config", false, "Check the config file, the policy file and HTTPS certificate it names, then exit without starting")
 	reissueCert := flag.Bool("reissue-cert", false, "Re-issue the server TLS certificate with new SANs")
 	var sans sanList
 	flag.Var(&sans, "san", "Subject Alternative Name for --reissue-cert (repeatable: IPs and hostnames)")
@@ -85,14 +81,7 @@ func main() {
 		if len(sans) == 0 {
 			log.Fatal("--reissue-cert requires at least one --san value")
 		}
-		cfgPath := *configPath
-		if cfgPath == "" {
-			cfgPath = os.Getenv("PHOENIX_CONFIG")
-		}
-		if cfgPath == "" {
-			cfgPath = "/data/config.json"
-		}
-		cfg, err := config.Load(cfgPath)
+		cfg, err := config.Load(resolveConfigPath(*configPath))
 		if err != nil {
 			log.Fatalf("loading config: %v", err)
 		}
@@ -110,14 +99,7 @@ func main() {
 	}
 
 	if *protectKey {
-		cfgPath := *configPath
-		if cfgPath == "" {
-			cfgPath = os.Getenv("PHOENIX_CONFIG")
-		}
-		if cfgPath == "" {
-			cfgPath = "/data/config.json"
-		}
-		cfg, err := config.Load(cfgPath)
+		cfg, err := config.Load(resolveConfigPath(*configPath))
 		if err != nil {
 			log.Fatalf("loading config: %v", err)
 		}
@@ -127,16 +109,16 @@ func main() {
 		return
 	}
 
-	// Load config
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cfgPath = os.Getenv("PHOENIX_CONFIG")
-	}
-	if cfgPath == "" {
-		cfgPath = "/data/config.json"
+	if *checkConfig {
+		if err := runCheckConfig(resolveConfigPath(*configPath)); err != nil {
+			fmt.Fprintf(os.Stderr, "config check failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
-	cfg, err := config.Load(cfgPath)
+	// Load config
+	cfg, err := config.Load(resolveConfigPath(*configPath))
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
 	}
@@ -241,39 +223,8 @@ func main() {
 		log.Printf("  Policy: %s (%d rules)", cfg.Policy.Path, len(pe.Rules()))
 	}
 
-	// Initialize nonce store if enabled
-	if cfg.Attestation.Nonce.Enabled {
-		maxAge := nonce.DefaultMaxAge
-		if cfg.Attestation.Nonce.MaxAge != "" {
-			maxAge, _ = time.ParseDuration(cfg.Attestation.Nonce.MaxAge) // validated above
-		}
-		ns := nonce.NewStore(maxAge)
-		srv.SetNonceStore(ns)
-		defer ns.Stop()
-		log.Printf("  Nonce challenge: enabled (max_age=%s)", maxAge)
-	} else {
-		log.Printf("  Nonce challenge: disabled")
-	}
-
-	// Initialize short-lived token issuer if enabled
-	if cfg.Attestation.Token.Enabled {
-		ttl := token.DefaultTTL
-		if cfg.Attestation.Token.TTL != "" {
-			ttl, _ = time.ParseDuration(cfg.Attestation.Token.TTL) // validated above
-		}
-		ti, err := token.NewIssuer(ttl)
-		if err != nil {
-			log.Fatalf("initializing token issuer: %v", err)
-		}
-		srv.SetTokenIssuer(ti)
-		log.Printf("  Short-lived tokens: enabled (ttl=%s)", ttl)
-	} else {
-		log.Printf("  Short-lived tokens: disabled")
-	}
-
 	// Initialize session identity if enabled
 	var sessionStore *session.Store
-	var approvalStore *approval.Store
 	if cfg.Session.Enabled {
 		sessionTTL := session.DefaultTTL
 		if cfg.Session.TTL != "" {
@@ -288,32 +239,6 @@ func main() {
 		srv.SetSessionRoles(cfg.Session.Roles)
 		defer sessionStore.Stop()
 		log.Printf("  Sessions: enabled (roles=%d, ttl=%s)", len(cfg.Session.Roles), sessionTTL)
-		for _, warning := range cfg.RoleBindingWarnings(func(name string) bool {
-			_, err := a.GetAgent(name)
-			return err == nil
-		}) {
-			log.Printf("WARNING: %s", warning)
-		}
-
-		// Check if any role requires step-up approval
-		hasStepUp := false
-		var stepUpTimeout time.Duration
-		for _, role := range cfg.Session.Roles {
-			if role.StepUp {
-				hasStepUp = true
-				if role.StepUpTTL != "" {
-					if d, err := time.ParseDuration(role.StepUpTTL); err == nil && stepUpTimeout == 0 {
-						stepUpTimeout = d
-					}
-				}
-			}
-		}
-		if hasStepUp {
-			approvalStore = approval.NewStore(stepUpTimeout)
-			srv.SetApprovalStore(approvalStore)
-			defer approvalStore.Stop()
-			log.Printf("  Step-up approvals: enabled (timeout=%s)", stepUpTimeout)
-		}
 	} else {
 		log.Printf("  Sessions: disabled")
 	}
@@ -321,11 +246,7 @@ func main() {
 	// Request-use grants. The store is always opened (it only creates
 	// grants.json on the first change), so listing and revoking keep working
 	// while the feature is disabled. A missing access_requests block = off.
-	tokenTTL := token.DefaultTTL
-	if cfg.Attestation.Token.Enabled && cfg.Attestation.Token.TTL != "" {
-		tokenTTL, _ = time.ParseDuration(cfg.Attestation.Token.TTL) // validated above
-	}
-	grantStore, err := openGrantStore(cfg, a, al, tokenTTL)
+	grantStore, err := openGrantStore(cfg, a, al)
 	if err != nil {
 		log.Fatalf("opening grant store: %v", err)
 	}
@@ -349,7 +270,6 @@ func main() {
 		deps := dashboard.Deps{
 			Sessions:     sessionStore,
 			SessionRoles: cfg.Session.Roles,
-			Approvals:    approvalStore,
 			AuditPath:    cfg.Audit.Path,
 			Backend:      backend,
 			ACL:          a,
@@ -367,47 +287,6 @@ func main() {
 		log.Printf("  Dashboard: enabled at /dashboard/")
 	}
 
-	// Start local attestation agent if enabled
-	if cfg.Attestation.LocalAgent.Enabled {
-		localAgent := agent.New(cfg.Attestation.LocalAgent.SocketPath)
-		if err := localAgent.Start(); err != nil {
-			log.Fatalf("starting local attestation agent: %v", err)
-		}
-		defer localAgent.Stop()
-		log.Printf("  Local agent: %s", localAgent.SocketPath())
-	} else {
-		log.Printf("  Local agent: disabled")
-	}
-
-	// Initialize CA for mTLS if enabled
-	var tlsCfg *tls.Config
-	if cfg.Auth.MTLS.Enabled {
-		authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
-		if err != nil {
-			log.Fatalf("loading CA for mTLS: %v", err)
-		}
-
-		// Load CRL for revocation persistence
-		if cfg.Auth.MTLS.CRLPath != "" {
-			crl, err := ca.NewCRL(cfg.Auth.MTLS.CRLPath)
-			if err != nil {
-				log.Fatalf("loading CRL: %v", err)
-			}
-			authority.SetCRL(crl)
-		}
-
-		srv.SetCA(authority)
-		tlsCfg = authority.TLSConfig()
-		if cfg.Auth.MTLS.Require {
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		}
-		log.Printf("  mTLS: enabled (require=%v)", cfg.Auth.MTLS.Require)
-		log.Printf("  Bearer: %v", cfg.Auth.Bearer.Enabled)
-	} else if cfg.TLSEnabled() {
-		// TLS without mTLS: encrypt the pipe, no client certificates.
-		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS13}
-	}
-
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
 	if rb := cfg.AuditRotateBytes(); rb > 0 {
@@ -416,24 +295,58 @@ func main() {
 		log.Printf("  Audit: %s (rotation off)", cfg.Audit.Path)
 	}
 
-	httpSrv := newHTTPServer(cfg.Server.Listen, srv, tlsCfg)
+	httpSrv := newHTTPServer(cfg.Server.Listen, srv, nil)
 
-	if cfg.TLSEnabled() {
-		// Use the dedicated server leaf cert for TLS identity (NOT the CA cert)
-		serverCert, _ := cfg.TLSCertKey()
-		log.Printf("  TLS: enabled (server cert: %s)", serverCert)
-	} else {
-		log.Printf("  TLS: disabled (plaintext HTTP)")
-		if !transport.IsLoopbackListen(cfg.Server.Listen) {
-			// Loud, never fatal: loopback plaintext is the supported default,
-			// but a non-loopback bind without TLS puts bearer tokens and
-			// secret values on the wire in cleartext.
-			log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
-		}
+	if !transport.IsLoopbackListen(cfg.Server.Listen) {
+		// Loud, never fatal: loopback plaintext is the supported default,
+		// but a non-loopback bind puts bearer tokens and secret values on
+		// the wire in cleartext. HTTPS is https_listener's job.
+		log.Printf("\n%s", transport.ServerPlaintextWarning(cfg.Server.Listen, cfg.Dashboard.Enabled))
 	}
-	if err := serveListeners(httpSrv, cfg, optionalHTTPS, log.Printf); err != nil {
+	if err := serveListeners(httpSrv, optionalHTTPS, log.Printf); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// resolveConfigPath picks the config file: --config, then $PHOENIX_CONFIG,
+// then /data/config.json.
+func resolveConfigPath(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if env := os.Getenv("PHOENIX_CONFIG"); env != "" {
+		return env
+	}
+	return "/data/config.json"
+}
+
+// runCheckConfig is --check-config: it runs the same checks startup does on
+// the config file, the policy file and the HTTPS certificate, without opening
+// the store or binding any port, so an operator can check a config (including
+// one with removed settings) before deploying a new version.
+func runCheckConfig(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if cfg.Policy.Path != "" {
+		pe, err := policy.LoadFile(cfg.Policy.Path)
+		if err != nil {
+			return fmt.Errorf("policy %s: %w", cfg.Policy.Path, err)
+		}
+		fmt.Printf("policy OK: %s (%d rules)\n", cfg.Policy.Path, len(pe.Rules()))
+	}
+	if _, err := loadHTTPSListener(cfg.HTTPSListener); err != nil {
+		return err
+	}
+	fmt.Printf("config OK: %s\n", path)
+	return nil
 }
 
 func runInit(dir, passphrase string) error {
@@ -513,18 +426,21 @@ func runInit(dir, passphrase string) error {
 	fmt.Printf("Generated server certificate: %s\n", serverCertPath)
 
 	// Write config with actual paths
-	crlPath := filepath.Join(dir, "crl.json")
 	cfgPath := filepath.Join(dir, "config.json")
 	cfg := config.DefaultConfig()
 	cfg.Store.Path = filepath.Join(dir, "store.json")
 	cfg.Store.MasterKey = keyPath
 	cfg.ACL.Path = aclPath
 	cfg.Audit.Path = filepath.Join(dir, "audit.log")
-	cfg.Auth.MTLS.CACert = caCertPath
-	cfg.Auth.MTLS.CAKey = caKeyPath
-	cfg.Auth.MTLS.ServerCert = serverCertPath
-	cfg.Auth.MTLS.ServerKey = serverKeyPath
-	cfg.Auth.MTLS.CRLPath = crlPath
+	// HTTPS is written off: turning it on is one setting ("enabled": true)
+	// once clients have ca.crt. --reissue-cert uses ca_cert/ca_key.
+	cfg.HTTPSListener = config.HTTPSListenerConfig{
+		Listen: "0.0.0.0:9443",
+		Cert:   serverCertPath,
+		Key:    serverKeyPath,
+		CACert: caCertPath,
+		CAKey:  caKeyPath,
+	}
 	// New installs get request-use grants switched on (plan Q1); configs
 	// written before this release have no block and stay off.
 	cfg.AccessRequests = config.NewInstallAccessRequests()
@@ -615,18 +531,21 @@ func runHashPassword() error {
 	return nil
 }
 
+// runReissueCert is --reissue-cert: it signs a new server certificate for
+// https_listener with the internal CA, adding the given names (SANs).
 func runReissueCert(cfg *config.Config, sans []string) error {
-	if cfg.Auth.MTLS.CACert == "" || cfg.Auth.MTLS.CAKey == "" {
-		return fmt.Errorf("config is missing auth.mtls.ca_cert and auth.mtls.ca_key paths — run --init first")
+	hl := cfg.HTTPSListener
+	if hl.CACert == "" || hl.CAKey == "" {
+		return fmt.Errorf("config is missing https_listener.ca_cert and https_listener.ca_key (--init writes them; older configs had them under auth.mtls)")
 	}
-	if cfg.Auth.MTLS.ServerCert == "" || cfg.Auth.MTLS.ServerKey == "" {
-		return fmt.Errorf("config is missing auth.mtls.server_cert and auth.mtls.server_key paths")
+	if hl.Cert == "" || hl.Key == "" {
+		return fmt.Errorf("config is missing https_listener.cert and https_listener.key paths")
 	}
 
 	// Always include localhost and loopback
 	allSANs := append([]string{"localhost", "127.0.0.1"}, sans...)
 
-	authority, err := ca.LoadCA(cfg.Auth.MTLS.CACert, cfg.Auth.MTLS.CAKey)
+	authority, err := ca.LoadCA(hl.CACert, hl.CAKey)
 	if err != nil {
 		return fmt.Errorf("loading CA: %w", err)
 	}
@@ -636,21 +555,19 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 		return fmt.Errorf("issuing server cert: %w", err)
 	}
 
-	if err := bundle.Save(cfg.Auth.MTLS.ServerCert, cfg.Auth.MTLS.ServerKey, cfg.Auth.MTLS.CACert); err != nil {
+	if err := bundle.Save(hl.Cert, hl.Key, hl.CACert); err != nil {
 		return fmt.Errorf("saving server cert: %w", err)
 	}
 
-	fmt.Printf("Server certificate reissued: %s\n", cfg.Auth.MTLS.ServerCert)
+	fmt.Printf("Server certificate reissued: %s\n", hl.Cert)
 	fmt.Printf("SANs: %s\n", strings.Join(allSANs, ", "))
 	fmt.Println("Restart the server for the new certificate to take effect.")
 	return nil
 }
 
 // openGrantStore opens grants.json (access_requests.store_path, default next
-// to the ACL file). Tombstones for deleted agents are kept for
-// max(short-lived token TTL, max_grant_ttl) plus an hour, so no credential
-// issued before a delete can outlive its tombstone.
-func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger, tokenTTL time.Duration) (*grant.Store, error) {
+// to the ACL file).
+func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger) (*grant.Store, error) {
 	// Checked again here (Validate already did) so no caller can open a
 	// store that would overwrite or quarantine another Phoenix file.
 	if err := cfg.ValidateGrantStorePath(); err != nil {
@@ -664,10 +581,9 @@ func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger, tokenTTL t
 			_, err := a.GetAgent(name)
 			return err == nil
 		},
-		RequestTTL:         set.RequestTTL,
-		DefaultGrantTTL:    set.DefaultGrantTTL,
-		MaxGrantTTL:        set.MaxGrantTTL,
-		TombstoneRetention: max(tokenTTL, set.MaxGrantTTL) + time.Hour,
+		RequestTTL:      set.RequestTTL,
+		DefaultGrantTTL: set.DefaultGrantTTL,
+		MaxGrantTTL:     set.MaxGrantTTL,
 	})
 }
 

@@ -78,28 +78,29 @@ container can reach it. That is the safe default.
 
 ### Reaching the container from the host
 
-To use the server from outside the container, it has to listen on the
-container's network interface. That crosses a wire (the Docker bridge), so
-turn TLS on at the same time. Phoenix treats every network, Docker bridges
-included, as untrusted. The `--init` certificate already covers
-`127.0.0.1` and `localhost`.
+To use the server from outside the container, turn on its HTTPS endpoint.
+Traffic from the host crosses a wire (the Docker bridge), and Phoenix treats
+every network, Docker bridges included, as untrusted. `--init` already wrote
+an `https_listener` block on `0.0.0.0:9443` (switched off), and its
+certificate covers `127.0.0.1` and `localhost`. The plain HTTP address stays
+on the container's loopback.
 
 ```bash
 docker rm -f phoenix
 
-# listen on all container interfaces + enable TLS (edits /data/config.json)
+# turn on the HTTPS endpoint (edits /data/config.json)
 docker run --rm -v phoenix-data:/data --entrypoint sed phoenixsecdev/phoenix -i \
-  -e 's/"listen": "127.0.0.1:9090"/"listen": "0.0.0.0:9090"/' \
-  -e '/"tls": {/{n;s/"enabled": false/"enabled": true/;}' \
+  -e '/"https_listener": {/{n;s/"enabled": false/"enabled": true/;}' \
   /data/config.json
 
-# publish to host loopback only
-docker run -d --name phoenix -p 127.0.0.1:9090:9090 -v phoenix-data:/data \
+# check the edited config, then publish HTTPS to host loopback only
+docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix --check-config --config /data/config.json
+docker run -d --name phoenix -p 127.0.0.1:9443:9443 -v phoenix-data:/data \
   --restart unless-stopped phoenixsecdev/phoenix
 
 # trust the Phoenix CA, then talk HTTPS from the host CLI
 docker cp phoenix:/data/ca.crt ~/.phoenix-ca.crt
-export PHOENIX_SERVER="https://127.0.0.1:9090"
+export PHOENIX_SERVER="https://127.0.0.1:9443"
 export PHOENIX_CA_CERT=~/.phoenix-ca.crt
 phoenix get demo/api-key
 ```

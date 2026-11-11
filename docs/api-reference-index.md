@@ -2,7 +2,7 @@
 
 Base path: `/v1`  
 Content type: JSON  
-Auth: bearer token and/or mTLS depending on server config.
+Auth: bearer token or session token (`phxs_`).
 
 This index is a concise map of currently implemented endpoints in `internal/api/api.go`.
 
@@ -25,9 +25,9 @@ This index is a concise map of currently implemented endpoints in `internal/api/
 
 `POST /v1/resolve` request fields:
 - `refs` (required): list of reference strings
-- `nonce` (optional): challenge nonce
-- `timestamp` (optional, required for signed resolve)
-- `signature` (optional): detached base64 ECDSA signature
+
+A body that still sends `nonce` or `signature` (nonce challenges and signed
+resolve were removed) gets `400` saying so.
 
 ## Audit
 
@@ -53,32 +53,11 @@ Query params:
 - `token` (required)
 - `permissions` (array of `{path, actions[]}`; validated server-side)
 
-## Certificate lifecycle
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/v1/certs/issue` | Issue agent certificate bundle (admin-only, mTLS enabled) |
-| POST | `/v1/certs/revoke` | Revoke cert by serial number (admin-only, mTLS enabled) |
-
-`POST /v1/certs/issue` body:
-- `agent_name` (required)
-
-`POST /v1/certs/revoke` body:
-- `serial_number` (required, decimal string)
-- `agent_name` (optional metadata)
-
-## Key and attestation controls
+## Key management
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v1/rotate-master` | Rotate master key (admin-only, file backend) |
-| POST | `/v1/challenge` | Get one-time nonce for challenge-response |
-| POST | `/v1/token/mint` | Mint short-lived token (admin-only, when enabled) |
-
-`POST /v1/token/mint` body:
-- `agent` (required)
-- `process_uid` (optional)
-- `binary_hash` (optional)
 
 ## Policy checks
 
@@ -92,7 +71,7 @@ Query params:
 
 Any authenticated identity, including session tokens, gets `200`.
 `allow_unseal` is `true` only when the caller can read the path without
-grants (its ACL, or a session's scope + action + ACL/elevation) **and** the
+grants (its ACL, or a session's scope + action + ACL) **and** the
 path's policy sets `allow_unseal`. Unreadable paths return `{"allowed": false}`.
 
 Response:
@@ -114,26 +93,26 @@ Response:
 - `role` (required): role name to mint
 - `seal_public_key` (optional): base64-encoded X25519 public key
 
-If the role has `allowed_agents` and the caller is not on it, mint and renew
-return `403 ROLE_NOT_ALLOWED` (for a step-up role, no approval is created).
-
 `GET /v1/sessions` query params:
 - `role` — filter by role name
 - `agent` — filter by agent name (admin only)
 
-Session-token callers see only their own session. Bearer/mTLS callers see
+Session-token callers see only their own session. Bearer callers see
 sessions for their agent. Admins see all.
 
-## Step-up approvals
+## Removed routes
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/v1/approvals` | List pending approvals (admin-only) |
-| GET | `/v1/approval/{id}` | Get approval status |
-| POST | `/v1/approval/{id}/approve` | Approve step-up request (re-checks the role, `allowed_agents`, bootstrap trust, attestation and seal key) |
-| POST | `/v1/approval/{id}/deny` | Deny step-up request |
+These answer `410 Gone` with a one-line reason, so an old client learns what
+happened instead of getting a bare 404:
 
-See [Session Identity](session-identity.md) for the approval workflow.
+| Method | Path | Was | Use instead |
+|---|---|---|---|
+| POST | `/v1/token/mint` | Short-lived tokens | `POST /v1/session/mint` |
+| POST | `/v1/challenge` | Nonce challenge | `source_ip` policy |
+| POST | `/v1/proxy` | Never built (always 501) | — |
+| POST | `/v1/certs/issue`, `/v1/certs/revoke` | Client certificates (mTLS) | Bearer tokens over HTTPS |
+| GET | `/v1/approvals` | Step-up approvals | `GET /v1/access-requests` |
+| any | `/v1/approval/...` | Step-up approvals | `/v1/access-requests/{id}` |
 
 ## Sealed responses
 
@@ -156,7 +135,7 @@ See [Sealed Responses](sealed-responses.md) for the full guide.
 ## Operator dashboard
 
 The dashboard is served at `/dashboard/` and is **not** part of the `/v1/` API.
-It uses cookie-based auth (not bearer/mTLS) and returns HTML (not JSON).
+It uses cookie-based auth (not bearer tokens) and returns HTML (not JSON).
 
 Dashboard routes are only registered when `dashboard.enabled` is `true` in
 config. They do not appear in the API mux otherwise.
@@ -231,11 +210,8 @@ Denial codes:
 | `SESSION_INVALID` | 401 | Token malformed or signature invalid |
 | `SCOPE_EXCEEDED` | 403 | Path outside role's namespace scope |
 | `ACTION_DENIED` | 403 | Action not permitted by role |
-| `APPROVAL_REQUIRED` | 202 | Step-up approval needed |
-| `STEP_UP_REAPPROVAL_REQUIRED` | 403 | Elevated step-up session cannot renew without fresh approval |
 | `BOOTSTRAP_FAILED` | 403 | Auth method not accepted for this role |
 | `ROLE_NOT_FOUND` | 404 | Requested role does not exist |
-| `ROLE_NOT_ALLOWED` | 403 | The role's `allowed_agents` does not list this agent |
 | `ATTESTATION_FAILED` | 403 | Attestation requirements not met |
 | `SEAL_KEY_REQUIRED` | 403 | Role requires seal key at mint |
 | `SEAL_KEY_MISMATCH` | 403 | Seal key doesn't match session binding |

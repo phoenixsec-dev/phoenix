@@ -2,14 +2,13 @@
   "server": {
     "listen": "127.0.0.1:9090"
   },
-  "tls": {
-    "enabled": false
-  },
   "https_listener": {
     "enabled": false,
     "listen": "127.0.0.1:9443",
-    "cert": "/data/server.crt",
-    "key": "/data/server.key"
+    "cert": "/data/phoenix/server.crt",
+    "key": "/data/phoenix/server.key",
+    "ca_cert": "/data/phoenix/ca.crt",
+    "ca_key": "/data/phoenix/ca.key"
   },
   "store": {
     "backend": "file",
@@ -22,10 +21,6 @@
   "auth": {
     "bearer": {
       "enabled": true
-    },
-    "mtls": {
-      "enabled": false,
-      "require": false
     }
   },
   "acl": {
@@ -37,20 +32,6 @@
   },
   "policy": {
     "path": "/data/phoenix/policy.json"
-  },
-  "attestation": {
-    "nonce": {
-      "enabled": false,
-      "max_age": "30s"
-    },
-    "token": {
-      "enabled": false,
-      "ttl": "15m"
-    },
-    "local_agent": {
-      "enabled": false,
-      "socket_path": "/tmp/phoenix-agent.sock"
-    }
   },
   "session": {
     "enabled": false,
@@ -78,15 +59,9 @@
           "read_value"
         ],
         "bootstrap_trust": [
-          "mtls"
+          "bearer"
         ],
-        "require_seal_key": true,
-        "step_up": true,
-        "step_up_ttl": "15m",
-        "elevates_acl": true,
-        "allowed_agents": [
-          "deployer"
-        ]
+        "require_seal_key": true
       }
     }
   },

@@ -46,7 +46,7 @@ Phoenix is built for the people actually running agents today — self-hosted, h
 - **Encrypted storage** — AES-256-GCM envelope encryption with per-namespace keys
 - **Per-agent access control** — each agent only sees the paths it needs
 - **Sealed responses** — end-to-end encrypted delivery per agent, even on shared hosts
-- **Attestation and policy** — per-path requirements like mTLS, IP binding, and tool identity
+- **Attestation and policy** — per-path requirements like IP binding and sealed delivery
 - **Audit trail** — every access, denial, and resolution attempt is logged (secret values are never written to the log)
 - **Reference-first workflows** — `phoenix://` URIs replace raw values in configs and scripts
 - **Exec credential stripping** — `phoenix exec` injects secrets and strips broker credentials from the child process
@@ -66,7 +66,7 @@ Because "just trust the model stack with your secrets" is not a serious security
 | Secrets out of model context | No | No | Yes |
 | Encrypted at rest | No | No | Yes (AES-256-GCM) |
 | Per-agent access control | No | No | Yes |
-| Identity attestation | No | No | Yes (mTLS + policy) |
+| Identity attestation | No | No | Yes (IP binding + policy) |
 | Runtime audit trail | No | No | Yes |
 | Credential stripping | No | No | Yes |
 | Key rotation | No | No | Yes |
@@ -115,10 +115,10 @@ Docker path (`docker run ... --init /data`, then `docker exec`).
 
 > The default server config listens on `127.0.0.1:9090` over plain HTTP.
 > That is the supported default — loopback traffic never touches the network.
-> The moment other machines need access, enable `"tls": {"enabled": true}`
-> (one line; the `--init` certificate is used automatically) — see
+> The moment other machines need access, set `"https_listener": {"enabled": true}`
+> (one line; `--init` already wrote its certificate and `0.0.0.0:9443`) — see
 > [LAN Deployment](docs/lan-deployment.md). The server warns loudly at
-> startup if it is ever bound to a non-loopback address without TLS.
+> startup if its plain HTTP address is ever bound to a non-loopback address.
 >
 > **Deployment envelope:** Phoenix is LAN-scoped by design. A single machine
 > or a local network you operate is the supported territory; exposing Phoenix
@@ -136,7 +136,7 @@ For the full first-run walkthrough, see [Getting Started](docs/getting-started.m
 | First secret in 2 minutes (binary or Docker) | [Quickstart](docs/quickstart.md) |
 | First install and setup | [Getting Started](docs/getting-started.md) |
 | CLI commands and workflows | [CLI Usage](docs/cli-usage.md) |
-| Auth, mTLS, and identity | [Authentication](docs/authentication.md) |
+| Auth and identity | [Authentication](docs/authentication.md) |
 | Session tokens and role-based access | [Session Identity](docs/session-identity.md) |
 | Operator dashboard (browser UI) | [Dashboard](docs/dashboard.md) |
 | Per-path policy and attestation | [Policy and Attestation](docs/policy-and-attestation.md) |
@@ -158,7 +158,7 @@ For the full first-run walkthrough, see [Getting Started](docs/getting-started.m
 **Phoenix helps with:**
 - keeping secret values out of model context, prompts, and tool responses
 - per-agent authorization and scoped access control
-- cryptographic identity via mTLS and sealed-response key pairs
+- sealed-response key pairs, so only the intended agent can open a value
 - audit visibility for every read, deny, and resolution attempt
 - safer multi-agent operation on shared hosts with separated identities
 

@@ -16,13 +16,11 @@ import (
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
-	"github.com/phoenixsec/phoenix/internal/ca"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
-	"github.com/phoenixsec/phoenix/internal/token"
 )
 
 // --- fixture -----------------------------------------------------------------
@@ -310,7 +308,7 @@ func TestGrantExpiryIsImmediate(t *testing.T) {
 
 func TestAttestationStillAppliesToGrants(t *testing.T) {
 	e := newGrantEnv(t)
-	pe, err := policy.Load([]byte(`{"attestation":{"infra/*":{"deny_bearer":true}}}`))
+	pe, err := policy.Load([]byte(`{"attestation":{"infra/*":{"source_ip":["10.9.9.9"]}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,38 +664,6 @@ func TestSessionCannotUseOrRequestGrant(t *testing.T) {
 		t.Fatal("session resolved a grant-only secret")
 	}
 
-	// The sharpest case: a session presented together with the same mTLS
-	// client certificate the grant is bound to. The session layer copies the
-	// cert fingerprint into the auth info, so only the "sessions never
-	// consult grants" rule keeps the caller-chosen seal key away.
-	authority := setCA(t, e.srv)
-	cert := issueCertPEM(t, authority, "vector")
-	e.srv.SetSessionRoles(map[string]config.RoleConfig{
-		"wide": {Namespaces: []string{"infra/**"}, Actions: []string{"read_value"}, BootstrapTrust: []string{"mtls"}},
-	})
-	mtls := func(method, path, tok, body string, hdr ...string) *httptest.ResponseRecorder {
-		var b []byte
-		if body != "" {
-			b = []byte(body)
-		}
-		req := makeMTLSRequest(method, path, b, cert)
-		if tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
-		}
-		for _, h := range hdr {
-			k, v, _ := strings.Cut(h, ": ")
-			req.Header.Set(k, v)
-		}
-		w := httptest.NewRecorder()
-		e.srv.ServeHTTP(w, req)
-		return w
-	}
-	id := expect(t, mtls("POST", "/v1/access-requests", "", `{"paths":["infra/other"],"reason":"r"}`), 201, "")["id"].(string)
-	e.approve(t, id, "")
-	expect(t, mtls("GET", "/v1/secrets/infra/other", "", "", "X-Phoenix-Seal-Key: "+e.sealPub), 200, "")
-	mtlsSess := expect(t, mtls("POST", "/v1/session/mint", "", `{"role":"wide","seal_public_key":"`+evilPub+`"}`), 200, "")["session_token"].(string)
-	expect(t, mtls("GET", "/v1/secrets/infra/other", mtlsSess, "", "X-Phoenix-Seal-Key: "+evilPub), 403, CodeACLDenied)
-
 	// Sessions cannot file requests or list grants; whoami says why.
 	expect(t, e.do("POST", "/v1/access-requests", sess, `{"paths":["infra/x"],"reason":"r"}`), 403, CodeSessionCannotRequest)
 	expect(t, e.do("GET", "/v1/grants", sess, ""), 403, CodeSessionCannotRequest)
@@ -781,83 +747,6 @@ func TestAgentDeleteRevokesBeforeDelete(t *testing.T) {
 	e.srv.acl.SetAgentSealKey("vector", e.sealPub)
 	expect(t, e.sealedGet("infra/b2/app-key", vectorTok), 401, "")
 	expect(t, e.sealedGet("infra/b2/app-key", "vector-token-2"), 403, CodeGrantRevoked)
-}
-
-func TestOldCredentialsCannotReachRecreatedAgentsGrants(t *testing.T) {
-	t.Run("mtls", func(t *testing.T) {
-		e := newGrantEnv(t)
-		e.set(func(s *config.AccessRequestsSettings) { s.RequireSealed = false })
-		authority := setCA(t, e.srv)
-		oldCert := issueCertPEM(t, authority, "vector")
-
-		e.delVector(t)
-		e.addVector(t, "vector-token-2")
-		newCert := issueCertPEM(t, authority, "vector")
-		// The recreated agent requests over mTLS with its new cert.
-		req := makeMTLSRequest("POST", "/v1/access-requests", []byte(`{"paths":["infra/other"],"reason":"r"}`), newCert)
-		w := httptest.NewRecorder()
-		e.srv.ServeHTTP(w, req)
-		id := expect(t, w, 201, "")["id"].(string)
-		e.approve(t, id, "")
-
-		get := func(cert []byte) *httptest.ResponseRecorder {
-			w := httptest.NewRecorder()
-			e.srv.ServeHTTP(w, makeMTLSRequest("GET", "/v1/secrets/infra/other", nil, cert))
-			return w
-		}
-		expect(t, get(newCert), 200, "")
-		expect(t, get(oldCert), 403, CodeACLDenied)
-		// A bearer token of the same agent is a different credential kind.
-		expect(t, e.do("GET", "/v1/secrets/infra/other", "vector-token-2", ""), 403, CodeACLDenied)
-	})
-	t.Run("short-lived token", func(t *testing.T) {
-		e := newGrantEnv(t)
-		e.clock = nil // tombstones use the real clock so they compare with token iat
-		e.set(func(s *config.AccessRequestsSettings) { s.RequireSealed = false })
-		st, err := grant.Open(grant.Options{
-			Path:        filepath.Join(t.TempDir(), "grants.json"),
-			AgentExists: func(n string) bool { _, err := e.srv.acl.GetAgent(n); return err == nil },
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		e.store = st
-		e.srv.SetGrantStore(st)
-		e.srv.now = time.Now
-		iss, _ := token.NewIssuer(time.Hour)
-		e.srv.SetTokenIssuer(iss)
-
-		oldTok, _, _ := iss.Mint("vector", nil, "")
-		time.Sleep(2 * time.Millisecond)
-		e.delVector(t)
-		e.addVector(t, "vector-token-2")
-		time.Sleep(2 * time.Millisecond)
-		newTok, _, _ := iss.Mint("vector", nil, "")
-		e.approve(t, e.request(t, newTok, "infra/other"), "")
-
-		expect(t, e.do("GET", "/v1/secrets/infra/other", newTok, ""), 200, "")
-		expect(t, e.do("GET", "/v1/secrets/infra/other", oldTok, ""), 403, CodeACLDenied)
-	})
-}
-
-// setCA turns on mTLS with a fresh test CA.
-func setCA(t *testing.T, srv *Server) *ca.CA {
-	t.Helper()
-	authority, err := ca.GenerateCA("TestOrg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.SetCA(authority)
-	return authority
-}
-
-func issueCertPEM(t *testing.T, authority *ca.CA, agent string) []byte {
-	t.Helper()
-	b, err := authority.IssueAgentCert(agent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b.CertPEM
 }
 
 func (e *grantEnv) delVector(t *testing.T) {
@@ -945,48 +834,6 @@ func TestEveryDenialCodeIsDocumented(t *testing.T) {
 		if !bytes.Contains(doc, []byte("`"+code+"`")) {
 			t.Errorf("code %s is missing from docs/denial-codes.md", code)
 		}
-	}
-}
-
-// R1 H2: a deleted approver's still-valid short-lived token or mTLS cert
-// (both authenticate by name) must lose every approver power.
-func TestDeletedApproverLosesApproverPowers(t *testing.T) {
-	e := newGrantEnv(t)
-	authority := setCA(t, e.srv)
-	cert := issueCertPEM(t, authority, "approver")
-	iss, _ := token.NewIssuer(time.Hour)
-	e.srv.SetTokenIssuer(iss)
-	tok, _, _ := iss.Mint("approver", nil, "")
-
-	gid := e.approve(t, e.request(t, vectorTok, "infra/other"), "")
-	pending := e.request(t, vectorTok, "infra/b2/app-key")
-	expect(t, e.do("DELETE", "/v1/agents/approver", adminTok, ""), 200, "")
-
-	viaCert := func(method, path string) *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		e.srv.ServeHTTP(w, makeMTLSRequest(method, path, nil, cert))
-		return w
-	}
-	viaToken := func(method, path string) *httptest.ResponseRecorder { return e.do(method, path, tok, "") }
-	for name, call := range map[string]func(string, string) *httptest.ResponseRecorder{"short-lived token": viaToken, "mtls cert": viaCert} {
-		t.Run(name, func(t *testing.T) {
-			expect(t, call("POST", "/v1/access-requests/"+pending+"/approve"), 403, CodeApproverRequired)
-			expect(t, call("POST", "/v1/access-requests/"+pending+"/deny"), 403, CodeApproverRequired)
-			expect(t, call("GET", "/v1/access-requests?agent=vector"), 403, CodeApproverRequired)
-			expect(t, call("GET", "/v1/grants?agent=vector"), 403, CodeApproverRequired)
-			expect(t, call("GET", "/v1/access-requests/"+pending), 404, CodeNotFound)
-			if l := expect(t, call("GET", "/v1/access-requests"), 200, ""); len(l["requests"].([]any)) != 0 {
-				t.Fatalf("deleted approver still sees other agents' requests: %v", l)
-			}
-			// Revoking another agent's grant looks like 404 (no existence oracle).
-			expect(t, call("POST", "/v1/grants/"+gid+"/revoke"), 404, CodeNotFound)
-		})
-	}
-	if g, _ := e.store.GetGrant(gid); g.State(e.clock.Now()) != grant.GrantActive {
-		t.Fatal("deleted approver revoked another agent's grant")
-	}
-	if r, _ := e.store.GetRequest(pending); r.Status != grant.StatusPending {
-		t.Fatalf("deleted approver decided a request: %s", r.Status)
 	}
 }
 

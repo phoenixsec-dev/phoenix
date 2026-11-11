@@ -4,37 +4,36 @@
 
 The server reads a JSON config file. `config.example.json` is a starter template.
 The example binds to loopback (`127.0.0.1`), where plaintext HTTP is the safe,
-supported default. Binding a non-loopback address means requests cross a wire:
-enable the `tls` block. The server starts either way, but logs a prominent
-`INSECURE TRANSPORT` warning when a non-loopback bind would put bearer tokens
-and secret values on the network in cleartext.
+supported default. `server.listen` always serves plain HTTP; anything that
+crosses a wire uses the HTTPS endpoint, `https_listener`. The server starts
+either way, but logs a prominent `INSECURE TRANSPORT` warning when
+`server.listen` is a non-loopback address, because bearer tokens and secret
+values would cross the network in cleartext.
+
+Check a config file without starting the server (see
+[Checking a config](#checking-a-config-and-removed-settings)):
+
+```bash
+phoenix-server --check-config --config /data/config.json
+```
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `server.listen` | Primary bind address | `127.0.0.1:9090` |
-| `tls.enabled` | Serve HTTPS on the primary address (independent of mTLS) | `false` |
-| `tls.cert` | Server certificate path | `auth.mtls.server_cert` (the `--init` leaf) |
-| `tls.key` | Server private key path | `auth.mtls.server_key` |
-| `https_listener.enabled` | Add a separate HTTPS endpoint | `false` |
-| `https_listener.listen` | Additional bind address; required when enabled | — |
-| `https_listener.cert` | Additional endpoint's server certificate; required when enabled | — |
-| `https_listener.key` | Additional endpoint's private key; required when enabled | — |
+| `server.listen` | Plain HTTP bind address; keep it on loopback | `127.0.0.1:9090` |
+| `https_listener.enabled` | Serve HTTPS (the only way to turn it on) | `false` |
+| `https_listener.listen` | HTTPS bind address; required when enabled | `--init`: `0.0.0.0:9443` |
+| `https_listener.cert` | Server certificate; required when enabled | `--init`: `<dir>/server.crt` |
+| `https_listener.key` | Server private key; required when enabled | `--init`: `<dir>/server.key` |
+| `https_listener.ca_cert` | Internal CA certificate; used only by `--reissue-cert` | `--init`: `<dir>/ca.crt` |
+| `https_listener.ca_key` | Internal CA key; used only by `--reissue-cert` | `--init`: `<dir>/ca.key` |
 | `store.path` | Encrypted store file | `/data/store.json` |
 | `store.master_key` | Master key file | `/data/master.key` |
 | `store.backend` | Secret backend (`file` or `1password`) | `file` |
 | `acl.path` | ACL definition file | `/data/acl.json` |
 | `audit.path` | Audit log file | `/data/audit.log` |
 | `audit.rotate_mb` | Rotate the audit log at this size; archives are kept forever. Negative = never rotate. See [Audit log rotation](#audit-log-rotation) | `50` |
-| `auth.bearer.enabled` | Allow bearer token auth | `true` |
-| `auth.mtls.enabled` | Enable mTLS | `false` |
-| `auth.mtls.require` | Reject connections without client cert | `false` |
+| `auth.bearer.enabled` | Bearer token auth; must stay `true` (it is the only way to log in) | `true` |
 | `policy.path` | Attestation policy file (optional) | — |
-| `attestation.nonce.enabled` | Enable nonce challenge-response | `false` |
-| `attestation.nonce.max_age` | Nonce TTL | `30s` |
-| `attestation.token.enabled` | Enable short-lived token minting | `false` |
-| `attestation.token.ttl` | Token lifetime | `15m` |
-| `attestation.local_agent.enabled` | Enable local Unix-socket attestation agent | `false` |
-| `attestation.local_agent.socket_path` | Unix socket path when enabled | — |
 | `session.enabled` | Enable session identity | `false` |
 | `session.ttl` | Default session lifetime | `1h` |
 | `session.roles` | Named role definitions (see below) | — |
@@ -63,28 +62,22 @@ See [Session Identity](session-identity.md) for the full guide.
       "deploy": {
         "namespaces": ["prod/**"],
         "actions": ["list", "read_value"],
-        "bootstrap_trust": ["mtls"],
+        "bootstrap_trust": ["bearer"],
         "require_seal_key": true,
-        "step_up": true,
-        "step_up_ttl": "15m",
-        "elevates_acl": true,
-        "allowed_agents": ["deployer"]
+        "max_ttl": "15m"
       }
     }
   }
 }
 ```
 
-Each role defines: `namespaces` (required), `bootstrap_trust` (required),
-`actions` (default: list + read_value), and optional fields for seal key
-requirements, attestation, step-up approval and `allowed_agents`.
+Each role defines: `namespaces` (required), `bootstrap_trust` (required:
+`bearer` and/or `local`), `actions` (default: list + read_value), and
+optional `require_seal_key`, `max_ttl` and `attestation` (`source_ip` =
+loopback callers only, `require_sealed`).
 
-`allowed_agents` binds a role to named ACL agents. It is checked at mint,
-at step-up approval and at renewal (`403 ROLE_NOT_ALLOWED`). Empty means any
-agent whose auth method is in `bootstrap_trust`. The server logs a `WARNING`
-at startup for each `step_up` role without it, and for listed names that are
-not in the ACL. The next release makes it required for `elevates_acl` roles.
-See [Session Identity](session-identity.md#binding-a-role-to-agents-allowed_agents).
+A role does not raise an agent above its own ACL. To give an agent temporary
+access to more, approve an [access request](access-requests.md).
 
 ## Access requests
 
@@ -164,13 +157,13 @@ The dashboard uses cookie-based auth with HMAC-signed tokens and CSRF protection
 Login attempts are rate-limited with exponential backoff (5 failures before lockout,
 up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.
 
-**Transport security:** When a request arrives over TLS (the primary or optional
-HTTPS endpoint) or through a TLS reverse proxy (detected via
+**Transport security:** When a request arrives over HTTPS (`https_listener`)
+or through a TLS reverse proxy (detected via
 `X-Forwarded-Proto: https`),
 the session cookie is set with `Secure` flag automatically. For production use:
 
 - Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`), or
-- Enable native TLS (`"tls": {"enabled": true}` — no client certs needed), or
+- Use the HTTPS endpoint (`"https_listener": {"enabled": true}`), or
 - Run behind a TLS reverse proxy (e.g., Nginx Proxy Manager)
 
 Do not expose the dashboard over plain HTTP on a network you do not control —
@@ -238,69 +231,56 @@ The default configuration starts the server on plain HTTP at `127.0.0.1:9090`.
 This is safe for local-only use — loopback traffic never reaches a NIC, so the
 server is not reachable from the network and TLS would add nothing.
 
-The moment the listener crosses a wire, enable TLS. `phoenix-server --init`
-generates a CA and server certificate; `"tls": {"enabled": true}` serves HTTPS
-with them — no client certificates, no mTLS required:
+The moment traffic crosses a wire, use HTTPS. There is one way to turn it
+on: `https_listener`. `phoenix-server --init` generates an internal CA and a
+server certificate and writes the block for you, switched off:
 
 ```json
 {
-  "server": { "listen": "0.0.0.0:9090" },
-  "tls": { "enabled": true }
+  "server": { "listen": "127.0.0.1:9090" },
+  "https_listener": {
+    "enabled": true,
+    "listen": "0.0.0.0:9443",
+    "cert": "/data/server.crt",
+    "key": "/data/server.key",
+    "ca_cert": "/data/ca.crt",
+    "ca_key": "/data/ca.key"
+  }
 }
 ```
 
-`tls.cert` / `tls.key` override the certificate paths; when unset, the `--init`
-server leaf (`auth.mtls.server_cert` / `server_key` paths) is used. mTLS is a
-separate, optional layer for client-certificate authentication — enabling
-`auth.mtls` also serves TLS, as it always has, but plain HTTPS no longer
-requires it.
+Set `"enabled": true` and point clients at `https://<host>:9443` with
+`PHOENIX_CA_CERT` set to `ca.crt`. Keep `server.listen` on loopback for local
+tools and health checks. `ca_cert` and `ca_key` are only read by
+`phoenix-server --reissue-cert`, which signs a new server certificate with
+extra names (SANs).
 
-If you bind a non-loopback address without TLS, the server still starts but
-logs a prominent `INSECURE TRANSPORT` warning: bearer tokens and every secret
-value it returns would cross the network in cleartext.
+If you bind `server.listen` to a non-loopback address, the server still
+starts but logs a prominent `INSECURE TRANSPORT` warning: bearer tokens and
+every secret value it returns would cross the network in cleartext.
 
 | Deployment | Config | Result |
 |-----------|--------|--------|
-| Local only | Default (`127.0.0.1`, TLS disabled) | Plain HTTP on loopback — safe |
-| LAN / remote | `0.0.0.0`, `"tls": {"enabled": true}` | HTTPS, bearer tokens still work |
-| LAN + client certs | add `auth.mtls.enabled: true` (`require: false`) | HTTPS with optional client certs |
-| Locked down | `auth.mtls.enabled: true`, `require: true` | Full mTLS required |
+| Local only | Default (`127.0.0.1`, HTTPS off) | Plain HTTP on loopback — safe |
+| LAN / remote | `127.0.0.1` + `https_listener.enabled: true` | HTTPS for the network, HTTP for local tools |
 | Behind reverse proxy | `127.0.0.1`, proxy terminates TLS | Plain HTTP on loopback, TLS to clients |
+
+Client certificates (mTLS) and the separate `tls` block were removed; see
+[removed settings](#checking-a-config-and-removed-settings).
 
 See [LAN Deployment](lan-deployment.md) for the full multi-host setup,
 including re-issuing the server certificate with LAN IP/hostname SANs.
 
-### Optional HTTPS alongside the existing endpoint
+### How the HTTPS endpoint works
 
-Use `https_listener` to add HTTPS while existing consumers keep their HTTP
+`https_listener` adds HTTPS while existing consumers keep their HTTP
 address and configuration. Both endpoints use the same handler, secret store,
 ACLs, policies, sessions, rate limiter, and audit logger. The additional listener
 uses the direct client address for source-IP policy, just like the primary.
 HTTP requests are not redirected.
 
-This fragment adds HTTPS on port 9443 while keeping HTTP on port 9090:
-
-```json
-{
-  "server": { "listen": "0.0.0.0:9090" },
-  "tls": { "enabled": false },
-  "auth": {
-    "bearer": { "enabled": true },
-    "mtls": { "enabled": false }
-  },
-  "https_listener": {
-    "enabled": true,
-    "listen": "0.0.0.0:9443",
-    "cert": "/data/server.crt",
-    "key": "/data/server.key"
-  }
-}
-```
-
-Merge the fragment into your existing configuration. The checked-in example
-keeps the additional listener disabled and bound to loopback. When enabled,
-`listen`, `cert`, and `key` must all be explicit; this block does not inherit
-certificate paths from `tls` or `auth.mtls`.
+When enabled, `listen`, `cert`, and `key` must all be set (`--init` writes
+them).
 
 The certificate must cover the hostname or IP selected clients use. For a
 private CA, install its public trust certificate on those clients and set
@@ -309,12 +289,6 @@ certificate before sending credentials; do not disable certificate checks.
 Other consumers need no configuration changes. HTTP remains unencrypted and
 continues to produce the existing warning on non-loopback binds. Tokens retain
 their existing permissions on both transports; there are no HTTPS-only tokens.
-
-The original settings retain their meaning: `tls.enabled` converts the primary
-address to HTTPS. Enabling `auth.mtls` also converts the primary and applies its
-client-certificate verification and revocation checks to both listeners. When
-`auth.mtls.require` is true, both endpoints require a valid client certificate.
-Leave both settings false for the HTTP-plus-HTTPS example above.
 
 An omitted or disabled `https_listener` opens no additional socket. When it is
 enabled, a configuration mistake stops startup, the same as any other config
@@ -346,8 +320,8 @@ Keep the original endpoint's settings and other consumers' configuration intact.
 ```text
 +-----------+     phoenix://     +---------+     AES-256-GCM     +-------+
 |  Agent /  | ---- resolve ----> | Phoenix | ---- envelope ----> | Store |
-|   Tool    |     (mTLS/ACL/     | Server  |    encryption       | (JSON)|
-+-----------+      attestation)  +---------+                     +-------+
+|   Tool    |  (token/session/   | Server  |    encryption       | (JSON)|
++-----------+  ACL/attestation)  +---------+                     +-------+
                                       |
                                       v
                                  +---------+
@@ -358,9 +332,8 @@ Keep the original endpoint's settings and other consumers' configuration intact.
 
 Authentication flow:
 - request
-- mTLS cert verification (if available)
-- bearer fallback (if allowed)
-- ACL authorization
+- session token (`phxs_`) or bearer token
+- ACL authorization (plus session scope, then grants)
 - attestation policy check
 - secret access
 - audit log write
@@ -386,22 +359,65 @@ docker exec -e PHOENIX_TOKEN phoenix phoenix status
 ```
 
 The generated config listens on `127.0.0.1:9090` *inside the container*,
-so a `-p 9090:9090` port mapping reaches nothing until you change it. To
-use Phoenix from the host or other machines, set `server.listen` to
-`0.0.0.0:9090` **and** `"tls": {"enabled": true}` together: traffic now
-crosses the Docker bridge, which Phoenix treats as an untrusted network.
-The exact commands (a tested `sed` one-liner, then `docker cp` of `ca.crt`
-for `PHOENIX_CA_CERT`) are in
+so a `-p 9090:9090` port mapping reaches nothing. To use Phoenix from the
+host or other machines, turn on `https_listener` (`--init` already bound it
+to `0.0.0.0:9443`) and publish port 9443: traffic crosses the Docker bridge,
+which Phoenix treats as an untrusted network. The exact commands (a `sed`
+one-liner, then `docker cp` of `ca.crt` for `PHOENIX_CA_CERT`) are in
 [Quickstart: reaching the container from the host](quickstart.md#reaching-the-container-from-the-host).
 
-The image healthcheck probes `/v1/health` over plain HTTP and falls back
-to HTTPS, so it stays green after TLS is enabled. With
-`auth.mtls.require: true` it cannot present a client certificate and will
-report unhealthy; override it with `--health-cmd` in that setup.
+The image healthcheck probes `/v1/health` over plain HTTP on the
+container's loopback, which stays on when HTTPS is turned on.
 
 The repo's `docker-compose.yml` builds the image from source and follows
 the same flow (`docker compose run --rm phoenix --init /data`, then
 `docker compose up -d`).
+
+## Checking a config and removed settings
+
+`phoenix-server --check-config` runs the checks startup runs on the config
+file, the policy file it names, and the HTTPS certificate, then exits. It
+does not open the store or bind a port, so you can run it before deploying a
+new version:
+
+```bash
+phoenix-server --check-config --config /data/config.json
+# policy OK: /data/policy.json (21 rules)
+# config OK: /data/config.json
+```
+
+Exit status is 0 when the config would start, 1 otherwise, with the reason.
+
+Settings that Phoenix no longer has are never silently ignored. If the
+config, the policy file, or a role still uses one, startup (and
+`--check-config`) stops with one line per field saying what was removed, why,
+and what to use instead, for example:
+
+```text
+invalid config: config uses settings Phoenix no longer has (delete them to start):
+  auth.mtls: removed. Why: client certificates (mTLS) were removed: .... Instead: use bearer tokens over https_listener; ....
+  session.roles.ops.step_up: removed. Why: step-up approvals were folded into access requests. Instead: turn on access_requests; ....
+```
+
+Removed in this release (see `RELEASE_NOTES.md` for why each went):
+
+| Where | Removed | Use instead |
+|---|---|---|
+| config | `tls` | `https_listener` |
+| config | `auth.mtls` | bearer tokens over `https_listener`; move `ca_cert`/`ca_key` into `https_listener` to keep `--reissue-cert` |
+| config | `attestation.token`, `attestation.nonce` | session roles; `source_ip` rules |
+| config | `attestation.local_agent` | nothing yet; the planned local Phoenix service replaces it |
+| config | `onepassword.enabled` | `store.backend: "1password"` (the connector stays) |
+| role | `step_up`, `step_up_ttl`, `elevates_acl`, `allowed_agents` | [access requests](access-requests.md) |
+| role | `bootstrap_trust` `"mtls"` / `"token"`; `attestation` `"require_mtls"` / `"cert_fingerprint"` | `"bearer"` / `"local"`; attestation `"source_ip"` (loopback only), or `require_seal_key: true` |
+| policy | `require_mtls`, `cert_fingerprint`, `deny_bearer`, `process`, `require_fresh_attestation`, `credential_ttl`, `allowed_tools`, `deny_tools`, `require_nonce`, `nonce_max_age`, `require_signed`, `time_window`, `time_zone` | `source_ip`, `require_sealed` |
+
+Removed API routes (`/v1/token/mint`, `/v1/challenge`, `/v1/proxy`,
+`/v1/certs/*`, `/v1/approvals`, `/v1/approval/...`) answer `410 Gone` with the
+reason. Removed CLI commands and flags (`phoenix token`, `phoenix cert`,
+`phoenix init`, `phoenix agent-sock`, `phoenix resolve --signed`,
+`phoenix mcp-server --http`, `phoenix policy test --time`, `phoenix approve
+apr_...`) print a short explanation and exit 1.
 
 ## Related docs
 
