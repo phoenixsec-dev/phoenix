@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.20.0 (2026-11-11)
+## v0.21.0 (2026-11-11)
 
 ### Removed: features that checked nothing, dead code, mTLS, MCP over HTTP, step-up
 
@@ -60,6 +60,8 @@ passed `PHOENIX_MCP_TOKEN`, `PHOENIX_MASTER_PASSPHRASE`, `PHOENIX_ROLE`
 variable and the 1Password service account token (also under the name
 `PHOENIX_OP_TOKEN_ENV` points at). Values mapped with `--env` still arrive.
 `phoenix ssh` runs `ssh` with the same filtered environment.
+
+## v0.20.0 (2026-11-11)
 
 ### SSH Certificates: Temporary Root Login, Approved Like a Grant
 
