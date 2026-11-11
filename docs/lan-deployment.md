@@ -116,11 +116,11 @@ export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 # Create agents with least-privilege ACLs
 phoenix agent create host-a-builder \
   -t "$(openssl rand -hex 32)" \
-  --acl "build/**:read;ci/**:read"
+  --acl "build/**:list,read_value;ci/**:list,read_value"
 
 phoenix agent create host-b-deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "deploy/**:read;infra/**:read"
+  --acl "deploy/**:list,read_value;infra/**:list,read_value"
 ```
 
 ## 3. Distribute the CA certificate to client machines
@@ -280,7 +280,7 @@ From each client machine:
 phoenix status
 
 # Store a test secret (from admin)
-phoenix set build/test-key -v "test-value" -d "deployment test"
+printf '%s' "test-value" | phoenix set build/test-key --value-stdin -d "deployment test"
 
 # Resolve from the appropriate agent
 phoenix resolve phoenix://build/test-key

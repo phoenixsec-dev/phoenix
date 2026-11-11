@@ -7,12 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
-	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/policy"
-	"github.com/phoenixsec/phoenix/internal/session"
 )
 
 // Closed set of next steps; must match docs/denial-codes.md.
@@ -219,91 +216,6 @@ func assertNoPolicyTerms(t *testing.T, body string) {
 	}
 }
 
-func TestSessionMintAttestationFailureIsGeneric(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-	ss, err := session.NewStore(time.Hour)
-	if err != nil {
-		t.Fatalf("session store: %v", err)
-	}
-	t.Cleanup(ss.Stop)
-	srv.SetSessionStore(ss)
-	srv.SetSessionRoles(map[string]config.RoleConfig{
-		"secure": {
-			Namespaces:     []string{"prod/*"},
-			BootstrapTrust: []string{"bearer"},
-			Attestation:    []string{"source_ip"},
-		},
-	})
-
-	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(`{"role":"secure"}`))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status %d: %s", w.Code, w.Body.String())
-	}
-	if d := decodeDenial(t, w); d["code"] != "ATTESTATION_FAILED" || d["next_step"] != NextAskUser {
-		t.Fatalf("denial = %v", d)
-	}
-	assertNoPolicyTerms(t, w.Body.String())
-
-	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
-	e := findAPIAuditEntry(entries, "session.mint", "secure", "denied", "attestation_failed")
-	if e == nil || !strings.Contains(e.Metadata["denial.detail"], "loopback") || !strings.Contains(e.Metadata["denial.detail"], "source_ip") {
-		t.Fatalf("audit entry missing attestation detail: %+v", e)
-	}
-}
-
-func TestSessionRenewAttestationFailureIsGeneric(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-	ss, err := session.NewStore(time.Hour)
-	if err != nil {
-		t.Fatalf("session store: %v", err)
-	}
-	t.Cleanup(ss.Stop)
-	srv.SetSessionStore(ss)
-	srv.SetSessionRoles(map[string]config.RoleConfig{
-		"secure": {
-			Namespaces:     []string{"test/*"},
-			BootstrapTrust: []string{"bearer"},
-			Attestation:    []string{"source_ip"},
-		},
-	})
-
-	// Mint from loopback, then renew from a LAN address.
-	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(`{"role":"secure"}`))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.RemoteAddr = "127.0.0.1:4000"
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("mint: %d %s", w.Code, w.Body.String())
-	}
-	var mint struct {
-		SessionToken string `json:"session_token"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &mint)
-
-	req = httptest.NewRequest("POST", "/v1/session/renew", strings.NewReader(`{}`))
-	req.Header.Set("Authorization", "Bearer "+mint.SessionToken)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status %d: %s", w.Code, w.Body.String())
-	}
-	if d := decodeDenial(t, w); d["code"] != "ATTESTATION_FAILED" {
-		t.Fatalf("denial = %v", d)
-	}
-	assertNoPolicyTerms(t, w.Body.String())
-	entries, _ := queryAPIAuditEntries(t, srv, adminToken)
-	e := findAPIAuditEntry(entries, "session.renew", "secure", "denied", "attestation_failed")
-	if e == nil || !strings.Contains(e.Metadata["denial.detail"], "loopback") {
-		t.Fatalf("audit entry missing detail: %+v", e)
-	}
-}
-
-// denial.detail can carry caller-controlled text (e.g. X-Phoenix-Tool); the
-// stored copy is capped so one request cannot bloat the audit log.
 func TestAuditDeniedDetailIsCapped(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 	huge := strings.Repeat("é", 16*1024) // 32 KiB, multi-byte

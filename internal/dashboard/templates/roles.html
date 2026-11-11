@@ -24,12 +24,6 @@
             {{if .Config.RequireSealKey}}<span class="flag flag-seal">seal key</span>{{end}}
             {{if .Config.MaxTTL}}<span class="flag flag-ttl">max TTL: {{.Config.MaxTTL}}</span>{{end}}
         </div>
-        {{if .Config.Attestation}}
-        <div class="pill-group">
-            <span class="pill-label">Attestation</span>
-            {{range .Config.Attestation}}<span class="pill pill-attest">{{.}}</span>{{end}}
-        </div>
-        {{end}}
     </div>
 {{end}}
 </div>

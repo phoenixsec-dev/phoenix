@@ -16,11 +16,11 @@ should be encrypted per-agent even in transit.
 ```bash
 phoenix agent create builder \
   -t "$(openssl rand -hex 32)" \
-  --acl "build/**:read"
+  --acl "build/**:list,read_value"
 
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "deploy/**:read;infra/**:read"
+  --acl "deploy/**:list,read_value;infra/**:list,read_value"
 ```
 
 ### 2. Generate sealed key pairs

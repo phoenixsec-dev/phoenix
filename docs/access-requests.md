@@ -224,7 +224,6 @@ SIGHUP sent to exec go to the command; Ctrl-C reaches it from the terminal.
   output); exec prints a warning naming the variable.
 - Output that ends in the first few bytes of a secret is held until more
   output arrives or the command exits.
-- It cannot be combined with `--output-env`.
 
 What a grant never does:
 

@@ -66,7 +66,7 @@ assert_not_contains "$warn_log" "dashboard" "no dashboard line when dashboard is
 ok "non-loopback plaintext: loud warning, startup not refused"
 
 # --- 4. Dashboard enabled adds the dashboard exposure line ---
-config_patch "d['dashboard']={'enabled': True, 'pin': '123456'}"
+config_patch "d['dashboard']={'enabled': True, 'password_hash': '\$2a\$10\$HLVxwM4wKNkthQOq6HXfuOj6tC68h.gfwNjx2MSHkqPXkgvrMpK3a'}"
 run_expect_warning "$RUN_DIR/warn-dash.log"
 warn_log="$(cat "$RUN_DIR/warn-dash.log")"
 assert_contains "$warn_log" "dashboard passwords and session cookies" "dashboard exposure line missing"
@@ -97,10 +97,10 @@ ok "mcp-server --http reports the removal"
 start_server
 
 # --- 7. https_listener preserves HTTP and shares application state ---
-phoenix_admin set dual/key -v synthetic-dual >/dev/null
-phoenix_admin set forbidden/key -v synthetic-denied >/dev/null
-phoenix_admin set source-denied/key -v synthetic-ip-denied >/dev/null
-phoenix_admin agent create dual-reader -t synthetic-dual-reader --acl 'dual/*:read' >/dev/null
+printf '%s' synthetic-dual | phoenix_admin set dual/key --value-stdin >/dev/null
+printf '%s' synthetic-denied | phoenix_admin set forbidden/key --value-stdin >/dev/null
+printf '%s' synthetic-ip-denied | phoenix_admin set source-denied/key --value-stdin >/dev/null
+phoenix_admin agent create dual-reader -t synthetic-dual-reader --acl 'dual/*:list,read_value' >/dev/null
 stop_server
 HTTPS_PORT="$(free_port)"
 HTTP_URL="$PHOENIX_SERVER"
@@ -108,7 +108,7 @@ HTTPS_URL="https://127.0.0.1:$HTTPS_PORT"
 cat >"$RUN_DIR/dual-policy.json" <<'JSON'
 {"attestation":{"dual/*":{"source_ip":["127.0.0.1"]},"source-denied/*":{"source_ip":["192.0.2.1"]}}}
 JSON
-config_patch "d['https_listener']={'enabled':True,'listen':'127.0.0.1:$HTTPS_PORT','cert':'$RUN_DIR/server.crt','key':'$RUN_DIR/server.key'}; d['policy']={'path':'$RUN_DIR/dual-policy.json'}; d['session']={'enabled':True,'roles':{'dual-reader':{'namespaces':['dual/*'],'actions':['read_value'],'bootstrap_trust':['bearer']}}}; d['dashboard']={'enabled':True,'pin':'123456','allow_multi_login':True}"
+config_patch "d['https_listener']={'enabled':True,'listen':'127.0.0.1:$HTTPS_PORT','cert':'$RUN_DIR/server.crt','key':'$RUN_DIR/server.key'}; d['policy']={'path':'$RUN_DIR/dual-policy.json'}; d['session']={'enabled':True,'roles':{'dual-reader':{'namespaces':['dual/*'],'actions':['read_value'],'bootstrap_trust':['bearer']}}}; d['dashboard']={'enabled':True,'password_hash':'\$2a\$10\$HLVxwM4wKNkthQOq6HXfuOj6tC68h.gfwNjx2MSHkqPXkgvrMpK3a','allow_multi_login':True}"
 start_server
 assert_contains "$(cat "$RUN_DIR/server.log")" "Optional HTTPS listener serving" "optional listener startup missing"
 if curl -fsS -m 3 "http://127.0.0.1:$HTTPS_PORT/v1/health" >/dev/null 2>&1; then
@@ -131,9 +131,9 @@ for url in "$HTTP_URL" "$HTTPS_URL"; do
     "$url/v1/secrets/source-denied/key" -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H 'X-Forwarded-For: 192.0.2.1')" 403 "forwarded IP must not bypass direct source policy"
 done
-PHOENIX_SERVER="$HTTPS_URL" PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin set dual/key -v synthetic-updated >/dev/null
+printf '%s' synthetic-updated | PHOENIX_SERVER="$HTTPS_URL" PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin set dual/key --value-stdin >/dev/null
 assert_eq "$(phoenix_admin get dual/key)" synthetic-updated "HTTPS write visible over existing HTTP"
-phoenix_admin set dual/key -v synthetic-http-update >/dev/null
+printf '%s' synthetic-http-update | phoenix_admin set dual/key --value-stdin >/dev/null
 assert_eq "$(PHOENIX_SERVER="$HTTPS_URL" PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin get dual/key)" synthetic-http-update "HTTP write visible over HTTPS"
 
 mint="$(curl -fsS "$HTTP_URL/v1/session/mint" -H 'Authorization: Bearer synthetic-dual-reader' \
@@ -146,7 +146,7 @@ assert_eq "$(dual_status "$HTTP_URL" /v1/secrets/dual/key "$(jq -r .session_toke
 
 for url in "$HTTP_URL" "$HTTPS_URL"; do
   headers="$(curl -sS --max-time 3 --cacert "$RUN_DIR/ca.crt" -D - -o /dev/null \
-    "$url/dashboard/login" --data 'credential=123456')"
+    "$url/dashboard/login" --data 'credential=e2e-dash-password')"
   # HTTP/2 lowercases header names; compare without depending on the protocol.
   assert_contains "${headers,,}" 'set-cookie: phoenix_dash=' "dashboard login on both transports"
   if [[ "$url" == https://* ]]; then

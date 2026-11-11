@@ -30,12 +30,9 @@ phoenix exec --env KEY=phoenix://namespace/secret -- <command> [args...]
 
 Resolves references and injects them as environment variables into the child
 process. Phoenix broker credentials are stripped from the child environment.
-
-To write resolved env vars to a file instead of exec'ing (for Docker init-container patterns):
-
-```bash
-phoenix exec --env KEY=phoenix://namespace/secret --output-env /path/to/envfile -- true
-```
+Values live only in that process's environment; never write them to a file
+(`--output-env` was removed for that reason). Add `--redact-output` to mask a
+value the command prints by mistake.
 
 ### Store a secret
 
@@ -47,13 +44,24 @@ phoenix exec --env KEY=phoenix://namespace/secret --output-env /path/to/envfile 
 phoenix set <namespace/key> -d "description"
 ```
 
+There is no `-v`/`--value` flag: a value on the command line leaks to shell
+history and the process list.
+
 ### List secrets
 
 ```bash
-phoenix list [prefix]
+phoenix list [folder/]
 ```
 
-Returns accessible secret paths. Use a prefix to filter by namespace.
+Returns the secret paths you can see in a folder. `services/browser`,
+`services/browser/` and `services/browser/*` all list `services/browser/`;
+other wildcards are refused. There is no `--prefix` option.
+
+Every command refuses an option it does not have with
+`no such option` and exit code 2, before contacting the server: that is a
+typo, not a permission problem, so fix the command and retry. `phoenix
+<command> --help` shows its options; `--` ends options (for a path that
+starts with `-`).
 
 ### Delete a secret
 
@@ -120,10 +128,12 @@ Dry-run attestation check against the local policy file.
 ### Create an agent
 
 ```bash
-phoenix agent create <name> -t <token> --acl "namespace/*:read,write;other/*:read"
+phoenix agent create <name> -t <token> --acl "namespace/*:list,read_value,write;other/*:list"
 ```
 
 Creates a new agent with the specified ACL permissions (admin only).
+Actions: `list` (see names), `read_value` (read values), `write`, `delete`,
+`admin`. The old `read` shorthand was removed; write `list,read_value`.
 
 ### List agents
 
@@ -158,11 +168,14 @@ Query the audit log. Filter by count, agent, or time range.
 ### Generate a seal key pair
 
 ```bash
-phoenix keypair generate <agent-name> [-o /path/to/keys/]
+phoenix keypair generate <agent-name> [-o /path/to/<name>.seal.key] [--force]
 ```
 
-Writes `<name>.seal.key` (private key, mode `0600`) and prints the derived
-public key to stdout. Set `PHOENIX_SEAL_KEY` to the private key path to enable.
+Makes the key pair on this machine, writes the private key (mode `0600`,
+default `~/.config/phoenix/keys/<name>.seal.key`) and registers only the
+public key with the server, which never sees the private half. `--force`
+replaces an existing key. Set `PHOENIX_SEAL_KEY` to the private key path to
+enable.
 
 When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 `phoenix exec` transparently encrypt/decrypt values using NaCl box.
@@ -173,7 +186,7 @@ When sealed mode is active, `phoenix get`, `phoenix resolve`, and
   `phoenix set <path>` in their own terminal (hidden prompt), or use
   `phoenix import`, so values never appear in conversation history
 - Prefer `phoenix://` references in config files over hardcoded values
-- Recommend least-privilege ACL scopes per agent (e.g. `namespace/*:read` not `*:admin`)
+- Recommend least-privilege ACL scopes per agent (e.g. `namespace/*:list,read_value` not `*:admin`)
 - Use `phoenix verify --dry-run` to validate references without exposing values
 - Use `phoenix status` to review the security posture after setup
 - All secret access is logged — use `phoenix audit` to review
@@ -187,7 +200,7 @@ Typical flow for setting up a new secret with proper access control:
 phoenix set myapp/api-key -d "OpenAI API key"
 
 # 2. Create an agent with scoped access
-phoenix agent create deployer -t "$(openssl rand -hex 32)" --acl "myapp/*:read"
+phoenix agent create deployer -t "$(openssl rand -hex 32)" --acl "myapp/*:list,read_value"
 
 # 3. Verify the agent can access the secret
 phoenix policy test --agent deployer --ip 10.0.0.5 myapp/api-key

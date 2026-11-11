@@ -3,6 +3,8 @@ package acl
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -23,16 +25,16 @@ func testACL() *ACL {
 				Name:      "vector",
 				TokenHash: crypto.HashToken("vector-token"),
 				Permissions: []Permission{
-					{Path: "openclaw/*", Actions: []Action{ActionRead}},
-					{Path: "vector/*", Actions: []Action{ActionRead, ActionWrite}},
-					{Path: "infra/*", Actions: []Action{ActionRead}},
+					{Path: "openclaw/*", Actions: []Action{ActionList, ActionReadValue}},
+					{Path: "vector/*", Actions: []Action{ActionList, ActionReadValue, ActionWrite}},
+					{Path: "infra/*", Actions: []Action{ActionList, ActionReadValue}},
 				},
 			},
 			"openclaw": {
 				Name:      "openclaw",
 				TokenHash: crypto.HashToken("openclaw-token"),
 				Permissions: []Permission{
-					{Path: "openclaw/*", Actions: []Action{ActionRead}},
+					{Path: "openclaw/*", Actions: []Action{ActionList, ActionReadValue}},
 				},
 			},
 		},
@@ -73,7 +75,7 @@ func TestAuthorizeAdmin(t *testing.T) {
 	a := testACL()
 
 	// Admin has wildcard with admin action (covers all actions)
-	if err := a.Authorize("admin", "openclaw/api-key", ActionRead); err != nil {
+	if err := a.Authorize("admin", "openclaw/api-key", ActionReadValue); err != nil {
 		t.Fatalf("admin read openclaw: %v", err)
 	}
 	if err := a.Authorize("admin", "openclaw/api-key", ActionWrite); err != nil {
@@ -88,7 +90,7 @@ func TestAuthorizeVector(t *testing.T) {
 	a := testACL()
 
 	// Vector can read openclaw/*
-	if err := a.Authorize("vector", "openclaw/api-key", ActionRead); err != nil {
+	if err := a.Authorize("vector", "openclaw/api-key", ActionReadValue); err != nil {
 		t.Fatalf("vector read openclaw: %v", err)
 	}
 
@@ -103,7 +105,7 @@ func TestAuthorizeVector(t *testing.T) {
 	}
 
 	// Vector CANNOT read proxmox/*
-	if err := a.Authorize("vector", "proxmox/admin-token", ActionRead); err != ErrAccessDenied {
+	if err := a.Authorize("vector", "proxmox/admin-token", ActionReadValue); err != ErrAccessDenied {
 		t.Fatalf("vector should not read proxmox, got %v", err)
 	}
 }
@@ -112,12 +114,12 @@ func TestAuthorizeOpenClaw(t *testing.T) {
 	a := testACL()
 
 	// OpenClaw can read its own secrets
-	if err := a.Authorize("openclaw", "openclaw/api-key", ActionRead); err != nil {
+	if err := a.Authorize("openclaw", "openclaw/api-key", ActionReadValue); err != nil {
 		t.Fatalf("openclaw read own: %v", err)
 	}
 
 	// OpenClaw CANNOT read proxmox secrets
-	if err := a.Authorize("openclaw", "proxmox/admin-token", ActionRead); err != ErrAccessDenied {
+	if err := a.Authorize("openclaw", "proxmox/admin-token", ActionReadValue); err != ErrAccessDenied {
 		t.Fatalf("openclaw should not read proxmox, got %v", err)
 	}
 
@@ -155,10 +157,13 @@ func TestMatchPath(t *testing.T) {
 }
 
 func TestHasAction(t *testing.T) {
-	actions := []Action{ActionRead, ActionWrite}
+	actions := []Action{ActionReadValue, ActionWrite}
 
-	if !hasAction(actions, ActionRead) {
-		t.Error("should have read")
+	if !hasAction(actions, ActionReadValue) {
+		t.Error("should have read_value")
+	}
+	if hasAction(actions, ActionList) {
+		t.Error("read_value should not imply list")
 	}
 	if !hasAction(actions, ActionWrite) {
 		t.Error("should have write")
@@ -169,7 +174,7 @@ func TestHasAction(t *testing.T) {
 
 	// Admin action grants everything
 	adminActions := []Action{ActionAdmin}
-	if !hasAction(adminActions, ActionRead) {
+	if !hasAction(adminActions, ActionReadValue) {
 		t.Error("admin should cover read")
 	}
 	if !hasAction(adminActions, ActionDelete) {
@@ -181,7 +186,7 @@ func TestAddAndRemoveAgent(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
 
 	err := a.AddAgent("test", "test-token", []Permission{
-		{Path: "test/*", Actions: []Action{ActionRead}},
+		{Path: "test/*", Actions: []Action{ActionList, ActionReadValue}},
 	})
 	if err != nil {
 		t.Fatalf("AddAgent: %v", err)
@@ -212,11 +217,11 @@ func TestValidatePermissions(t *testing.T) {
 		perms   []Permission
 		wantErr bool
 	}{
-		{"valid", []Permission{{Path: "ns/*", Actions: []Action{ActionRead, ActionWrite}}}, false},
-		{"empty path", []Permission{{Path: "", Actions: []Action{ActionRead}}}, true},
+		{"valid", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue, ActionWrite}}}, false},
+		{"empty path", []Permission{{Path: "", Actions: []Action{ActionList, ActionReadValue}}}, true},
 		{"no actions", []Permission{{Path: "ns/*", Actions: []Action{}}}, true},
 		{"invalid action", []Permission{{Path: "ns/*", Actions: []Action{"rread"}}}, true},
-		{"mixed valid and invalid", []Permission{{Path: "ns/*", Actions: []Action{ActionRead, "bogus"}}}, true},
+		{"mixed valid and invalid", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue, "bogus"}}}, true},
 		{"nil perms", nil, false},
 	}
 	for _, tt := range tests {
@@ -257,7 +262,7 @@ func TestAddAgentDuplicate(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
 
 	err := a.AddAgent("agent", "token1", []Permission{
-		{Path: "ns1/*", Actions: []Action{ActionRead}},
+		{Path: "ns1/*", Actions: []Action{ActionList, ActionReadValue}},
 	})
 	if err != nil {
 		t.Fatalf("first AddAgent: %v", err)
@@ -320,7 +325,7 @@ func TestFilePersistence(t *testing.T) {
 
 	a1, _ := New(path)
 	a1.AddAgent("test", "token123", []Permission{
-		{Path: "ns/*", Actions: []Action{ActionRead}},
+		{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}},
 	})
 	a1.Save()
 
@@ -344,10 +349,10 @@ func TestRemoveAgentPersists(t *testing.T) {
 
 	a1, _ := New(path)
 	a1.AddAgent("ephemeral", "tok1", []Permission{
-		{Path: "ns/*", Actions: []Action{ActionRead}},
+		{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}},
 	})
 	a1.AddAgent("keeper", "tok2", []Permission{
-		{Path: "ns/*", Actions: []Action{ActionRead}},
+		{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}},
 	})
 
 	// Remove one agent
@@ -384,7 +389,7 @@ func TestAddAgentConcurrent(t *testing.T) {
 			name := fmt.Sprintf("agent-%d", i)
 			token := fmt.Sprintf("token-%d", i)
 			a.AddAgent(name, token, []Permission{
-				{Path: "ns/*", Actions: []Action{ActionRead}},
+				{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}},
 			})
 		}(i)
 	}
@@ -407,58 +412,21 @@ func TestAddAgentConcurrent(t *testing.T) {
 	}
 }
 
-func TestNormalizeActions(t *testing.T) {
-	// Legacy "read" expands to list + read_value
-	result, dep := NormalizeActions([]Action{ActionRead})
-	if !dep {
-		t.Fatal("expected deprecation=true for ActionRead")
+// The old "read" shorthand is refused by name, both in an ACL file (startup
+// fails, naming each agent and path) and through ValidatePermissions.
+func TestRemovedReadActionRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "acl.json")
+	data := `{"agents": {"old": {"name": "old", "token_hash": "x", "permissions": [{"path": "ns/*", "actions": ["read"]}]}}}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 actions, got %d: %v", len(result), result)
+	_, err := New(path)
+	if err == nil || !strings.Contains(err.Error(), `agent "old" path "ns/*"`) || !strings.Contains(err.Error(), "read_value") {
+		t.Fatalf("ACL file with read: %v", err)
 	}
-	if result[0] != ActionList || result[1] != ActionReadValue {
-		t.Fatalf("expected [list, read_value], got %v", result)
-	}
-
-	// New actions pass through unchanged
-	result2, dep2 := NormalizeActions([]Action{ActionList, ActionReadValue})
-	if dep2 {
-		t.Fatal("expected deprecation=false for new actions")
-	}
-	if len(result2) != 2 || result2[0] != ActionList || result2[1] != ActionReadValue {
-		t.Fatalf("expected unchanged [list, read_value], got %v", result2)
-	}
-
-	// Mixed: read + write
-	result3, dep3 := NormalizeActions([]Action{ActionRead, ActionWrite})
-	if !dep3 {
-		t.Fatal("expected deprecation=true")
-	}
-	if len(result3) != 3 {
-		t.Fatalf("expected 3 actions, got %d: %v", len(result3), result3)
-	}
-
-	// Deduplication: read + list should not produce double list
-	result4, _ := NormalizeActions([]Action{ActionRead, ActionList})
-	listCount := 0
-	for _, a := range result4 {
-		if a == ActionList {
-			listCount++
-		}
-	}
-	if listCount != 1 {
-		t.Fatalf("expected exactly 1 list action, got %d in %v", listCount, result4)
-	}
-}
-
-func TestHasActionLegacyRead(t *testing.T) {
-	actions := []Action{ActionRead}
-
-	if !hasAction(actions, ActionList) {
-		t.Error("legacy read should grant list")
-	}
-	if !hasAction(actions, ActionReadValue) {
-		t.Error("legacy read should grant read_value")
+	err = ValidatePermissions([]Permission{{Path: "ns/*", Actions: []Action{"read"}}})
+	if err == nil || !strings.Contains(err.Error(), "was removed") {
+		t.Fatalf("ValidatePermissions with read: %v", err)
 	}
 }
 
@@ -513,7 +481,7 @@ func TestAuthorizeLegacyReadBackcompat(t *testing.T) {
 				Name:      "legacy",
 				TokenHash: crypto.HashToken("legacy-token"),
 				Permissions: []Permission{
-					{Path: "test/*", Actions: []Action{ActionRead}},
+					{Path: "test/*", Actions: []Action{ActionList, ActionReadValue}},
 				},
 			},
 		},
@@ -541,7 +509,7 @@ func TestValidatePermissionsNewActions(t *testing.T) {
 
 func TestSetAgentSealKey(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
-	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}}})
 
 	// Valid 32-byte key in base64
 	validKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -569,7 +537,7 @@ func TestSetAgentSealKeyNotFound(t *testing.T) {
 
 func TestSetAgentSealKeyBadBase64(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
-	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}}})
 
 	if err := a.SetAgentSealKey("test", "not-valid-base64!!!"); err == nil {
 		t.Error("expected error for bad base64")
@@ -578,7 +546,7 @@ func TestSetAgentSealKeyBadBase64(t *testing.T) {
 
 func TestSetAgentSealKeyWrongSize(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
-	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}}})
 
 	// 16 bytes instead of 32
 	shortKey := "AAAAAAAAAAAAAAAAAAAAAA=="
@@ -589,7 +557,7 @@ func TestSetAgentSealKeyWrongSize(t *testing.T) {
 
 func TestGetAgentSealKeyNoKey(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
-	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}}})
 
 	got, err := a.GetAgentSealKey("test")
 	if err != nil {
@@ -614,7 +582,7 @@ func TestSealKeyPersistence(t *testing.T) {
 	path := dir + "/acl.json"
 
 	a1, _ := New(path)
-	a1.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+	a1.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}}})
 
 	validKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	if err := a1.SetAgentSealKey("test", validKey); err != nil {
@@ -662,7 +630,7 @@ func TestSealKeyBackwardCompat(t *testing.T) {
 
 func TestUpdateAgentPreservesSealKey(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
-	a.AddAgent("test", "tok1", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+	a.AddAgent("test", "tok1", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}}})
 
 	validKey := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	a.SetAgentSealKey("test", validKey)
@@ -683,7 +651,7 @@ func TestUpdateAgentPreservesSealKey(t *testing.T) {
 
 func TestSetAgentSealKeyOverwrite(t *testing.T) {
 	a := NewFromConfig(&ACLConfig{Agents: make(map[string]Agent)})
-	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionRead}}})
+	a.AddAgent("test", "tok", []Permission{{Path: "ns/*", Actions: []Action{ActionList, ActionReadValue}}})
 
 	key1 := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	key2 := "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="

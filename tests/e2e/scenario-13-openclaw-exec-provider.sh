@@ -4,8 +4,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 13 openclaw-exec-provider
 init_scenario 13
 start_server
-phoenix_admin set openclaw/one -v synthetic-openclaw-one >/dev/null
-phoenix_admin set openclaw/two -v synthetic-openclaw-two >/dev/null
+printf '%s' synthetic-openclaw-one | phoenix_admin set openclaw/one --value-stdin >/dev/null
+printf '%s' synthetic-openclaw-two | phoenix_admin set openclaw/two --value-stdin >/dev/null
 run_provider() { PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" openclaw-exec-provider; }
 out="$(printf '%s' '{"protocolVersion":1,"provider":"phoenix","ids":["openclaw/one","phoenix://openclaw/two"]}' | run_provider)"
 assert_eq "$(jq -r '.values["openclaw/one"]' <<<"$out")" synthetic-openclaw-one
@@ -19,6 +19,12 @@ if printf '%s' '{"protocolVersion":1,"provider":"phoenix","ids":[]}{}' | run_pro
 assert_contains "$(cat "$RUN_DIR/trailing.err")" 'trailing data'
 dupe="$(printf '%s' '{"protocolVersion":1,"provider":"phoenix","ids":["openclaw/one","openclaw/one"]}' | run_provider)"
 assert_eq "$(jq -r '.values["openclaw/one"]' <<<"$dupe")" synthetic-openclaw-one
-alias="$(printf '%s' '{"protocolVersion":1,"provider":"phoenix","ids":["openclaw/two"]}' | PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" resolve --stdin-json)"
-assert_eq "$(jq -r '.values["openclaw/two"]' <<<"$alias")" synthetic-openclaw-two
+# The old extra names were removed and point at the one that stays.
+for old in "resolve --stdin-json" "secret-provider openclaw"; do
+  rc=0
+  # shellcheck disable=SC2086
+  printf '%s' '{"protocolVersion":1,"provider":"phoenix","ids":["openclaw/two"]}' | PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" $old >"$RUN_DIR/alias.out" 2>&1 || rc=$?
+  [[ "$rc" -eq 1 ]] || die "phoenix $old did not fail (rc=$rc)"
+  assert_contains "$(cat "$RUN_DIR/alias.out")" "openclaw-exec-provider" "phoenix $old must name the command to use"
+done
 ok "Scenario 13 PASS"

@@ -192,32 +192,6 @@ func TestLoadInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestLoadLegacyRulesFormat(t *testing.T) {
-	cfg := `{
-		"rules": [
-			{
-				"path": "secure/*",
-				"require_sealed": true,
-				"allowed_ips": ["192.168.0.0/24"]
-			}
-		]
-	}`
-	e, err := Load([]byte(cfg))
-	if err != nil {
-		t.Fatalf("Load legacy format: %v", err)
-	}
-	rule, pattern := e.RuleFor("secure/db")
-	if rule == nil || pattern != "secure/*" {
-		t.Fatalf("expected secure/* match, got rule=%v pattern=%q", rule, pattern)
-	}
-	if !rule.RequireSealed {
-		t.Fatal("expected require_sealed=true")
-	}
-	if len(rule.AllowedIPs) != 1 || rule.AllowedIPs[0] != "192.168.0.0/24" {
-		t.Fatalf("expected allowed IP copied from allowed_ips, got %v", rule.AllowedIPs)
-	}
-}
-
 func TestLoadRejectsUnknownRuleField(t *testing.T) {
 	// Typo: "allowed_ips" is not valid inside canonical "attestation" format.
 	cfg := `{
@@ -382,27 +356,8 @@ func TestNoNewFieldsNoChange(t *testing.T) {
 	}
 }
 
-func TestRequireSealedLegacyFormat(t *testing.T) {
-	policyJSON := `{"rules":[{"path":"secure/*","require_sealed":true,"allow_unseal":true}]}`
-	e, err := Load([]byte(policyJSON))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	rule, _ := e.RuleFor("secure/key")
-	if rule == nil {
-		t.Fatal("expected rule")
-	}
-	if !rule.RequireSealed {
-		t.Error("expected RequireSealed=true from legacy format")
-	}
-	if !rule.AllowUnseal {
-		t.Error("expected AllowUnseal=true from legacy format")
-	}
-}
-
 // A policy file that still uses removed rule fields is refused with one line
-// per field (both file formats), not loaded with the rule quietly ignored.
+// per field, not loaded with the rule quietly ignored.
 func TestLoadRefusesRemovedFields(t *testing.T) {
 	data := `{"attestation": {
 		"a/*": {"source_ip": ["10.0.0.1"], "require_mtls": true, "allowed_tools": ["x"]},
@@ -418,9 +373,10 @@ func TestLoadRefusesRemovedFields(t *testing.T) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}
 	}
-	if _, err := Load([]byte(`{"rules": [{"path": "x/*", "require_nonce": true}]}`)); err == nil ||
-		!strings.Contains(err.Error(), "rules[0].require_nonce: removed") {
-		t.Errorf("legacy format: %v", err)
+	// The old "rules" list format is refused as a whole, with the move to make.
+	if _, err := Load([]byte(`{"rules": [{"path": "x/*", "allowed_ips": ["10.0.0.1"]}]}`)); err == nil ||
+		!strings.Contains(err.Error(), "rules: removed") || !strings.Contains(err.Error(), "source_ip") {
+		t.Errorf("old rules format: %v", err)
 	}
 	for _, f := range removedRuleFields {
 		if f.Why == "" {

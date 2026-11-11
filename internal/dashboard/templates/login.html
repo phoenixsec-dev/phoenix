@@ -15,12 +15,12 @@
         {{if .Blocked}}
         <p class="login-hint">Another dashboard session is active. Log out from that device first, or use Force Login to take over.</p>
         <form method="POST" action="/dashboard/force-login">
-            <input type="password" name="credential" placeholder="Password or PIN" class="input" autofocus required>
+            <input type="password" name="credential" placeholder="Password" class="input" autofocus required>
             <button type="submit" class="btn btn-primary">Force Login</button>
         </form>
         {{else}}
         <form method="POST" action="/dashboard/login">
-            <input type="password" name="credential" placeholder="Password or PIN" class="input" autofocus required>
+            <input type="password" name="credential" placeholder="Password" class="input" autofocus required>
             <button type="submit" class="btn btn-primary">Sign In</button>
         </form>
         {{end}}

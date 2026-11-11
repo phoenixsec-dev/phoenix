@@ -136,8 +136,7 @@ type Handler struct {
 	deps            Deps
 	tmpls           map[string]*template.Template
 	cookieKey       []byte // 32 bytes, HMAC signing
-	passwordH       []byte // bcrypt hash (nil if PIN mode)
-	pin             string // raw PIN (empty if password mode)
+	passwordH       []byte // bcrypt hash of the dashboard password
 	sessionTTL      time.Duration
 	allowMultiLogin bool
 	loginRL         *loginRateLimiter
@@ -178,11 +177,8 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		}
 	}
 
-	// Set up auth: password hash (bcrypt) or PIN
 	if cfg.PasswordHash != "" {
 		h.passwordH = []byte(cfg.PasswordHash)
-	} else if cfg.PIN != "" {
-		h.pin = cfg.PIN
 	}
 
 	// Parse templates: each page gets its own template set so that
@@ -372,15 +368,12 @@ func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, c
 	http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
 }
 
-// checkCredential verifies the password hash or PIN.
+// checkCredential verifies the dashboard password against its bcrypt hash.
 func (h *Handler) checkCredential(credential string) bool {
-	if h.passwordH != nil {
-		return bcrypt.CompareHashAndPassword(h.passwordH, []byte(credential)) == nil
+	if h.passwordH == nil {
+		return false
 	}
-	if h.pin != "" {
-		return len(credential) > 0 && hmac.Equal([]byte(h.pin), []byte(credential))
-	}
-	return false
+	return bcrypt.CompareHashAndPassword(h.passwordH, []byte(credential)) == nil
 }
 
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {

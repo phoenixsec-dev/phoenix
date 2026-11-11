@@ -4,10 +4,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 20 hermes-audit-metadata
 init_scenario 20
 start_server
-phoenix_admin set hermesmeta/allowed -v synthetic-hermes-audit >/dev/null
-phoenix_admin set restricted/key -v synthetic-restricted >/dev/null
-phoenix_admin set tooled/key -v synthetic-tooled >/dev/null
-phoenix_admin agent create hermes-reader -t synthetic-hermes-reader --acl 'hermesmeta/*:read;tooled/*:read' >/dev/null
+printf '%s' synthetic-hermes-audit | phoenix_admin set hermesmeta/allowed --value-stdin >/dev/null
+printf '%s' synthetic-restricted | phoenix_admin set restricted/key --value-stdin >/dev/null
+printf '%s' synthetic-tooled | phoenix_admin set tooled/key --value-stdin >/dev/null
+phoenix_admin agent create hermes-reader -t synthetic-hermes-reader --acl 'hermesmeta/*:list,read_value;tooled/*:list,read_value' >/dev/null
 long="$(python3 -c 'print("x"*300)')"; formatted=$'kit\u202Emain'; sentinel=synthetic-hermes-key-must-not-log
 
 # All five Hermes headers, plus unlisted and credential-shaped headers that must be ignored.

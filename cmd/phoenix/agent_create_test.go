@@ -41,10 +41,11 @@ func TestCmdAgentCreateMalformedACL(t *testing.T) {
 		errStr string
 	}{
 		{"no colon", "nocolon", "malformed ACL rule"},
-		{"empty path", ":read", "malformed ACL rule"},
+		{"empty path", ":list", "malformed ACL rule"},
 		{"empty actions", "ns/*:", "malformed ACL rule"},
 		{"invalid action", "ns/*:rread", "invalid action"},
-		{"mixed invalid", "ns/*:read,bogus", "invalid action"},
+		{"mixed invalid", "ns/*:list,bogus", "invalid action"},
+		{"removed read", "ns/*:read", `action "read" was removed`},
 	}
 
 	for _, tt := range tests {
@@ -65,12 +66,12 @@ func TestCmdAgentCreateValidACLTrimsSpaces(t *testing.T) {
 	token = "test-token"
 	// Valid ACL with spaces — should parse without ACL errors.
 	// Will fail at API request (no server), not at parse time.
-	err := cmdAgentCreate([]string{"agent", "-t", "tok", "--acl", " ns/* : read , write "})
+	err := cmdAgentCreate([]string{"agent", "-t", "tok", "--acl", " ns/* : list , read_value "})
 	if err == nil {
 		t.Fatal("expected error (no server), not nil")
 	}
 	// Should NOT be an ACL parse error
-	if strings.Contains(err.Error(), "malformed ACL") || strings.Contains(err.Error(), "invalid action") {
+	if strings.Contains(err.Error(), "malformed ACL") || strings.Contains(err.Error(), "invalid action") || strings.Contains(err.Error(), "was removed") {
 		t.Fatalf("should not be an ACL parse error: %v", err)
 	}
 }
@@ -79,11 +80,11 @@ func TestCmdAgentCreateTrailingSemicolon(t *testing.T) {
 	t.Setenv("PHOENIX_TOKEN", "test-token")
 	token = "test-token"
 	// Trailing semicolons should be allowed
-	err := cmdAgentCreate([]string{"agent", "-t", "tok", "--acl", "ns/*:read;"})
+	err := cmdAgentCreate([]string{"agent", "-t", "tok", "--acl", "ns/*:list;"})
 	if err == nil {
 		t.Fatal("expected error (no server)")
 	}
-	if strings.Contains(err.Error(), "malformed ACL") {
+	if strings.Contains(err.Error(), "malformed ACL") || strings.Contains(err.Error(), "was removed") {
 		t.Fatalf("trailing semicolon should be allowed: %v", err)
 	}
 }

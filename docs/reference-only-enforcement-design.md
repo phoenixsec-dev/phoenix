@@ -6,7 +6,7 @@ This feature is not yet implemented. See [Roadmap](roadmap.md) for timeline.
 ## Problem
 
 Today, Phoenix supports reference-first workflows, but does not enforce them globally.
-Any identity with `read` permission can use:
+Any identity with `read_value` permission can use:
 
 - `GET /v1/secrets/{path}` (`phoenix get`)
 - `POST /v1/resolve` (`phoenix resolve`)
@@ -82,7 +82,7 @@ Introduce distinct actions (for example):
 - `read_value` (raw secret reads)
 - `resolve_ref` (reference resolution)
 
-This avoids overloading current `read` permission.
+This avoids overloading the current `read_value` permission.
 
 ### Phase 3: Enforced broker pattern (future)
 

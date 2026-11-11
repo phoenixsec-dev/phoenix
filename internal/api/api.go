@@ -708,6 +708,15 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// A "*" in a single-secret read is someone trying to list a folder.
+	// Say so before scope, ACL and attestation, so it never reads as a
+	// permission problem; it is decided from the path alone, so it reveals
+	// nothing about which secrets exist.
+	if path != "" && !strings.HasSuffix(path, "/") && strings.Contains(path, "*") {
+		jsonError(w, "invalid secret path: wildcards are not secret names; to list a folder, end the path with /", http.StatusBadRequest)
+		return
+	}
+
 	// Session scope enforcement (before ACL)
 	if path != "" && !strings.HasSuffix(path, "/") {
 		if !s.checkSessionScope(w, r, info, path, ip) {
@@ -826,6 +835,13 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	path := secretPath(r)
 	ip := clientIP(r)
+
+	// Reads treat "*" as a listing mistake (handleGetSecret), so a secret
+	// named with one could be stored but never read back. Refuse it here.
+	if strings.Contains(path, "*") {
+		jsonError(w, "invalid secret path: \"*\" is not allowed in secret names (it is read as a wildcard)", http.StatusBadRequest)
+		return
+	}
 
 	// write is never grantable, so this is the session + ACL check only.
 	if reason := s.dataAccess(info, path, "write", acl.ActionWrite, ip).Reason; reason != "" {
@@ -1485,11 +1501,17 @@ func (s *Server) validateSealHeader(r *http.Request, info *authInfo) (*[32]byte,
 	return pubKey, nil
 }
 
-// generateKeyPairRequest is the JSON body for keypair generation.
+// generateKeyPairRequest is the JSON body for POST /v1/keypair. The client
+// makes the key pair and sends only the public half; the server never sees
+// the private key.
 type generateKeyPairRequest struct {
-	AgentName string `json:"agent_name"`
+	AgentName     string `json:"agent_name"`
+	SealPublicKey string `json:"seal_public_key"`
 }
 
+// handleGenerateKeyPair registers (or with ?force=true replaces) an agent's
+// seal public key. It used to generate the pair and return the private key;
+// a request without seal_public_key (an older CLI) gets a 400 saying so.
 func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 	agentName, err := s.authenticate(r)
 	if err != nil {
@@ -1513,6 +1535,15 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "agent_name is required", http.StatusBadRequest)
 		return
 	}
+	if req.SealPublicKey == "" {
+		jsonError(w, "seal_public_key is required: the server no longer generates key pairs (it must never see the private key); update the phoenix CLI, which makes the pair locally", http.StatusBadRequest)
+		return
+	}
+	pubKey, err := crypto.DecodeSealKey(req.SealPublicKey)
+	if err != nil {
+		jsonError(w, "invalid seal_public_key: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Verify agent exists
 	_, err = s.acl.GetAgent(req.AgentName)
@@ -1529,16 +1560,7 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kp, err := crypto.GenerateSealKeyPair()
-	if err != nil {
-		log.Printf("error generating seal keypair: %v", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	pubEncoded := crypto.EncodeSealKey(&kp.PublicKey)
-	privEncoded := crypto.EncodeSealKey(&kp.PrivateKey)
-
+	pubEncoded := crypto.EncodeSealKey(pubKey)
 	if err := s.acl.SetAgentSealKey(req.AgentName, pubEncoded); err != nil {
 		log.Printf("error storing seal key for %q: %v", req.AgentName, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1554,9 +1576,8 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]string{
-		"agent_name":       req.AgentName,
-		"seal_public_key":  pubEncoded,
-		"seal_private_key": privEncoded,
+		"agent_name":      req.AgentName,
+		"seal_public_key": pubEncoded,
 	})
 }
 
@@ -1659,18 +1680,6 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check role attestation requirements
-	if len(role.Attestation) > 0 {
-		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
-			// The failed requirement and the role's list go to the audit
-			// log only, so the caller does not learn the role's policy.
-			writeSessionAttestationFailed(w)
-			s.logAudit(s.audit.LogDeniedWithMetadata(info.Agent, "session.mint", req.Role, ip, "attestation_failed",
-				denialAuditMetadata(r, fmt.Sprintf("%s; role %q requires attestation: %v", reason, req.Role, role.Attestation))))
-			return
-		}
-	}
-
 	// Validate seal key if required
 	var sealPubKey []byte
 	if role.RequireSealKey {
@@ -1771,18 +1780,6 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Re-check role attestation requirements against the CURRENT request
-	// (for example, a source_ip role renewed from a non-loopback address).
-	if len(role.Attestation) > 0 {
-		if reason := s.checkRoleAttestation(role.Attestation, info, ip); reason != "" {
-			writeSessionAttestationFailed(w)
-			s.logAudit(s.audit.LogSessionDeniedWithMetadata(info.Agent, "session.renew", info.SessionRole, ip, "attestation_failed", info.SessionID,
-				denialAuditMetadata(r, fmt.Sprintf("%s; role %q requires attestation: %v", reason, info.SessionRole, role.Attestation))))
-			return
-		}
-
-	}
-
 	ttl := s.sessionTTL(role.MaxTTL)
 
 	tokenStr, renewedSess, err := s.sessions.Renew(info.SessionID, ttl)
@@ -1815,19 +1812,6 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 		"expires_at":    renewedSess.ExpiresAt.Format(time.RFC3339),
 		"renewed":       true,
 	})
-}
-
-// checkRoleAttestation checks a role's attestation list against the request.
-// "source_ip" means the caller must be on loopback; "require_sealed" is
-// enforced by the role's seal key binding, not here. It returns a non-empty
-// reason when a check fails.
-func (s *Server) checkRoleAttestation(attestation []string, info *authInfo, ip string) string {
-	for _, req := range attestation {
-		if req == "source_ip" && !info.IsLocal {
-			return "role requires local (loopback) access"
-		}
-	}
-	return ""
 }
 
 // bootstrapMethod returns the primary auth method string from authInfo.

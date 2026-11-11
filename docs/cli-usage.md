@@ -10,12 +10,21 @@ phoenix set myapp/api-key -d "Stripe API key"
 # Read a secret
 phoenix get myapp/db-password
 
-# List secrets
+# List secrets in a folder (myapp, myapp/ and myapp/* all mean myapp/)
 phoenix list myapp/
 
 # Delete a secret
 phoenix delete myapp/old-key
 ```
+
+Every command checks its options before contacting the server. An option it
+does not have (`phoenix list --prefix x/`) prints `no such option`, the usage
+line, and exits 2; that is a typo, never a permission problem. `phoenix
+<command> --help` prints the usage. A value after an option that takes one is
+a value even if it starts with `-`, and `--` ends the options, so a path that
+starts with `-` still works: `phoenix get -- -odd/key`. Reading a single
+secret whose path contains `*` answers 400 "wildcards are not secret names; to
+list a folder, end the path with /".
 
 ## Reference resolution
 
@@ -33,10 +42,7 @@ phoenix resolve phoenix://myapp/db-password phoenix://myapp/api-key
 SecretRefs, use the stdin/stdout provider command instead:
 
 ```bash
-phoenix resolve --stdin-json
-# aliases:
 phoenix openclaw-exec-provider
-phoenix secret-provider openclaw
 ```
 
 See [Integrations](integrations.md#openclaw) for the OpenClaw config shape.
@@ -60,7 +66,6 @@ example `PHOENIX_TOKEN`, `PHOENIX_MCP_TOKEN`, `PHOENIX_MASTER_PASSPHRASE`,
 Additional exec flags:
 - `--timeout 5s`
 - `--mask-env`
-- `--output-env <path>`
 - `--redact-output`: exec stays as the parent and replaces every resolved
   value in the command's stdout/stderr with `[REDACTED:<NAME>]`; the exit code
   is passed through. A guard against accidental echo, not a hostile command.
@@ -140,8 +145,9 @@ some-command-that-prints-a-token | phoenix set myapp/api-key --value-stdin
 phoenix set ssh/deploy-key --value-stdin < deploy_key.pem
 ```
 
-Avoid `-v <value>` and `echo "secret" | ...`: both put the secret in your shell
-history, and `-v` also shows it in process listings.
+Avoid `echo "secret" | ...`: it puts the secret in your shell history. There
+is no `-v <value>` flag; it was removed for the same reason (and it showed the
+value in process listings).
 
 ## Audit log
 
@@ -217,12 +223,12 @@ See [Session Identity](session-identity.md) for full details.
 # Create an agent with scoped ACL (admin only)
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "myapp/**:read;staging/**:read,write"
+  --acl "myapp/**:list,read_value;staging/**:list,read_value,write"
 
 # Update an existing agent (re-create with --force)
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
-  --acl "myapp/**:read,write" --force
+  --acl "myapp/**:list,read_value,write" --force
 
 # List all agents (admin only)
 phoenix agent list
@@ -240,9 +246,13 @@ recursively. See [ACL path patterns](authentication.md#acl-path-patterns).
 # Generate a seal key pair for an agent
 phoenix keypair generate myagent -o /etc/phoenix/keys/myagent.seal.key
 
-# The private key is written to <name>.seal.key
+# The private key is written to -o (default ~/.config/phoenix/keys/<name>.seal.key)
 # The public key is printed to stdout
 ```
+
+The key pair is made on this machine. Only the public key is sent to the
+server (`POST /v1/keypair`); the private key is written with mode 0600 and
+never leaves the client. `--force` replaces a key already registered.
 
 Set `PHOENIX_SEAL_KEY` to the private key path to enable sealed mode.
 See [Sealed Responses](sealed-responses.md).
@@ -307,7 +317,11 @@ These print why they went and exit 1: `phoenix token mint`, `phoenix cert
 ...`, `phoenix init` (use `phoenix-server --init <dir>`), `phoenix agent-sock
 ...`, `phoenix resolve --signed`,
 `phoenix mcp-server --http` (stdio MCP stays), `phoenix policy test --time`,
-and `phoenix approve|deny apr_...`. See
+`phoenix approve|deny apr_...`, `phoenix set -v/--value` (use the hidden
+prompt or `--value-stdin`), `phoenix exec --output-env` (run the command
+under `phoenix exec` instead), and the OpenClaw provider aliases
+`phoenix resolve --stdin-json` / `phoenix secret-provider openclaw` (use
+`phoenix openclaw-exec-provider`). See
 [removed settings](configuration.md#checking-a-config-and-removed-settings).
 
 ## Related docs

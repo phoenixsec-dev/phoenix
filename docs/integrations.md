@@ -54,9 +54,6 @@ Phoenix provides an OpenClaw-compatible exec provider command:
 
 ```bash
 phoenix openclaw-exec-provider
-# equivalent aliases:
-phoenix secret-provider openclaw
-phoenix resolve --stdin-json
 ```
 
 This command reads OpenClaw's exec-provider JSON request from stdin:

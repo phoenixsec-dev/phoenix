@@ -65,21 +65,6 @@ type policyFile struct {
 	Attestation map[string]Rule `json:"attestation"`
 }
 
-// legacyPolicyFile preserves compatibility with early list-style policy files:
-// {"rules":[{"path":"secure/*","allowed_ips":["10.0.0.0/24"]}]}
-type legacyPolicyFile struct {
-	Rules []legacyRule `json:"rules"`
-}
-
-type legacyRule struct {
-	Path string `json:"path"`
-
-	AllowedIPs    []string `json:"allowed_ips,omitempty"` // legacy name
-	SourceIP      []string `json:"source_ip,omitempty"`   // canonical name
-	RequireSealed bool     `json:"require_sealed,omitempty"`
-	AllowUnseal   bool     `json:"allow_unseal,omitempty"`
-}
-
 // NewEngine creates a policy engine with no rules (all requests pass).
 func NewEngine() *Engine {
 	return &Engine{rules: make(map[string]Rule)}
@@ -105,7 +90,7 @@ func Load(data []byte) (*Engine, error) {
 		return nil, err
 	}
 
-	// Parse top-level once so we can support both canonical and legacy formats.
+	// Parse top-level once to tell "{}" from a file with a policy in it.
 	var top map[string]json.RawMessage
 	if err := strictUnmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("parsing policy JSON: %w", err)
@@ -122,40 +107,12 @@ func Load(data []byte) (*Engine, error) {
 		return &Engine{rules: pf.Attestation}, nil
 	}
 
-	if _, ok := top["rules"]; ok {
-		var legacy legacyPolicyFile
-		if err := strictUnmarshal(data, &legacy); err != nil {
-			return nil, fmt.Errorf("parsing policy JSON: %w", err)
-		}
-		rules := make(map[string]Rule, len(legacy.Rules))
-		for i, r := range legacy.Rules {
-			pattern := strings.TrimSpace(r.Path)
-			if pattern == "" {
-				return nil, fmt.Errorf("parsing policy JSON: rules[%d].path is required", i)
-			}
-			if _, exists := rules[pattern]; exists {
-				return nil, fmt.Errorf("parsing policy JSON: duplicate rule path %q", pattern)
-			}
-
-			ips := r.SourceIP
-			if len(ips) == 0 {
-				ips = r.AllowedIPs
-			}
-			rules[pattern] = Rule{
-				AllowedIPs:    ips,
-				RequireSealed: r.RequireSealed,
-				AllowUnseal:   r.AllowUnseal,
-			}
-		}
-		return &Engine{rules: rules}, nil
-	}
-
 	// "{}" is valid and means no rules.
 	if len(top) == 0 {
 		return NewEngine(), nil
 	}
 
-	return nil, fmt.Errorf(`parsing policy JSON: expected top-level "attestation" object (or legacy "rules" array)`)
+	return nil, fmt.Errorf(`parsing policy JSON: expected top-level "attestation" object`)
 }
 
 func strictUnmarshal(data []byte, v interface{}) error {

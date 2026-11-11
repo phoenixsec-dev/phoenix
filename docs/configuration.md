@@ -72,9 +72,9 @@ See [Session Identity](session-identity.md) for the full guide.
 ```
 
 Each role defines: `namespaces` (required), `bootstrap_trust` (required:
-`bearer` and/or `local`), `actions` (default: list + read_value), and
-optional `require_seal_key`, `max_ttl` and `attestation` (`source_ip` =
-loopback callers only, `require_sealed`).
+`bearer` and/or `local`; `["local"]` alone means loopback callers only),
+`actions` (default: list + read_value), and optional `require_seal_key`
+(sealed responses only) and `max_ttl`.
 
 A role does not raise an agent above its own ACL. To give an agent temporary
 access to more, approve an [access request](access-requests.md).
@@ -144,11 +144,11 @@ Then add it to config:
 |-------|------|-------------|
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
-| `dashboard.pin` | `string` | Alternative: login PIN (constant-time compare, loopback only) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
 | `dashboard.allow_multi_login` | `bool` | Allow concurrent dashboard sessions (default `false`) |
 
-Either `password_hash` or `pin` is required when the dashboard is enabled.
+`password_hash` is required when the dashboard is enabled (`dashboard.pin`
+was removed; a config that still sets it will not start).
 The password is stored as a bcrypt hash — the plaintext never appears in config.
 Validation rejects non-bcrypt values in `password_hash` to prevent accidental
 plaintext storage.
@@ -409,7 +409,11 @@ Removed in this release (see `RELEASE_NOTES.md` for why each went):
 | config | `attestation.local_agent` | nothing yet; the planned local Phoenix service replaces it |
 | config | `onepassword.enabled` | `store.backend: "1password"` (the connector stays) |
 | role | `step_up`, `step_up_ttl`, `elevates_acl`, `allowed_agents` | [access requests](access-requests.md) |
-| role | `bootstrap_trust` `"mtls"` / `"token"`; `attestation` `"require_mtls"` / `"cert_fingerprint"` | `"bearer"` / `"local"`; attestation `"source_ip"` (loopback only), or `require_seal_key: true` |
+| config | `dashboard.pin` | `dashboard.password_hash` (`phoenix-server --hash-password`) |
+| role | `bootstrap_trust` `"mtls"` / `"token"` | `"bearer"` / `"local"` |
+| role | `attestation` list (`"source_ip"`, `"require_sealed"`, `"require_mtls"`, `"cert_fingerprint"`) | `bootstrap_trust: ["local"]` for loopback only; `require_seal_key: true` for sealed |
+| policy | `rules` list with `allowed_ips` (old format) | `{"attestation": {"<path>": {"source_ip": [...]}}}` |
+| ACL | action `read` | `list,read_value` (or just the one you need) |
 | policy | `require_mtls`, `cert_fingerprint`, `deny_bearer`, `process`, `require_fresh_attestation`, `credential_ttl`, `allowed_tools`, `deny_tools`, `require_nonce`, `nonce_max_age`, `require_signed`, `time_window`, `time_zone` | `source_ip`, `require_sealed` |
 
 Removed API routes (`/v1/token/mint`, `/v1/challenge`, `/v1/proxy`,
@@ -417,7 +421,9 @@ Removed API routes (`/v1/token/mint`, `/v1/challenge`, `/v1/proxy`,
 reason. Removed CLI commands and flags (`phoenix token`, `phoenix cert`,
 `phoenix init`, `phoenix agent-sock`, `phoenix resolve --signed`,
 `phoenix mcp-server --http`, `phoenix policy test --time`, `phoenix approve
-apr_...`) print a short explanation and exit 1.
+apr_...`, `phoenix set -v`, `phoenix exec --output-env`, `phoenix
+secret-provider openclaw`, `phoenix resolve --stdin-json`) and
+`phoenix-server --init --passphrase` print a short explanation and exit 1.
 
 ## Related docs
 

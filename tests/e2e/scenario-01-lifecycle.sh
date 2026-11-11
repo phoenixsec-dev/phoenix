@@ -4,7 +4,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 01 lifecycle
 init_scenario 01
 start_server
-phoenix_admin set lifecycle/one -v synthetic-one >/dev/null
+printf '%s' synthetic-one | phoenix_admin set lifecycle/one --value-stdin >/dev/null
 printf 'synthetic-two' | phoenix_admin set lifecycle/two --value-stdin >/dev/null
 assert_eq "$(phoenix_admin get lifecycle/one)" synthetic-one "get"
 assert_contains "$(phoenix_admin list lifecycle/)" lifecycle/two "list"

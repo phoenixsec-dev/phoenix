@@ -53,16 +53,16 @@ Enable sessions in your server config:
 |-------|------|-------------|
 | `namespaces` | `[]string` | Required. Glob patterns for accessible paths (`dev/*`, `prod/**`) |
 | `actions` | `[]string` | Allowed actions. Default: `["list", "read_value"]`. Options: `list`, `read_value`, `write`, `delete`, `admin` |
-| `bootstrap_trust` | `[]string` | Required. Auth methods that can mint this role: `bearer`, `local` |
-| `require_seal_key` | `bool` | Require seal public key at mint time |
+| `bootstrap_trust` | `[]string` | Required. Auth methods that can mint this role: `bearer`, `local`. `["local"]` alone means loopback callers only (checked at mint and renewal) |
+| `require_seal_key` | `bool` | Require seal public key at mint time, so every response is sealed |
 | `max_ttl` | `string` | Per-role TTL override (e.g. `"30m"`) |
-| `attestation` | `[]string` | `source_ip` (the caller must be on loopback, checked at mint and renewal) and/or `require_sealed` (needs `require_seal_key: true`; the seal key binding is what enforces it) |
 
 The role fields `step_up`, `step_up_ttl`, `elevates_acl` and `allowed_agents`
 were removed along with step-up approval; a config that still has one stops
 at startup with a line naming it. Temporary human-approved access is now
 done with [access requests](access-requests.md). Bootstrap methods `mtls` and
-`token` were removed too.
+`token` were removed too, and so was the role `attestation` list (use
+`bootstrap_trust: ["local"]` or `require_seal_key: true`).
 
 ## Agent bootstrap
 
@@ -86,14 +86,13 @@ auto-renews before expiry.
 POST /v1/session/mint  {"role": "dev"}
 ```
 
-The server checks role existence, bootstrap trust, attestation and the seal
-key.
+The server checks role existence, bootstrap trust and the seal key.
 Returns a session token (`phxs_...` prefix) with role scope and expiry.
 
 ### Renewal
 
 Sessions auto-renew when nearing expiry. On renewal, the server rechecks
-bootstrap trust and attestation. If anything changed (role config updated),
+bootstrap trust. If anything changed (role config updated),
 renewal fails and the agent must re-mint.
 
 ### Revocation
@@ -200,7 +199,6 @@ for the full list and client rules):
 | `ACTION_DENIED` | Action not permitted by the role |
 | `BOOTSTRAP_FAILED` | Auth method not in role's bootstrap_trust |
 | `ROLE_NOT_FOUND` | Requested role does not exist |
-| `ATTESTATION_FAILED` | Missing or insufficient attestation |
 | `SEAL_KEY_REQUIRED` | Role requires a seal key but none was provided |
 | `SEAL_KEY_MISMATCH` | Seal key doesn't match session binding |
 
@@ -211,7 +209,7 @@ All session lifecycle events are logged to the audit trail:
 | Action | Status | When |
 |--------|--------|------|
 | `session.mint.approved` | allowed | Session minted successfully |
-| `session.mint` | denied | Mint failed (role_not_found, bootstrap_failed, attestation_failed) |
+| `session.mint` | denied | Mint failed (role_not_found, bootstrap_failed) |
 | `session.renewed` | allowed | Session renewed |
 | `session.renew` | denied | Renewal failed (for example bootstrap_failed) |
 | `session.revoke` | allowed | Session revoked |

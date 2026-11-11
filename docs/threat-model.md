@@ -142,7 +142,7 @@ Approval is the highest-risk action — it grants an agent temporary use of secr
 
 The dashboard uses a **separate auth surface** from the API:
 
-- Single shared password (bcrypt hash in config) or PIN (constant-time compare)
+- Single shared password (bcrypt hash in config)
 - Cookie-based sessions with HMAC-SHA256 signed payloads and per-session nonce
 - Single active session by default (configurable via `allow_multi_login`)
 - Force Login as escape hatch for orphaned sessions (re-authenticates, invalidates prior)
@@ -160,13 +160,13 @@ one credential and are distinguished only by source IP in the audit trail
 
 | Threat | Mitigation | Residual risk |
 |--------|-----------|---------------|
-| Brute-force login | Rate limiting with exponential backoff, audit logging of failures | PIN mode has smaller keyspace; use password for non-loopback deployments. Per-IP rate limiting assumes LAN-envelope addresses; it is not sized for internet-scale credential stuffing (out of scope) |
+| Brute-force login | Rate limiting with exponential backoff, audit logging of failures | A weak password is still guessable; pick a long one. Per-IP rate limiting assumes LAN-envelope addresses; it is not sized for internet-scale credential stuffing (out of scope) |
 | Session cookie theft (network) | `Secure` flag set when HTTPS detected; `HttpOnly` prevents JS access; `SameSite=Strict` prevents CSRF via cross-origin requests | Plain HTTP on a shared network exposes the cookie — **do not do this**. The server warns loudly at startup when the dashboard is enabled on a non-loopback plain HTTP bind |
 | Session cookie theft (XSS) | `HttpOnly` flag; no user-supplied content rendered unescaped; embedded static assets (no CDN/external JS) | XSS in Go `html/template` is unlikely but not impossible if templates are modified |
 | CSRF | Token-per-session in signed cookie, validated on all POST actions | Relies on `SameSite=Strict` + token check |
 | Unauthorized approval | Runs the same approve code as the API, so every API check (request still pending, paths still requestable, sealed-delivery rules) applies | A compromised dashboard session can approve any pending request |
-| Shared credential | All operators share one password/PIN; no per-user identity | Forensic distinction limited to source IP (`dashboard@<ip>`) |
-| Config file credential exposure | Password stored as bcrypt hash in config (`password_hash`); plaintext rejected by validation; agent reading config gets only the hash | PIN mode stores plaintext PIN; use `password_hash` for non-loopback deployments |
+| Shared credential | All operators share one password; no per-user identity | Forensic distinction limited to source IP (`dashboard@<ip>`) |
+| Config file credential exposure | Password stored as bcrypt hash in config (`password_hash`); plaintext rejected by validation; agent reading config gets only the hash | An agent that can read the config can run an offline guessing attack on the hash; keep the password long |
 
 ### Deployment requirements
 
@@ -272,7 +272,7 @@ For the full sealed responses design, wire format, policy controls
 - Use session roles with short `max_ttl` in higher-risk deployments.
 - Store data/key/audit files on restricted paths with strict permissions.
 - Monitor audit logs for denied access bursts and unusual path access.
-- If the dashboard is enabled: use HTTPS, use a strong password (not PIN),
+- If the dashboard is enabled: use HTTPS, use a strong password,
   monitor for `dashboard.login` denied events in the audit trail, and
   restrict network access to the server to trusted hosts.
 - Disable the dashboard when it is not needed.
