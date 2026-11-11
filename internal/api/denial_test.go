@@ -203,19 +203,6 @@ func TestSessionDenialCarriesNextStep(t *testing.T) {
 	}
 }
 
-// policyTerms are role attestation names that must not reach a session
-// mint/renew caller.
-var policyTerms = []string{"require_mtls", "source_ip", "cert_fingerprint", "mTLS", "fingerprint", "loopback"}
-
-func assertNoPolicyTerms(t *testing.T, body string) {
-	t.Helper()
-	for _, term := range policyTerms {
-		if strings.Contains(body, term) {
-			t.Fatalf("response leaks policy term %q: %s", term, body)
-		}
-	}
-}
-
 func TestAuditDeniedDetailIsCapped(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 	huge := strings.Repeat("é", 16*1024) // 32 KiB, multi-byte

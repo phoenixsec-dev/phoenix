@@ -1219,10 +1219,7 @@ func cmdResolve(args []string) error {
 		return err
 	}
 
-	var refs []string
-	for _, arg := range args {
-		refs = append(refs, arg)
-	}
+	refs := append([]string(nil), args...)
 
 	if len(refs) < 1 {
 		return fmt.Errorf("usage: phoenix resolve <phoenix://ns/secret> [ref...]")
