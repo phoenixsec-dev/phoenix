@@ -200,16 +200,6 @@ func (e *Engine) Evaluate(secretPath string, ctx *RequestContext) error {
 	return nil
 }
 
-// containsString checks if a slice contains a string.
-func containsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
-}
-
 // RuleFor returns the attestation rule and pattern matching a secret path,
 // or nil if no rule matches.
 func (e *Engine) RuleFor(secretPath string) (*Rule, string) {
