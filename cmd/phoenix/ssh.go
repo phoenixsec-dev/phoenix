@@ -132,8 +132,13 @@ func printSSHMachines(w io.Writer, l sshMachineList) {
 // cmdSSHList handles "phoenix ssh --list", and plain "phoenix ssh" with the
 // usage line added.
 func cmdSSHList(withUsage bool) error {
-	if err := requireAuth(); err != nil {
-		return err
+	// Same identity a login uses: the agent's own token, never a session minted
+	// for PHOENIX_ROLE, which would hide the approvals a login can use. A
+	// phxs_ session token given directly still lists names.
+	if token == "" || strings.HasPrefix(token, "phxs_") {
+		if err := requireAuth(); err != nil {
+			return err
+		}
 	}
 	l, err := fetchSSHMachines()
 	if err != nil {
@@ -284,6 +289,9 @@ func sshCertificate(a sshArgs, publicKey string) (sshSignResult, error) {
 		return signed, err
 	}
 	if denial != nil && sshNeedsApproval(denial, a.askAgain) {
+		if strings.TrimSpace(a.reason) == "" {
+			return signed, sshNoApprovalError(a.machine, denial.Code)
+		}
 		if err := sshRequestApproval(a); err != nil {
 			return signed, err
 		}
@@ -300,26 +308,28 @@ func sshCertificate(a sshArgs, publicKey string) (sshSignResult, error) {
 
 // sshNoApprovalError explains a refused login when there is no --reason to
 // file a request with. It names the agent the CLI is running as, because an
-// approval belongs to one agent, token and IP: the usual reason a login fails
-// "inside" an approval is that this command ran with a different PHOENIX_TOKEN
-// from the one that asked (a shell wrapper or alias that sets it, skipped by
-// timeout, env or a script).
-func sshNoApprovalError(machine string) error {
+// approval belongs to one agent, token and IP. A login that fails right after
+// an approval usually ran with a different PHOENIX_TOKEN from the one that
+// asked (a shell wrapper that sets it, skipped by timeout, env or a script),
+// or from another IP. code is the server's denial code.
+func sshNoApprovalError(machine, code string) error {
 	who := ""
 	if l, err := fetchSSHMachines(); err == nil && l.Agent != "" {
-		who = fmt.Sprintf(" for agent %s, which has no active approval for it from this machine", cleanServerText(l.Agent))
+		who = fmt.Sprintf(" for agent %s, which has no active approval for it from this IP", cleanServerText(l.Agent))
+	}
+	if code == "GRANT_EXPIRED" {
+		return fmt.Errorf("your approval for %s has ended%s.\n"+
+			"  Run again with --reason \"why you need it\" to ask a human again", machine, who)
 	}
 	return fmt.Errorf("%s needs a human's approval%s.\n"+
-		"  If a human already approved it, this command is not using the token that asked: check PHOENIX_TOKEN.\n"+
+		"  If a human already approved it, check that this command uses the same PHOENIX_TOKEN\n"+
+		"  and runs from the same machine (IP) as the one that asked.\n"+
 		"  Otherwise run again with --reason \"why you need it\" and wait for a human to decide", machine, who)
 }
 
 // sshRequestApproval files the request and waits for a person to decide. Asking
 // again while one is pending just returns that same request.
 func sshRequestApproval(a sshArgs) error {
-	if strings.TrimSpace(a.reason) == "" {
-		return sshNoApprovalError(a.machine)
-	}
 	var rq accessRequestView
 	if _, err := apiJSON("POST", "/v1/access-requests", map[string]any{
 		"paths": []string{"ssh/" + a.machine}, "action": "ssh_login", "reason": a.reason, "ttl": a.ttl,

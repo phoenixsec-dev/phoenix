@@ -55,7 +55,8 @@ it to run this whenever it needs root or a shell on another machine.
 
 An approval belongs to one agent, token and IP. If `phoenix ssh` says a machine
 needs approval although a human just approved it, the command ran with a
-different `PHOENIX_TOKEN` from the one that asked. A common way: a shell
+different `PHOENIX_TOKEN` from the one that asked, or from another IP. A common
+way to get a different token: a shell
 function or alias that sets `PHOENIX_TOKEN` and runs `phoenix`, then
 `timeout phoenix ...`, `env`, `xargs` or a script runs the binary directly and
 skips it. The error names the agent it ran as, and `--list` shows which machines

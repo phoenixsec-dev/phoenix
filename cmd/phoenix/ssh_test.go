@@ -146,10 +146,35 @@ func TestSSHNoApprovalNamesTheAgent(t *testing.T) {
 		w.Write([]byte(`{"error":"access_denied","code":"SSH_GRANT_REQUIRED","next_step":"request_use"}`))
 	})
 	_, err := sshCertificate(sshArgs{machine: "vm204"}, "pk")
-	if err == nil || !strings.Contains(err.Error(), "for agent vector") || !strings.Contains(err.Error(), "PHOENIX_TOKEN") || !strings.Contains(err.Error(), "--reason") {
+	if err == nil || !strings.Contains(err.Error(), "for agent vector") || !strings.Contains(err.Error(), "PHOENIX_TOKEN") ||
+		!strings.Contains(err.Error(), "same machine") || !strings.Contains(err.Error(), "--reason") {
 		t.Fatalf("err = %v", err)
+	}
+	// An ended approval says so instead of pointing at the token.
+	if err := sshNoApprovalError("vm204", "GRANT_EXPIRED"); !strings.Contains(err.Error(), "has ended") || strings.Contains(err.Error(), "PHOENIX_TOKEN") {
+		t.Fatalf("expired err = %v", err)
 	}
 	if strings.Contains(calls.String(), "access-requests") {
 		t.Fatalf("filed a request without a reason:\n%s", calls.String())
+	}
+}
+
+// With PHOENIX_ROLE set, --list still uses the agent's own token, like a login
+// does, so it shows the approvals that login would use instead of minting a
+// session that sees none.
+func TestSSHListIgnoresRole(t *testing.T) {
+	t.Setenv("PHOENIX_ROLE", "deploy")
+	var calls callLog
+	useMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.add(r)
+		w.Write([]byte(machinesJSON))
+	})
+	out := captureStdout(t, func() {
+		if err := cmdSSH([]string{"--list"}); err != nil {
+			t.Error(err)
+		}
+	})
+	if got := calls.String(); got != "GET /v1/ssh/machines" || !strings.Contains(out, "approved until") {
+		t.Fatalf("calls:\n%s\nout:\n%s", got, out)
 	}
 }

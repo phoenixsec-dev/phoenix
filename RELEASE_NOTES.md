@@ -28,8 +28,11 @@ with a different `PHOENIX_TOKEN` (a shell function set the token, and
 `timeout phoenix ...` skipped it), so it was a different agent with no
 approval, and the CLI only said "run again with --reason". The retry happened
 to go through the function and worked, which made `--reason` look required.
-The error now names the agent the CLI ran as and says that an approval belongs
-to one agent, token and IP, so check `PHOENIX_TOKEN`. `--reason` is shown as
+The error now names the agent the CLI ran as, says that an approval belongs to
+one agent, token and IP (so check `PHOENIX_TOKEN` and where it runs from), and
+says so plainly when the approval has ended. `phoenix ssh --list` uses the
+agent's own token even with `PHOENIX_ROLE` set, so it shows the approvals a
+login would use. `--reason` is shown as
 optional in the usage line.
 
 ## v0.22.0 (2026-11-11)

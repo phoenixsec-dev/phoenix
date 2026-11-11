@@ -202,8 +202,8 @@ approves it. Use this whenever you need root or a shell somewhere else.
    is not listed, or the human denies it, say so and stop.
 
 If it says the machine needs approval although a human already approved it,
-this command is running with a different `PHOENIX_TOKEN` from the one that
-asked. An approval belongs to one agent, token and IP.
+check that this command uses the same `PHOENIX_TOKEN` and runs from the same
+machine as the one that asked. An approval belongs to one agent, token and IP.
 
 ## Safety Guardrails
 

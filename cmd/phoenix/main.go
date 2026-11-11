@@ -296,7 +296,7 @@ Usage:
   phoenix agent delete <name>                 Delete an agent
   phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
   phoenix openclaw-exec-provider               OpenClaw SecretRef exec provider (stdin/stdout JSON)
-  phoenix ssh <machine> -r "why" [-- cmd]     Log in to a machine with a human's temporary approval
+  phoenix ssh <machine> [-r "why"] [-- cmd]   Log in to a machine with a human's temporary approval
   phoenix ssh --list                          Machines you can ask to log in to, and your approvals
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
