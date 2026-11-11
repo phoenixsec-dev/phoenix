@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## v0.20.0 (2026-11-11)
 
 ### SSH Certificates: Temporary Root Login, Approved Like a Grant
 
