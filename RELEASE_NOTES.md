@@ -1,5 +1,37 @@
 # Release Notes
 
+## Unreleased
+
+### Agents can find out they may log in to another machine
+
+Until now an agent only learned that `phoenix ssh` existed from hand-written
+notes in its owner's files, and could not ask Phoenix which machines it may log
+in to. One recently told its owner to open a terminal instead.
+
+- `GET /v1/ssh/machines` lists the machines this server can sign logins for,
+  to any signed-in caller: names only, never addresses or users. Each shows
+  `approved_until` where the caller's own approval is active. With `ssh_ca`
+  off it answers 200 with an empty list, `enabled: false` and a note. Audited
+  as `ssh.list`.
+- `phoenix ssh --list` prints that list. Plain `phoenix ssh` prints the list
+  and the usage line.
+- `phoenix-skill/SKILL.md` now has frontmatter (`name: phoenix` and a
+  trigger description that covers "root or an SSH login on another machine")
+  and a short "Root on another machine" section. The MCP `phoenix_whoami`
+  description points at `phoenix ssh --list` too.
+
+### Fixed: "needs a human's approval" right after a human approved
+
+Inside an active approval `phoenix ssh <machine> -- '<command>'` already ran
+without `--reason`. The reported failure had another cause: the command ran
+with a different `PHOENIX_TOKEN` (a shell function set the token, and
+`timeout phoenix ...` skipped it), so it was a different agent with no
+approval, and the CLI only said "run again with --reason". The retry happened
+to go through the function and worked, which made `--reason` look required.
+The error now names the agent the CLI ran as and says that an approval belongs
+to one agent, token and IP, so check `PHOENIX_TOKEN`. `--reason` is shown as
+optional in the usage line.
+
 ## v0.22.0 (2026-11-11)
 
 ### Fixed: a typo in a command looks like a typo, not a permission wall

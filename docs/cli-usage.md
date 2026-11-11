@@ -98,10 +98,11 @@ These run on the agent's own token, never a session (except
 ## Log in to a machine (SSH certificates)
 
 ```bash
+phoenix ssh --list     # machines you may ask for, and approvals you already have
 phoenix ssh arch-omen --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
 ```
 
-Asks a human if there is no approval yet, then logs in with a throwaway key and a
+Asks a human if there is no approval yet (inside an approval `--reason` is optional), then logs in with a throwaway key and a
 certificate that ends with the approval. See [SSH certificates](ssh-certificates.md).
 
 ## Secure secret input
