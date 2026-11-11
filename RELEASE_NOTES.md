@@ -179,6 +179,20 @@ variable and the 1Password service account token (also under the name
 `PHOENIX_OP_TOKEN_ENV` points at). Values mapped with `--env` still arrive.
 `phoenix ssh` runs `ssh` with the same filtered environment.
 
+### Dashboard: several logins at once
+
+Signing in on one device no longer locks every other device out. Up to 5
+browsers can be signed in at once. The Sessions page lists each login with
+its device, IP, when it signed in and when it was last used, and a
+**Sign out** button. A 6th login signs out the one used least recently, so
+whoever has the password is never locked out. Logout now ends the login on
+the server as well. Password rate limiting and `session_ttl` are unchanged.
+
+**Upgrading:** `dashboard.allow_multi_login` and the Force Login button are
+removed. A config that still has `allow_multi_login` (true or false) refuses
+to start; delete the line. New audit actions: `dashboard.login_revoke` and
+`dashboard.login_evicted`; `dashboard.force_login` is gone.
+
 ## v0.20.0 (2026-11-11)
 
 ### SSH Certificates: Temporary Root Login, Approved Like a Grant

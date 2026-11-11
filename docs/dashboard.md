@@ -25,10 +25,11 @@ not use bearer tokens or session tokens. Instead:
   session nonce. `HttpOnly`, `SameSite=Strict`, and `Secure` (when HTTPS detected).
 - **Password**: stored as a bcrypt hash in config; the plaintext never
   appears there.
-- **Single active session**: By default, only one dashboard session exists
-  at a time. A new login is rejected if a session is already active. A
-  Force Login option re-authenticates and invalidates the prior session.
-  Configurable via `allow_multi_login`.
+- **Several logins, each listed**: up to 5 browsers can be signed in at
+  once (a desktop and a phone, say). The Sessions page lists each one and
+  can sign it out. A 6th login signs out the one used least recently, so
+  the password holder is never locked out. Logins live in server memory:
+  logout and sign-out end them on the server, and a restart ends them all.
 - **Rate limiting**: Exponential backoff per source IP after 5 failed
   attempts (1s base, 60s cap). Rate-limited and failed attempts are
   logged to the audit trail.
@@ -145,18 +146,17 @@ Add the hash to your server config:
 | `enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `password_hash` | `string` | bcrypt hash of operator password |
 | `session_ttl` | `string` | Browser session lifetime (default `4h`) |
-| `allow_multi_login` | `bool` | Allow concurrent dashboard sessions (default `false`) |
 
 `password_hash` is required (generate it with `phoenix-server
 --hash-password`). The old `pin` field was removed: it stored a short
 plaintext secret in config, and a config that still sets it will not start.
 
-By default, only one dashboard session is active at a time. A second
-login attempt is rejected with a message to log out from the other
-device first. If the other session is orphaned (browser closed without
-logging out), a **Force Login** button appears that re-authenticates
-and takes over, invalidating the old session. Set `allow_multi_login`
-to `true` if concurrent operator sessions are needed.
+Up to 5 dashboard logins can be active at once; see
+[Sessions](#sessions-dashboardsessions). `session_ttl` is how long each
+login lasts from when it signed in. The old `allow_multi_login` setting
+and the Force Login button are gone (several logins are always allowed);
+a config that still has `allow_multi_login` refuses to start until the
+line is deleted.
 
 The password is stored as a bcrypt hash — the plaintext never appears
 in config. Config validation rejects non-bcrypt values in `password_hash`
@@ -202,7 +202,15 @@ in red and stays on screen.
 
 ### Sessions (`/dashboard/sessions`)
 
-Table of active sessions: ID (truncated), role, agent, source IP,
+**Dashboard logins** at the top: one row per signed-in browser with its
+device (for example "Chrome on Android", from the User-Agent; hover for
+the full string), the IP of its last request, when it signed in, when it
+was last used and how long until it expires. Your own browser is marked
+"this device". **Sign out** ends that login at once; signing out your
+own works like Logout. At most 5 logins exist; a new one past that signs
+out the least recently used.
+
+**Agent sessions** below: table of active role sessions: ID (truncated), role, agent, source IP,
 bootstrap method, created time, TTL remaining (color-coded), and a
 Revoke button.
 
@@ -238,11 +246,10 @@ All dashboard actions are logged to the same audit trail as API actions.
 | `dashboard.login` | allowed | `dashboard@<ip>` | Successful login |
 | `dashboard.login` | denied | `dashboard` | Failed login (invalid credentials) |
 | `dashboard.login` | denied | `dashboard` | Rate-limited login attempt |
-| `dashboard.login` | denied | `dashboard` | Blocked by active session |
-| `dashboard.force_login` | allowed | `dashboard@<ip>` | Force login (took over existing session) |
-| `dashboard.force_login` | denied | `dashboard` | Force login with wrong credentials |
+| `dashboard.login_evicted` | allowed | `dashboard@<ip>` | A new login pushed out the least recently used one (path = its ID, IP = its last IP) |
+| `dashboard.login_revoke` | allowed | `dashboard@<ip>` | A login signed out from the Sessions page (path = its ID) |
 | `dashboard.logout` | allowed | `dashboard@<ip>` | Explicit logout |
-| `dashboard.auth` | denied | `dashboard` | Expired, invalid, or superseded cookie |
+| `dashboard.auth` | denied | `dashboard` | Expired, invalid, or signed-out cookie |
 | `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action |
 | `session.revoke` | allowed | `dashboard@<ip>` | Session revoked |
 | `access_request.approved` / `.denied` | allowed | `dashboard@<ip>` | Access request decided (plus an `.attempt` line before it) |

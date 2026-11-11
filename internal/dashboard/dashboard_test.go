@@ -112,13 +112,19 @@ func login(t *testing.T, h *Handler) *http.Cookie {
 	return nil
 }
 
-func csrfFromCookie(t *testing.T, h *Handler, cookie *http.Cookie) string {
+// payloadFromCookie returns the verified contents of a dashboard cookie.
+func payloadFromCookie(t *testing.T, h *Handler, cookie *http.Cookie) *cookiePayload {
 	t.Helper()
 	p, err := h.verifyCookie(&http.Request{Header: http.Header{"Cookie": {cookie.String()}}})
 	if err != nil {
-		t.Fatalf("csrf extraction: %v", err)
+		t.Fatalf("cookie payload: %v", err)
 	}
-	return p.CSRF
+	return p
+}
+
+func csrfFromCookie(t *testing.T, h *Handler, cookie *http.Cookie) string {
+	t.Helper()
+	return payloadFromCookie(t, h, cookie).CSRF
 }
 
 func TestLoginSuccess(t *testing.T) {
@@ -469,12 +475,8 @@ func TestLogoutAudit(t *testing.T) {
 func TestExpiredCookieAudit(t *testing.T) {
 	h, _, buf := testHandlerWithAudit(t)
 
-	// Login first so there's an active nonce, then craft an expired cookie with it
-	login(t, h)
-
-	h.nonceMu.Lock()
-	nonce := h.activeNonce
-	h.nonceMu.Unlock()
+	// Login first so there's a live login, then craft an expired cookie with its nonce
+	nonce := payloadFromCookie(t, h, login(t, h)).Nonce
 
 	// Create a cookie that's already expired but has the right nonce
 	payload := cookiePayload{
@@ -552,145 +554,139 @@ func TestLogoutRequiresAuth(t *testing.T) {
 	}
 }
 
-// --- Single-session tests ---
+// --- Several logins at once ---
 
-func TestSingleSessionBlocksSecondLogin(t *testing.T) {
-	h, _ := testHandler(t) // default: allowMultiLogin=false
-
-	// First login succeeds
-	login(t, h)
-
-	// Second login should be blocked
+// loginAs signs in with a given User-Agent, like a separate phone or desktop.
+func loginAs(t *testing.T, h *Handler, ua string) *http.Cookie {
+	t.Helper()
 	form := url.Values{"credential": {"testpass"}}
 	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", ua)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d", w.Code)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "phoenix_dash" {
+			return c
+		}
 	}
-	loc := w.Header().Get("Location")
-	if !strings.Contains(loc, "blocked=1") {
-		t.Fatalf("expected blocked redirect, got %s", loc)
-	}
+	t.Fatalf("login as %q: no cookie (Location %s)", ua, w.Header().Get("Location"))
+	return nil
 }
 
-func TestSingleSessionForceLoginTakesOver(t *testing.T) {
-	h, _ := testHandler(t)
-
-	// First login
-	cookie1 := login(t, h)
-
-	// Force login from second browser
-	form := url.Values{"credential": {"testpass"}}
-	req := httptest.NewRequest("POST", "/dashboard/force-login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+// get fetches a dashboard page with a cookie and returns the response.
+func get(h *Handler, path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("GET", path, nil)
+	req.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d", w.Code)
-	}
-
-	// Old cookie should now be invalid (session superseded)
-	req2 := httptest.NewRequest("GET", "/dashboard/", nil)
-	req2.AddCookie(cookie1)
-	w2 := httptest.NewRecorder()
-	h.ServeHTTP(w2, req2)
-
-	if w2.Code != http.StatusSeeOther {
-		t.Fatalf("expected old cookie to redirect to login, got %d", w2.Code)
-	}
+	return w
 }
 
-func TestSingleSessionLogoutAllowsNewLogin(t *testing.T) {
-	h, _ := testHandler(t)
-
-	cookie := login(t, h)
-	csrf := csrfFromCookie(t, h, cookie)
-
-	// Logout
-	form := url.Values{"_csrf": {csrf}}
-	req := httptest.NewRequest("POST", "/dashboard/logout", strings.NewReader(form.Encode()))
+// post sends a CSRF-protected form POST with a cookie.
+func post(t *testing.T, h *Handler, path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{"_csrf": {csrfFromCookie(t, h, cookie)}}
+	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d", w.Code)
-	}
-
-	// New login should succeed
-	cookie2 := login(t, h)
-	if cookie2.Value == "" {
-		t.Fatal("expected new cookie after logout")
-	}
+	return w
 }
 
-func TestMultiLoginAllowsConcurrentSessions(t *testing.T) {
-	// Create handler with AllowMultiLogin=true
-	ss, err := session.NewStore(time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(ss.Stop)
-	hash, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
-	if err != nil {
-		t.Fatal(err)
-	}
+const (
+	uaDesktop = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+	uaPhone   = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Mobile Safari/537.36"
+)
 
-	cfg := config.DashboardConfig{
-		Enabled:         true,
-		PasswordHash:    string(hash),
-		AllowMultiLogin: true,
-	}
-	deps := Deps{
-		Sessions:     ss,
-		SessionRoles: map[string]config.RoleConfig{},
-		StartTime:    time.Now(),
-	}
-	h, err := New(cfg, deps)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// First login
-	login(t, h)
-
-	// Second login should also succeed
-	form := url.Values{"credential": {"testpass"}}
-	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d", w.Code)
-	}
-	loc := w.Header().Get("Location")
-	if strings.Contains(loc, "blocked") {
-		t.Fatal("multi-login mode should not block second login")
-	}
-}
-
-func TestForceLoginRequiresValidCredential(t *testing.T) {
+// The bug this replaces: a desktop login locked the phone out.
+func TestTwoLoginsBothWork(t *testing.T) {
 	h, _ := testHandler(t)
-	login(t, h) // create active session
+	desktop := loginAs(t, h, uaDesktop)
+	phone := loginAs(t, h, uaPhone)
 
-	form := url.Values{"credential": {"wrongpass"}}
-	req := httptest.NewRequest("POST", "/dashboard/force-login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d", w.Code)
+	for name, c := range map[string]*http.Cookie{"desktop": desktop, "phone": phone} {
+		if w := get(h, "/dashboard/", c); w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", name, w.Code)
+		}
 	}
-	loc := w.Header().Get("Location")
-	if !strings.Contains(loc, "error=") {
-		t.Fatalf("expected error redirect, got %s", loc)
+
+	body := get(h, "/dashboard/sessions", phone).Body.String()
+	for _, want := range []string{"Firefox on Linux", "Chrome on Android", "this device"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("sessions page missing %q", want)
+		}
+	}
+}
+
+// Logging out, or signing another login out from the Sessions page, ends only
+// that login.
+func TestSigningOneOutLeavesTheOther(t *testing.T) {
+	h, _, buf := testHandlerWithAudit(t)
+	desktop := loginAs(t, h, uaDesktop)
+	phone := loginAs(t, h, uaPhone)
+	tablet := loginAs(t, h, uaPhone)
+
+	// Logout on the desktop.
+	post(t, h, "/dashboard/logout", desktop)
+	if w := get(h, "/dashboard/", desktop); w.Code != http.StatusSeeOther {
+		t.Fatalf("desktop after logout: expected redirect, got %d", w.Code)
+	}
+
+	// The phone signs the tablet out from the Sessions page.
+	tabletID := ""
+	tabletNonce := payloadFromCookie(t, h, tablet).Nonce
+	for _, l := range h.logins.list(time.Now()) {
+		if l.nonce == tabletNonce {
+			tabletID = l.ID
+		}
+	}
+	if w := post(t, h, "/dashboard/logins/"+tabletID+"/revoke", phone); !strings.Contains(w.Header().Get("Location"), "/dashboard/sessions") {
+		t.Fatalf("revoke: expected back to sessions, got %s", w.Header().Get("Location"))
+	}
+	if w := get(h, "/dashboard/", tablet); w.Code != http.StatusSeeOther {
+		t.Fatalf("tablet after sign-out: expected redirect, got %d", w.Code)
+	}
+	if w := get(h, "/dashboard/", phone); w.Code != http.StatusOK {
+		t.Fatalf("phone: expected 200, got %d", w.Code)
+	}
+	if findAuditEntry(parseAuditEntries(buf), "dashboard.login_revoke", "allowed") == nil {
+		t.Fatal("expected dashboard.login_revoke audit entry")
+	}
+}
+
+// Past the cap, a new login signs out the least recently used one instead of
+// being refused, so the password holder is never locked out.
+func TestLoginCapSignsOutLeastRecentlyUsed(t *testing.T) {
+	h, _, buf := testHandlerWithAudit(t)
+	cookies := make([]*http.Cookie, maxDashboardLogins)
+	for i := range cookies {
+		cookies[i] = loginAs(t, h, uaDesktop)
+	}
+	// Make login 1 the least recently used; login 0 was just used.
+	base := time.Now().Add(-time.Hour)
+	for i, c := range cookies {
+		n := payloadFromCookie(t, h, c).Nonce
+		h.logins.touch(n, "", base.Add(time.Duration(i)*time.Minute))
+	}
+	h.logins.touch(payloadFromCookie(t, h, cookies[0]).Nonce, "", time.Now())
+
+	newest := loginAs(t, h, uaPhone)
+
+	if got := len(h.logins.list(time.Now())); got != maxDashboardLogins {
+		t.Fatalf("expected %d logins, got %d", maxDashboardLogins, got)
+	}
+	if w := get(h, "/dashboard/", cookies[1]); w.Code != http.StatusSeeOther {
+		t.Fatalf("least recently used login should be signed out, got %d", w.Code)
+	}
+	for _, c := range []*http.Cookie{cookies[0], cookies[2], newest} {
+		if w := get(h, "/dashboard/", c); w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+	}
+	if findAuditEntry(parseAuditEntries(buf), "dashboard.login_evicted", "allowed") == nil {
+		t.Fatal("expected dashboard.login_evicted audit entry")
 	}
 }
 

@@ -4,6 +4,41 @@
 
 {{if .Flash}}<div class="flash flash-info">{{.Flash}}</div>{{end}}
 
+<h2 class="section-title">Dashboard logins ({{len .Logins}} of {{.MaxLogins}})</h2>
+<div class="table-wrap">
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Device</th>
+            <th>IP</th>
+            <th>Signed in</th>
+            <th>Last used</th>
+            <th>Expires in</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Logins}}
+        <tr>
+            <td title="{{.UserAgent}}">{{.Device}}{{if eq .ID $.CurrentLogin}} <span class="pill pill-action">this device</span>{{end}}</td>
+            <td class="mono">{{.IP}}</td>
+            <td data-time="{{.Started.Unix}}">{{fmtTime .Started}}</td>
+            <td data-time="{{.LastUsed.Unix}}">{{fmtTime .LastUsed}}</td>
+            <td class="ttl-active">{{ttlRemain .Expires}}</td>
+            <td>
+                <form method="POST" action="/dashboard/logins/{{.ID}}/revoke" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                    <button type="submit" class="btn btn-revoke btn-sm" data-confirm="Sign out {{.Device}} ({{.IP}})?">Sign out</button>
+                </form>
+            </td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+</div>
+
+<h2 class="section-title">Agent sessions</h2>
+
 <form class="filter-bar" method="GET" action="/dashboard/sessions">
     <select name="role" class="input input-sm">
         <option value="">All Roles</option>

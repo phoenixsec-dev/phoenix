@@ -108,7 +108,7 @@ HTTPS_URL="https://127.0.0.1:$HTTPS_PORT"
 cat >"$RUN_DIR/dual-policy.json" <<'JSON'
 {"attestation":{"dual/*":{"source_ip":["127.0.0.1"]},"source-denied/*":{"source_ip":["192.0.2.1"]}}}
 JSON
-config_patch "d['https_listener']={'enabled':True,'listen':'127.0.0.1:$HTTPS_PORT','cert':'$RUN_DIR/server.crt','key':'$RUN_DIR/server.key'}; d['policy']={'path':'$RUN_DIR/dual-policy.json'}; d['session']={'enabled':True,'roles':{'dual-reader':{'namespaces':['dual/*'],'actions':['read_value'],'bootstrap_trust':['bearer']}}}; d['dashboard']={'enabled':True,'password_hash':'\$2a\$10\$HLVxwM4wKNkthQOq6HXfuOj6tC68h.gfwNjx2MSHkqPXkgvrMpK3a','allow_multi_login':True}"
+config_patch "d['https_listener']={'enabled':True,'listen':'127.0.0.1:$HTTPS_PORT','cert':'$RUN_DIR/server.crt','key':'$RUN_DIR/server.key'}; d['policy']={'path':'$RUN_DIR/dual-policy.json'}; d['session']={'enabled':True,'roles':{'dual-reader':{'namespaces':['dual/*'],'actions':['read_value'],'bootstrap_trust':['bearer']}}}; d['dashboard']={'enabled':True,'password_hash':'\$2a\$10\$HLVxwM4wKNkthQOq6HXfuOj6tC68h.gfwNjx2MSHkqPXkgvrMpK3a'}"
 start_server
 assert_contains "$(cat "$RUN_DIR/server.log")" "Optional HTTPS listener serving" "optional listener startup missing"
 if curl -fsS -m 3 "http://127.0.0.1:$HTTPS_PORT/v1/health" >/dev/null 2>&1; then
