@@ -19,6 +19,7 @@
 //	phoenix request <path>... --reason "..." [--ttl 30m] [--wait]
 //	phoenix request status <req_id>
 //	phoenix ssh <machine> [--reason "..."] [--ttl 15m] [-- command...]
+//	phoenix ssh --list
 //	phoenix whoami | pending | grants [--all] | grants revoke <gnt_id>
 //	phoenix approve <req_id> | deny <req_id>
 //	phoenix verify <file> [--dry-run]
@@ -296,6 +297,7 @@ Usage:
   phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
   phoenix openclaw-exec-provider               OpenClaw SecretRef exec provider (stdin/stdout JSON)
   phoenix ssh <machine> -r "why" [-- cmd]     Log in to a machine with a human's temporary approval
+  phoenix ssh --list                          Machines you can ask to log in to, and your approvals
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
   phoenix exec --mask-env --env ...           Strip phoenix:// refs from child env

@@ -7,11 +7,13 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -32,7 +34,8 @@ var (
 	sshUserPattern    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 )
 
-const sshUsage = `usage: phoenix ssh <machine> [--reason "why you need it"] [--ttl 15m] [--ask-again] [-- command...]`
+const sshUsage = `usage: phoenix ssh <machine> [--reason "why you need it"] [--ttl 15m] [--ask-again] [-- 'command']
+       phoenix ssh --list`
 
 // defaultSSHTTL is what an agent asks for unless it says otherwise.
 const defaultSSHTTL = "15m"
@@ -40,6 +43,7 @@ const defaultSSHTTL = "15m"
 type sshArgs struct {
 	machine, reason, ttl string
 	askAgain             bool // file a new request even after a human revoked the last one
+	list                 bool // print the machines instead of logging in
 	command              []string
 }
 
@@ -62,16 +66,84 @@ func parseSSHArgs(args []string) (sshArgs, error) {
 			a.ttl = args[i]
 		case args[i] == "--ask-again":
 			a.askAgain = true
+		case args[i] == "--list":
+			a.list = true
 		case strings.HasPrefix(args[i], "-") || a.machine != "":
 			return a, errors.New(sshUsage)
 		default:
 			a.machine = args[i]
 		}
 	}
+	// No machine and nothing else: show what there is to log in to.
+	if a.machine == "" && a.command == nil && a.reason == "" && !a.askAgain {
+		a.list = true
+	}
+	if a.list {
+		if a.machine != "" || a.command != nil || a.reason != "" || a.askAgain {
+			return a, errors.New("--list takes no machine, command or other option\n" + sshUsage)
+		}
+		return a, nil
+	}
 	if !sshMachinePattern.MatchString(a.machine) {
 		return a, errors.New(sshUsage)
 	}
 	return a, nil
+}
+
+// sshMachineList is the server's answer from GET /v1/ssh/machines.
+type sshMachineList struct {
+	Agent    string `json:"agent"`
+	Enabled  bool   `json:"enabled"`
+	Note     string `json:"note"`
+	Machines []struct {
+		Name          string `json:"name"`
+		ApprovedUntil string `json:"approved_until"`
+	} `json:"machines"`
+}
+
+// fetchSSHMachines asks the server which machines it can sign logins for.
+func fetchSSHMachines() (sshMachineList, error) {
+	var out sshMachineList
+	_, err := apiJSON("GET", "/v1/ssh/machines", nil, &out)
+	return out, err
+}
+
+// printSSHMachines writes the list for a person or agent to read: one machine
+// per line, with the end of this caller's approval where it has one.
+func printSSHMachines(w io.Writer, l sshMachineList) {
+	if !l.Enabled || len(l.Machines) == 0 {
+		msg := "SSH logins are not enabled on this server"
+		if l.Note != "" {
+			msg = cleanServerText(l.Note)
+		}
+		fmt.Fprintln(w, msg+".")
+		return
+	}
+	fmt.Fprintf(w, "Machines you can ask to log in to (as agent %s):\n", cleanServerText(l.Agent))
+	for _, m := range l.Machines {
+		line := "  " + cleanServerText(m.Name)
+		if m.ApprovedUntil != "" {
+			line += "  approved until " + cleanServerText(m.ApprovedUntil) + " (no --reason needed)"
+		}
+		fmt.Fprintln(w, line)
+	}
+}
+
+// cmdSSHList handles "phoenix ssh --list", and plain "phoenix ssh" with the
+// usage line added.
+func cmdSSHList(withUsage bool) error {
+	if err := requireAuth(); err != nil {
+		return err
+	}
+	l, err := fetchSSHMachines()
+	if err != nil {
+		return err
+	}
+	printSSHMachines(os.Stdout, l)
+	if withUsage {
+		fmt.Println(sshUsage)
+	}
+	return nil
 }
 
 // sshSignResult is the server's answer from POST /v1/ssh/sign.
@@ -161,6 +233,9 @@ func cmdSSH(args []string) error {
 	if err != nil {
 		return err
 	}
+	if a.list {
+		return cmdSSHList(!slices.Contains(args, "--list"))
+	}
 	if err := requireBootstrapAuth(); err != nil {
 		return err
 	}
@@ -173,21 +248,9 @@ func cmdSSH(args []string) error {
 	if err != nil {
 		return err
 	}
-	signed, denial, err := sshSign(a.machine, publicKey)
+	signed, err := sshCertificate(a, publicKey)
 	if err != nil {
 		return err
-	}
-	if denial != nil && sshNeedsApproval(denial, a.askAgain) {
-		if err := sshRequestApproval(a); err != nil {
-			return err
-		}
-		signed, denial, err = sshSign(a.machine, publicKey)
-		if err != nil {
-			return err
-		}
-	}
-	if denial != nil {
-		return errors.New(formatDenial(*denial, "  "))
 	}
 	if !sshAddressPattern.MatchString(signed.Address) || !sshUserPattern.MatchString(signed.User) {
 		return errors.New("server returned an invalid address or user")
@@ -212,11 +275,50 @@ func cmdSSH(args []string) error {
 	return nil
 }
 
+// sshCertificate gets publicKey signed for a.machine. Inside an active approval
+// the first try works and no --reason is needed; only a missing or ended
+// approval files a request (which needs one) and waits for a person.
+func sshCertificate(a sshArgs, publicKey string) (sshSignResult, error) {
+	signed, denial, err := sshSign(a.machine, publicKey)
+	if err != nil {
+		return signed, err
+	}
+	if denial != nil && sshNeedsApproval(denial, a.askAgain) {
+		if err := sshRequestApproval(a); err != nil {
+			return signed, err
+		}
+		signed, denial, err = sshSign(a.machine, publicKey)
+		if err != nil {
+			return signed, err
+		}
+	}
+	if denial != nil {
+		return signed, errors.New(formatDenial(*denial, "  "))
+	}
+	return signed, nil
+}
+
+// sshNoApprovalError explains a refused login when there is no --reason to
+// file a request with. It names the agent the CLI is running as, because an
+// approval belongs to one agent, token and IP: the usual reason a login fails
+// "inside" an approval is that this command ran with a different PHOENIX_TOKEN
+// from the one that asked (a shell wrapper or alias that sets it, skipped by
+// timeout, env or a script).
+func sshNoApprovalError(machine string) error {
+	who := ""
+	if l, err := fetchSSHMachines(); err == nil && l.Agent != "" {
+		who = fmt.Sprintf(" for agent %s, which has no active approval for it from this machine", cleanServerText(l.Agent))
+	}
+	return fmt.Errorf("%s needs a human's approval%s.\n"+
+		"  If a human already approved it, this command is not using the token that asked: check PHOENIX_TOKEN.\n"+
+		"  Otherwise run again with --reason \"why you need it\" and wait for a human to decide", machine, who)
+}
+
 // sshRequestApproval files the request and waits for a person to decide. Asking
 // again while one is pending just returns that same request.
 func sshRequestApproval(a sshArgs) error {
 	if strings.TrimSpace(a.reason) == "" {
-		return fmt.Errorf("%s needs a human's approval: run again with --reason \"why you need it\"", a.machine)
+		return sshNoApprovalError(a.machine)
 	}
 	var rq accessRequestView
 	if _, err := apiJSON("POST", "/v1/access-requests", map[string]any{
