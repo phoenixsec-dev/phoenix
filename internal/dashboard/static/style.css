@@ -213,6 +213,8 @@ body {
 .path-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
 .path-item { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .path-full { overflow-wrap: anywhere; }
+/* In a table, "anywhere" lets the column shrink to one character; keep a readable width. */
+.data-table td.path-full { min-width: 24ch; }
 .attest-list { margin: 8px 0; }
 .revoke-note { font-size: 0.85em; color: var(--text-secondary); margin: 8px 0; }
 .deny-form { display: flex; gap: 8px; margin-top: 8px; }

@@ -1,5 +1,36 @@
 # Release Notes
 
+## v0.20.0 (2026-11-11)
+
+### SSH Certificates: Temporary Root Login, Approved Like a Grant
+
+`phoenix ssh <machine>` logs an agent in with a human's approval and a certificate
+that expires with it. The signing key stays on the server, the agent's key is
+thrown away, and revoking blocks new logins at once and ends open sessions within
+about 30 seconds. Off unless you add an `ssh_ca` block. See [SSH certificates](docs/ssh-certificates.md).
+
+### Fast Dashboard and Audit Log Rotation
+
+The Overview and Audit pages, `GET /v1/status` and `GET /v1/audit` used to
+decode the whole audit log on every request: 7-8 seconds each for a 260 MB log
+on one CPU, which also made other tabs lag while it ran. They now read from the
+end of the file and stop once they have enough entries: every dashboard page
+loads in under 150 ms with the same log.
+
+- The audit log rotates at `audit.rotate_mb` (default 50 MB) into dated
+  archives next to it. Archives are never deleted; all but the newest are
+  gzipped. `"rotate_mb": -1` turns rotation off. See
+  [Audit log rotation](docs/configuration.md#audit-log-rotation).
+- Queries search the current file and the newest archive, at most 64 MB.
+  The Audit page shows a note when that cut a search short, and
+  `GET /v1/audit` returns `"truncated": true`.
+- The Audit page's status filter now runs in the search: "denied, 50" shows
+  the newest 50 denied entries, not the denied ones among the newest 50.
+- `GET /v1/audit` without `limit` (and `phoenix audit` without `--last`)
+  returns the newest 10,000 entries instead of the whole log.
+- Secret paths are shown in full on every dashboard page (Overview and Audit
+  used to cut them at 40 and 30 characters) and wrap on narrow screens.
+
 ## v0.19.0 (2026-11-01)
 
 ### Request-Use Grants: an Agent Asks, a Human Approves, Access Expires

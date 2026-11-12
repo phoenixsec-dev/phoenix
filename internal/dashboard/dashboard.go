@@ -783,26 +783,15 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 		limit = 500
 	}
 
-	opts := audit.QueryOptions{Limit: limit}
-	if agentFilter != "" {
-		opts.Agent = agentFilter
-	}
-
-	var entries []audit.Entry
+	// Status is filtered inside the search, so a page of "denied" holds
+	// `limit` denied entries rather than the denied ones among the newest
+	// `limit` of everything.
+	opts := audit.QueryOptions{Limit: limit, Agent: agentFilter, Status: statusFilter}
+	var res audit.Result
 	if h.deps.AuditPath != "" {
-		entries, _ = audit.Query(h.deps.AuditPath, opts)
+		res, _ = audit.Search(h.deps.AuditPath, opts)
 	}
-
-	// Filter by status client-side (audit.Query doesn't support it)
-	if statusFilter != "" {
-		var filtered []audit.Entry
-		for _, e := range entries {
-			if e.Status == statusFilter {
-				filtered = append(filtered, e)
-			}
-		}
-		entries = filtered
-	}
+	entries := res.Entries
 
 	// Reverse for newest first
 	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
@@ -816,6 +805,8 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 		"AgentFilter":  agentFilter,
 		"StatusFilter": statusFilter,
 		"Limit":        limit,
+		"Truncated":    res.Truncated,
+		"ScanMB":       audit.DefaultMaxScanBytes >> 20,
 	})
 }
 

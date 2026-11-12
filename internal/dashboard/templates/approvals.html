@@ -3,7 +3,7 @@
 <h1 class="page-title">Approvals</h1>
 
 {{if .Error}}<div class="flash flash-error flash-sticky">{{.Error}}</div>{{end}}
-{{if .Flash}}<div class="flash flash-info">{{.Flash}}</div>{{end}}
+{{if .Flash}}<div class="flash flash-info path-full">{{.Flash}}</div>{{end}}
 
 {{if .AccessOn}}
 <h2 class="section-title">Secret access requests</h2>
@@ -36,6 +36,7 @@
                 <label class="path-item">
                     <input type="checkbox" name="path" value="{{.Path}}" checked>
                     <span class="mono path-full">{{.Path}}</span>
+                    {{if .SSHLogin}}<span class="flag flag-warn">root login on this machine</span>{{end}}
                     {{if .Missing}}<span class="flag flag-warn">does not exist</span>{{end}}
                     {{if .Hidden}}<span class="flag flag-warn">hidden from this agent</span>{{end}}
                     {{if .AlreadyAllowed}}<span class="flag flag-ttl">already allowed</span>{{end}}
@@ -46,7 +47,7 @@
             <div class="attest-list">
                 <div class="detail-label">Attestation (never waived; checked at every use)</div>
                 {{range .Attestation}}
-                <div class="detail-row"><span class="mono">{{.Path}}</span><span>{{.Requirement}}: <strong>{{.Status}}</strong></span></div>
+                <div class="detail-row"><span class="mono path-full">{{.Path}}</span><span>{{.Requirement}}: <strong>{{.Status}}</strong></span></div>
                 {{end}}
             </div>
             {{end}}
@@ -68,7 +69,7 @@
         </form>
         <div class="history">
             <div class="detail-label">This agent, last 24h: {{len .History}} other request(s), {{.HistoryDenied}} denied</div>
-            {{range .History}}<div class="mono history-item">{{.Status}} &middot; {{.Paths}}</div>{{end}}
+            {{range .History}}<div class="mono history-item path-full">{{.Status}} &middot; {{.Paths}}</div>{{end}}
         </div>
         <div class="approval-id mono">{{.ID}}</div>
     </div>
@@ -96,7 +97,7 @@
             <div class="detail-row"><span class="detail-label">Source IP</span><span class="mono">{{.SourceIP}}</span></div>
             <div class="detail-row"><span class="detail-label">Bootstrap</span><span>{{.BootstrapMethod}}</span></div>
             {{if .CertFingerprint}}<div class="detail-row"><span class="detail-label">Cert</span><span class="mono">{{truncate .CertFingerprint 24}}</span></div>{{end}}
-            <div class="detail-row"><span class="detail-label">Namespaces</span><span class="mono">{{join .Namespaces ", "}}</span></div>
+            <div class="detail-row"><span class="detail-label">Namespaces</span><span class="mono path-full">{{join .Namespaces ", "}}</span></div>
             {{if .RequesterTTY}}<div class="detail-row"><span class="detail-label">TTY</span><span class="mono">{{.RequesterTTY}}</span></div>{{end}}
             <div class="detail-row"><span class="detail-label">Created</span><span data-time="{{.CreatedAt.Unix}}">{{fmtTime .CreatedAt}}</span></div>
             <div class="detail-row"><span class="detail-label">Expires</span><span>{{ttlRemain .ExpiresAt}}</span></div>

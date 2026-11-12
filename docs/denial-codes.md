@@ -95,6 +95,7 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | `ACL_DENIED` | 403 | `request_use` if requestable, else `ask_user` | The identity's ACL does not allow the action on this path and no grant covers it |
 | `GRANT_EXPIRED` | 403 | `request_use` if requestable, else `ask_user` | A grant for this path ended by time in the last 24h |
 | `GRANT_REVOKED` | 403 | `ask_user` | A human revoked the grant for this path in the last 24h |
+| `SSH_GRANT_REQUIRED` | 403 | `request_use` | `POST /v1/ssh/sign` with no approval for this machine. See [SSH certificates](ssh-certificates.md) |
 | `ATTESTATION_REQUIRED` | 403 | `ask_user` | The path's attestation policy (mTLS, IP, nonce, process, signed resolve) was not met |
 | `SEALED_REQUIRED` | 403 | `use_exec` | The path (policy `require_sealed`) or the grant (`sealed_only`) is only served sealed and no valid seal key was presented |
 | `SCOPE_EXCEEDED` | 403 | `remint_session` (`request_use` on a requestable read) | Path outside the session role's namespaces |

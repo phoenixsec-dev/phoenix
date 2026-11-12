@@ -413,6 +413,12 @@ are retried every 30 seconds). Grant events are audit actions such as
 preceded by an `....attempt` line. Reads through a grant are normal
 `read_value` / `resolve` entries with metadata `grant_id`.
 
+## Logins as grants
+
+A request with action `ssh_login` asks to log in to a machine, not to read a secret.
+It follows this same flow with its own rules: see
+[SSH certificates](ssh-certificates.md).
+
 ## Grants and step-up roles
 
 Grants and step-up sessions are separate. A grant is for one agent and exact

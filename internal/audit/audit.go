@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -30,35 +31,54 @@ type Entry struct {
 // Logger writes audit entries to a file.
 type Logger struct {
 	mu   sync.Mutex
-	file *os.File
-	enc  *json.Encoder
+	w    io.Writer
+	file *os.File // nil for NewWriterLogger
+
+	// Rotation (rotate.go); maxBytes 0 = never rotate.
+	path     string
+	maxBytes int64
+	size     int64 // bytes in the current file
+	kick     chan struct{}
+	wg       sync.WaitGroup
 }
 
 // NewLogger creates a new audit logger writing to the given file path.
 // The file is opened in append mode and created if it doesn't exist.
+// It never rotates the file; see NewRotatingLogger.
 func NewLogger(path string) (*Logger, error) {
+	return NewRotatingLogger(path, 0)
+}
+
+// NewRotatingLogger is NewLogger that moves the file to a dated archive
+// once it passes maxBytes (0 = never). Archives are never deleted.
+func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("opening audit log: %w", err)
 	}
-
-	return &Logger{
-		file: f,
-		enc:  json.NewEncoder(f),
-	}, nil
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("opening audit log: %w", err)
+	}
+	l := &Logger{w: f, file: f, path: path, maxBytes: maxBytes, size: st.Size()}
+	if maxBytes > 0 {
+		l.kick = make(chan struct{}, 1)
+		l.wg.Add(1)
+		go l.compressWorker(l.kick)
+		l.kickCompress() // finish anything a crash left half compressed
+	}
+	return l, nil
 }
 
 // NewWriterLogger creates an audit logger backed by any io.Writer (useful for tests).
 func NewWriterLogger(w io.Writer) *Logger {
-	return &Logger{
-		enc: json.NewEncoder(w),
-	}
+	return &Logger{w: w}
 }
 
 // logWithMetadata writes a low-level audit entry with optional sanitized metadata.
 func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessionID string, sealed bool, metadata map[string]string) error {
 	entry := Entry{
-		Timestamp: time.Now().UTC(),
 		Agent:     agent,
 		Action:    action,
 		Path:      path,
@@ -73,11 +93,31 @@ func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessio
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if err := l.enc.Encode(entry); err != nil {
+	// Stamped under the lock so file order follows the clock (unless the
+	// clock itself steps back; Search does not rely on it).
+	entry.Timestamp = time.Now().UTC()
+	line, err := json.Marshal(entry)
+	if err != nil {
 		return err
 	}
-	if l.file != nil {
-		return l.file.Sync()
+	n, err := l.w.Write(append(line, '\n'))
+	l.size += int64(n)
+	if err != nil {
+		return err
+	}
+	if l.file == nil {
+		return nil
+	}
+	if err := l.file.Sync(); err != nil {
+		return err
+	}
+	if l.maxBytes > 0 && l.size >= l.maxBytes {
+		if err := l.rotate(); err != nil {
+			// The line is safely written; only the rotation failed. Try
+			// again after another maxBytes instead of on every write.
+			log.Printf("audit: WARNING: rotating %s: %v", l.path, err)
+			l.size = 0
+		}
 	}
 	return nil
 }
@@ -165,59 +205,25 @@ func (l *Logger) LogSessionDeniedWithMetadata(agent, action, path, ip, reason, s
 	return l.logWithMetadata(agent, action, path, "denied", ip, reason, sessionID, false, metadata)
 }
 
-// Close flushes and closes the audit log file.
+// Close closes the audit log file and waits for any archive compression.
 func (l *Logger) Close() error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
+	var err error
 	if l.file != nil {
-		return l.file.Close()
+		err = l.file.Close()
+		l.file = nil
+		l.w = closedWriter{}
 	}
-	return nil
+	if l.kick != nil {
+		close(l.kick)
+		l.kick = nil
+	}
+	l.mu.Unlock()
+	l.wg.Wait()
+	return err
 }
 
-// Query reads audit entries from a file, filtered by optional criteria.
-type QueryOptions struct {
-	Since *time.Time
-	Agent string
-	Path  string
-	Limit int
-}
+// closedWriter makes a write after Close fail instead of panicking.
+type closedWriter struct{}
 
-// Query reads and filters audit entries from a log file.
-func Query(path string, opts QueryOptions) ([]Entry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("opening audit log for query: %w", err)
-	}
-	defer f.Close()
-
-	var entries []Entry
-	dec := json.NewDecoder(f)
-
-	for dec.More() {
-		var entry Entry
-		if err := dec.Decode(&entry); err != nil {
-			continue // skip malformed lines
-		}
-
-		if opts.Since != nil && entry.Timestamp.Before(*opts.Since) {
-			continue
-		}
-		if opts.Agent != "" && entry.Agent != opts.Agent {
-			continue
-		}
-		if opts.Path != "" && entry.Path != opts.Path {
-			continue
-		}
-
-		entries = append(entries, entry)
-	}
-
-	// If limit is set, return only the last N entries
-	if opts.Limit > 0 && len(entries) > opts.Limit {
-		entries = entries[len(entries)-opts.Limit:]
-	}
-
-	return entries, nil
-}
+func (closedWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }

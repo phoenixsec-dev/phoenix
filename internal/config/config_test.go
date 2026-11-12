@@ -1003,3 +1003,37 @@ func TestAccessRequestsNotifyErrorsDoNotEchoValues(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHCAValidation(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			AccessRequests: &AccessRequestsConfig{Enabled: true},
+			SSHCA:          &SSHCAConfig{Enabled: true, Hosts: map[string]SSHHost{"arch-omen": {Address: "192.168.0.99"}}},
+		}
+	}
+	if err := base().validateSSHCA(); err != nil {
+		t.Fatalf("valid config refused: %v", err)
+	}
+	if got := base().SSHCAHosts()["arch-omen"].User; got != DefaultSSHUser {
+		t.Fatalf("default user = %q", got)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"grants off":       func(c *Config) { c.AccessRequests.Enabled = false },
+		"no grants block":  func(c *Config) { c.AccessRequests = nil },
+		"no hosts":         func(c *Config) { c.SSHCA.Hosts = nil },
+		"bad name":         func(c *Config) { c.SSHCA.Hosts["Bad Name"] = SSHHost{Address: "1.2.3.4"} },
+		"option address":   func(c *Config) { c.SSHCA.Hosts["x"] = SSHHost{Address: "-oProxyCommand=evil"} },
+		"empty address":    func(c *Config) { c.SSHCA.Hosts["x"] = SSHHost{} },
+		"option user name": func(c *Config) { c.SSHCA.Hosts["x"] = SSHHost{Address: "1.2.3.4", User: "-l"} },
+	} {
+		c := base()
+		mutate(c)
+		if err := c.validateSSHCA(); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	off := &Config{SSHCA: &SSHCAConfig{Enabled: false}}
+	if err := off.validateSSHCA(); err != nil {
+		t.Fatalf("a disabled block must not be checked: %v", err)
+	}
+}

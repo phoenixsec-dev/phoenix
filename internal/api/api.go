@@ -20,6 +20,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
@@ -170,6 +172,8 @@ type Server struct {
 	// opened; accessCfg holds the current access_requests settings (nil =
 	// feature off). now is the clock used for grant views; tests replace it.
 	grants    *grant.Store
+	sshCA     ssh.Signer                // ssh.go; nil = SSH certificates off
+	sshHosts  map[string]config.SSHHost // machines Phoenix can sign logins for
 	accessCfg atomic.Pointer[config.AccessRequestsSettings]
 	now       func() time.Time
 	// notifyTimeout limits one access-request notification (notify.go).
@@ -257,12 +261,16 @@ func (s *Server) SetApprovalStore(as *approval.Store) {
 	s.approvals = as
 }
 
-// SetDashboard registers the dashboard handler under /dashboard/.
+// SetDashboard registers the dashboard handler under /dashboard/. The bare
+// server address and /dashboard both send a browser there, so typing just the
+// host name lands on the login page instead of a 404.
 func (s *Server) SetDashboard(h http.Handler) {
 	s.mux.Handle("/dashboard/", h)
-	s.mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+	toDashboard := func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
-	})
+	}
+	s.mux.HandleFunc("GET /dashboard", toDashboard)
+	s.mux.HandleFunc("GET /{$}", toDashboard)
 }
 
 // ServeHTTP implements http.Handler.
@@ -297,6 +305,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/sessions", s.handleSessionList)
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 	s.accessRoutes()
+	s.sshRoutes()
 }
 
 // authInfo contains authentication result and attestation evidence.
@@ -1075,23 +1084,31 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		opts.Agent = agent
 	}
 
+	// No limit, or one above the cap, returns the newest maxAuditQueryLimit
+	// entries: "everything" from a multi-GB log would not fit in memory.
+	opts.Limit = maxAuditQueryLimit
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		var limit int
 		fmt.Sscanf(limitStr, "%d", &limit)
-		if limit > 0 {
+		if limit > 0 && limit < maxAuditQueryLimit {
 			opts.Limit = limit
 		}
 	}
 
-	entries, err := audit.Query(s.auditPath, opts)
+	res, err := audit.Search(s.auditPath, opts)
 	if err != nil {
 		log.Printf("error querying audit log: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	jsonOK(w, map[string]interface{}{"entries": entries})
+	// truncated: the search stopped at its read cap or the newest archive
+	// before it found `limit` matches; older entries may exist.
+	jsonOK(w, map[string]interface{}{"entries": res.Entries, "truncated": res.Truncated})
 }
+
+// maxAuditQueryLimit caps how many entries one GET /v1/audit returns.
+const maxAuditQueryLimit = 10000
 
 // createAgentRequest is the JSON body for agent registration.
 type createAgentRequest struct {

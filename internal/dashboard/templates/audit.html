@@ -17,8 +17,17 @@
     <button type="submit" class="btn btn-sm">Filter</button>
 </form>
 
+{{/* Auto-refresh replaces everything inside #audit-table, so the
+     truncation note and the empty state stay in step with the rows. */}}
+<div id="audit-table">
+{{if .Truncated}}
+<div class="flash flash-info flash-sticky" id="audit-truncated">
+    Only the newest part of the audit log was searched (the current file and the newest archive, at most {{.ScanMB}} MB).
+    Older entries may match but are not shown.
+</div>
+{{end}}
 {{if .Entries}}
-<div class="table-wrap" id="audit-table">
+<div class="table-wrap">
 <table class="data-table">
     <thead>
         <tr>
@@ -38,7 +47,7 @@
             <td class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
             <td>{{.Agent}}</td>
             <td class="mono">{{.Action}}</td>
-            <td class="mono">{{truncate .Path 30}}</td>
+            <td class="mono path-full">{{.Path}}</td>
             <td><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
             <td class="mono">{{.IP}}</td>
             <td class="mono">{{truncate .SessionID 12}}</td>
@@ -53,4 +62,5 @@
     <p>No audit entries</p>
 </div>
 {{end}}
+</div>
 {{end}}

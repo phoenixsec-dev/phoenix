@@ -184,22 +184,32 @@ func cmdRequestStatus(args []string) error {
 
 // printRequest shows a request's state for the agent that asked.
 func printRequest(rq accessRequestView) {
-	fmt.Printf("Request: %s\n", cleanServerText(rq.ID))
-	fmt.Printf("Status:  %s\n", cleanServerText(rq.Status))
-	fmt.Printf("Paths:   %s\n", cleanList(rq.Paths, ", "))
+	fprintRequest(os.Stdout, rq)
+}
+
+func fprintRequest(w io.Writer, rq accessRequestView) {
+	fmt.Fprintf(w, "Request: %s\n", cleanServerText(rq.ID))
+	fmt.Fprintf(w, "Status:  %s\n", cleanServerText(rq.Status))
+	fmt.Fprintf(w, "Paths:   %s\n", cleanList(rq.Paths, ", "))
 	if len(rq.GrantedPaths) > 0 {
-		fmt.Printf("Granted: %s until %s\n", cleanList(rq.GrantedPaths, ", "), cleanServerText(rq.GrantExpiresAt))
+		fmt.Fprintf(w, "Granted: %s until %s\n", cleanList(rq.GrantedPaths, ", "), cleanServerText(rq.GrantExpiresAt))
 	}
 	if rq.Note != "" {
-		fmt.Printf("Note:    %s\n", cleanServerText(rq.Note))
+		fmt.Fprintf(w, "Note:    %s\n", cleanServerText(rq.Note))
 	}
-	fmt.Printf("Next:    %s\n", requestNextHint(rq))
+	fmt.Fprintf(w, "Next:    %s\n", requestNextHint(rq))
 }
 
 // requestNextHint is the client-authored "what now" for a request. For an
 // active grant it names the exact phoenix exec command.
 func requestNextHint(rq accessRequestView) string {
 	if rq.NextStep == "use_exec" && len(rq.GrantedPaths) > 0 {
+		if rq.Action == "ssh_login" {
+			if p := hintPath(strings.TrimPrefix(rq.GrantedPaths[0], "ssh/")); p != "" {
+				return "phoenix ssh " + p + " -- <command>"
+			}
+			return nextStepHint("ask_user")
+		}
 		if p := hintPath(rq.GrantedPaths[0]); p != "" {
 			return "phoenix exec --redact-output --env NAME=phoenix://" + p + " -- <command>"
 		}
@@ -210,6 +220,12 @@ func requestNextHint(rq accessRequestView) string {
 // waitForDecision polls a request every 5s until it is decided or expires.
 // A deny or expiry is returned as an error so scripts can tell.
 func waitForDecision(rq accessRequestView) error {
+	return waitForDecisionTo(os.Stdout, rq)
+}
+
+// waitForDecisionTo is waitForDecision with the final summary sent to w. phoenix
+// ssh uses stderr, because its stdout belongs to the remote command.
+func waitForDecisionTo(w io.Writer, rq accessRequestView) error {
 	// The id comes from the server and is reused in a URL: accept only the
 	// real format.
 	if !requestIDPattern.MatchString(rq.ID) {
@@ -238,7 +254,7 @@ func waitForDecision(rq accessRequestView) error {
 		}
 		rq = next
 	}
-	printRequest(rq)
+	fprintRequest(w, rq)
 	if rq.Status != "approved" {
 		return fmt.Errorf("request %s %s", id, cleanServerText(rq.Status))
 	}

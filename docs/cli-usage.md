@@ -87,6 +87,15 @@ These run on the agent's own token or cert, never a session (except
 `phoenix whoami`, which reports on whatever credential you use). See
 [Access requests](access-requests.md).
 
+## Log in to a machine (SSH certificates)
+
+```bash
+phoenix ssh arch-omen --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
+```
+
+Asks a human if there is no approval yet, then logs in with a throwaway key and a
+certificate that ends with the approval. See [SSH certificates](ssh-certificates.md).
+
 ## Secure secret input
 
 Run `phoenix set <path>` with no value and Phoenix asks for it with echo off,
@@ -139,6 +148,10 @@ phoenix audit --agent deployer --since 2026-02-26T00:00:00Z
 ```
 
 Secret values are never written to the audit log.
+
+`phoenix audit` returns at most 10,000 entries (the newest), and searches only
+the current log file and the newest archive. See
+[Audit log rotation](configuration.md#audit-log-rotation).
 
 ## Import and export
 

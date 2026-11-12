@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # release/** too, so stacked release PRs (each based on the one before) get tested.
+    branches: [main, "release/**"]
 
 permissions:
   contents: read

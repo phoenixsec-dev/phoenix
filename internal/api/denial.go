@@ -42,6 +42,7 @@ const (
 	CodeInternalError       = "INTERNAL_ERROR"
 	CodeGrantExpired        = "GRANT_EXPIRED"
 	CodeGrantRevoked        = "GRANT_REVOKED"
+	CodeSSHGrantRequired    = "SSH_GRANT_REQUIRED"
 	// CodeRoleNotAllowed: a session role's allowed_agents does not list the
 	// agent (session mint, step-up approval, renewal).
 	CodeRoleNotAllowed = "ROLE_NOT_ALLOWED"
@@ -91,6 +92,8 @@ var denialNextStep = map[string]string{
 	// request_use is never static: it depends on the current settings.
 	CodeGrantExpired: NextAskUser,
 	CodeGrantRevoked: NextAskUser,
+	// The sign endpoint upgrades this to request_use itself: see denySSHSign.
+	CodeSSHGrantRequired: NextAskUser,
 
 	// Request-use API codes.
 	CodeNotRequestable:       NextAskUser,

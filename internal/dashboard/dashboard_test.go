@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -756,5 +758,76 @@ func TestForceLoginRequiresValidCredential(t *testing.T) {
 	loc := w.Header().Get("Location")
 	if !strings.Contains(loc, "error=") {
 		t.Fatalf("expected error redirect, got %s", loc)
+	}
+}
+
+// The audit page filters status inside the search (a denied entry older than
+// the newest 50 still shows) and says when older archives went unsearched.
+func TestAuditPageStatusFilterAndTruncation(t *testing.T) {
+	h, _, _ := testHandler(t)
+	cookie := login(t, h)
+	dir := t.TempDir()
+	line := func(ts, status, path string) string {
+		return `{"ts":"` + ts + `","agent":"a","action":"read","path":"` + path + `","status":"` + status + `","sealed":false}` + "\n"
+	}
+	var cur strings.Builder
+	for i := 0; i < 60; i++ {
+		cur.WriteString(line("2026-11-08T00:00:00Z", "allowed", "p/new"))
+	}
+	os.WriteFile(filepath.Join(dir, "audit.log"), []byte(cur.String()), 0600)
+	os.WriteFile(filepath.Join(dir, "audit-20261102T000000.000Z.log"), []byte(line("2026-11-02T00:00:00Z", "denied", "p/denied-old")), 0600)
+	os.WriteFile(filepath.Join(dir, "audit-20261101T000000.000Z.log.gz"), nil, 0600) // older history
+	h.deps.AuditPath = filepath.Join(dir, "audit.log")
+
+	req := httptest.NewRequest("GET", "/dashboard/audit?status=denied", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	body := w.Body.String()
+	if !strings.Contains(body, "p/denied-old") || strings.Contains(body, "p/new") {
+		t.Fatalf("status filter not applied in the search:\n%s", body)
+	}
+	// The note must sit inside #audit-table, the part auto-refresh replaces.
+	if i, j := strings.Index(body, `id="audit-table"`), strings.Index(body, `id="audit-truncated"`); i < 0 || j < i {
+		t.Fatal("truncation notice missing or outside #audit-table")
+	}
+}
+
+// Overview and Audit show a secret path in full, in a cell that can wrap,
+// not cut to 30-40 characters.
+func TestPagesShowFullSecretPath(t *testing.T) {
+	h, _, _ := testHandler(t)
+	cookie := login(t, h)
+	long := "homelab/proxmox/cluster-api-tokens/automation/terraform-provisioner-token"
+	path := filepath.Join(t.TempDir(), "audit.log")
+	os.WriteFile(path, []byte(`{"ts":"2026-11-08T00:00:00Z","agent":"a","action":"read","path":"`+long+`","status":"allowed","sealed":false}`+"\n"), 0600)
+	h.deps.AuditPath = path
+
+	for _, page := range []string{"/dashboard/", "/dashboard/audit"} {
+		req := httptest.NewRequest("GET", page, nil)
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if !strings.Contains(w.Body.String(), `<td class="mono path-full">`+long+`</td>`) {
+			t.Fatalf("%s: full path not shown in a path-full cell", page)
+		}
+	}
+}
+
+// A step-up approval card shows the role's namespaces in full and wrappable;
+// a namespace can be an exact secret path.
+func TestApprovalCardNamespacesWrap(t *testing.T) {
+	h, _, as := testHandler(t)
+	cookie := login(t, h)
+	long := "homelab/proxmox/cluster-api-tokens/automation/terraform-provisioner-token"
+	if _, err := as.Create("deploy", "agent1", nil, []string{long}, []string{"list"}, "bearer", "", "10.0.0.1", "", time.Hour, 0); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/dashboard/approvals", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), `<span class="mono path-full">`+long+`</span>`) {
+		t.Fatal("namespace not shown in full in a path-full span")
 	}
 }

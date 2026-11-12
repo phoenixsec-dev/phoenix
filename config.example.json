@@ -32,7 +32,8 @@
     "path": "/data/phoenix/acl.json"
   },
   "audit": {
-    "path": "/data/phoenix/audit.log"
+    "path": "/data/phoenix/audit.log",
+    "rotate_mb": 50
   },
   "policy": {
     "path": "/data/phoenix/policy.json"

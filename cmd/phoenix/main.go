@@ -20,6 +20,7 @@
 //	phoenix exec --env KEY=phoenix://ns/secret [--output-env <path>] [--timeout <dur>] [--mask-env] [--redact-output] -- <command> [args...]
 //	phoenix request <path>... --reason "..." [--ttl 30m] [--wait]
 //	phoenix request status <req_id>
+//	phoenix ssh <machine> [--reason "..."] [--ttl 15m] [-- command...]
 //	phoenix whoami | pending | grants [--all] | grants revoke <gnt_id>
 //	phoenix approve <apr_id|req_id> | deny <apr_id|req_id>
 //	phoenix verify <file> [--dry-run]
@@ -296,6 +297,8 @@ func main() {
 		err = cmdDeny(args)
 	case "request":
 		err = cmdRequest(args)
+	case "ssh":
+		err = cmdSSH(args)
 	case "pending":
 		err = cmdPending(args)
 	case "whoami":
@@ -396,6 +399,7 @@ Usage:
   phoenix resolve --stdin-json                  OpenClaw SecretRef exec provider (stdin/stdout JSON)
   phoenix openclaw-exec-provider               OpenClaw SecretRef exec provider (stdin/stdout JSON)
   phoenix secret-provider openclaw             Alias for openclaw-exec-provider
+  phoenix ssh <machine> -r "why" [-- cmd]     Log in to a machine with a human's temporary approval
   phoenix exec --env K=phoenix://n/s -- cmd   Run command with resolved secrets as env
   phoenix exec --output-env <file> --env ...  Write resolved env to file (no exec)
   phoenix exec --timeout 5s --env ...         Fail if resolution exceeds duration
@@ -1015,6 +1019,7 @@ func cmdAudit(args []string) error {
 			IP        string `json:"ip"`
 			Reason    string `json:"reason"`
 		} `json:"entries"`
+		Truncated bool `json:"truncated"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
@@ -1025,6 +1030,9 @@ func cmdAudit(args []string) error {
 		}
 		fmt.Printf("%s  %-10s %-8s %-40s %s  %s\n",
 			e.Timestamp, e.Agent, e.Action, e.Path, status, e.IP)
+	}
+	if result.Truncated {
+		fmt.Fprintln(os.Stderr, "note: only the newest part of the audit log was searched; older entries may match (see the archived audit-*.log files)")
 	}
 	return nil
 }

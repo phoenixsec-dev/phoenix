@@ -36,6 +36,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/session"
+	"github.com/phoenixsec/phoenix/internal/sshca"
 	"github.com/phoenixsec/phoenix/internal/store"
 	"github.com/phoenixsec/phoenix/internal/token"
 	"github.com/phoenixsec/phoenix/internal/transport"
@@ -218,7 +219,7 @@ func main() {
 	}
 
 	// Initialize audit logger
-	al, err := audit.NewLogger(cfg.Audit.Path)
+	al, err := audit.NewRotatingLogger(cfg.Audit.Path, cfg.AuditRotateBytes())
 	if err != nil {
 		log.Fatalf("initializing audit logger: %v", err)
 	}
@@ -334,6 +335,14 @@ func main() {
 	defer stopGrants()
 	go grantStore.Run(grantCtx, 30*time.Second)
 	logAccessRequests(cfg, a)
+	if cfg.SSHCAEnabled() {
+		ca, created, err := sshca.LoadOrCreate(cfg.SSHCAKeyPath())
+		if err != nil {
+			log.Fatalf("loading SSH CA key: %v", err)
+		}
+		srv.SetSSHCA(ca, cfg.SSHCAHosts())
+		log.Printf("SSH certificates: enabled for %d host(s), new key=%v, CA %s", len(cfg.SSHCA.Hosts), created, sshca.PublicKey(ca))
+	}
 
 	// Initialize dashboard if enabled
 	if cfg.Dashboard.Enabled {
@@ -401,7 +410,11 @@ func main() {
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
 	log.Printf("  ACL: %s (%d agents)", cfg.ACL.Path, len(a.ListAgents()))
-	log.Printf("  Audit: %s", cfg.Audit.Path)
+	if rb := cfg.AuditRotateBytes(); rb > 0 {
+		log.Printf("  Audit: %s (rotates at %d MB; archives are kept)", cfg.Audit.Path, rb>>20)
+	} else {
+		log.Printf("  Audit: %s (rotation off)", cfg.Audit.Path)
+	}
 
 	httpSrv := newHTTPServer(cfg.Server.Listen, srv, tlsCfg)
 

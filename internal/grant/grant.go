@@ -26,8 +26,13 @@ import (
 	"github.com/phoenixsec/phoenix/internal/store"
 )
 
-// ActionReadValue is the only grantable action in v1.
+// ActionReadValue is the only grantable action on secrets in v1.
 const ActionReadValue = "read_value"
+
+// ActionSSHLogin is a grant to log in to a machine, on the path "ssh/<machine>".
+// It is its own action so a grant to read a secret can never become a login, and
+// a login grant can never read a secret, whatever the paths look like.
+const ActionSSHLogin = "ssh_login"
 
 // Auth methods, matching internal/api's bootstrapMethod strings. Sessions
 // ("phxs_" tokens) can never create or use a grant.

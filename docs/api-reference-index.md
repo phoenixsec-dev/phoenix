@@ -182,6 +182,16 @@ a notification to `access_requests.notify_url` (no endpoint; see
 | POST | `/v1/grants/{id}/revoke` | Revoke (owner or approver) |
 | GET | `/v1/whoami` | Caller identity, ACL rules, grants, pending requests |
 
+## SSH certificates
+
+See [ssh-certificates.md](ssh-certificates.md).
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/v1/ssh/sign` | Sign `{"host","public_key"}` with an active `ssh_login` grant on `ssh/<host>`. Own identity only, never a session |
+| GET | `/v1/ssh/ca` | The CA's public key. No login |
+| GET | `/v1/ssh/window/{host}/{grant}` | `{"open":true/false}`: whether this approval is active for this machine. Anything unknown or switched off is false. No login; machines ask at every login and for each open session |
+
 ## Common error shape
 
 Most failures return:

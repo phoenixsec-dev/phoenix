@@ -24,6 +24,7 @@ and secret values on the network in cleartext.
 | `store.backend` | Secret backend (`file` or `1password`) | `file` |
 | `acl.path` | ACL definition file | `/data/acl.json` |
 | `audit.path` | Audit log file | `/data/audit.log` |
+| `audit.rotate_mb` | Rotate the audit log at this size; archives are kept forever. Negative = never rotate. See [Audit log rotation](#audit-log-rotation) | `50` |
 | `auth.bearer.enabled` | Allow bearer token auth | `true` |
 | `auth.mtls.enabled` | Enable mTLS | `false` |
 | `auth.mtls.require` | Reject connections without client cert | `false` |
@@ -38,6 +39,7 @@ and secret values on the network in cleartext.
 | `session.ttl` | Default session lifetime | `1h` |
 | `session.roles` | Named role definitions (see below) | — |
 | `access_requests.*` | Request-use grants: agents ask a human for temporary use of exact secrets (see below) | block missing = off |
+| `ssh_ca.*` | Short-lived SSH login certificates, approved through grants. See [SSH certificates](ssh-certificates.md) | block missing = off |
 | `onepassword.vault` | 1Password vault name | — |
 | `onepassword.service_account_token_env` | Token env var name | `OP_SERVICE_ACCOUNT_TOKEN` |
 | `onepassword.cache_ttl` | Runtime read/list cache duration | `60s` |
@@ -173,6 +175,37 @@ the session cookie is set with `Secure` flag automatically. For production use:
 
 Do not expose the dashboard over plain HTTP on a network you do not control —
 the server logs a loud startup warning if you do.
+
+## Audit log rotation
+
+When `audit.log` passes `audit.rotate_mb` (default 50), Phoenix renames it to a
+dated archive in the same directory and starts a new `audit.log`:
+
+```text
+audit.log                                  current file
+audit-20261108T120000.000Z.log             newest archive, plain text
+audit-20261101T093000.000Z.log.gz          older archives, gzipped
+```
+
+- **Nothing is ever deleted.** Removing old archives is your decision.
+- **No line is lost.** The rename happens while writers wait, so every line is
+  in exactly one file. The archive name is the UTC time of the rotation.
+- **The newest archive stays plain** until the next rotation, so the dashboard
+  and `GET /v1/audit` can read it backwards when the current file is too short.
+  Older archives are gzipped in the background; the plain file is removed only
+  after its `.gz` is complete. Read them with `zcat`.
+- An existing log larger than the limit is rotated on the first write after
+  upgrading.
+- Set `"rotate_mb": -1` only if you rotate the file another way, and then
+  only while Phoenix is stopped. Phoenix keeps its file open, and
+  copy-and-truncate on a running server can lose a line written between the
+  copy and the truncate.
+
+Queries (dashboard Audit page, Overview, `GET /v1/audit`, `phoenix audit`)
+read from the end of the log and stop once they have enough entries, so they
+stay fast however large the log grows. They search only the current file and
+the newest archive, and at most 64 MB per query. When that cut a search short
+the dashboard says so and the API returns `"truncated": true`.
 
 ## 1Password runtime backend (broker mode, read-only)
 

@@ -29,6 +29,8 @@ type Config struct {
 	// AccessRequests is nil when the block is missing, which means the
 	// request-use feature is off (safe default for upgraded installs).
 	AccessRequests *AccessRequestsConfig `json:"access_requests,omitempty"`
+	// SSHCA is nil when the block is missing, which means SSH certificates are off.
+	SSHCA *SSHCAConfig `json:"ssh_ca,omitempty"`
 }
 
 // AuthConfig controls authentication methods.
@@ -115,6 +117,25 @@ type ACLFileConfig struct {
 // AuditConfig controls audit logging.
 type AuditConfig struct {
 	Path string `json:"path"` // Path to audit log file
+	// RotateMB: when the log passes this many MB it is renamed to a dated
+	// archive next to it and a new file is started. Archives are never
+	// deleted. 0 or unset = 50; negative = never rotate.
+	RotateMB int `json:"rotate_mb,omitempty"`
+}
+
+// DefaultAuditRotateMB is the rotate size when audit.rotate_mb is unset.
+const DefaultAuditRotateMB = 50
+
+// AuditRotateBytes is the audit log rotate size in bytes (0 = never).
+func (c *Config) AuditRotateBytes() int64 {
+	switch {
+	case c.Audit.RotateMB < 0:
+		return 0
+	case c.Audit.RotateMB == 0:
+		return DefaultAuditRotateMB << 20
+	default:
+		return int64(c.Audit.RotateMB) << 20
+	}
 }
 
 // PolicyConfig controls the optional attestation policy engine.
@@ -498,6 +519,9 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.validateAccessRequests(); err != nil {
+		return err
+	}
+	if err := c.validateSSHCA(); err != nil {
 		return err
 	}
 	// Always, even without an access_requests block: the store always opens.
