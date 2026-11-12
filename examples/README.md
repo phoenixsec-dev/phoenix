@@ -21,9 +21,9 @@ Each script will:
    ./examples/01-local-quickstart/run.sh
    ```
 
-2. **Exec wrapper with `--output-env`**
+2. **Run a command with secrets in its environment (`phoenix exec`, `--redact-output`)**
    ```bash
-   ./examples/02-exec-output-env/run.sh
+   ./examples/02-exec/run.sh
    ```
 
 3. **ACL strict parsing + enforcement**

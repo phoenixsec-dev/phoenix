@@ -75,38 +75,6 @@ func TestCmdPolicyTestIPCheck(t *testing.T) {
 	}
 }
 
-func TestCmdPolicyShowLegacyRulesFormat(t *testing.T) {
-	dir := t.TempDir()
-	policyPath := filepath.Join(dir, "policy.json")
-	policyData := `{
-		"rules": [
-			{
-				"path": "secure/*",
-				"allowed_ips": ["192.168.0.0/24"]
-			}
-		]
-	}`
-	if err := os.WriteFile(policyPath, []byte(policyData), 0644); err != nil {
-		t.Fatalf("write policy: %v", err)
-	}
-
-	origPolicy := os.Getenv("PHOENIX_POLICY")
-	os.Setenv("PHOENIX_POLICY", policyPath)
-	defer os.Setenv("PHOENIX_POLICY", origPolicy)
-
-	out := captureStdout(t, func() {
-		if err := cmdPolicyShow([]string{"secure/db"}); err != nil {
-			t.Fatalf("cmdPolicyShow: %v", err)
-		}
-	})
-	if !strings.Contains(out, "Pattern: secure/*") {
-		t.Fatalf("expected matched pattern in output, got: %s", out)
-	}
-	if !strings.Contains(out, `source_ip: ["192.168.0.0/24"]`) {
-		t.Fatalf("expected source_ip in output, got: %s", out)
-	}
-}
-
 func TestCmdPolicyShowIncludesRequireSealed(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.json")

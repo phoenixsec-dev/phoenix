@@ -48,7 +48,7 @@ func setupTestServer(t *testing.T) (*Server, string) {
 				Name:      "reader",
 				TokenHash: crypto.HashToken("reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},
@@ -1995,7 +1995,7 @@ func TestCreateAgentInvalidPermissions(t *testing.T) {
 		name  string
 		perms []acl.Permission
 	}{
-		{"empty path", []acl.Permission{{Path: "", Actions: []acl.Action{acl.ActionRead}}}},
+		{"empty path", []acl.Permission{{Path: "", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}},
 		{"no actions", []acl.Permission{{Path: "ns/*", Actions: []acl.Action{}}}},
 		{"invalid action", []acl.Permission{{Path: "ns/*", Actions: []acl.Action{"bogus"}}}},
 	}
@@ -2026,7 +2026,7 @@ func TestCreateAgentValidPermissions(t *testing.T) {
 		Name:  "goodagent",
 		Token: "goodtoken",
 		Permissions: []acl.Permission{
-			{Path: "ns/*", Actions: []acl.Action{acl.ActionRead, acl.ActionWrite}},
+			{Path: "ns/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue, acl.ActionWrite}},
 		},
 	})
 	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
@@ -2080,7 +2080,7 @@ func setupTestServerWithGranularACL(t *testing.T) *Server {
 				Name:      "legacy-reader",
 				TokenHash: crypto.HashToken("legacy-reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},
@@ -2232,7 +2232,7 @@ func setupSealedTestServer(t *testing.T) (*Server, string, *crypto.SealKeyPair) 
 func TestGenerateKeyPairSuccess(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
-	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader", SealPublicKey: testSealPub(t)})
 	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w := httptest.NewRecorder()
@@ -2251,8 +2251,8 @@ func TestGenerateKeyPairSuccess(t *testing.T) {
 	if resp["seal_public_key"] == "" {
 		t.Error("seal_public_key is empty")
 	}
-	if resp["seal_private_key"] == "" {
-		t.Error("seal_private_key is empty")
+	if _, ok := resp["seal_private_key"]; ok {
+		t.Error("the server must never return a private key")
 	}
 	if w.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("Cache-Control = %q, want %q", w.Header().Get("Cache-Control"), "no-store")
@@ -2265,11 +2265,39 @@ func TestGenerateKeyPairSuccess(t *testing.T) {
 	}
 }
 
+// testSealPub returns a fresh seal public key, made the way the CLI makes it.
+func testSealPub(t *testing.T) string {
+	t.Helper()
+	kp, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return crypto.EncodeSealKey(&kp.PublicKey)
+}
+
+// An older CLI sends no public key and expects one back; it gets a 400 that
+// says to update, and the agent's key is untouched. A malformed key is a 400.
+func TestGenerateKeyPairNeedsClientPublicKey(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	for _, body := range []string{`{"agent_name":"reader"}`, `{"agent_name":"reader","seal_public_key":"bm90LWEta2V5"}`} {
+		req := httptest.NewRequest("POST", "/v1/keypair", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code != 400 {
+			t.Fatalf("%s: expected 400, got %d: %s", body, w.Code, w.Body.String())
+		}
+	}
+	if stored, _ := srv.acl.GetAgentSealKey("reader"); stored != "" {
+		t.Fatalf("seal key registered from a bad request: %q", stored)
+	}
+}
+
 func TestGenerateKeyPairRotationRequiresForce(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
 	// First generation
-	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader", SealPublicKey: testSealPub(t)})
 	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w := httptest.NewRecorder()
@@ -2279,7 +2307,7 @@ func TestGenerateKeyPairRotationRequiresForce(t *testing.T) {
 	}
 
 	// Second generation without force should fail
-	body, _ = json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	body, _ = json.Marshal(generateKeyPairRequest{AgentName: "reader", SealPublicKey: testSealPub(t)})
 	req = httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w = httptest.NewRecorder()
@@ -2289,7 +2317,7 @@ func TestGenerateKeyPairRotationRequiresForce(t *testing.T) {
 	}
 
 	// With force=true should succeed
-	body, _ = json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	body, _ = json.Marshal(generateKeyPairRequest{AgentName: "reader", SealPublicKey: testSealPub(t)})
 	req = httptest.NewRequest("POST", "/v1/keypair?force=true", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w = httptest.NewRecorder()
@@ -2302,7 +2330,7 @@ func TestGenerateKeyPairRotationRequiresForce(t *testing.T) {
 func TestGenerateKeyPairNonAdmin(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader", SealPublicKey: testSealPub(t)})
 	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer reader-token")
 	w := httptest.NewRecorder()
@@ -2316,7 +2344,7 @@ func TestGenerateKeyPairNonAdmin(t *testing.T) {
 func TestGenerateKeyPairAgentNotFound(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
-	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "nonexistent"})
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "nonexistent", SealPublicKey: testSealPub(t)})
 	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w := httptest.NewRecorder()
@@ -2331,7 +2359,7 @@ func TestGetSealKey(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
 	// Generate a keypair first
-	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader"})
+	body, _ := json.Marshal(generateKeyPairRequest{AgentName: "reader", SealPublicKey: testSealPub(t)})
 	req := httptest.NewRequest("POST", "/v1/keypair", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w := httptest.NewRecorder()
@@ -2821,7 +2849,7 @@ func TestDryRunUnchangedWithSealKey(t *testing.T) {
 func TestPolicyCheckAllowUnseal(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
-	pe, _ := policy.Load([]byte(`{"rules":[{"path":"test/*","allow_unseal":true}]}`))
+	pe, _ := policy.Load([]byte(`{"attestation":{"test/*":{"allow_unseal":true}}}`))
 	srv.SetPolicy(pe)
 
 	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
@@ -2842,7 +2870,7 @@ func TestPolicyCheckAllowUnseal(t *testing.T) {
 func TestPolicyCheckDenyUnseal(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 
-	pe, _ := policy.Load([]byte(`{"rules":[{"path":"other/*","allow_unseal":true}]}`))
+	pe, _ := policy.Load([]byte(`{"attestation":{"other/*":{"allow_unseal":true}}}`))
 	srv.SetPolicy(pe)
 
 	req := httptest.NewRequest("GET", "/v1/policy/check?path=test/secret&check=allow_unseal", nil)
@@ -3073,43 +3101,6 @@ func TestSessionMintCacheControl(t *testing.T) {
 	}
 }
 
-func TestSessionMintAttestationEnforced(t *testing.T) {
-	srv, adminToken := setupTestServer(t)
-
-	ss, err := session.NewStore(time.Hour)
-	if err != nil {
-		t.Fatalf("session store: %v", err)
-	}
-	t.Cleanup(ss.Stop)
-	srv.SetSessionStore(ss)
-	srv.SetSessionRoles(map[string]config.RoleConfig{
-		"secure": {
-			Namespaces:     []string{"prod/*"},
-			BootstrapTrust: []string{"bearer"},
-			Attestation:    []string{"source_ip"},
-		},
-	})
-
-	// Mint from a LAN address (should fail because the role requires loopback)
-	body := `{"role":"secure"}`
-	req := httptest.NewRequest("POST", "/v1/session/mint", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != 403 {
-		t.Fatalf("status = %d, want 403, body: %s", w.Code, w.Body.String())
-	}
-
-	var result struct {
-		Code string `json:"code"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if result.Code != "ATTESTATION_FAILED" {
-		t.Errorf("code = %q, want ATTESTATION_FAILED", result.Code)
-	}
-}
-
 func TestSessionRenewLocalityRecheck(t *testing.T) {
 	// This test verifies that renewal checks the CURRENT request's locality,
 	// not the original mint-time source IP.
@@ -3230,7 +3221,7 @@ func TestSessionListSelfOnly(t *testing.T) {
 				Name:      "reader",
 				TokenHash: crypto.HashToken("reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},
@@ -3389,7 +3380,7 @@ func TestSessionRevokeOtherDenied(t *testing.T) {
 				Name:      "reader",
 				TokenHash: crypto.HashToken("reader-token"),
 				Permissions: []acl.Permission{
-					{Path: "test/*", Actions: []acl.Action{acl.ActionRead}},
+					{Path: "test/*", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}},
 				},
 			},
 		},
@@ -3757,5 +3748,40 @@ func TestResolveRefusesRemovedNonceFields(t *testing.T) {
 		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "removed") {
 			t.Errorf("%s: got %d %s, want 400 naming the removal", field, w.Code, w.Body.String())
 		}
+	}
+}
+
+// tsk_20261108_0033: a "*" in a single-secret read is a usage hint (400),
+// decided before ACL and attestation, the same for an identity with no
+// access and for an admin, and whether or not anything is stored there.
+func TestGetSecretWildcardIsUsageError(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	srv.backend.Set("services/browser/key", "v", "admin", "", nil)
+	for _, tok := range []string{"reader-token", adminToken} {
+		for _, p := range []string{"services/browser/*", "nothing/here/*", "services/br*wser"} {
+			req := httptest.NewRequest("GET", "/v1/secrets/"+p, nil)
+			req.Header.Set("Authorization", "Bearer "+tok)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+			if w.Code != 400 || !strings.Contains(w.Body.String(), "wildcards are not secret names; to list a folder, end the path with /") {
+				t.Errorf("%s as %s: %d %s", p, tok, w.Code, w.Body.String())
+			}
+		}
+	}
+}
+
+// Review R1 on tsk_20261108_0033: a name with "*" could be written but not
+// read back (reads answer the wildcard hint), so writes refuse it too.
+func TestSetSecretRefusesStar(t *testing.T) {
+	srv, adminToken := setupTestServer(t)
+	req := httptest.NewRequest("PUT", "/v1/secrets/review/a*b", strings.NewReader(`{"value":"v"}`))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "not allowed in secret names") {
+		t.Fatalf("PUT a*b: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := srv.backend.Get("review/a*b"); err == nil {
+		t.Fatal("secret with * was stored")
 	}
 }

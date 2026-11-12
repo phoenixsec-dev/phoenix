@@ -7,8 +7,8 @@ trap stop_local_phoenix EXIT
 start_local_phoenix
 
 echo "==> Storing secrets"
-"$PHX_BIN" set demo/api-key -v "sk-demo-123" -d "Example API key"
-"$PHX_BIN" set demo/db-password -v "hunter2" -d "Example DB password"
+printf '%s' "sk-demo-123" | "$PHX_BIN" set demo/api-key --value-stdin -d "Example API key"
+printf '%s' "hunter2" | "$PHX_BIN" set demo/db-password --value-stdin -d "Example DB password"
 
 echo "==> Preferred: inject secret into a command via phoenix exec"
 "$PHX_BIN" exec \

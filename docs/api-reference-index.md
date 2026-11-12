@@ -212,7 +212,6 @@ Denial codes:
 | `ACTION_DENIED` | 403 | Action not permitted by role |
 | `BOOTSTRAP_FAILED` | 403 | Auth method not accepted for this role |
 | `ROLE_NOT_FOUND` | 404 | Requested role does not exist |
-| `ATTESTATION_FAILED` | 403 | Attestation requirements not met |
 | `SEAL_KEY_REQUIRED` | 403 | Role requires seal key at mint |
 | `SEAL_KEY_MISMATCH` | 403 | Seal key doesn't match session binding |
 | `SESSION_REQUIRED` | 400 | Operation requires a session token |

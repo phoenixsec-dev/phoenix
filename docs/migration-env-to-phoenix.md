@@ -29,8 +29,8 @@ phoenix import secrets.env --prefix myapp/
 Or store individually:
 
 ```bash
-phoenix set myapp/db-password -v "..." -d "DB password"
-phoenix set myapp/api-key -v "..." -d "API key"
+phoenix set myapp/db-password -d "DB password"   # paste the value when asked
+phoenix set myapp/api-key -d "API key"
 ```
 
 See [CLI Usage](cli-usage.md) for import options including 1Password migration
@@ -39,8 +39,8 @@ See [CLI Usage](cli-usage.md) for import options including 1Password migration
 ## 4) Create least-privilege agent identities
 
 ```bash
-phoenix agent create myapp-runtime -t "runtime-token" --acl "myapp/**:read"
-phoenix agent create myapp-deployer -t "deploy-token" --acl "myapp/**:read,write"
+phoenix agent create myapp-runtime -t "runtime-token" --acl "myapp/**:list,read_value"
+phoenix agent create myapp-deployer -t "deploy-token" --acl "myapp/**:list,read_value,write"
 ```
 
 `myapp/**` grants access to everything under `myapp/`, including nested paths;
@@ -76,14 +76,9 @@ phoenix exec \
   -- your-app-command
 ```
 
-For init-container style workflows:
-
-```bash
-phoenix exec \
-  --env DB_PASSWORD=phoenix://myapp/db-password \
-  --env OPENAI_KEY=phoenix://myapp/api-key \
-  --output-env /run/secrets/app.env
-```
+For init-container style workflows, run the app's entrypoint under
+`phoenix exec` too rather than writing an env file: the values then live only
+in the process environment, never on disk.
 
 ## 7) Validate and audit
 

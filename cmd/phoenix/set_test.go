@@ -6,18 +6,6 @@ import (
 	"testing"
 )
 
-func TestCmdSetRejectsValueAndValueStdin(t *testing.T) {
-	t.Setenv("PHOENIX_TOKEN", "test-token")
-	token = "test-token"
-	err := cmdSet([]string{"test/secret", "-v", "myvalue", "--value-stdin"})
-	if err == nil {
-		t.Fatal("expected error combining -v and --value-stdin")
-	}
-	if !strings.Contains(err.Error(), "cannot combine") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestCmdSetValueStdinReadsFromStdin(t *testing.T) {
 	t.Setenv("PHOENIX_TOKEN", "test-token")
 	token = "test-token"

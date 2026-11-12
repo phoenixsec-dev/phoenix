@@ -29,8 +29,8 @@ PHOENIX_SERVER="http://127.0.0.1:$port"; export PHOENIX_SERVER
 # Helpers expect config at RUN_DIR/config.json; point through a temporary symlink.
 ln -s "$RUN_DIR/state/config.json" "$RUN_DIR/config.json"
 start_server
-phoenix_admin set upgrade/key -v synthetic-upgrade >/dev/null
-phoenix_admin agent create upgrade-agent -t synthetic-upgrade-agent --acl 'upgrade/*:read' >/dev/null
+printf '%s' synthetic-upgrade | phoenix_admin set upgrade/key --value-stdin >/dev/null
+phoenix_admin agent create upgrade-agent -t synthetic-upgrade-agent --acl 'upgrade/*:list,read_value' >/dev/null
 old_mint="$(curl -fsS -X POST "$PHOENIX_SERVER/v1/session/mint" -H 'Authorization: Bearer synthetic-upgrade-agent' -H 'Content-Type: application/json' --data '{"role":"upgrade-reader"}')"; old_session="$(jq -r .session_token <<<"$old_mint")"
 assert_eq "$(PHOENIX_TOKEN="$old_session" "$PHOENIX" get upgrade/key)" synthetic-upgrade
 old_audit_count="$(wc -l <"$RUN_DIR/state/audit.log")"

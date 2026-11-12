@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -52,7 +53,7 @@ func main() {
 	initDir := flag.String("init", "", "Initialize a new Phoenix data directory")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	passphraseStdin := flag.Bool("passphrase-stdin", false, "Read master key passphrase from stdin")
-	initPassphrase := flag.String("passphrase", "", "Passphrase to protect master key (--init only)")
+	flag.String("passphrase", "", "Removed: use --passphrase-stdin or PHOENIX_MASTER_PASSPHRASE")
 	protectKey := flag.Bool("protect-key", false, "Add, change, or remove passphrase on existing master key")
 	hashPassword := flag.Bool("hash-password", false, "Generate a bcrypt hash for dashboard password_hash config")
 	checkConfig := flag.Bool("check-config", false, "Check the config file, the policy file and HTTPS certificate it names, then exit without starting")
@@ -61,8 +62,10 @@ func main() {
 	flag.Var(&sans, "san", "Subject Alternative Name for --reissue-cert (repeatable: IPs and hostnames)")
 	flag.Parse()
 
-	if *initPassphrase != "" {
-		fmt.Fprintln(os.Stderr, "WARNING: --passphrase is visible in process listings. Use PHOENIX_MASTER_PASSPHRASE env var or --passphrase-stdin instead.")
+	if flagSet("passphrase") {
+		fmt.Fprintln(os.Stderr, "phoenix-server --passphrase was removed: a passphrase on the command line is visible to every user in the process list and lands in shell history. "+
+			"Pipe it in with --passphrase-stdin, or set PHOENIX_MASTER_PASSPHRASE.")
+		os.Exit(2)
 	}
 
 	if *showVersion {
@@ -92,7 +95,11 @@ func main() {
 	}
 
 	if *initDir != "" {
-		if err := runInit(*initDir, *initPassphrase); err != nil {
+		passphrase, err := initPassphrase(*passphraseStdin)
+		if err != nil {
+			log.Fatalf("init failed: %v", err)
+		}
+		if err := runInit(*initDir, passphrase); err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
 		return
@@ -321,9 +328,10 @@ func resolveConfigPath(flagValue string) string {
 }
 
 // runCheckConfig is --check-config: it runs the same checks startup does on
-// the config file, the policy file and the HTTPS certificate, without opening
-// the store or binding any port, so an operator can check a config (including
-// one with removed settings) before deploying a new version.
+// the config file, the policy file, the ACL file and the HTTPS certificate,
+// without opening the store or binding any port, so an operator can check a
+// config (including one with removed settings) before deploying a new
+// version. Every file is checked, so one run lists every problem.
 func runCheckConfig(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return err
@@ -332,21 +340,56 @@ func runCheckConfig(path string) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	if err := cfg.Validate(); err != nil {
-		return err
+		errs = append(errs, err)
 	}
 	if cfg.Policy.Path != "" {
 		pe, err := policy.LoadFile(cfg.Policy.Path)
 		if err != nil {
-			return fmt.Errorf("policy %s: %w", cfg.Policy.Path, err)
+			errs = append(errs, fmt.Errorf("policy %s: %w", cfg.Policy.Path, err))
+		} else {
+			fmt.Printf("policy OK: %s (%d rules)\n", cfg.Policy.Path, len(pe.Rules()))
 		}
-		fmt.Printf("policy OK: %s (%d rules)\n", cfg.Policy.Path, len(pe.Rules()))
+	}
+	if cfg.ACL.Path != "" {
+		a, err := acl.New(cfg.ACL.Path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("acl %s: %w", cfg.ACL.Path, err))
+		} else {
+			fmt.Printf("acl OK: %s (%d agents)\n", cfg.ACL.Path, len(a.ListAgents()))
+		}
 	}
 	if _, err := loadHTTPSListener(cfg.HTTPSListener); err != nil {
-		return err
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	fmt.Printf("config OK: %s\n", path)
 	return nil
+}
+
+// flagSet reports whether the named flag was given on the command line, even
+// with an empty value.
+func flagSet(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+// initPassphrase picks the passphrase that protects a new master key for
+// --init: stdin with --passphrase-stdin, else PHOENIX_MASTER_PASSPHRASE.
+// Neither means an unprotected key (add one later with --protect-key).
+func initPassphrase(stdin bool) (string, error) {
+	if !stdin && os.Getenv("PHOENIX_MASTER_PASSPHRASE") == "" {
+		return "", nil
+	}
+	return crypto.ReadPassphrase(stdin)
 }
 
 func runInit(dir, passphrase string) error {

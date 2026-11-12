@@ -11,18 +11,18 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 21 request-use-grants
 init_scenario 21
 # --init writes access_requests enabled (new-install default); add an API approver.
-config_patch "d['access_requests']['approvers']=['e2e-approver']; d['dashboard']={'enabled': True, 'pin': 'e2e-dash-pin'}"
+config_patch "d['access_requests']['approvers']=['e2e-approver']; d['dashboard']={'enabled': True, 'password_hash': '\$2a\$10\$HLVxwM4wKNkthQOq6HXfuOj6tC68h.gfwNjx2MSHkqPXkgvrMpK3a'}"
 start_server
 
 AGENT=synthetic-request-agent
 APPROVER=synthetic-request-approver
-phoenix_admin set infra/b2/app-key -v synthetic-b2-key >/dev/null
-phoenix_admin set infra/other -v synthetic-other >/dev/null
-phoenix_admin set infra/third -v synthetic-third >/dev/null
-phoenix_admin set infra/short -v synthetic-short >/dev/null
-phoenix_admin set infra/dash -v synthetic-dash-value >/dev/null
-phoenix_admin set infra/dash-extra -v synthetic-dash-extra >/dev/null
-phoenix_admin agent create e2e-agent -t "$AGENT" --acl 'dev/*:read' >/dev/null
+printf '%s' synthetic-b2-key | phoenix_admin set infra/b2/app-key --value-stdin >/dev/null
+printf '%s' synthetic-other | phoenix_admin set infra/other --value-stdin >/dev/null
+printf '%s' synthetic-third | phoenix_admin set infra/third --value-stdin >/dev/null
+printf '%s' synthetic-short | phoenix_admin set infra/short --value-stdin >/dev/null
+printf '%s' synthetic-dash-value | phoenix_admin set infra/dash --value-stdin >/dev/null
+printf '%s' synthetic-dash-extra | phoenix_admin set infra/dash-extra --value-stdin >/dev/null
+phoenix_admin agent create e2e-agent -t "$AGENT" --acl 'dev/*:list,read_value' >/dev/null
 phoenix_admin agent create e2e-approver -t "$APPROVER" --acl 'approver-none/*:list' >/dev/null
 keyfile="$RUN_DIR/agent-seal.key"
 keyout="$(phoenix_admin keypair generate e2e-agent -o "$keyfile")"
@@ -90,7 +90,7 @@ assert_eq "$(jq -r .allowed "$RUN_DIR/resp")" false "allow_unseal for a grant-on
 # phoenix exec --redact-output, revoke it on the grants page.
 jar="$RUN_DIR/dash.cookies"
 dash() { curl -sS -b "$jar" -c "$jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
-assert_eq "$(dash -X POST --data-urlencode credential=e2e-dash-pin "$PHOENIX_SERVER/dashboard/login")" 303 "dashboard login"
+assert_eq "$(dash -X POST --data-urlencode credential=e2e-dash-password "$PHOENIX_SERVER/dashboard/login")" 303 "dashboard login"
 call "$AGENT" POST /v1/access-requests '{"paths":["infra/dash","infra/dash-extra"],"reason":"e2e: <script>dash</script>","ttl":"30m"}'
 assert_eq "$HTTP_CODE" 201 "dashboard request"
 rd="$(jq -r .id "$RUN_DIR/resp")"

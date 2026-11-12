@@ -54,6 +54,11 @@ per field. They went because the server could not actually check them:
 
 Use `source_ip` and `require_sealed` instead.
 
+The old file format, a top-level `rules` list with `allowed_ips`, also fails
+to load. Move each rule under `attestation`:
+`{"rules":[{"path":"p/**","allowed_ips":["10.0.0.5"]}]}` becomes
+`{"attestation":{"p/**":{"source_ip":["10.0.0.5"]}}}`.
+
 ## Sealed policy controls
 
 Sealed responses add per-path controls such as:

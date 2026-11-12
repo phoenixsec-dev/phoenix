@@ -4,7 +4,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 05 rotation-under-load
 init_scenario 05
 start_server
-for i in $(seq 1 50); do phoenix_admin set "rotation/ns$((i%10))/key$i" -v "synthetic-rotation-$i" >/dev/null; done
+for i in $(seq 1 50); do printf '%s' "synthetic-rotation-$i" | phoenix_admin set "rotation/ns$((i%10))/key$i" --value-stdin >/dev/null; done
 (
   for _ in $(seq 1 30); do PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" get rotation/ns1/key1 >/dev/null; sleep 0.05; done
 ) & reader=$!

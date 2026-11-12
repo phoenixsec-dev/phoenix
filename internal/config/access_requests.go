@@ -191,7 +191,7 @@ func (c *Config) validateAccessRequests() error {
 			case "read_value":
 			case "write":
 				return errors.New("access_requests.grantable_actions: write grants are not supported yet; use [\"read_value\"]")
-			case "list", "delete", "admin", "read":
+			case "list", "delete", "admin":
 				return fmt.Errorf("access_requests.grantable_actions: %q can never be granted; use [\"read_value\"]", a)
 			default:
 				return fmt.Errorf("access_requests.grantable_actions: unknown action %q; use [\"read_value\"]", a)

@@ -2,10 +2,13 @@ package policy
 
 import "github.com/phoenixsec/phoenix/internal/removed"
 
-// removedRuleFields are policy rule fields Phoenix no longer has, in both the
-// "attestation" map format and the legacy "rules" list. Load refuses a file
-// that still uses one, so nobody keeps trusting a rule that checks nothing.
-var removedRuleFields = ruleFields(
+// removedRuleFields are policy settings Phoenix no longer has. Load refuses a
+// file that still uses one, so nobody keeps trusting a rule that checks
+// nothing.
+var removedRuleFields = append([]removed.Field{
+	{Path: "rules", Why: "it was the old list format for policy files; every rule it could hold fits the \"attestation\" map",
+		Instead: "move each rule under a top-level \"attestation\" object keyed by its path, and rename allowed_ips to source_ip"},
+}, ruleFields(
 	removed.Field{Path: "require_mtls", Why: "client certificates (mTLS) were removed",
 		Instead: "use source_ip"},
 	removed.Field{Path: "cert_fingerprint", Why: "client certificates (mTLS) were removed",
@@ -30,18 +33,13 @@ var removedRuleFields = ruleFields(
 		Instead: "use session roles with a short max_ttl"},
 	removed.Field{Path: "credential_ttl", Why: "it only applied to require_fresh_attestation, which is gone",
 		Instead: "use session roles with a short max_ttl"},
-)
+)...)
 
-// ruleFields expands each field name into its two locations: a rule in the
-// "attestation" map and a rule in the legacy "rules" list.
+// ruleFields places each rule field name inside a rule of the "attestation"
+// map.
 func ruleFields(fields ...removed.Field) []removed.Field {
-	var out []removed.Field
-	for _, f := range fields {
-		name := f.Path
-		f.Path = "attestation.*." + name
-		out = append(out, f)
-		f.Path = "rules.[]." + name
-		out = append(out, f)
+	for i := range fields {
+		fields[i].Path = "attestation.*." + fields[i].Path
 	}
-	return out
+	return fields
 }

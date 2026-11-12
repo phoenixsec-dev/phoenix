@@ -4,7 +4,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 03 attestation-policy
 init_scenario 03
 start_server
-for p in local/key denied/key sealed/key; do phoenix_admin set "$p" -v synthetic-attestation >/dev/null; done
+for p in local/key denied/key sealed/key; do printf '%s' synthetic-attestation | phoenix_admin set "$p" --value-stdin >/dev/null; done
 stop_server
 cat >"$RUN_DIR/policy.json" <<'JSON'
 {"attestation":{"local/*":{"source_ip":["127.0.0.1","::1"]},"denied/*":{"source_ip":["192.0.2.9"]},"sealed/*":{"require_sealed":true}}}

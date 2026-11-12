@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -314,8 +316,24 @@ func TestCmdResolveSealedPartialErrors(t *testing.T) {
 
 // --- cmdKeypairGenerate tests ---
 
+// echoSealPub is a mock POST /v1/keypair: it checks the CLI sent a valid
+// public key and no private key, answers like the server, and returns the key.
+func echoSealPub(t *testing.T, w http.ResponseWriter, r *http.Request) string {
+	t.Helper()
+	var body map[string]string
+	json.NewDecoder(r.Body).Decode(&body)
+	if _, err := crypto.DecodeSealKey(body["seal_public_key"]); err != nil {
+		t.Errorf("bad seal_public_key sent: %v", err)
+	}
+	if len(body) != 2 {
+		t.Errorf("request carries more than agent_name and seal_public_key: %v", body)
+	}
+	json.NewEncoder(w).Encode(map[string]string{"agent_name": body["agent_name"], "seal_public_key": body["seal_public_key"]})
+	return body["seal_public_key"]
+}
+
 func TestCmdKeypairGenerateWritesKeyFile(t *testing.T) {
-	kp, _ := crypto.GenerateSealKeyPair()
+	var sentPub string
 
 	outPath := filepath.Join(t.TempDir(), "test-agent.seal.key")
 
@@ -323,11 +341,7 @@ func TestCmdKeypairGenerateWritesKeyFile(t *testing.T) {
 		if r.Method != "POST" || !strings.HasPrefix(r.URL.Path, "/v1/keypair") {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(map[string]string{
-			"agent_name":       "test-agent",
-			"seal_public_key":  crypto.EncodeSealKey(&kp.PublicKey),
-			"seal_private_key": crypto.EncodeSealKey(&kp.PrivateKey),
-		})
+		sentPub = echoSealPub(t, w, r)
 	}, func() {
 		oldStdout := os.Stdout
 		_, w, _ := os.Pipe()
@@ -346,8 +360,12 @@ func TestCmdKeypairGenerateWritesKeyFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading key file: %v", err)
 		}
-		if string(data) != crypto.EncodeSealKey(&kp.PrivateKey) {
-			t.Fatal("key file content mismatch")
+		priv, err := crypto.DecodeSealKey(string(data))
+		if err != nil {
+			t.Fatalf("key file: %v", err)
+		}
+		if crypto.EncodeSealKey(crypto.DeriveSealPublicKey(priv)) != sentPub {
+			t.Fatal("key file is not the private half of the registered public key")
 		}
 
 		info, _ := os.Stat(outPath)
@@ -357,19 +375,112 @@ func TestCmdKeypairGenerateWritesKeyFile(t *testing.T) {
 	})
 }
 
+// An older server ignores the public key and returns one it made itself.
+// The CLI must refuse, and leave the existing key file alone.
+func TestCmdKeypairGenerateOldServerRefused(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "a.seal.key")
+	os.WriteFile(outPath, []byte("existing"), 0600)
+	other, _ := crypto.GenerateSealKeyPair()
+	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"agent_name":       "a",
+			"seal_public_key":  crypto.EncodeSealKey(&other.PublicKey),
+			"seal_private_key": crypto.EncodeSealKey(&other.PrivateKey),
+		})
+	}, func() {
+		err := cmdKeypairGenerate([]string{"a", "-o", outPath})
+		if err == nil || !strings.Contains(err.Error(), "Update phoenix-server") {
+			t.Fatalf("err = %v", err)
+		}
+		if data, _ := os.ReadFile(outPath); string(data) != "existing" {
+			t.Fatalf("key file changed: %q", data)
+		}
+		if left, _ := filepath.Glob(outPath + ".*.tmp"); len(left) != 0 {
+			t.Fatalf("temp key file left behind: %v", left)
+		}
+	})
+}
+
+// Review R1: a file or symlink already at "<output>.tmp" is never written
+// through or reused; the key goes to a fresh, uniquely named file.
+func TestCmdKeypairGenerateIgnoresPlantedTmp(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "a.seal.key")
+	victim := filepath.Join(dir, "victim")
+	os.WriteFile(victim, []byte("victim"), 0600)
+	os.Symlink(victim, outPath+".tmp")
+	var sentPub string
+	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		sentPub = echoSealPub(t, w, r)
+	}, func() {
+		captureStdout(t, func() {
+			if err := cmdKeypairGenerate([]string{"a", "-o", outPath}); err != nil {
+				t.Fatalf("cmdKeypairGenerate: %v", err)
+			}
+		})
+	})
+	if data, _ := os.ReadFile(victim); string(data) != "victim" {
+		t.Fatalf("write followed the planted symlink: %q", data)
+	}
+	if fi, err := os.Lstat(outPath); err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0600 {
+		t.Fatalf("key file is not a private regular file: %v %v", fi, err)
+	}
+	data, _ := os.ReadFile(outPath)
+	priv, err := crypto.DecodeSealKey(string(data))
+	if err != nil || crypto.EncodeSealKey(crypto.DeriveSealPublicKey(priv)) != sentPub {
+		t.Fatalf("key file does not match the registered key: %v", err)
+	}
+}
+
+// Review R1/R2: when the server may have registered the key but the answer
+// was lost or a server error, the new private key is kept and its path named, not deleted.
+func TestCmdKeypairGenerateKeepsKeyOnLostResponse(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "a.seal.key")
+	os.WriteFile(outPath, []byte("old"), 0600)
+	lost := func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		hj, _ := w.(http.Hijacker)
+		conn, _, _ := hj.Hijack()
+		conn.Close()
+	}
+	// Review R2: a 500 can come after the server already holds the new key
+	// (it updates the ACL in memory before saving the file).
+	serverError := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+	}
+	for _, handler := range []http.HandlerFunc{lost, serverError} {
+		withMockServer(t, handler, func() {
+			err := cmdKeypairGenerate([]string{"a", "--force", "-o", outPath})
+			if err == nil {
+				t.Fatal("expected an error for a lost response")
+			}
+			if data, _ := os.ReadFile(outPath); string(data) != "old" {
+				t.Fatalf("existing key file changed: %q", data)
+			}
+			m := regexp.MustCompile(`kept at (\S+)`).FindStringSubmatch(err.Error())
+			if m == nil {
+				t.Fatalf("error does not name the kept key: %v", err)
+			}
+			data, rerr := os.ReadFile(m[1])
+			if rerr != nil {
+				t.Fatalf("kept key missing: %v", rerr)
+			}
+			if _, derr := crypto.DecodeSealKey(string(data)); derr != nil {
+				t.Fatalf("kept key unreadable: %v", derr)
+			}
+		})
+	}
+}
+
 func TestCmdKeypairGenerateHardensExistingPerms(t *testing.T) {
-	kp, _ := crypto.GenerateSealKeyPair()
 
 	outPath := filepath.Join(t.TempDir(), "test-agent.seal.key")
 	// Pre-create with insecure permissions
 	os.WriteFile(outPath, []byte("old-key"), 0644)
 
 	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{
-			"agent_name":       "test-agent",
-			"seal_public_key":  crypto.EncodeSealKey(&kp.PublicKey),
-			"seal_private_key": crypto.EncodeSealKey(&kp.PrivateKey),
-		})
+		echoSealPub(t, w, r)
 	}, func() {
 		oldStdout := os.Stdout
 		_, w, _ := os.Pipe()
@@ -392,18 +503,13 @@ func TestCmdKeypairGenerateHardensExistingPerms(t *testing.T) {
 }
 
 func TestCmdKeypairGenerateForceFlag(t *testing.T) {
-	kp, _ := crypto.GenerateSealKeyPair()
 	var gotForce bool
 
 	outPath := filepath.Join(t.TempDir(), "test.seal.key")
 
 	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotForce = r.URL.Query().Get("force") == "true"
-		json.NewEncoder(w).Encode(map[string]string{
-			"agent_name":       "test-agent",
-			"seal_public_key":  crypto.EncodeSealKey(&kp.PublicKey),
-			"seal_private_key": crypto.EncodeSealKey(&kp.PrivateKey),
-		})
+		echoSealPub(t, w, r)
 	}, func() {
 		oldStdout := os.Stdout
 		_, w, _ := os.Pipe()
@@ -437,17 +543,12 @@ func TestCmdKeypairGenerateMissingName(t *testing.T) {
 }
 
 func TestCmdKeypairGenerateDefaultPath(t *testing.T) {
-	kp, _ := crypto.GenerateSealKeyPair()
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{
-			"agent_name":       "myagent",
-			"seal_public_key":  crypto.EncodeSealKey(&kp.PublicKey),
-			"seal_private_key": crypto.EncodeSealKey(&kp.PrivateKey),
-		})
+		echoSealPub(t, w, r)
 	}, func() {
 		oldStdout := os.Stdout
 		_, w, _ := os.Pipe()

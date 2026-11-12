@@ -6,8 +6,8 @@ init_scenario 14
 config_patch "d['session']={'enabled':True,'ttl':'3s','roles':{'openclaw':{'namespaces':['auth/*'],'actions':['read_value'],'bootstrap_trust':['bearer']}}}"
 start_server
 base=(PHOENIX_SERVER="$PHOENIX_SERVER")
-env "${base[@]}" PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" set auth/key -v synthetic-auth >/dev/null
-env "${base[@]}" PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" agent create openclaw-agent -t synthetic-openclaw-bootstrap --acl 'auth/*:read' >/dev/null
+printf '%s' synthetic-auth | env "${base[@]}" PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" set auth/key --value-stdin >/dev/null
+env "${base[@]}" PHOENIX_TOKEN="$ADMIN_TOKEN" "$PHOENIX" agent create openclaw-agent -t synthetic-openclaw-bootstrap --acl 'auth/*:list,read_value' >/dev/null
 request='{"protocolVersion":1,"provider":"phoenix","ids":["auth/key"]}'
 provider_value() { jq -r '.values["auth/key"]'; }
 bearer="$(printf '%s' "$request" | env "${base[@]}" HOME="$RUN_DIR/home-bearer" PHOENIX_TOKEN=synthetic-openclaw-bootstrap PHOENIX_ROLE=openclaw "$PHOENIX" openclaw-exec-provider | provider_value)"
