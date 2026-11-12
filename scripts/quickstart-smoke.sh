@@ -80,13 +80,12 @@ smoke_docker() {
   [[ "$(docker exec -e PHOENIX_TOKEN "$CONTAINER" phoenix get demo/api-key)" == "sk-demo-123" ]] \
     || fail "get returned the wrong value"
 
-  echo "==> TLS from host"
+  echo "==> HTTPS from host"
   docker rm -f "$CONTAINER" >/dev/null
   docker run --rm -v "$VOLUME:/data" --entrypoint sed "$image" -i \
-    -e 's/"listen": "127.0.0.1:9090"/"listen": "0.0.0.0:9090"/' \
-    -e '/"tls": {/{n;s/"enabled": false/"enabled": true/;}' \
+    -e '/"https_listener": {/{n;s/"enabled": false/"enabled": true/;}' \
     /data/config.json
-  docker run -d --name "$CONTAINER" -p "127.0.0.1:$PORT:9090" -v "$VOLUME:/data" "$image" >/dev/null
+  docker run -d --name "$CONTAINER" -p "127.0.0.1:$PORT:9443" -v "$VOLUME:/data" "$image" >/dev/null
   # The host may not have the phoenix CLI; use the one inside the image,
   # but on the host network namespace so the request really crosses the
   # published port with certificate verification.

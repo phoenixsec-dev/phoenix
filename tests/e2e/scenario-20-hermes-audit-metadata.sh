@@ -38,22 +38,14 @@ deny="$(jq -c '[.entries[] | select(.path=="restricted/key" and .status=="denied
 assert_eq "$(jq -r .agent <<<"$deny")" hermes-reader "denial records real agent"
 assert_eq "$(jq -r '.metadata["hermes.profile"]' <<<"$deny")" admin "spoof recorded as hint only"
 
-# X-Hermes-Tool is an audit hint; X-Phoenix-Tool is the attestation input.
-stop_server
-cat >"$RUN_DIR/policy.json" <<'JSON'
-{"attestation":{"tooled/*":{"allowed_tools":["phoenix_resolve"]}}}
-JSON
-config_patch "d['policy']={'path':'$RUN_DIR/policy.json'}"
-start_server
-code="$(curl -sS -o "$RUN_DIR/toolspoof" -w '%{http_code}' "$PHOENIX_SERVER/v1/secrets/tooled/key" \
-  -H 'Authorization: Bearer synthetic-hermes-reader' -H 'X-Hermes-Tool: phoenix_resolve' -H 'X-Phoenix-Tool: wrong_tool')"
-assert_eq "$code" 403 "X-Hermes-Tool must not satisfy allowed_tools"
+# Tool headers decide nothing: X-Hermes-Tool is an audit hint only, and
+# X-Phoenix-Tool (once a tool-rule input, now removed) is ignored entirely.
 body="$(curl -fsS "$PHOENIX_SERVER/v1/secrets/tooled/key" \
-  -H 'Authorization: Bearer synthetic-hermes-reader' -H 'X-Hermes-Tool: anything-at-all' -H 'X-Phoenix-Tool: phoenix_resolve')"
-assert_eq "$(jq -r .value <<<"$body")" synthetic-tooled "genuine X-Phoenix-Tool still attests"
+  -H 'Authorization: Bearer synthetic-hermes-reader' -H 'X-Hermes-Tool: phoenix_resolve' -H 'X-Phoenix-Tool: wrong_tool')"
+assert_eq "$(jq -r .value <<<"$body")" synthetic-tooled "tool headers must not change access"
 audit="$(api_admin GET /v1/audit)"
-tooldeny="$(jq -c '[.entries[] | select(.path=="tooled/key" and .status=="denied")][-1]' <<<"$audit")"
-assert_eq "$(jq -r '.metadata["hermes.tool"]' <<<"$tooldeny")" phoenix_resolve "hermes tool recorded as hint"
+toolread="$(jq -c '[.entries[] | select(.path=="tooled/key" and .status=="allowed")][-1]' <<<"$audit")"
+assert_eq "$(jq -r '.metadata["hermes.tool"]' <<<"$toolread")" phoenix_resolve "hermes tool recorded as hint"
 [[ "$(jq -r '[.entries[].metadata // {} | keys[]] | map(select(startswith("phoenix."))) | length' <<<"$audit")" == 0 ]] \
   || die "X-Phoenix-Tool captured as caller metadata"
 ok "Scenario 20 PASS"

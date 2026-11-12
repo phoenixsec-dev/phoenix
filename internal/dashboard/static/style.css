@@ -135,7 +135,6 @@ body {
 .pill-attest { background: rgba(210,153,34,0.15); color: var(--orange); }
 .role-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .flag { padding: 3px 10px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
-.flag-stepup { background: rgba(218,54,51,0.15); color: var(--red); }
 .flag-seal { background: rgba(210,153,34,0.15); color: var(--orange); }
 .flag-ttl { background: rgba(255,255,255,0.05); color: var(--text-secondary); }
 

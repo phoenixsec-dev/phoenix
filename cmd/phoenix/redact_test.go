@@ -85,6 +85,22 @@ func TestChildEnvStripsBrokerCredentials(t *testing.T) {
 	}
 }
 
+// The leak found in the 2026-11 review: these reached the child before.
+// PHOENIX_ROLE would let the child mint its own session; the others are
+// credentials outright. A 1Password token under a custom name (named by
+// PHOENIX_OP_TOKEN_ENV) goes too; unrelated variables stay.
+func TestChildEnvStripsEveryPhoenixCredential(t *testing.T) {
+	env := childEnv([]string{
+		"PATH=/bin", "HOME=/home/a",
+		"PHOENIX_MCP_TOKEN=m", "PHOENIX_MASTER_PASSPHRASE=p", "PHOENIX_ROLE=r",
+		"OP_SERVICE_ACCOUNT_TOKEN=o", "PHOENIX_OP_TOKEN_ENV=MY_OP", "MY_OP=o2",
+		"PHOENIX_SOMETHING_NEW=x", "NOT_PHOENIX_TOKEN=keep",
+	}, false)
+	if got := strings.Join(env, ","); got != "PATH=/bin,HOME=/home/a,NOT_PHOENIX_TOKEN=keep" {
+		t.Fatalf("child env = %s", got)
+	}
+}
+
 func TestRunRedactedStdoutStderrSplitAndExitCode(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -161,5 +177,17 @@ func TestCmdExecRedactRejectsOutputEnv(t *testing.T) {
 	err := cmdExec([]string{"--redact-output", "--output-env", "/tmp/x", "--env", "A=phoenix://a/b"})
 	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// Review R1-02: every MCP-over-HTTP flag is refused, in both spellings.
+func TestRemovedMCPFlags(t *testing.T) {
+	for _, args := range [][]string{{"--http", "127.0.0.1:1"}, {"--tls-cert", "x"}, {"--tls-key=x"}, {"--mcp-token", "t"}, {"-v", "--http=:1"}} {
+		if removedMCPFlag(args) == "" {
+			t.Errorf("%v not refused", args)
+		}
+	}
+	if f := removedMCPFlag([]string{"--verbose"}); f != "" {
+		t.Errorf("--verbose refused as %q", f)
 	}
 }

@@ -78,16 +78,16 @@ func testClient(t *testing.T, tlsCfg *tls.Config) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 2 * time.Second}
 }
 
-func startTestListeners(t *testing.T, cfg *config.Config, handler http.Handler, tlsCfg *tls.Config, client *http.Client) (*listenerLog, func()) {
+func startTestListeners(t *testing.T, cfg *config.Config, handler http.Handler, client *http.Client) (*listenerLog, func()) {
 	t.Helper()
 	optional, err := loadHTTPSListener(cfg.HTTPSListener)
 	if err != nil {
 		t.Fatal(err)
 	}
-	primary := newHTTPServer(cfg.Server.Listen, handler, tlsCfg)
+	primary := newHTTPServer(cfg.Server.Listen, handler, nil)
 	logs := &listenerLog{}
 	done := make(chan error, 1)
-	go func() { done <- serveListeners(primary, cfg, optional, logs.printf) }()
+	go func() { done <- serveListeners(primary, optional, logs.printf) }()
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -103,13 +103,9 @@ func startTestListeners(t *testing.T, cfg *config.Config, handler http.Handler, 
 		})
 	}
 	t.Cleanup(stop)
-	scheme := "http"
-	if cfg.TLSEnabled() {
-		scheme = "https"
-	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		resp, err := client.Get(scheme + "://" + cfg.Server.Listen)
+		resp, err := client.Get("http://" + cfg.Server.Listen)
 		if err == nil {
 			resp.Body.Close()
 			break
@@ -134,7 +130,7 @@ func TestOptionalHTTPSSharedHandlerAndTLSVerification(t *testing.T) {
 		fmt.Fprintf(w, "%s tls=%t", host, r.TLS != nil)
 	})
 	client := testClient(t, trust)
-	logs, stop := startTestListeners(t, cfg, handler, nil, client)
+	logs, stop := startTestListeners(t, cfg, handler, client)
 	if !strings.Contains(logs.text(), "Optional HTTPS listener serving") {
 		t.Fatal(logs.text())
 	}
@@ -272,7 +268,7 @@ func TestOptionalHTTPSBindFailurePreservesPrimary(t *testing.T) {
 			cfg.Server.Listen = testAddress(t)
 			cfg.HTTPSListener = optional
 			tc.change(cfg)
-			logs, _ := startTestListeners(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }), nil, testClient(t, trust))
+			logs, _ := startTestListeners(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }), testClient(t, trust))
 			if tc.want == "" {
 				if logs.text() != "" {
 					t.Fatal(logs.text())
@@ -291,65 +287,6 @@ func TestOptionalHTTPSBindFailurePreservesPrimary(t *testing.T) {
 	}
 }
 
-func TestOptionalHTTPSInheritsMTLSAndRevocation(t *testing.T) {
-	for _, required := range []bool{false, true} {
-		t.Run(fmt.Sprintf("required=%t", required), func(t *testing.T) {
-			authority, optional, trust := testCertificates(t)
-			bundle, err := authority.IssueAgentCert("test-agent")
-			if err != nil {
-				t.Fatal(err)
-			}
-			cert, err := tls.X509KeyPair(bundle.CertPEM, bundle.KeyPEM)
-			if err != nil {
-				t.Fatal(err)
-			}
-			trust.Certificates = []tls.Certificate{cert}
-			serverTLS := authority.TLSConfig()
-			if required {
-				serverTLS.ClientAuth = tls.RequireAndVerifyClientCert
-			}
-			cfg := config.DefaultConfig()
-			cfg.Server.Listen = testAddress(t)
-			cfg.HTTPSListener = optional
-			cfg.Auth.MTLS.Enabled = true
-			cfg.Auth.MTLS.ServerCert = optional.Cert
-			cfg.Auth.MTLS.ServerKey = optional.Key
-			client := testClient(t, trust)
-			startTestListeners(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }), serverTLS, client)
-			for _, addr := range []string{cfg.Server.Listen, optional.Listen} {
-				resp, err := client.Get("https://" + addr)
-				if err != nil {
-					t.Fatal(err)
-				}
-				resp.Body.Close()
-				noCert := trust.Clone()
-				noCert.Certificates = nil
-				resp, err = testClient(t, noCert).Get("https://" + addr)
-				if resp != nil {
-					resp.Body.Close()
-				}
-				if (err != nil) != required {
-					t.Fatalf("no client cert: required=%t err=%v", required, err)
-				}
-			}
-			leaf, err := x509.ParseCertificate(cert.Certificate[0])
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := authority.RevokeCert(leaf.SerialNumber, "test-agent"); err != nil {
-				t.Fatal(err)
-			}
-			for _, addr := range []string{cfg.Server.Listen, optional.Listen} {
-				resp, err := client.Get("https://" + addr)
-				if err == nil {
-					resp.Body.Close()
-					t.Fatal("revoked client certificate accepted")
-				}
-			}
-		})
-	}
-}
-
 type failedListener struct{ net.Listener }
 
 func (l failedListener) Accept() (net.Conn, error) { return nil, errors.New("forced accept failure") }
@@ -360,7 +297,7 @@ func TestOptionalHTTPSServeFailureReported(t *testing.T) {
 	client := testClient(t, nil)
 	startTestListeners(t, cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}), nil, client)
+	}), client)
 	_, optional, _ := testCertificates(t)
 	cert, err := tls.LoadX509KeyPair(optional.Cert, optional.Key)
 	if err != nil {
@@ -405,7 +342,7 @@ func TestPrimaryBindFailureDoesNotStartOptionalHTTPS(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := &listenerLog{}
-	if err := serveListeners(&http.Server{Addr: occupied.Addr().String()}, cfg, loaded, logs.printf); err == nil {
+	if err := serveListeners(&http.Server{Addr: occupied.Addr().String()}, loaded, logs.printf); err == nil {
 		t.Fatal("primary bind failure must be returned")
 	}
 	if logs.text() != "" {

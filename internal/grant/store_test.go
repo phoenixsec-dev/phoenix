@@ -244,13 +244,13 @@ func TestMatch(t *testing.T) {
 		path   string
 		action string
 	}{
-		"other path":      {ok, "infra/nope", ActionReadValue},
-		"other action":    {ok, "infra/key", "write"},
-		"other agent":     {bearerCaller("echo"), "infra/key", ActionReadValue},
-		"wrong token fp":  {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: AuthBearer, CredentialFP: "fp-rotated"}, "infra/key", ActionReadValue},
-		"wrong ip":        {Caller{Agent: "vector", SourceIP: "10.0.0.6", AuthMethod: AuthBearer, CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
-		"mtls not bearer": {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: AuthMTLS, CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
-		"session":         {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "session", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
+		"other path":     {ok, "infra/nope", ActionReadValue},
+		"other action":   {ok, "infra/key", "write"},
+		"other agent":    {bearerCaller("echo"), "infra/key", ActionReadValue},
+		"wrong token fp": {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: AuthBearer, CredentialFP: "fp-rotated"}, "infra/key", ActionReadValue},
+		"wrong ip":       {Caller{Agent: "vector", SourceIP: "10.0.0.6", AuthMethod: AuthBearer, CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
+		"other method":   {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "mtls", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
+		"session":        {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "session", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
 	}
 	for name, tc := range misses {
 		if m := nm(tc.c, tc.path, tc.action); m.Grant != nil || m.Reason != "" {
@@ -263,9 +263,9 @@ func TestMatch(t *testing.T) {
 	}
 	e.setGone("vector", false)
 
-	// mTLS binding: same cert fingerprint required; bind_source_ip off allows other IPs.
+	// Token binding: same token fingerprint required; bind_source_ip off allows other IPs.
 	in := bearerIn("mtls-agent", "infra/key")
-	in.AuthMethod, in.CredentialFP = AuthMTLS, "sha256:cert1"
+	in.CredentialFP = "fp-other1"
 	mr, _, err := e.s.Create(in)
 	if err != nil {
 		t.Fatal(err)
@@ -275,13 +275,13 @@ func TestMatch(t *testing.T) {
 	if _, _, err := e.s.Approve(a); err != nil {
 		t.Fatal(err)
 	}
-	mc := Caller{Agent: "mtls-agent", SourceIP: "10.9.9.9", AuthMethod: AuthMTLS, CredentialFP: "sha256:cert1"}
+	mc := Caller{Agent: "mtls-agent", SourceIP: "10.9.9.9", AuthMethod: AuthBearer, CredentialFP: "fp-other1"}
 	if nm(mc, "infra/key", ActionReadValue).Grant == nil {
-		t.Fatal("mtls with same cert from another IP (binding off) should match")
+		t.Fatal("same token from another IP (binding off) should match")
 	}
-	mc.CredentialFP = "sha256:cert2"
+	mc.CredentialFP = "fp-other2"
 	if nm(mc, "infra/key", ActionReadValue).Grant != nil {
-		t.Fatal("different cert matched")
+		t.Fatal("different token matched")
 	}
 
 	// Expiry at exact clock edges, then the 24h "recently ended" window.
@@ -296,56 +296,6 @@ func TestMatch(t *testing.T) {
 	e.clock.Set(g.ExpiresAt.Add(EndedLookback))
 	if m := nm(ok, "infra/key", ActionReadValue); m.Reason != "" {
 		t.Fatalf("24h after expiry reason = %q, want plain denial", m.Reason)
-	}
-}
-
-func TestShortLivedTokenAndTombstone(t *testing.T) {
-	e := newEnv(t)
-	tokenIn := func() CreateInput {
-		in := bearerIn("kit", "infra/key")
-		in.AuthMethod, in.CredentialFP = AuthToken, ""
-		return in
-	}
-	r, _, err := e.s.Create(tokenIn())
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.approve(r.ID)
-
-	// Delete the agent: grant revoked, tombstone recorded. Recreate the name.
-	e.clock.Advance(time.Minute)
-	deletedAt := e.clock.Now()
-	if _, err := e.s.DeleteAgent("kit", "admin", "10.0.0.9", nil); err != nil {
-		t.Fatal(err)
-	}
-	e.clock.Advance(time.Minute)
-	r2, _, err := e.s.Create(tokenIn())
-	if err != nil {
-		t.Fatal(err)
-	}
-	g2 := e.approve(r2.ID)
-	if !g2.NotBeforeTombstone.Equal(deletedAt) {
-		t.Fatalf("not_before_tombstone = %v, want %v", g2.NotBeforeTombstone, deletedAt)
-	}
-
-	c := Caller{Agent: "kit", SourceIP: "10.0.0.5", AuthMethod: AuthToken}
-	for _, tc := range []struct {
-		iat  time.Time
-		want bool
-	}{
-		{time.Time{}, false},                 // no iat
-		{deletedAt.Add(-time.Second), false}, // old token from before the delete
-		{deletedAt, false},                   // must be strictly after
-		{deletedAt.Add(time.Second), true},   // token issued to the recreated agent
-	} {
-		c.TokenIssuedAt = tc.iat
-		if got := e.s.Match(c, "infra/key", ActionReadValue).Grant != nil; got != tc.want {
-			t.Errorf("iat %v: match = %v, want %v", tc.iat, got, tc.want)
-		}
-	}
-	// A bearer caller cannot use a token-bound grant.
-	if e.s.Match(bearerCaller("kit"), "infra/key", ActionReadValue).Grant != nil {
-		t.Fatal("bearer caller used a token-bound grant")
 	}
 }
 
@@ -456,23 +406,6 @@ func TestTickExpiryUsageRetention(t *testing.T) {
 	}
 	if _, ok := e.s.GetRequest(p.ID); ok {
 		t.Fatal("expired request not pruned after 30 days")
-	}
-}
-
-func TestTombstonePrune(t *testing.T) {
-	e := newEnv(t)
-	if _, err := e.s.DeleteAgent("gone", "admin", "", nil); err != nil {
-		t.Fatal(err)
-	}
-	e.clock.Advance(DefaultTombstoneRetention - time.Second)
-	e.s.Tick()
-	if _, ok := e.s.snapshot().Tombstones["gone"]; !ok {
-		t.Fatal("tombstone pruned too early")
-	}
-	e.clock.Advance(time.Second)
-	e.s.Tick()
-	if _, ok := e.s.snapshot().Tombstones["gone"]; ok {
-		t.Fatal("tombstone kept past retention")
 	}
 }
 

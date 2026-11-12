@@ -4,17 +4,12 @@
 
 Phoenix includes a built-in MCP server.
 
-Transport options:
-- `phoenix mcp-server` → stdio JSON-RPC
-- `phoenix mcp-server --http 127.0.0.1:8080 --mcp-token <token>` → Streamable HTTP on `/mcp`
-- add `--tls-cert`/`--tls-key` to serve the HTTP transport over HTTPS
-  (required whenever MCP clients connect from other machines; on a
-  non-loopback bind without TLS the transport starts but logs a loud
-  `INSECURE TRANSPORT` warning)
+The MCP server speaks JSON-RPC over stdio (`phoenix mcp-server`), started by
+the agent's harness. (MCP over HTTP, `--http`, was removed.)
 
-`https://` server URLs below assume the Phoenix server has its `tls` config
-block enabled and clients trust the CA via `PHOENIX_CA_CERT` — see
-[LAN Deployment](lan-deployment.md). No mTLS is required for this.
+`https://` server URLs below assume the Phoenix server has `https_listener`
+enabled (port 9443 by default) and clients trust the CA via
+`PHOENIX_CA_CERT` — see [LAN Deployment](lan-deployment.md).
 
 Example Claude MCP config:
 
@@ -25,7 +20,7 @@ Example Claude MCP config:
       "command": "phoenix",
       "args": ["mcp-server"],
       "env": {
-        "PHOENIX_SERVER": "https://phoenix:9090",
+        "PHOENIX_SERVER": "https://phoenix:9443",
         "PHOENIX_CA_CERT": "/etc/phoenix/certs/ca.crt",
         "PHOENIX_TOKEN": "..."
       }
@@ -33,18 +28,6 @@ Example Claude MCP config:
   }
 }
 ```
-
-Streamable HTTP mode example:
-
-```bash
-export PHOENIX_SERVER="https://phoenix:9090"
-export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
-export PHOENIX_TOKEN="<phoenix-agent-token>"
-export PHOENIX_MCP_TOKEN="<separate-mcp-client-token>"
-phoenix mcp-server --http 127.0.0.1:8080
-```
-
-Tool identity headers let policy control which MCP tools may access which paths.
 
 > By default, `phoenix_get` and `phoenix_resolve` can return plaintext tool output.
 > With sealed mode (`PHOENIX_SEAL_KEY`) they return opaque `PHOENIX_SEALED:` tokens
@@ -108,10 +91,7 @@ OpenClaw process:
           "PHOENIX_TOKEN",
           "PHOENIX_ROLE",
           "PHOENIX_CA_CERT",
-          "PHOENIX_CLIENT_CERT",
-          "PHOENIX_CLIENT_KEY",
-          "PHOENIX_SEAL_KEY",
-          "PHOENIX_TOOL"
+          "PHOENIX_SEAL_KEY"
         ],
         timeoutMs: 10000
       }
@@ -150,35 +130,24 @@ The exec provider accepts ids either as Phoenix paths (`openclaw/shared/key`) or
 full refs (`phoenix://openclaw/shared/key`). It normalizes paths to Phoenix refs for
 resolution, but the stdout `values`/`errors` keys match OpenClaw's input ids.
 
-Set Phoenix credentials for the OpenClaw process. There are three valid auth
+Set Phoenix credentials for the OpenClaw process. There are two valid auth
 modes — pick exactly one:
 
 **(a) Role auto-mint with a bootstrap token** — the CLI uses the bootstrap token
 to mint a short-lived session for the role:
 
 ```bash
-export PHOENIX_SERVER=https://phoenix:9090
+export PHOENIX_SERVER=https://phoenix:9443
 export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
 export PHOENIX_TOKEN=<bootstrap-token>   # NOT a phxs_... session token
 export PHOENIX_ROLE=openclaw-gateway
 ```
 
-**(b) Role auto-mint with mTLS** — the client certificate is the bootstrap
-identity; no bearer token needed:
-
-```bash
-export PHOENIX_SERVER=https://phoenix:9090
-export PHOENIX_ROLE=openclaw-gateway
-export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
-export PHOENIX_CLIENT_CERT=/etc/phoenix/openclaw.crt
-export PHOENIX_CLIENT_KEY=/etc/phoenix/openclaw.key
-```
-
-**(c) Pre-minted session token** — mint a session out of band and hand the
+**(b) Pre-minted session token** — mint a session out of band and hand the
 `phxs_...` token to the process directly:
 
 ```bash
-export PHOENIX_SERVER=https://phoenix:9090
+export PHOENIX_SERVER=https://phoenix:9443
 export PHOENIX_CA_CERT=/etc/phoenix/ca.crt
 export PHOENIX_TOKEN=<phxs_session-token>
 # Do NOT set PHOENIX_ROLE in this mode.
@@ -191,17 +160,10 @@ Combinations that do not work:
 - A `phxs_...` session token past its expiry — pre-minted tokens are not
   renewed by the exec provider; use role auto-mint for long-running processes.
 
-Do not point the exec provider at a role that requires step-up approval — the
-CLI will block waiting for approval until OpenClaw's `timeoutMs` kills the
-process; use a non-step-up role for bootstrap secrets.
-
-Sealed responses, session auto-mint/renewal, and Phoenix attestation headers are
-handled by the same CLI auth paths as `phoenix resolve`. Plain
-`phoenix resolve <ref>` remains the general human/script command; use
-`phoenix openclaw-exec-provider` for OpenClaw's stdin/stdout provider protocol.
-Signed resolve (`phoenix resolve --signed` challenge/response) is a CLI-path
-feature and is not supported in the exec-provider path — bootstrap attestation
-there relies on mTLS/role identity instead.
+Sealed responses and session auto-mint/renewal are handled by the same CLI
+auth paths as `phoenix resolve`. Plain `phoenix resolve <ref>` remains the
+general human/script command; use `phoenix openclaw-exec-provider` for
+OpenClaw's stdin/stdout provider protocol.
 
 ### Audit-only OpenClaw metadata headers
 
@@ -256,8 +218,8 @@ services:
       # port, nothing crosses a physical wire). The Phoenix CLI still prints
       # a plaintext warning for this non-loopback URL — expected in this
       # topology. If Phoenix publishes a port or the network spans hosts,
-      # enable the server's tls block and switch to https:// with
-      # PHOENIX_CA_CERT (see the TLS variant below).
+      # turn on the server's https_listener and switch to https:// with
+      # PHOENIX_CA_CERT (see the HTTPS variant below).
       PHOENIX_SERVER: "http://phoenix:9090"
       PHOENIX_TOKEN: "${OPENCLAW_PHOENIX_TOKEN}"
       PHOENIX_ROLE: "openclaw-gateway"
@@ -271,12 +233,14 @@ volumes:
   phoenix-data:
 ```
 
-TLS variant — enable `"tls": {"enabled": true}` in the Phoenix config, then:
+HTTPS variant — set `"https_listener": {"enabled": true}` in the Phoenix config
+(`--init` already wrote its `0.0.0.0:9443` listen address and certificate
+paths), then:
 
 ```yaml
   openclaw:
     environment:
-      PHOENIX_SERVER: "https://phoenix:9090"
+      PHOENIX_SERVER: "https://phoenix:9443"
       PHOENIX_CA_CERT: "/etc/phoenix/ca.crt"
       PHOENIX_TOKEN: "${OPENCLAW_PHOENIX_TOKEN}"
       PHOENIX_ROLE: "openclaw-gateway"
@@ -287,9 +251,6 @@ TLS variant — enable `"tls": {"enabled": true}` in the Phoenix config, then:
 The `--init` server certificate covers `localhost`/`127.0.0.1` only; for the
 `phoenix` service hostname, re-issue it once with
 `phoenix-server --reissue-cert --san phoenix --config /data/phoenix/config.json`.
-
-For mTLS instead of bearer tokens, mount certs into the OpenClaw container and set
-`PHOENIX_CA_CERT`, `PHOENIX_CLIENT_CERT`, and `PHOENIX_CLIENT_KEY`.
 
 ## Caller metadata audit headers
 
@@ -330,10 +291,9 @@ anything, so treat them as labels, not identity:
   converted to spaces, whitespace collapsed) and capped at 256 bytes. Values
   that sanitize to empty are dropped rather than stored blank.
 
-`X-Phoenix-Tool` is **not** part of this mechanism. It is an attestation policy
-input evaluated against `allowed_tools`/`deny_tools`, so it is never recorded as
-caller metadata. `X-Hermes-Tool` is the audit-only hint of the same idea; a
-request may send both, and only `X-Phoenix-Tool` affects the access decision.
+`X-Phoenix-Tool` is **not** part of this mechanism and is ignored. It used to feed
+the `allowed_tools`/`deny_tools` policy rules, which were removed because the
+caller sets the header itself. It is never recorded as caller metadata.
 
 Adding a platform is a code change to the allowlist in `internal/api/api.go`,
 not configuration — an operator cannot map arbitrary headers, so a credential
@@ -347,7 +307,7 @@ The Go SDK is included in the repository at `sdk/go/phoenix/`.
 import "github.com/phoenixsec/phoenix/sdk/go/phoenix"
 
 // Basic client
-client := phoenix.New("https://phoenix:9090", "token")
+client := phoenix.New("https://phoenix:9443", "token")
 val, err := client.Resolve("phoenix://myapp/api-key")
 vals, err := client.ResolveBatch([]string{
     "phoenix://myapp/openai-key",
@@ -355,8 +315,8 @@ vals, err := client.ResolveBatch([]string{
 })
 
 // Session identity
-client, err := phoenix.NewWithRole("https://phoenix:9090", "bootstrap-token", "dev")
-// Auto-mints a session; non-elevated sessions auto-renew before expiry
+client, err := phoenix.NewWithRole("https://phoenix:9443", "bootstrap-token", "dev")
+// Auto-mints a session; it auto-renews before expiry
 
 // Sealed mode
 client.SetSealKey("/path/to/agent.seal.key")
@@ -370,7 +330,6 @@ var perr *phoenix.Error
 if errors.As(err, &perr) {
     if perr.IsSessionExpired()   { /* re-mint */ }
     if perr.IsScopeExceeded()    { /* wrong role */ }
-    if perr.IsApprovalRequired() { /* needs human */ }
 }
 ```
 

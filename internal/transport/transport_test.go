@@ -63,7 +63,8 @@ func TestServerPlaintextWarning(t *testing.T) {
 		`"0.0.0.0:9090"`,
 		"bearer tokens",
 		"secret value",
-		`"tls": { "enabled": true }`,
+		`"https_listener": { "enabled": true }`,
+		`"127.0.0.1:9090"`,
 		"--reissue-cert",
 	} {
 		if !strings.Contains(w, want) {
@@ -77,15 +78,6 @@ func TestServerPlaintextWarning(t *testing.T) {
 	wd := ServerPlaintextWarning("0.0.0.0:9090", true)
 	if !strings.Contains(wd, "dashboard passwords and session cookies") {
 		t.Errorf("dashboard warning line missing:\n%s", wd)
-	}
-}
-
-func TestMCPPlaintextWarning(t *testing.T) {
-	w := MCPPlaintextWarning("0.0.0.0:8080")
-	for _, want := range []string{"INSECURE TRANSPORT", `"0.0.0.0:8080"`, "MCP bearer token", "--tls-cert"} {
-		if !strings.Contains(w, want) {
-			t.Errorf("MCP warning missing %q:\n%s", want, w)
-		}
 	}
 }
 

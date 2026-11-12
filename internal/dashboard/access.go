@@ -220,43 +220,8 @@ func (h *Handler) attestFacts(rq grant.Request, p string, sealKeyOK bool) []atte
 		out = append(out, attestFact{Path: p, Requirement: req, Status: st})
 	}
 	is := func(b bool) *bool { return &b }
-	if rule.RequireMTLS {
-		add("mTLS client certificate", is(rq.AuthMethod == grant.AuthMTLS))
-	}
-	if rule.DenyBearer {
-		add("no bearer tokens", is(rq.AuthMethod != grant.AuthBearer))
-	}
 	if len(rule.AllowedIPs) > 0 {
 		add("source IP in "+strings.Join(rule.AllowedIPs, ", "), is(ipAllowed(rq.SourceIP, rule.AllowedIPs)))
-	}
-	if rule.CertFingerprint != "" {
-		// An mTLS request saved its certificate fingerprint, so this one is
-		// knowable now. Bearer and token requests have no certificate.
-		add("specific client certificate", is(rq.AuthMethod == grant.AuthMTLS &&
-			strings.EqualFold(rq.CredentialFP, rule.CertFingerprint)))
-	}
-	if rule.RequireNonce {
-		add("nonce challenge", nil)
-	}
-	if rule.RequireSigned {
-		add("signed resolve", nil)
-	}
-	if rule.Process != nil {
-		add("process attestation (local agent socket)", nil)
-	}
-	if rule.TimeWindow != "" {
-		add("time window "+rule.TimeWindow, nil)
-	}
-	switch {
-	case rule.RequireFreshAttestation && rq.AuthMethod != grant.AuthToken:
-		// Only a short-lived token carries an issue time, so a bearer token
-		// or cert can never pass this: the grant would be unusable.
-		add("short-lived credential", is(false))
-	case rule.CredentialTTL != "" || rule.RequireFreshAttestation:
-		add("short-lived credential", nil) // token age is checked at each use
-	}
-	if len(rule.AllowedTools) > 0 || len(rule.DenyTools) > 0 {
-		add("tool restriction", nil)
 	}
 	if rule.RequireSealed {
 		add("sealed delivery", is(sealKeyOK))

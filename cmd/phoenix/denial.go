@@ -71,8 +71,7 @@ var knownDenialCodes = map[string]bool{
 	"INVALID_REF": true, "INTERNAL_ERROR": true,
 	"SESSION_EXPIRED": true, "SESSION_INVALID": true, "SESSION_REVOKED": true,
 	"SESSION_REQUIRED": true, "SEAL_KEY_MISMATCH": true, "SEAL_KEY_REQUIRED": true,
-	"APPROVAL_REQUIRED": true, "STEP_UP_REAPPROVAL_REQUIRED": true,
-	"ROLE_NOT_FOUND": true, "ROLE_NOT_ALLOWED": true, "BOOTSTRAP_FAILED": true,
+	"ROLE_NOT_FOUND": true, "BOOTSTRAP_FAILED": true,
 	"ATTESTATION_FAILED": true, "ADMIN_AUTH_REQUIRED": true,
 	// Request-use grants.
 	"GRANT_EXPIRED": true, "GRANT_REVOKED": true, "NOT_REQUESTABLE": true, "SSH_GRANT_REQUIRED": true,
@@ -134,18 +133,6 @@ func formatDenialForPath(d serverDenial, indent, path string) string {
 		msg = fmt.Sprintf("[%s] %s", code, msg)
 	}
 	return fmt.Sprintf("%s\n%snext: %s", msg, indent, denialHintForPath(d.Code, d.NextStep, path))
-}
-
-// approvalIDPattern matches IDs from internal/approval ("apr_" + hex).
-var approvalIDPattern = regexp.MustCompile(`^apr_[0-9a-f]{1,128}$`)
-
-// approveCommand returns "phoenix approve <id>", built locally, or "" when
-// the server's approval ID does not look like one.
-func approveCommand(id string) string {
-	if !approvalIDPattern.MatchString(id) {
-		return ""
-	}
-	return "phoenix approve " + id
 }
 
 // displayRef cleans a ref taken from a server response map key before it

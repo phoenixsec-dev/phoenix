@@ -19,8 +19,7 @@ environment variables before use:
 
 - `PHOENIX_SERVER` — server URL (default: `http://127.0.0.1:9090`)
 - `PHOENIX_TOKEN` — bearer token for authentication
-- `PHOENIX_CA_CERT` — CA certificate path (for TLS)
-- `PHOENIX_CLIENT_CERT` / `PHOENIX_CLIENT_KEY` — mTLS client auth
+- `PHOENIX_CA_CERT` — CA certificate path (for HTTPS)
 - `PHOENIX_SEAL_KEY` — seal private key file path (enables sealed mode)
 
 ### Preferred: run a command with secrets injected

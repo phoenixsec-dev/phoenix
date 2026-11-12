@@ -15,10 +15,6 @@
         <div class="stat-value">{{.SessionCount}}</div>
         <div class="stat-label">Active Sessions</div>
     </div>
-    <div class="stat-card">
-        <div class="stat-value">{{.PendingApprovals}}</div>
-        <div class="stat-label">Pending Approvals</div>
-    </div>
     {{if .AccessHealth}}
     <a class="stat-card" href="/dashboard/approvals">
         <div class="stat-value">{{.PendingAccess}}{{if gt .PendingAccess 0}} <span class="badge">new</span>{{end}}</div>

@@ -199,6 +199,9 @@ func cmdSSH(args []string) error {
 	fmt.Fprintf(os.Stderr, "Access to %s ends at %s.\n", a.machine, cleanServerText(signed.ExpiresAt))
 	cmd := exec.Command("ssh", sshCommandArgs(keyPath, certPath, signed.User, signed.Address, a.command)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	// Same filter as phoenix exec: ssh (and any ProxyCommand it runs) gets
+	// no Phoenix token or other Phoenix credential.
+	cmd.Env = childEnv(os.Environ(), false)
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {

@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
-	"github.com/phoenixsec/phoenix/internal/approval"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/grant"
@@ -120,7 +119,6 @@ var staticFS embed.FS
 type Deps struct {
 	Sessions     *session.Store
 	SessionRoles map[string]config.RoleConfig
-	Approvals    *approval.Store
 	AuditPath    string
 	Backend      store.SecretBackend
 	ACL          *acl.ACL
@@ -230,8 +228,6 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	h.mux.HandleFunc("POST /dashboard/logout", h.requireAuth(h.handleLogout))
 	h.mux.HandleFunc("GET /dashboard/", h.requireAuth(h.handleOverview))
 	h.mux.HandleFunc("GET /dashboard/approvals", h.requireAuth(h.handleApprovals))
-	h.mux.HandleFunc("POST /dashboard/approvals/{id}/approve", h.requireAuth(h.handleApprove))
-	h.mux.HandleFunc("POST /dashboard/approvals/{id}/deny", h.requireAuth(h.handleDeny))
 	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/approve", h.requireAuth(h.handleAccessApprove))
 	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/deny", h.requireAuth(h.handleAccessDeny))
 	h.mux.HandleFunc("GET /dashboard/grants", h.requireAuth(h.handleGrants))
@@ -532,11 +528,6 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		activeSessionCount = h.deps.Sessions.ActiveCount()
 	}
 
-	pendingApprovals := 0
-	if h.deps.Approvals != nil {
-		pendingApprovals = len(h.deps.Approvals.ListPending())
-	}
-
 	// Request-use grants: pending count and degraded state.
 	var accessHealth *grant.Health
 	if h.deps.Grants != nil {
@@ -555,154 +546,30 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "overview.html", map[string]interface{}{
-		"CSRF":             r.Header.Get("X-Csrf-Token"),
-		"Active":           "overview",
-		"SecretCount":      secretCount,
-		"AgentCount":       agentCount,
-		"SessionCount":     activeSessionCount,
-		"PendingApprovals": pendingApprovals,
-		"PendingAccess":    h.pendingAccessCount(),
-		"AccessHealth":     accessHealth,
-		"AccessOn":         h.accessEnabled() && h.deps.Access.AccessRequestSettings().Enabled,
-		"Uptime":           fmtAgo(h.deps.StartTime),
-		"RecentAudit":      recentAudit,
-		"SessionsEnabled":  h.deps.Sessions != nil,
+		"CSRF":            r.Header.Get("X-Csrf-Token"),
+		"Active":          "overview",
+		"SecretCount":     secretCount,
+		"AgentCount":      agentCount,
+		"SessionCount":    activeSessionCount,
+		"PendingAccess":   h.pendingAccessCount(),
+		"AccessHealth":    accessHealth,
+		"AccessOn":        h.accessEnabled() && h.deps.Access.AccessRequestSettings().Enabled,
+		"Uptime":          fmtAgo(h.deps.StartTime),
+		"RecentAudit":     recentAudit,
+		"SessionsEnabled": h.deps.Sessions != nil,
 	})
 }
 
+// handleApprovals shows the pending access requests (approvals.html).
 func (h *Handler) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	if h.deps.Approvals == nil {
-		h.render(w, "approvals.html", map[string]interface{}{
-			"CSRF":          r.Header.Get("X-Csrf-Token"),
-			"Active":        "approvals",
-			"Pending":       nil,
-			"Resolved":      nil,
-			"Flash":         r.URL.Query().Get("flash"),
-			"Error":         accessErrorMessage(r.URL.Query().Get("error")),
-			"AccessCards":   h.accessCards(),
-			"AccessOn":      h.accessEnabled(),
-			"StepUpEnabled": false,
-		})
-		return
-	}
-
-	all := h.deps.Approvals.ListAll()
-
-	var pending, resolved []*approval.Approval
-	for _, a := range all {
-		if a.Status == approval.StatusPending {
-			pending = append(pending, a)
-		} else {
-			resolved = append(resolved, a)
-		}
-	}
-
-	// Sort pending by created (oldest first), resolved by created (newest first)
-	sort.Slice(pending, func(i, j int) bool {
-		return pending[i].CreatedAt.Before(pending[j].CreatedAt)
-	})
-	sort.Slice(resolved, func(i, j int) bool {
-		return resolved[i].CreatedAt.After(resolved[j].CreatedAt)
-	})
-
 	h.render(w, "approvals.html", map[string]interface{}{
-		"CSRF":          r.Header.Get("X-Csrf-Token"),
-		"Active":        "approvals",
-		"UnboundRoles":  h.unboundRoles(),
-		"Pending":       pending,
-		"Resolved":      resolved,
-		"Flash":         r.URL.Query().Get("flash"),
-		"Error":         accessErrorMessage(r.URL.Query().Get("error")),
-		"AccessCards":   h.accessCards(),
-		"AccessOn":      h.accessEnabled(),
-		"StepUpEnabled": true,
+		"CSRF":        r.Header.Get("X-Csrf-Token"),
+		"Active":      "approvals",
+		"Flash":       r.URL.Query().Get("flash"),
+		"Error":       accessErrorMessage(r.URL.Query().Get("error")),
+		"AccessCards": h.accessCards(),
+		"AccessOn":    h.accessEnabled(),
 	})
-}
-
-// unboundRoles names the session roles with no allowed_agents, so the
-// step-up approval card can show a "role has no agent binding" badge: any
-// agent that passes bootstrap_trust could have asked for such a role.
-func (h *Handler) unboundRoles() map[string]bool {
-	out := map[string]bool{}
-	for name, role := range h.deps.SessionRoles {
-		if len(role.AllowedAgents) == 0 {
-			out[name] = true
-		}
-	}
-	return out
-}
-
-func (h *Handler) handleApprove(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if h.deps.Approvals == nil {
-		http.Redirect(w, r, "/dashboard/approvals?flash=approvals+not+configured", http.StatusSeeOther)
-		return
-	}
-
-	apr := h.deps.Approvals.Get(id)
-	if apr == nil {
-		http.Redirect(w, r, "/dashboard/approvals?flash=approval+not+found", http.StatusSeeOther)
-		return
-	}
-	if apr.Status != approval.StatusPending {
-		http.Redirect(w, r, "/dashboard/approvals?flash=approval+already+"+string(apr.Status), http.StatusSeeOther)
-		return
-	}
-
-	// Shared safety checks
-	role, valErr := approval.ValidateForMint(apr, h.deps.SessionRoles)
-	if valErr != nil {
-		http.Redirect(w, r, "/dashboard/approvals?flash="+escapeFlash(valErr.Error()), http.StatusSeeOther)
-		return
-	}
-
-	// Mint session
-	ttl := sessionTTL(role.MaxTTL)
-	tokenStr, sess, mintErr := h.deps.Sessions.Create(
-		apr.Role, apr.Agent, apr.SealPubKey,
-		role.Namespaces, role.Actions,
-		apr.BootstrapMethod, apr.CertFingerprint, apr.SourceIP, role.StepUp && role.ElevatesACL, ttl,
-	)
-	if mintErr != nil {
-		log.Printf("dashboard: session mint error: %v", mintErr)
-		http.Redirect(w, r, "/dashboard/approvals?flash=mint+error", http.StatusSeeOther)
-		return
-	}
-
-	// Record approval
-	clientIP := extractClientIP(r)
-	approverTTY := "dashboard:" + clientIP
-	if aprErr := h.deps.Approvals.Approve(id, "dashboard", clientIP, approverTTY, tokenStr, sess.ID, sess.ExpiresAt); aprErr != nil {
-		http.Redirect(w, r, "/dashboard/approvals?flash="+escapeFlash(aprErr.Error()), http.StatusSeeOther)
-		return
-	}
-
-	// Audit
-	if h.deps.Audit != nil {
-		h.deps.Audit.LogAllowed("dashboard@"+clientIP, "approval.approved", apr.Role, clientIP)
-	}
-
-	http.Redirect(w, r, "/dashboard/approvals?flash=approved+"+id, http.StatusSeeOther)
-}
-
-func (h *Handler) handleDeny(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if h.deps.Approvals == nil {
-		http.Redirect(w, r, "/dashboard/approvals?flash=approvals+not+configured", http.StatusSeeOther)
-		return
-	}
-
-	clientIP := extractClientIP(r)
-	if err := h.deps.Approvals.Deny(id, "dashboard", clientIP); err != nil {
-		http.Redirect(w, r, "/dashboard/approvals?flash="+escapeFlash(err.Error()), http.StatusSeeOther)
-		return
-	}
-
-	if h.deps.Audit != nil {
-		h.deps.Audit.LogAllowed("dashboard@"+clientIP, "approval.denied", id, clientIP)
-	}
-
-	http.Redirect(w, r, "/dashboard/approvals?flash=denied+"+id, http.StatusSeeOther)
 }
 
 func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -834,12 +701,8 @@ func (h *Handler) handleRoles(w http.ResponseWriter, r *http.Request) {
 // --- Rendering ---
 
 func (h *Handler) render(w http.ResponseWriter, name string, data map[string]interface{}) {
-	// Count pending step-up approvals and access requests for the nav badge
-	pending := h.pendingAccessCount()
-	if h.deps.Approvals != nil {
-		pending += len(h.deps.Approvals.ListPending())
-	}
-	data["PendingCount"] = pending
+	// Count pending access requests for the nav badge
+	data["PendingCount"] = h.pendingAccessCount()
 	t, ok := h.tmpls[name]
 	if !ok {
 		log.Printf("dashboard: unknown template %q", name)
@@ -895,17 +758,6 @@ func ttlRemain(t time.Time) string {
 		return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
 	}
 	return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
-}
-
-func sessionTTL(maxTTL string) time.Duration {
-	if maxTTL == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(maxTTL)
-	if err != nil {
-		return 0
-	}
-	return d
 }
 
 func extractClientIP(r *http.Request) string {

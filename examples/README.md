@@ -30,15 +30,3 @@ Each script will:
    ```bash
    ./examples/03-acl-strictness/run.sh
    ```
-
-
-## MCP HTTP quick check (no script)
-
-If you need MCP Streamable HTTP instead of stdio:
-
-```bash
-PHOENIX_MCP_TOKEN=test-mcp-token ./bin/phoenix mcp-server --http 127.0.0.1:8080
-```
-
-Endpoint: `http://127.0.0.1:8080/mcp`
-Auth header: `Authorization: Bearer test-mcp-token`

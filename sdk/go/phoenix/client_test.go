@@ -279,9 +279,6 @@ func TestErrorHelpers(t *testing.T) {
 		check  func(*Error) bool
 		expect bool
 	}{
-		{"approval required true", Error{Code: "APPROVAL_REQUIRED"}, (*Error).IsApprovalRequired, true},
-		{"approval reapproval true", Error{Code: "STEP_UP_REAPPROVAL_REQUIRED"}, (*Error).IsApprovalRequired, true},
-		{"approval required false", Error{Code: "OTHER"}, (*Error).IsApprovalRequired, false},
 		{"session expired true", Error{Code: "SESSION_EXPIRED"}, (*Error).IsSessionExpired, true},
 		{"session expired false", Error{Code: "OTHER"}, (*Error).IsSessionExpired, false},
 		{"scope exceeded true", Error{Code: "SCOPE_EXCEEDED"}, (*Error).IsScopeExceeded, true},

@@ -112,5 +112,5 @@ PHOENIX_TOKEN=<deployer-token> phoenix get build/api-key
 ## Related docs
 
 - [Sealed Responses](sealed-responses.md) — how sealed delivery works
-- [Authentication](authentication.md) — mTLS as an alternative to bearer tokens
+- [Authentication](authentication.md) — bearer tokens and session roles
 - [LAN Deployment](lan-deployment.md) — multi-host variant of this pattern

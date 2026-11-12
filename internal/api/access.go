@@ -77,8 +77,7 @@ func (s *Server) requestable(path, action string) bool {
 }
 
 // isApprover: not a session, listed in access_requests.approvers, and still
-// an agent in the ACL. The ACL check matters because short-lived tokens and
-// mTLS certs authenticate by name only, so they outlive an agent delete.
+// an agent in the ACL.
 // Admin ACL alone does not count. Self-approval is checked per request.
 // Every approver-only path (approve, deny, ?agent= lists, full views,
 // revoking others' grants) goes through this one check.
@@ -91,10 +90,9 @@ func (s *Server) isApprover(info *authInfo) bool {
 }
 
 // grantCaller describes the caller's credential for grant binding: the auth
-// method plus the bearer/cert fingerprint or short-lived token issue time.
-// Sessions get an empty Caller, which matches no grant and is refused by
-// Create (a second guard behind dataAccess step 1: a session over mTLS
-// carries the cert fingerprint, so it must never be described as "mtls").
+// method plus the bearer token fingerprint. Sessions get an empty Caller,
+// which matches no grant and is refused by Create (a second guard behind
+// dataAccess step 1).
 func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 	if info.UsedSession {
 		return grant.Caller{}
@@ -103,10 +101,6 @@ func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 	switch c.AuthMethod {
 	case grant.AuthBearer:
 		c.CredentialFP = info.BearerFP
-	case grant.AuthMTLS:
-		c.CredentialFP = info.CertFingerprint
-	case grant.AuthToken:
-		c.TokenIssuedAt = *info.TokenIssuedAt
 	}
 	return c
 }
@@ -122,7 +116,7 @@ type accessDecision struct {
 }
 
 // dataAccess decides a data request:
-//  1. session caller: today's check (scope, action, elevated-or-ACL); grants
+//  1. session caller: scope, action and the ACL; grants
 //     are never consulted, so a session with a caller-chosen seal key can
 //     never reach a grant.
 //  2. non-session caller the ACL allows: allowed.
@@ -214,7 +208,7 @@ func (s *Server) accessAuth(w http.ResponseWriter, r *http.Request, approverOnly
 			writeAccessError(w, CodeApproverRequired, "session tokens cannot approve or deny access requests", http.StatusForbidden)
 		} else {
 			jsonDeniedStep(w, "access_denied", CodeSessionCannotRequest,
-				"access requests and grants use the agent's own identity (bearer, mTLS or short-lived token), not a session",
+				"access requests and grants use the agent's own bearer token, not a session",
 				"", s.sessionRequestStep(r), http.StatusForbidden)
 		}
 		return nil, false
@@ -909,15 +903,14 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	if info.UsedSession {
 		resp["auth_method"] = "session"
 		resp["session"] = map[string]any{
-			"id":           info.SessionID,
-			"role":         info.SessionRole,
-			"namespaces":   info.SessionNamespaces,
-			"actions":      info.SessionActions,
-			"elevates_acl": info.SessionElevatesACL,
+			"id":         info.SessionID,
+			"role":       info.SessionRole,
+			"namespaces": info.SessionNamespaces,
+			"actions":    info.SessionActions,
 		}
 		resp["grants"] = []any{}
 		resp["pending_requests"] = []any{}
-		resp["note"] = "grants are used through the agent's own identity (bearer, mTLS or short-lived token), not a session"
+		resp["note"] = "grants are used through the agent's own bearer token, not a session"
 		jsonOK(w, resp)
 		return
 	}

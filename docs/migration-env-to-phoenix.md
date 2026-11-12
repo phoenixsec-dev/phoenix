@@ -47,8 +47,9 @@ phoenix agent create myapp-deployer -t "deploy-token" --acl "myapp/**:read,write
 `myapp/*` would match one level only. See
 [ACL path patterns](authentication.md#acl-path-patterns).
 
-For production, prefer mTLS certs over bearer tokens.
-See [Authentication](authentication.md) for mTLS setup.
+For production, give agents session roles (`PHOENIX_ROLE`) so day-to-day
+requests use short-lived, scoped tokens, and use HTTPS for anything that
+crosses a wire. See [Authentication](authentication.md).
 
 ## 5) Replace plaintext values with references
 
@@ -83,18 +84,6 @@ phoenix exec \
   --env OPENAI_KEY=phoenix://myapp/api-key \
   --output-env /run/secrets/app.env
 ```
-
-If your agent platform uses MCP over HTTP instead of local stdio, run Phoenix MCP in Streamable HTTP mode:
-
-```bash
-export PHOENIX_SERVER="https://phoenix:9090"
-export PHOENIX_CA_CERT="/etc/phoenix/certs/ca.crt"
-export PHOENIX_TOKEN="<phoenix-agent-token>"
-export PHOENIX_MCP_TOKEN="<mcp-client-token>"
-phoenix mcp-server --http 127.0.0.1:8080
-```
-
-Use `http://127.0.0.1:8080/mcp` as the MCP endpoint. Keep `PHOENIX_MCP_TOKEN` separate from `PHOENIX_TOKEN`.
 
 ## 7) Validate and audit
 

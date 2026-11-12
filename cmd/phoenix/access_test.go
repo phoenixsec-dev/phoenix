@@ -71,14 +71,11 @@ func TestApprovalPromptShowsEveryPath(t *testing.T) {
 	}
 }
 
-func TestApproveDispatchesOnPrefix(t *testing.T) {
+func TestApproveAccessRequest(t *testing.T) {
 	var log callLog
 	useMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		log.add(r)
 		switch {
-		case r.URL.Path == "/v1/approval/apr_00ff":
-			// Already decided, so the unchanged step-up flow stops before its prompt.
-			json.NewEncoder(w).Encode(map[string]string{"id": "apr_00ff", "status": "approved"})
 		case r.Method == "GET" && r.URL.Path == "/v1/access-requests/"+testReqID:
 			json.NewEncoder(w).Encode(pendingRequestJSON("why"))
 		case r.Method == "POST" && r.URL.Path == "/v1/access-requests/"+testReqID+"/approve":
@@ -88,23 +85,18 @@ func TestApproveDispatchesOnPrefix(t *testing.T) {
 		}
 	})
 
-	err := cmdApprove([]string{"apr_00ff"})
-	if err == nil || !strings.Contains(err.Error(), "already approved") {
-		t.Fatalf("step-up approve: %v", err)
-	}
 	if err := cmdApprove([]string{testReqID, "--path", "infra/a", "--ttl", "15m", "--yes"}); err != nil {
 		t.Fatalf("access approve: %v", err)
 	}
 	got := log.String()
-	want := "GET /v1/approval/apr_00ff\n" +
-		"GET /v1/access-requests/" + testReqID + "\n" +
+	want := "GET /v1/access-requests/" + testReqID + "\n" +
 		"POST /v1/access-requests/" + testReqID + `/approve {"paths":["infra/a"],"ttl":"15m"}`
 	if got != want {
 		t.Fatalf("calls:\n%s\nwant:\n%s", got, want)
 	}
 }
 
-func TestDenyDispatchesOnPrefix(t *testing.T) {
+func TestDenyAccessRequest(t *testing.T) {
 	var log callLog
 	useMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		log.add(r)
@@ -113,10 +105,7 @@ func TestDenyDispatchesOnPrefix(t *testing.T) {
 	if err := cmdDeny([]string{testReqID, "--note", "not now"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdDeny([]string{"apr_00ff"}); err != nil {
-		t.Fatal(err)
-	}
-	want := "POST /v1/access-requests/" + testReqID + `/deny {"note":"not now"}` + "\nPOST /v1/approval/apr_00ff/deny {}"
+	want := "POST /v1/access-requests/" + testReqID + `/deny {"note":"not now"}`
 	if got := log.String(); got != want {
 		t.Fatalf("calls:\n%s\nwant:\n%s", got, want)
 	}
