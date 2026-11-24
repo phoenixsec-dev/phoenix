@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"unicode/utf8"
 
+	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 )
@@ -181,6 +182,10 @@ func (s *Server) writeDataDenial(w http.ResponseWriter, r *http.Request, info *a
 		// The session stopped being valid while this request ran.
 		s.auditDenied(r, info, action, path, ip, reason)
 		handleAuthError(w, &sessionAuthError{code: reason, err: errors.New("the session is no longer valid")})
+	case reasonTokenReplaced:
+		// The token stopped being the agent's while this request ran.
+		s.auditDenied(r, info, action, path, ip, reason)
+		handleAuthError(w, acl.ErrUnauthorized)
 	case grant.ReasonGrantExpired:
 		s.auditDenied(r, info, action, path, ip, reason)
 		jsonDeniedStep(w, "access_denied", CodeGrantExpired,

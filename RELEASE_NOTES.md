@@ -1,5 +1,19 @@
 # Release Notes
 
+## Unreleased
+
+### Security: a request already running could use a replacement token's permissions
+
+A request logs in with its bearer token, then looks up permissions by agent
+name. If the token was replaced (or the agent deleted and made again) between
+those two steps, the request used the new token's permissions. The window is
+normally microseconds, but a `POST /v1/resolve` that sends its body slowly
+could hold it open for up to 15 seconds. Now every permission check, admin
+and approver checks included, also requires that the token the request logged
+in with is still the agent's. Such a request gets `401 unauthorized` (admin
+endpoints: 403), and the audit reason is `token_replaced`. Writing the same
+token again with `--force` is not a replacement. Nothing to configure.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine
