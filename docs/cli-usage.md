@@ -88,7 +88,7 @@ phoenix whoami
 
 # Approver (dashboard, or an identity in access_requests.approvers)
 phoenix pending
-phoenix approve req_... [--ttl 15m] [--path infra/b2/app-key] [--yes]
+phoenix approve req_... [--ttl 15m] [--uses 1] [--path infra/b2/app-key] [--yes]
 phoenix deny req_... --note "use the staging key"
 phoenix grants --all
 phoenix grants revoke gnt_...

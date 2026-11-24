@@ -170,7 +170,7 @@ a notification to `access_requests.notify_url` (no endpoint; see
 | POST | `/v1/access-requests` | Ask for temporary `read_value` on exact paths |
 | GET | `/v1/access-requests` | Own requests (approvers: all) |
 | GET | `/v1/access-requests/{id}` | One request with `next_step` |
-| POST | `/v1/access-requests/{id}/approve` | Approve, optionally narrowing paths / TTL (approvers) |
+| POST | `/v1/access-requests/{id}/approve` | Approve, optionally narrowing paths / TTL / uses (approvers) |
 | POST | `/v1/access-requests/{id}/deny` | Deny with optional note (approvers) |
 | GET | `/v1/grants` | Own grants (approvers: all) |
 | POST | `/v1/grants/{id}/revoke` | Revoke (owner or approver) |

@@ -192,6 +192,30 @@ enable.
 When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 `phoenix exec` transparently encrypt/decrypt values using NaCl box.
 
+## When you are denied a secret
+
+A denial that says `next: request temporary use` means a human can allow it:
+
+```bash
+phoenix request <namespace/key> --reason "what you need it for" --wait
+```
+
+Tell the user in chat what you asked for. The answer says how far it goes, and
+`phoenix request status <req_id>` shows it again:
+
+- `one use left`: one read of each secret. Use it with
+  `phoenix exec --redact-output --env NAME=phoenix://<namespace/key> -- <command>`.
+  Get the command right first: the use is spent once the value is handed over,
+  even if your command then fails. A typo in the command name or another
+  refused reference costs nothing.
+- `until 14:32`: any number of uses until then.
+- `always`: it is on your access list now; just use it.
+- `denied`: a human said no. Do not ask again; ask the user in chat if you
+  really need it. Read the note, if there is one.
+
+When the time or uses run out, reads say `GRANT_EXPIRED`; request again only if
+you still need it.
+
 ## Root on another machine
 
 Phoenix can give you a short SSH login to another machine, once a human
@@ -204,7 +228,7 @@ approves it. Use this whenever you need root or a shell somewhere else.
    Quote the whole command as one string. Use `sudo -n` inside it for root.
 3. A human approves on their side. That can take minutes; the command waits.
    Inside an active approval, later commands run at once and `--reason` is
-   optional.
+   optional. If the human allowed one login only, the next one asks again.
 4. Never ask the user to open a terminal or run sudo for you. If the machine
    is not listed, or the human denies it, say so and stop.
 
