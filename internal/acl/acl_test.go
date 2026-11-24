@@ -805,8 +805,8 @@ func TestFailedUpdateKeepsOldPermissionsNotOldToken(t *testing.T) {
 	if a.UpdateAgent("worker", "fake-1", all) == nil || a.Authorize("worker", "x/y", ActionWrite) == nil {
 		t.Error("the failed update widened the agent's access")
 	}
-	if a.UpdateAgent("worker", "fake-2", nil) == nil {
-		t.Error("the save should fail")
+	if err := a.UpdateAgent("worker", "fake-2", nil); !errors.Is(err, ErrReplacedNotSaved) {
+		t.Errorf("replacing: %v, want ErrReplacedNotSaved", err)
 	}
 	if _, err := a.Authenticate("fake-1"); err == nil {
 		t.Error("the replaced token still works")

@@ -38,6 +38,9 @@ var (
 	ErrAccessDenied  = errors.New("access denied: insufficient permissions")
 	ErrAgentNotFound = errors.New("agent not found")
 	ErrAgentExists   = errors.New("agent already exists")
+	// ErrReplacedNotSaved means a token was replaced (and the old one no longer
+	// works) but that could not be saved, so a restart would undo it.
+	ErrReplacedNotSaved = errors.New("token replaced but not saved")
 
 	// ValidActions is the set of recognized action strings.
 	ValidActions = map[Action]bool{
@@ -285,13 +288,17 @@ func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 		SealPublicKey: existing.SealPublicKey,
 	}
 
-	return a.saveOrUndo(func() {
+	err := a.saveOrUndo(func() {
 		// A replaced token stays dead even if the save failed. With the same
 		// token there is none to kill, only permissions nobody was told about.
 		if hash == existing.TokenHash {
 			a.config.Agents[name] = existing
 		}
 	})
+	if err != nil && hash != existing.TokenHash {
+		return fmt.Errorf("%w: %w", ErrReplacedNotSaved, err)
+	}
+	return err
 }
 
 // RemoveAgent removes an agent from the ACL.

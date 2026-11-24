@@ -1203,6 +1203,12 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 			jsonOK(w, map[string]string{"status": "ok", "agent": req.Name, "action": "updated"})
 			return
 		}
+		if errors.Is(err, acl.ErrReplacedNotSaved) {
+			log.Printf("error updating agent %q: %v", req.Name, err)
+			s.auditLogDenied(r, info.Agent, "update-agent", req.Name, clientIP(r), "not_saved")
+			jsonError(w, "the token was replaced and the old one no longer works, but that could not be saved: a restart would bring the old token back. Fix the disk and run this again", http.StatusInternalServerError)
+			return
+		}
 		if !errors.Is(err, acl.ErrAgentNotFound) {
 			log.Printf("error updating agent %q: %v", req.Name, err)
 			jsonError(w, "internal error", http.StatusInternalServerError)

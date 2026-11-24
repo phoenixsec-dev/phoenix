@@ -140,7 +140,7 @@ that dies halfway can do to it. Nothing to configure; what changed:
   token unchanged: wider permissions took effect although the save failed. All
   three are undone now. Replacing a token or deleting an agent still takes
   effect at once even if the save fails, so the old token stays dead until a
-  restart.
+  restart; the answer to a failed `--force` now says so.
 
 ## v0.24.0 (2026-11-24)
 
