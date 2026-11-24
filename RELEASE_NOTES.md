@@ -14,8 +14,8 @@ in with is still the agent's. So does everything looked up by agent name
 ("your" sessions, requests and grants). Requests that send a body are checked
 again after it arrived, so one kept waiting with an old token can no longer
 write a secret, make an agent or approve anything once that token is replaced. Such a
-request gets `401 unauthorized` (403 from a few admin endpoints). On secret
-reads, lists and writes the audit reason is `token_replaced`. Writing the same
+request gets `401 unauthorized`, audited with reason `token_replaced` (a few
+admin endpoints answer 403). Writing the same
 token again with `--force` is not a replacement. Nothing to configure.
 
 ### Security: a revoked session could be quietly replaced after a role change

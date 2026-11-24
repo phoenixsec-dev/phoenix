@@ -92,7 +92,7 @@ func (s *Server) handleSSHSign(w http.ResponseWriter, r *http.Request) {
 		writeAccessError(w, CodeRequestsDisabled, "access requests are turned off on this server", http.StatusNotImplemented)
 		return
 	}
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 	ip := clientIP(r)

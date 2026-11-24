@@ -577,7 +577,7 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 	c := s.grantCaller(info, ip)
@@ -621,9 +621,6 @@ func (s *Server) handleAccessRequestList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	approver := s.isApprover(info)
-	if s.writeLoginEnded(w, info) {
-		return
-	}
 	agent := info.Agent
 	if approver {
 		agent = q.Get("agent")
@@ -634,6 +631,9 @@ func (s *Server) handleAccessRequestList(w http.ResponseWriter, r *http.Request)
 	items := []map[string]any{}
 	for _, rq := range s.grants.ListRequests(agent, status) {
 		items = append(items, s.requestView(rq, approver))
+	}
+	if s.writeLoginEnded(w, r, info) {
+		return // after the lookup: the name may be another's now
 	}
 	jsonOK(w, map[string]any{"requests": items})
 }
@@ -647,7 +647,7 @@ func (s *Server) handleAccessRequestGet(w http.ResponseWriter, r *http.Request) 
 	}
 	rq, found := s.grants.GetRequest(r.PathValue("id"))
 	approver := s.isApprover(info)
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return // not "an ordinary agent": the name may be another's now
 	}
 	if !found || (!approver && rq.Agent != info.Agent) {
@@ -666,9 +666,6 @@ func (s *Server) handleGrantList(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	approver := s.isApprover(info)
-	if s.writeLoginEnded(w, info) {
-		return
-	}
 	agent := info.Agent
 	if approver {
 		agent = q.Get("agent")
@@ -679,6 +676,9 @@ func (s *Server) handleGrantList(w http.ResponseWriter, r *http.Request) {
 	items := []map[string]any{}
 	for _, g := range s.grants.ListGrants(agent, q.Get("include") == "inactive") {
 		items = append(items, s.grantView(g, approver))
+	}
+	if s.writeLoginEnded(w, r, info) {
+		return // after the lookup: the name may be another's now
 	}
 	jsonOK(w, map[string]any{"grants": items})
 }
@@ -693,7 +693,7 @@ func (s *Server) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	approver := s.isApprover(info)
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 	g, err := s.grants.Revoke(grant.RevokeInput{
@@ -745,7 +745,7 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ttl, ok := parseTTL(w, body.TTL)
-	if !ok || s.writeLoginEnded(w, info) {
+	if !ok || s.writeLoginEnded(w, r, info) {
 		return
 	}
 	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, body.Paths, ttl, func(paths []string, code string) {
@@ -877,7 +877,7 @@ func (s *Server) handleAccessRequestDeny(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Note string `json:"note"`
 	}
-	if !decodeBody(w, r, &body, true) || s.writeLoginEnded(w, info) {
+	if !decodeBody(w, r, &body, true) || s.writeLoginEnded(w, r, info) {
 		return
 	}
 	rq, err := s.grants.Deny(grant.DenyInput{
@@ -957,7 +957,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	resp["grants"] = grants
 	resp["pending_requests"] = pending
 	// Everything above was looked up by name, so it may be a new token's.
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 	jsonOK(w, resp)

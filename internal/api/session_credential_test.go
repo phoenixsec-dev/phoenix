@@ -823,12 +823,15 @@ func TestSlowBodyAfterTokenReplaced(t *testing.T) {
 				t.Fatal(err)
 			}
 			code, body := e.doReader(c.method, c.path, "old-token", &hookBody{Reader: strings.NewReader(c.body), hook: func() {
-				if err := e.srv.acl.UpdateAgent("worker", "new-token", admin); err != nil {
+				if err := e.srv.acl.UpdateAgent("worker", "new-token", nil); err != nil { // fewer permissions, too
 					t.Error(err)
 				}
 			}})
 			if code != 401 {
 				t.Errorf("%d %s, want 401", code, body)
+			}
+			if log, _ := os.ReadFile(filepath.Join(e.dir, "audit.log")); !strings.Contains(string(log), `"reason":"token_replaced"`) {
+				t.Error("no token_replaced audit line")
 			}
 			if _, err := e.srv.acl.GetAgent("backdoor"); err == nil {
 				t.Error("an agent was created")

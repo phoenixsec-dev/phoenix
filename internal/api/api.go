@@ -756,11 +756,12 @@ func (s *Server) loginEnded(info *authInfo) string {
 // while its request ran. Call it before acting on anything looked up by agent
 // name, and after reading a body: a slow body can keep a request waiting long
 // after its token was replaced.
-func (s *Server) writeLoginEnded(w http.ResponseWriter, info *authInfo) bool {
+func (s *Server) writeLoginEnded(w http.ResponseWriter, r *http.Request, info *authInfo) bool {
 	reason := s.loginEnded(info)
 	if reason == "" {
 		return false
 	}
+	s.auditDenied(r, info, "request", r.Method+" "+r.URL.Path, clientIP(r), reason)
 	if reason == reasonTokenReplaced {
 		handleAuthError(w, acl.ErrUnauthorized)
 	} else {
@@ -1022,7 +1023,7 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "backend is read-only", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 
@@ -1185,7 +1186,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 
@@ -1343,7 +1344,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		defer func() { _ = s.keyLock.Share() }()
 	}
 	// The wait for another rotation may have been long.
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 	// The rotation replaces the key file with one protected as it was at
@@ -1477,6 +1478,10 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 	// Session seal key binding check (once, before processing refs)
 	if !s.checkSessionSealKey(w, r, info) {
+		return
+	}
+
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 
@@ -1791,7 +1796,7 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.writeLoginEnded(w, info) {
+	if s.writeLoginEnded(w, r, info) {
 		return
 	}
 	pubEncoded := crypto.EncodeSealKey(pubKey)
@@ -2123,10 +2128,6 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
-	if s.writeLoginEnded(w, info) {
-		return // not "an ordinary agent": the name may be another's now
-	}
-
 	// Query filters
 	roleFilter := r.URL.Query().Get("role")
 	agentFilter := r.URL.Query().Get("agent")
@@ -2157,6 +2158,11 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]interface{}, 0, len(result))
 	for _, sess := range result {
 		items = append(items, sessionToMap(sess))
+	}
+	// After the lookups: an ended login is not "an ordinary agent", the name
+	// may be another's now.
+	if s.writeLoginEnded(w, r, info) {
+		return
 	}
 
 	jsonOK(w, map[string]interface{}{"sessions": items})
@@ -2217,7 +2223,7 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id st
 		}
 	} else {
 		isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
-		if s.writeLoginEnded(w, info) {
+		if s.writeLoginEnded(w, r, info) {
 			return
 		}
 		if info.Agent != sess.Agent && !isAdmin {
@@ -2256,7 +2262,7 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id 
 		}
 	} else {
 		isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
-		if s.writeLoginEnded(w, info) {
+		if s.writeLoginEnded(w, r, info) {
 			return
 		}
 		if info.Agent != sess.Agent && !isAdmin {
