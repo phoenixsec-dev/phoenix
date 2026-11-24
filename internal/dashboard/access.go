@@ -2,13 +2,8 @@ package dashboard
 
 import (
 	"errors"
-	"fmt"
-	"log"
 	"net"
-	"net/http"
-	"net/url"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -18,21 +13,19 @@ import (
 	"github.com/phoenixsec/phoenix/internal/grant"
 )
 
-// Request-use grants on the dashboard (plan sections 11 and 12).
-//
-// The approvals page shows one card per pending access request with every
-// fact a human needs to decide, built from server records (never from the
-// agent's reason). Approve goes through the API server's shared approval
-// path (AccessApprover), so the dashboard and the API apply the exact same
-// re-checks. Deny and revoke call the grant store directly, as the API does.
-// Every decision is recorded as "dashboard@<ip>".
+// The facts behind a request card: what a human needs to see before deciding,
+// built from server records and never from the agent's reason. The page that
+// shows them is in requests.go.
 
 // AccessApprover is the part of the API server the dashboard needs.
 // *api.Server implements it.
 type AccessApprover interface {
 	// ApproveAccessRequestAs approves with the API's re-checks for an
 	// approver the dashboard has already authenticated.
-	ApproveAccessRequestAs(id, approver, ip string, paths []string, ttl time.Duration) (grant.Grant, error)
+	ApproveAccessRequestAs(id, approver, ip string, how grant.Approval) (grant.Request, grant.Grant, error)
+	// RemoveAlwaysAs takes back an agent's "always" on one path. stillAllowed
+	// says another rule on the agent's access list goes on allowing it.
+	RemoveAlwaysAs(agent, path, by, ip string) (stillAllowed bool, err error)
 	// AccessRequestSettings is the access_requests config in force now.
 	AccessRequestSettings() config.AccessRequestsSettings
 }
@@ -58,125 +51,6 @@ type attestFact struct {
 	Path        string
 	Requirement string
 	Status      string // "met", "not met" or "checked at each use"
-}
-
-// ttlChoice is one entry of the TTL dropdown.
-type ttlChoice struct {
-	Value    string
-	Selected bool
-}
-
-// historyItem is one of the agent's other requests in the last 24h.
-type historyItem struct {
-	ID     string
-	Status string
-	Paths  string
-	When   time.Time
-}
-
-// accessCard is everything one approval card shows.
-type accessCard struct {
-	ID            string
-	Agent         string
-	SourceIP      string
-	AuthMethod    string
-	Action        string
-	Paths         []pathFact
-	RequestedTTL  string
-	TTLChoices    []ttlChoice
-	Delivery      string
-	SealKeyOK     bool
-	SealRequired  bool
-	Attestation   []attestFact
-	Reason        string
-	CreatedAt     time.Time
-	ExpiresAt     time.Time
-	History       []historyItem
-	HistoryDenied int
-}
-
-// accessEnabled reports whether the request-use pieces are wired in.
-func (h *Handler) accessEnabled() bool {
-	return h.deps.Grants != nil && h.deps.Access != nil
-}
-
-// pendingAccessCount is the number of pending access requests (0 when off).
-func (h *Handler) pendingAccessCount() int {
-	if h.deps.Grants == nil {
-		return 0
-	}
-	return len(h.deps.Grants.ListRequests("", grant.StatusPending))
-}
-
-// accessCards builds the approval cards for every pending request, oldest first.
-func (h *Handler) accessCards() []accessCard {
-	if !h.accessEnabled() {
-		return nil
-	}
-	cfg := h.deps.Access.AccessRequestSettings()
-	var cards []accessCard
-	for _, rq := range h.deps.Grants.ListRequests("", grant.StatusPending) {
-		cards = append(cards, h.buildCard(rq, cfg))
-	}
-	return cards
-}
-
-// buildCard collects the facts for one request (plan section 11, "What the
-// approver must see").
-func (h *Handler) buildCard(rq grant.Request, cfg config.AccessRequestsSettings) accessCard {
-	c := accessCard{
-		ID:           rq.ID,
-		Agent:        rq.Agent,
-		SourceIP:     rq.SourceIP,
-		AuthMethod:   rq.AuthMethod,
-		Action:       rq.Action,
-		RequestedTTL: shortDur(rq.RequestedTTL),
-		Reason:       cleanDisplayText(rq.Reason, maxReasonDisplay),
-		CreatedAt:    rq.CreatedAt,
-		ExpiresAt:    rq.ExpiresAt,
-		SealRequired: cfg.RequireSealed,
-	}
-	if h.deps.ACL != nil {
-		k, err := h.deps.ACL.GetAgentSealKey(rq.Agent)
-		c.SealKeyOK = err == nil && k != ""
-	}
-	if cfg.RequireSealed {
-		c.Delivery = "sealed only, to the agent's registered seal key (used through phoenix exec)"
-	} else {
-		c.Delivery = "plaintext or sealed, as the agent asks"
-	}
-	sshLogin := rq.Action == grant.ActionSSHLogin
-	if sshLogin {
-		c.SealRequired = false
-		c.Delivery = "a login certificate that ends with this approval, usable only from the IP above"
-	}
-	for _, p := range rq.Paths {
-		c.Paths = append(c.Paths, h.pathFacts(rq, p))
-		// Attestation rules guard secrets. Signing a login does not check them,
-		// so the card must not say it does.
-		if !sshLogin {
-			c.Attestation = append(c.Attestation, h.attestFacts(rq, p, c.SealKeyOK)...)
-		}
-	}
-	choices := ttlChoices(rq.RequestedTTL, cfg.MaxGrantTTL)
-	for i, d := range choices {
-		// Default to the longest legal choice: what the agent asked for,
-		// unless the current max_grant_ttl is lower.
-		c.TTLChoices = append(c.TTLChoices, ttlChoice{Value: shortDur(d), Selected: i == len(choices)-1})
-	}
-	since := time.Now().Add(-historyWindow)
-	for _, other := range h.deps.Grants.ListRequests(rq.Agent, "") {
-		if other.ID == rq.ID || other.CreatedAt.Before(since) {
-			continue
-		}
-		if other.Status == grant.StatusDenied {
-			c.HistoryDenied++
-		}
-		c.History = append(c.History, historyItem{
-			ID: other.ID, Status: string(other.Status), Paths: strings.Join(other.Paths, ", "), When: other.CreatedAt,
-		})
-	}
-	return c
 }
 
 // pathFacts works out the three badges for one path.
@@ -296,29 +170,44 @@ func cleanDisplayText(s string, maxRunes int) string {
 	return b.String()
 }
 
-// --- handlers ----------------------------------------------------------------
+// accessEnabled reports whether the request-use pieces are wired in.
+func (h *Handler) accessEnabled() bool {
+	return h.deps.Grants != nil && h.deps.Access != nil
+}
 
-// accessErrorText is the fixed red message for each error code the access
-// handlers redirect with. Only codes in this table are shown, so a crafted
-// link cannot put arbitrary red text on the approvals page.
+// pendingAccessCount is the number of pending access requests (0 when off).
+func (h *Handler) pendingAccessCount() int {
+	if h.deps.Grants == nil {
+		return 0
+	}
+	return len(h.deps.Grants.ListRequests("", grant.StatusPending))
+}
+
+// accessErrorText is the fixed red message for each error code. Only codes in
+// this table are shown, so a crafted link cannot put arbitrary red text on the
+// page.
 var accessErrorText = map[string]string{
-	"REVOKE_NOT_DURABLE":      "REVOKE_NOT_DURABLE: the grant is revoked until the next restart but the change was NOT saved. Fix the disk and retry the revoke, or rotate the secret.",
+	"REVOKE_NOT_DURABLE":      "REVOKE_NOT_DURABLE: access is off until the next restart, but the change was NOT saved. Fix the disk and do it again, or rotate the secret.",
 	"REQUESTS_DISABLED":       "Access requests are turned off on this server; approvals are paused.",
 	"REQUESTS_DEGRADED":       "The grants file cannot be written right now; no approvals until it is fixed. See Overview.",
-	"NOT_FOUND":               "That request or grant no longer exists.",
-	"NOT_PENDING":             "That request was already decided or has expired.",
+	"NOT_FOUND":               "That no longer exists.",
+	"NOT_PENDING":             "That request was already answered or has expired.",
 	"NOT_REQUESTABLE":         "A path in this request now matches access_requests.deny_paths and cannot be granted.",
 	"ACTION_NOT_GRANTABLE":    "This action is no longer grantable under the current config.",
 	"SEAL_KEY_NOT_REGISTERED": "Sealed delivery is required and the agent has no registered seal key.",
-	"EMPTY_GRANT":             "Tick at least one path to approve, or deny the request.",
-	"WIDENING_NOT_ALLOWED":    "An approval can only remove paths or shorten the time, never add.",
-	"INVALID_TTL":             "Pick one of the listed durations.",
-	"INVALID_REQUEST":         "The approval was not valid.",
+	"CREDENTIAL_CHANGED":      "This agent's token was replaced after it asked, so the answer would go to the wrong token. The agent has to ask again.",
+	"ALWAYS_NOT_ALLOWED":      "This request cannot be allowed always.",
+	"ACL_WRITE_FAILED":        "The agent's access list could not be saved; nothing changed.",
+	"EMPTY_GRANT":             "Tick at least one path to allow, or answer No.",
+	"WIDENING_NOT_ALLOWED":    "An answer can only remove paths or shorten the time, never add.",
+	"INVALID_TTL":             "Pick one of the listed times.",
+	"INVALID_USES":            "Uses must be a whole number from 1 to 1000, or empty for any number.",
+	"INVALID_REQUEST":         "The answer was not valid.",
 	"GRANT_LIMIT":             "This agent already has the maximum number of active grants. Revoke one first.",
 	"UNKNOWN_AGENT":           "The requesting agent no longer exists.",
 	"SELF_APPROVAL":           "An agent cannot approve its own request.",
-	"STORE_WRITE_FAILED":      "The decision could not be saved; nothing changed.",
-	"APPROVAL_MAYBE_SAVED":    "The approval could not be confirmed as saved, and undoing it also failed: it may still take effect after a restart. Fix the disk, then check Grants and revoke it if it is not wanted.",
+	"STORE_WRITE_FAILED":      "The answer could not be saved; nothing changed.",
+	"APPROVAL_MAYBE_SAVED":    "The answer could not be confirmed as saved, and undoing it also failed: it may still take effect after a restart. Fix the disk, then check this page and revoke it if it is not wanted.",
 	"AUDIT_WRITE_FAILED":      "The audit log could not be written; nothing changed.",
 	"NOT_CONFIGURED":          "Access requests are not wired into this dashboard.",
 }
@@ -348,139 +237,4 @@ func errCode(err error) string {
 		return coded.ErrorCode()
 	}
 	return "FAILED"
-}
-
-// redirectAccess sends the browser back to page with either a success flash
-// or an error code (shown through accessErrorText).
-func redirectAccess(w http.ResponseWriter, r *http.Request, page, flash, errorCode string) {
-	q := url.Values{}
-	if flash != "" {
-		q.Set("flash", flash)
-	}
-	if errorCode != "" {
-		q.Set("error", errorCode)
-	}
-	http.Redirect(w, r, page+"?"+q.Encode(), http.StatusSeeOther)
-}
-
-// handleAccessApprove: POST /dashboard/access-requests/{id}/approve.
-// Form: path (repeated; the ticked boxes) and ttl (one of the dropdown
-// choices). The TTL must be one of the legal choices for this request.
-func (h *Handler) handleAccessApprove(w http.ResponseWriter, r *http.Request) {
-	const page = "/dashboard/approvals"
-	if !h.accessEnabled() {
-		redirectAccess(w, r, page, "", "NOT_CONFIGURED")
-		return
-	}
-	id := r.PathValue("id")
-	rq, ok := h.deps.Grants.GetRequest(id)
-	if !ok {
-		redirectAccess(w, r, page, "", "NOT_FOUND")
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		redirectAccess(w, r, page, "", "INVALID_REQUEST")
-		return
-	}
-	paths := r.PostForm["path"]
-	if len(paths) == 0 {
-		redirectAccess(w, r, page, "", "EMPTY_GRANT")
-		return
-	}
-	ttl, err := time.ParseDuration(r.PostFormValue("ttl"))
-	if err != nil || !slices.Contains(ttlChoices(rq.RequestedTTL, h.deps.Access.AccessRequestSettings().MaxGrantTTL), ttl) {
-		redirectAccess(w, r, page, "", "INVALID_TTL")
-		return
-	}
-	ip := extractClientIP(r)
-	g, err := h.deps.Access.ApproveAccessRequestAs(id, "dashboard@"+ip, ip, paths, ttl)
-	if err != nil {
-		log.Printf("dashboard: approve %s: %v", id, err)
-		redirectAccess(w, r, page, "", errCode(err))
-		return
-	}
-	redirectAccess(w, r, page, fmt.Sprintf("approved %s: %s for %s (grant %s)",
-		id, strings.Join(g.Paths, ", "), shortDur(g.ExpiresAt.Sub(g.CreatedAt)), g.ID), "")
-}
-
-// handleAccessDeny: POST /dashboard/access-requests/{id}/deny with an
-// optional note (cleaned and capped by the store).
-func (h *Handler) handleAccessDeny(w http.ResponseWriter, r *http.Request) {
-	const page = "/dashboard/approvals"
-	if h.deps.Grants == nil {
-		redirectAccess(w, r, page, "", "NOT_CONFIGURED")
-		return
-	}
-	id := r.PathValue("id")
-	ip := extractClientIP(r)
-	if _, err := h.deps.Grants.Deny(grant.DenyInput{
-		RequestID: id, Denier: "dashboard@" + ip, DenierIP: ip, Note: r.FormValue("note"),
-	}); err != nil {
-		log.Printf("dashboard: deny %s: %v", id, err)
-		redirectAccess(w, r, page, "", errCode(err))
-		return
-	}
-	redirectAccess(w, r, page, "denied "+id, "")
-}
-
-// grantRow is one line of the grants page.
-type grantRow struct {
-	grant.Grant
-	State string
-	Ended time.Time
-}
-
-// handleGrants: GET /dashboard/grants[?view=recent]. Active grants with a
-// Revoke button, or the recently expired/revoked ones.
-func (h *Handler) handleGrants(w http.ResponseWriter, r *http.Request) {
-	view := r.URL.Query().Get("view")
-	if view != "recent" {
-		view = "active"
-	}
-	var rows []grantRow
-	if h.deps.Grants != nil {
-		now := time.Now()
-		for _, g := range h.deps.Grants.ListGrants("", view == "recent") {
-			st := g.State(now)
-			if view == "recent" && st == grant.GrantActive {
-				continue
-			}
-			row := grantRow{Grant: g, State: string(st), Ended: g.ExpiresAt}
-			if !g.RevokedAt.IsZero() && g.RevokedAt.Before(g.ExpiresAt) {
-				row.Ended = g.RevokedAt
-			}
-			rows = append(rows, row)
-		}
-	}
-	if view == "recent" {
-		sort.Slice(rows, func(i, j int) bool { return rows[i].Ended.After(rows[j].Ended) })
-	}
-	h.render(w, "grants.html", map[string]interface{}{
-		"CSRF":       r.Header.Get("X-Csrf-Token"),
-		"Active":     "grants",
-		"View":       view,
-		"Grants":     rows,
-		"Configured": h.deps.Grants != nil,
-		"Flash":      r.URL.Query().Get("flash"),
-		"Error":      accessErrorMessage(r.URL.Query().Get("error")),
-	})
-}
-
-// handleGrantRevoke: POST /dashboard/grants/{id}/revoke. A revoke that could
-// not be saved still denies at once, but the page says so in red
-// (REVOKE_NOT_DURABLE) instead of reporting success.
-func (h *Handler) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
-	const page = "/dashboard/grants"
-	if h.deps.Grants == nil {
-		redirectAccess(w, r, page, "", "NOT_CONFIGURED")
-		return
-	}
-	id := r.PathValue("id")
-	ip := extractClientIP(r)
-	if _, err := h.deps.Grants.Revoke(grant.RevokeInput{GrantID: id, By: "dashboard@" + ip, IP: ip}); err != nil {
-		log.Printf("dashboard: revoke %s: %v", id, err)
-		redirectAccess(w, r, page, "", errCode(err))
-		return
-	}
-	redirectAccess(w, r, page, "revoked "+id, "")
 }

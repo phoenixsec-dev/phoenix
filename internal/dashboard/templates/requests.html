@@ -1,0 +1,111 @@
+{{template "layout" .}}
+
+{{define "content"}}
+<div class="rq-page" data-requests-page data-focus="{{.Focus}}" data-now="{{.NowMillis}}">
+<h1 class="page-title">Requests</h1>
+
+<div data-requests-notice>
+{{if .Error}}<div class="flash flash-error flash-sticky">{{.Error}}</div>{{end}}
+{{if .Done}}<div class="flash flash-info flash-sticky">{{.Done}}</div>{{end}}
+</div>
+{{with .FocusEnded}}
+<div class="rq-ended-focus"><strong>{{.Agent}}</strong> asked for <span class="mono path-full">{{.What}}</span>.<br><span class="status-badge status-{{.Badge}}">{{.Outcome}}</span>{{if .Note}} <span class="rq-note">"{{.Note}}"</span>{{end}}</div>
+{{else}}{{if .FocusMissing}}<div class="flash flash-info flash-sticky">That request no longer exists.</div>{{end}}{{end}}
+
+{{if not .AccessOn}}
+<div class="empty-state"><p>Access requests are not set up on this server.</p></div>
+{{else}}
+<h2 class="section-title">Waiting for you</h2>
+<div class="rq-waiting" data-requests-waiting>
+{{range .Cards}}{{template "request-card" .}}{{end}}
+</div>
+<p class="rq-empty" data-requests-empty{{if .Cards}} hidden{{end}}>Nothing is waiting.</p>
+<p class="rq-notify" data-requests-notify hidden><button type="button" class="btn btn-sm">Notify me in this browser</button></p>
+{{end}}
+
+<div data-requests-sections>{{template "request-sections" .View}}</div>
+</div>
+{{end}}
+
+{{define "request-card"}}
+<article class="rq-card" id="{{.ID}}" data-request="{{.ID}}" data-expires="{{.ExpiresAt.Unix}}" data-agent="{{.Agent}}">
+<form method="POST" action="/dashboard/requests/{{.ID}}/answer">
+<input type="hidden" name="_csrf" value="{{.CSRF}}">
+<h3 class="rq-question">{{.Question}}</h3>
+{{if .Machine}}<div class="rq-root">root login on <strong>{{.Machine}}</strong></div>{{end}}
+<div class="rq-who"><span>{{.Agent}} from <span class="mono">{{.SourceIP}}</span></span><span class="rq-left"><time data-until="{{.ExpiresAt.Unix}}" datetime="{{.ExpiresAt.UTC.Format "2006-01-02T15:04:05Z"}}">until {{.ExpiresAt.UTC.Format "15:04"}} UTC</time></span></div>
+<div class="rq-reason"><span class="rq-label">Agent says (not verified)</span>{{.Reason}}</div>
+{{range .Problems}}<div class="rq-problem">{{.}}</div>{{end}}
+{{if not .Machine}}
+<div class="rq-paths">
+{{$many := gt (len .Paths) 1}}
+{{range .Paths}}
+<label class="rq-path">{{if $many}}<input type="checkbox" name="path" value="{{.Path}}" checked>{{else}}<input type="hidden" name="path" value="{{.Path}}">{{end}}<span class="mono path-full">{{.Path}}</span>
+{{if .Missing}}<span class="flag flag-warn">does not exist</span>{{end}}
+{{if .Hidden}}<span class="flag flag-warn">hidden from this agent</span>{{end}}
+{{if .AlreadyAllowed}}<span class="flag flag-ttl">already allowed</span>{{end}}
+</label>
+{{end}}
+</div>
+{{else}}{{range .Paths}}<input type="hidden" name="path" value="{{.Path}}">{{end}}{{end}}
+<div class="rq-buttons">
+<button type="submit" name="choice" value="no" class="btn rq-no">No</button>
+<button type="submit" name="choice" value="once" class="btn rq-yes">Once</button>
+<button type="submit" name="choice" value="time" class="btn rq-yes">{{.QuickLabel}}</button>
+{{if .AlwaysOK}}<button type="submit" name="choice" value="always" class="btn rq-always">Always</button>{{end}}
+</div>
+<details class="rq-more">
+<summary>More</summary>
+<div class="rq-limits"><label>Up to <select name="ttl" class="input input-sm">{{range .TTLs}}<option value="{{.}}" selected>{{.}}</option>{{end}}</select></label>
+<label>or <input type="number" name="uses" min="1" max="1000" placeholder="any" class="input input-sm rq-uses"> uses</label>
+<button type="submit" name="choice" value="custom" class="btn btn-sm rq-yes">Allow this</button></div>
+<label class="rq-notefield">Note with a No <input type="text" name="note" maxlength="300" class="input input-sm" placeholder="Optional, the agent sees it"></label>
+<ul class="rq-facts">
+<li>Once: {{if .Machine}}one login, open for up to{{else}}one read of each secret, within{{end}} {{.OnceWithin}}.</li>
+{{if .AlwaysOK}}<li>Always: puts read access to exactly {{if gt (len .Paths) 1}}these paths{{else}}this path{{end}} on {{.Agent}}'s access list, from any machine and without the sealed-only rule, until you remove it here.</li>{{end}}
+{{if .Delivery}}<li>{{.Delivery}}</li>{{end}}
+{{range .Attest}}<li><span class="mono path-full">{{.Path}}</span> needs {{.Requirement}}: <strong>{{.Status}}</strong> (never waived)</li>{{end}}
+<li>Asked with a {{.AuthMethod}} token. Other requests in the day before: {{.RecentAsks}}, answered No: {{.RecentNos}}.</li>
+<li>Taking access back later does not recall a value already handed over.</li>
+</ul>
+</details>
+</form>
+</article>
+{{end}}
+
+{{define "request-sections"}}
+<h2 class="section-title" id="active">Active now</h2>
+{{if .Active}}
+<div class="rq-list">
+{{range .Active}}
+<div class="rq-row"><div class="rq-row-main"><strong>{{.Agent}}</strong> <span class="mono path-full">{{.What}}</span>
+<div class="rq-sub">ends <time data-until="{{.ExpiresAt.Unix}}" datetime="{{.ExpiresAt.UTC.Format "2006-01-02T15:04:05Z"}}">at {{.ExpiresAt.UTC.Format "15:04"}} UTC</time> &middot; uses: {{.Uses}}{{if not .LastUsed.IsZero}} &middot; last {{.LastUsed.UTC.Format "15:04"}} UTC{{end}} &middot; by {{.By}}</div></div>
+<form method="POST" action="/dashboard/requests/grants/{{.ID}}/revoke"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button type="submit" class="btn btn-sm btn-revoke">Revoke</button></form></div>
+{{end}}
+</div>
+{{else}}<p class="rq-empty">No open access.</p>{{end}}
+
+<h2 class="section-title" id="always">Always</h2>
+{{if .Always}}
+<div class="rq-list">
+{{range .Always}}
+<div class="rq-row"><div class="rq-row-main"><strong>{{.Agent}}</strong> <span class="mono path-full">{{.Path}}</span>
+<div class="rq-sub">since {{.At.UTC.Format "2006-01-02"}} &middot; by {{.By}} &middot; <a href="/dashboard/requests/{{.RequestID}}">request</a>{{if .Unsaved}} &middot; <span class="text-red">removed but not saved; remove again</span>{{end}}</div></div>
+<form method="POST" action="/dashboard/requests/always/remove"><input type="hidden" name="_csrf" value="{{.CSRF}}"><input type="hidden" name="agent" value="{{.Agent}}"><input type="hidden" name="path" value="{{.Path}}"><button type="submit" class="btn btn-sm btn-revoke">Remove</button></form></div>
+{{end}}
+</div>
+{{else}}<p class="rq-empty">Nothing is on Always.</p>{{end}}
+
+<h2 class="section-title" id="expired">Expired, nobody answered</h2>
+{{if .Expired}}<div class="rq-list">{{range .Expired}}{{template "request-past" .}}{{end}}</div>
+{{else}}<p class="rq-empty">None.</p>{{end}}
+
+<h2 class="section-title" id="history">History</h2>
+{{if .History}}<div class="rq-list">{{range .History}}{{template "request-past" .}}{{end}}</div>
+{{else}}<p class="rq-empty">None in the last 30 days.</p>{{end}}
+{{end}}
+
+{{define "request-past"}}
+<div class="rq-row rq-past"><div class="rq-row-main"><strong>{{.Agent}}</strong> <span class="mono path-full">{{.What}}</span>
+<div class="rq-sub"><span class="status-badge status-{{.Badge}}">{{.Outcome}}</span> {{.When.UTC.Format "2006-01-02 15:04"}} UTC{{if .Note}} &middot; <span class="rq-note">"{{.Note}}"</span>{{end}}</div></div></div>
+{{end}}

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Phoenix Dashboard</title>
     <link rel="stylesheet" href="/dashboard/static/style.css">
+    <link rel="stylesheet" href="/dashboard/static/requests.css">
     <link rel="icon" href="/dashboard/static/phoenix-icon.svg" type="image/svg+xml">
 </head>
 <body>
@@ -16,12 +17,9 @@
         <a href="/dashboard/" class="nav-link{{if eq .Active "overview"}} active{{end}}">
             <span class="nav-icon">&#9632;</span> Overview
         </a>
-        <a href="/dashboard/approvals" class="nav-link{{if eq .Active "approvals"}} active{{end}}">
-            <span class="nav-icon">&#10003;</span> Approvals
-            {{if and .PendingCount (gt .PendingCount 0)}}<span class="badge">{{.PendingCount}}</span>{{end}}
-        </a>
-        <a href="/dashboard/grants" class="nav-link{{if eq .Active "grants"}} active{{end}}">
-            <span class="nav-icon">&#9873;</span> Grants
+        <a href="/dashboard/requests" class="nav-link{{if eq .Active "requests"}} active{{end}}">
+            <span class="nav-icon">&#10003;</span> Requests
+            <span class="badge" data-requests-badge{{if not .PendingCount}} hidden{{end}}>{{.PendingCount}}</span>
         </a>
         <a href="/dashboard/sessions" class="nav-link{{if eq .Active "sessions"}} active{{end}}">
             <span class="nav-icon">&#9679;</span> Sessions
@@ -43,5 +41,6 @@
         {{template "content" .}}
     </main>
     <script src="/dashboard/static/dashboard.js"></script>
+    <script src="/dashboard/static/requests.js"></script>
 </body>
 </html>{{end}}

@@ -13,6 +13,7 @@
         <h1 class="login-title">Phoenix</h1>
         {{if .Error}}<div class="flash flash-error">{{.Error}}</div>{{end}}
         <form method="POST" action="/dashboard/login">
+            {{with .Next}}<input type="hidden" name="next" value="{{.}}">{{end}}
             <input type="password" name="credential" placeholder="Password" class="input" autofocus required>
             <button type="submit" class="btn btn-primary">Sign In</button>
         </form>
