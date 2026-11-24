@@ -4,9 +4,9 @@
 
 ### Agents can find out they may log in to another machine
 
-Until now an agent only learned that `phoenix ssh` existed from hand-written
-notes in its owner's files, and could not ask Phoenix which machines it may log
-in to. One recently told its owner to open a terminal instead.
+`phoenix ssh` was already in the CLI help, but an agent could not ask Phoenix
+which machines it may log in to; it had to learn that from hand-written notes in
+its owner's files. One recently told its owner to open a terminal instead.
 
 - `GET /v1/ssh/machines` lists the machines this server can sign logins for,
   to any signed-in caller: names only, never addresses or users. Each shows
@@ -34,6 +34,11 @@ says so plainly when the approval has ended. `phoenix ssh --list` uses the
 agent's own token even with `PHOENIX_ROLE` set, so it shows the approvals a
 login would use. `--reason` is shown as
 optional in the usage line.
+
+**Upgrading:** update the server first. An older server has no
+`/v1/ssh/machines` and answers 404; `phoenix ssh --list` then says the server
+is too old. Logging in with `phoenix ssh <machine>` still works on servers that
+have SSH logins (v0.20.0 and newer).
 
 ## v0.23.0 (2026-11-24)
 

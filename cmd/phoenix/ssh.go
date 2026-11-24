@@ -101,10 +101,14 @@ type sshMachineList struct {
 	} `json:"machines"`
 }
 
-// fetchSSHMachines asks the server which machines it can sign logins for.
+// fetchSSHMachines asks the server which machines it can sign logins for. The
+// route never answers 404, so that means a server from before v0.24.0.
 func fetchSSHMachines() (sshMachineList, error) {
 	var out sshMachineList
-	_, err := apiJSON("GET", "/v1/ssh/machines", nil, &out)
+	code, err := apiJSON("GET", "/v1/ssh/machines", nil, &out)
+	if code == http.StatusNotFound {
+		err = errors.New("this Phoenix server is too old to list machines (no /v1/ssh/machines); update phoenix-server")
+	}
 	return out, err
 }
 

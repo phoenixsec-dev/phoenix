@@ -26,7 +26,8 @@ staticcheck ./...   # CI pins v0.7.0; see .github/workflows/ci.yml
   MCP and plugin tool descriptions, and the suggested snippet. If your change affects
   what an agent should do, update those in the same change.
 - **Docs travel with the code.** Update `docs/` and add a line under `## Unreleased`
-  in `RELEASE_NOTES.md` for anything a user would notice.
+  in `RELEASE_NOTES.md` for anything a user would notice. If that heading is not
+  there, add it above the newest version.
 - **Leave the version alone.** Do not edit `internal/version/version.go` or create
   tags. The maintainer does both at release.
 - Put a short comment above each new function saying what it is for. Keep tests small
