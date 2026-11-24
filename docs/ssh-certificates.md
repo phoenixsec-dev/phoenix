@@ -22,12 +22,12 @@ a short-lived certificate: a login pass with an expiry built in.
 phoenix ssh --list
 
 # Agent: asks if there is no approval yet, waits, then logs in and runs the command
-phoenix ssh arch-omen --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
+phoenix ssh build-1 --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
 
 # Human: dashboard -> Approvals -> approve. The card says "root login on this machine".
 
 # Agent: more commands in the same window need no new approval and no --reason
-phoenix ssh arch-omen -- sudo -n systemctl status something
+phoenix ssh build-1 -- sudo -n systemctl status something
 
 # Human: take it back. New logins stop at once, even with a pass the agent kept.
 # Open sessions under that approval end within about 30 seconds.
@@ -44,7 +44,7 @@ logins, and they are always tied to the IP that asked. `deny_paths: ["*"]` is a 
 way to turn on logins while keeping every secret out of the request flow. One machine
 per request.
 
-The command goes to ssh as is, so quote it as you would for ssh: `phoenix ssh arch-omen -- 'cd /srv && ls'`.
+The command goes to ssh as is, so quote it as you would for ssh: `phoenix ssh build-1 -- 'cd /srv && ls'`.
 
 `phoenix ssh --list` (or plain `phoenix ssh`) asks `GET /v1/ssh/machines`. It
 shows machine names only, never addresses or login users, and marks each one
@@ -73,7 +73,7 @@ new request by itself. If the human agrees, run it again with `--ask-again`.
 "ssh_ca": {
   "enabled": true,
   "hosts": {
-    "arch-omen": { "address": "192.168.0.99" }
+    "build-1": { "address": "192.0.2.20" }
   }
 }
 ```
@@ -90,7 +90,7 @@ Once per machine, as root. It fetches the CA's public key from the server, so th
 server must be configured first:
 
 ```bash
-sudo scripts/ssh-node-setup.sh install arch-omen https://phoenix.example.net:9443 /path/to/phoenix-ca.crt
+sudo scripts/ssh-node-setup.sh install build-1 https://phoenix.example.net:9443 /path/to/phoenix-ca.crt
 ```
 
 It makes these changes. `remove` undoes all of them except the `agent` user, and
@@ -106,7 +106,7 @@ ends any open session that came in with a certificate:
 | `phoenix-ssh-window.timer` | Every 30s, ends each `agent` SSH session whose own approval is over |
 
 Check it from the machine: `sshd -T -C user=agent,host=x,addr=127.0.0.1 | grep -i -E 'trustedusercakeys|authorizedprincipalscommand|authorizedkeysfile'`.
-The machine's sshd log names who logged in: `ID grant=gnt_...,agent=vector,host=arch-omen`.
+The machine's sshd log names who logged in: `ID grant=gnt_...,agent=vector,host=build-1`.
 Set `KEEP_AUTHORIZED_KEYS=1` on the install to leave existing keys working while a
 machine moves over. Sessions from those keys have no grant, so the timer leaves them
 alone until you run install again without it.

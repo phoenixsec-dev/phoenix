@@ -10,14 +10,14 @@ import (
 )
 
 func TestParseSSHArgs(t *testing.T) {
-	a, err := parseSSHArgs([]string{"arch-omen", "-r", "deploy", "--ttl", "5m", "--", "sudo", "-n", "id", "--", "x"})
+	a, err := parseSSHArgs([]string{"build-1", "-r", "deploy", "--ttl", "5m", "--", "sudo", "-n", "id", "--", "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.machine != "arch-omen" || a.reason != "deploy" || a.ttl != "5m" || !slices.Equal(a.command, []string{"sudo", "-n", "id", "--", "x"}) {
+	if a.machine != "build-1" || a.reason != "deploy" || a.ttl != "5m" || !slices.Equal(a.command, []string{"sudo", "-n", "id", "--", "x"}) {
 		t.Fatalf("parsed %+v", a)
 	}
-	if a, err = parseSSHArgs([]string{"vm204"}); err != nil || a.ttl != defaultSSHTTL {
+	if a, err = parseSSHArgs([]string{"lab1"}); err != nil || a.ttl != defaultSSHTTL {
 		t.Fatalf("default ttl: %+v, %v", a, err)
 	}
 	for _, list := range [][]string{{}, {"--list"}} {
@@ -25,7 +25,7 @@ func TestParseSSHArgs(t *testing.T) {
 			t.Errorf("%v should list machines: %+v, %v", list, a, err)
 		}
 	}
-	for _, bad := range [][]string{{"--list", "vm204"}, {"--list", "-r", "x"}, {"-oProxyCommand=evil"}, {"a", "b"}, {"Has.Dots"}, {"a", "--reason"}, {"--", "cmd"}} {
+	for _, bad := range [][]string{{"--list", "lab1"}, {"--list", "-r", "x"}, {"-oProxyCommand=evil"}, {"a", "b"}, {"Has.Dots"}, {"a", "--reason"}, {"--", "cmd"}} {
 		if _, err := parseSSHArgs(bad); err == nil {
 			t.Errorf("%v should be refused", bad)
 		}
@@ -42,7 +42,7 @@ func TestRevokedGrantIsOnlyReRequestedWhenAsked(t *testing.T) {
 	if !sshNeedsApproval(&serverDenial{Code: "GRANT_REVOKED"}, true) {
 		t.Fatal("--ask-again should file a request after a revoke")
 	}
-	if a, err := parseSSHArgs([]string{"vm204", "--ask-again"}); err != nil || !a.askAgain {
+	if a, err := parseSSHArgs([]string{"lab1", "--ask-again"}); err != nil || !a.askAgain {
 		t.Fatalf("--ask-again: %+v, %v", a, err)
 	}
 }
@@ -50,8 +50,8 @@ func TestRevokedGrantIsOnlyReRequestedWhenAsked(t *testing.T) {
 // Approval status must not land on stdout, which belongs to the remote command.
 func TestApprovalSummaryCanGoToAnyWriter(t *testing.T) {
 	var b strings.Builder
-	fprintRequest(&b, accessRequestView{ID: "req_1", Status: "approved", Action: "ssh_login", NextStep: "use_exec", GrantedPaths: []string{"ssh/vm204"}})
-	if !strings.Contains(b.String(), "phoenix ssh vm204 -- <command>") {
+	fprintRequest(&b, accessRequestView{ID: "req_1", Status: "approved", Action: "ssh_login", NextStep: "use_exec", GrantedPaths: []string{"ssh/lab1"}})
+	if !strings.Contains(b.String(), "phoenix ssh lab1 -- <command>") {
 		t.Fatalf("summary = %q", b.String())
 	}
 }
@@ -69,9 +69,9 @@ func TestThrowawayKeyIsPrivateAndOnlyItIsOffered(t *testing.T) {
 	if !strings.HasPrefix(publicKey, "ssh-ed25519 ") {
 		t.Fatalf("public key = %q", publicKey)
 	}
-	args := sshCommandArgs(keyPath, filepath.Join(dir, "cert"), "agent", "192.168.0.99", []string{"id"})
+	args := sshCommandArgs(keyPath, filepath.Join(dir, "cert"), "agent", "192.0.2.20", []string{"id"})
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"IdentitiesOnly=yes", "IdentityAgent=none", "BatchMode=yes", "-l agent 192.168.0.99 id"} {
+	for _, want := range []string{"IdentitiesOnly=yes", "IdentityAgent=none", "BatchMode=yes", "-l agent 192.0.2.20 id"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in %s", want, joined)
 		}
@@ -79,7 +79,7 @@ func TestThrowawayKeyIsPrivateAndOnlyItIsOffered(t *testing.T) {
 }
 
 // machinesJSON is a /v1/ssh/machines answer with one approved machine.
-const machinesJSON = `{"agent":"vector","enabled":true,"machines":[{"name":"arch-omen","approved_until":"2026-11-11T08:00:00Z"},{"name":"vm204"}]}`
+const machinesJSON = `{"agent":"vector","enabled":true,"machines":[{"name":"build-1","approved_until":"2026-11-11T08:00:00Z"},{"name":"lab1"}]}`
 
 // "phoenix ssh --list" and plain "phoenix ssh" show the machines and the
 // caller's approvals; plain "phoenix ssh" adds the usage line.
@@ -95,7 +95,7 @@ func TestSSHList(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	for _, want := range []string{"as agent vector", "arch-omen  approved until 2026-11-11T08:00:00Z", "  vm204\n"} {
+	for _, want := range []string{"as agent vector", "build-1  approved until 2026-11-11T08:00:00Z", "  lab1\n"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("--list missing %q:\n%s", want, out)
 		}
@@ -103,7 +103,7 @@ func TestSSHList(t *testing.T) {
 	if strings.Contains(out, "usage:") {
 		t.Fatalf("--list should not print usage:\n%s", out)
 	}
-	if out := captureStdout(t, func() { _ = cmdSSH(nil) }); !strings.Contains(out, "vm204") || !strings.Contains(out, "usage: phoenix ssh <machine>") {
+	if out := captureStdout(t, func() { _ = cmdSSH(nil) }); !strings.Contains(out, "lab1") || !strings.Contains(out, "usage: phoenix ssh <machine>") {
 		t.Fatalf("plain phoenix ssh:\n%s", out)
 	}
 
@@ -122,7 +122,7 @@ func TestSSHReasonOptionalInsideApproval(t *testing.T) {
 		calls.add(r)
 		w.Write([]byte(`{"certificate":"c","address":"192.0.2.5","user":"agent","expires_at":"x"}`))
 	})
-	signed, err := sshCertificate(sshArgs{machine: "arch-omen"}, "pk")
+	signed, err := sshCertificate(sshArgs{machine: "build-1"}, "pk")
 	if err != nil || signed.Address != "192.0.2.5" {
 		t.Fatalf("signed=%+v err=%v", signed, err)
 	}
@@ -145,13 +145,13 @@ func TestSSHNoApprovalNamesTheAgent(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte(`{"error":"access_denied","code":"SSH_GRANT_REQUIRED","next_step":"request_use"}`))
 	})
-	_, err := sshCertificate(sshArgs{machine: "vm204"}, "pk")
+	_, err := sshCertificate(sshArgs{machine: "lab1"}, "pk")
 	if err == nil || !strings.Contains(err.Error(), "for agent vector") || !strings.Contains(err.Error(), "PHOENIX_TOKEN") ||
 		!strings.Contains(err.Error(), "same machine") || !strings.Contains(err.Error(), "--reason") {
 		t.Fatalf("err = %v", err)
 	}
 	// An ended approval says so instead of pointing at the token.
-	if err := sshNoApprovalError("vm204", "GRANT_EXPIRED"); !strings.Contains(err.Error(), "has ended") || strings.Contains(err.Error(), "PHOENIX_TOKEN") {
+	if err := sshNoApprovalError("lab1", "GRANT_EXPIRED"); !strings.Contains(err.Error(), "has ended") || strings.Contains(err.Error(), "PHOENIX_TOKEN") {
 		t.Fatalf("expired err = %v", err)
 	}
 	if strings.Contains(calls.String(), "access-requests") {

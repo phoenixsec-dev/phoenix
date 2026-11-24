@@ -14,7 +14,7 @@
 //	{
 //	  "attestation": {
 //	    "openclaw/*": {
-//	      "source_ip": ["192.168.0.115", "10.0.0.0/24"],
+//	      "source_ip": ["192.0.2.11", "10.0.0.0/24"],
 //	      "require_sealed": true
 //	    }
 //	  }

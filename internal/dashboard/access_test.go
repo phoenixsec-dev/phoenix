@@ -147,7 +147,7 @@ func (e *accessEnv) post(t *testing.T, path string, form url.Values, withCSRF bo
 	}
 	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.RemoteAddr = "192.168.0.9:5555"
+	req.RemoteAddr = "192.0.2.9:5555"
 	req.AddCookie(e.cookie)
 	w := httptest.NewRecorder()
 	e.h.ServeHTTP(w, req)
@@ -196,7 +196,7 @@ func TestAccessCardShowsFactsAndApproveNarrows(t *testing.T) {
 		t.Fatalf("approve failed: %s", code)
 	}
 	got, _ := e.gs.GetRequest(rq.ID)
-	if got.Status != grant.StatusApproved || got.DecidedBy != "dashboard@192.168.0.9" {
+	if got.Status != grant.StatusApproved || got.DecidedBy != "dashboard@192.0.2.9" {
 		t.Fatalf("request = %s by %q", got.Status, got.DecidedBy)
 	}
 	g, _ := e.gs.GetGrant(got.GrantID)
@@ -280,7 +280,7 @@ func TestAccessDeny(t *testing.T) {
 		t.Fatalf("deny failed: %s", code)
 	}
 	got, _ := e.gs.GetRequest(rq.ID)
-	if got.Status != grant.StatusDenied || got.Note != "not today" || got.DecidedBy != "dashboard@192.168.0.9" {
+	if got.Status != grant.StatusDenied || got.Note != "not today" || got.DecidedBy != "dashboard@192.0.2.9" {
 		t.Fatalf("request = %+v", got)
 	}
 }
@@ -348,7 +348,7 @@ func TestGrantRevokeAndRecent(t *testing.T) {
 		t.Fatalf("revoke failed: %s", code)
 	}
 	got, _ := e.gs.GetGrant(g.ID)
-	if got.State(time.Now()) != grant.GrantRevoked || got.RevokedBy != "dashboard@192.168.0.9" {
+	if got.State(time.Now()) != grant.GrantRevoked || got.RevokedBy != "dashboard@192.0.2.9" {
 		t.Fatalf("grant state %s by %q", got.State(time.Now()), got.RevokedBy)
 	}
 	if page := e.get(t, "/dashboard/grants?view=recent"); !strings.Contains(page, "status-revoked") {
@@ -421,11 +421,11 @@ func TestSSHLoginCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.h.deps.Policy = pe
-	login := e.h.buildCard(grant.Request{ID: "req_x", Agent: "vector", Action: grant.ActionSSHLogin, Paths: []string{"ssh/arch-omen"}}, e.cfg)
+	login := e.h.buildCard(grant.Request{ID: "req_x", Agent: "vector", Action: grant.ActionSSHLogin, Paths: []string{"ssh/build-1"}}, e.cfg)
 	if len(login.Paths) != 1 || !login.Paths[0].SSHLogin || login.SealRequired || len(login.Attestation) != 0 {
 		t.Fatalf("login card = %+v", login)
 	}
-	secret := e.h.buildCard(grant.Request{ID: "req_y", Agent: "vector", Action: grant.ActionReadValue, Paths: []string{"ssh/arch-omen"}}, e.cfg)
+	secret := e.h.buildCard(grant.Request{ID: "req_y", Agent: "vector", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}}, e.cfg)
 	if secret.Paths[0].SSHLogin || len(secret.Attestation) == 0 {
 		t.Fatalf("a secret at the same path must keep its normal card: %+v", secret)
 	}

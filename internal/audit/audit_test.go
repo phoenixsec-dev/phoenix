@@ -20,9 +20,9 @@ func TestLogAndQuery(t *testing.T) {
 	}
 	defer logger.Close()
 
-	logger.LogAllowed("vector", "read", "openclaw/api-key", "192.168.0.117")
-	logger.LogDenied("openclaw", "read", "proxmox/admin", "192.168.0.115", "acl")
-	logger.LogAllowed("admin", "write", "monitoring/grafana", "192.168.0.110")
+	logger.LogAllowed("vector", "read", "openclaw/api-key", "192.0.2.12")
+	logger.LogDenied("openclaw", "read", "proxmox/admin", "192.0.2.11", "acl")
+	logger.LogAllowed("admin", "write", "monitoring/grafana", "192.0.2.10")
 
 	// Query all
 	entries, err := Query(logPath, QueryOptions{})

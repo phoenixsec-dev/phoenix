@@ -636,13 +636,13 @@ func TestSSHCAValidation(t *testing.T) {
 	base := func() *Config {
 		return &Config{
 			AccessRequests: &AccessRequestsConfig{Enabled: true},
-			SSHCA:          &SSHCAConfig{Enabled: true, Hosts: map[string]SSHHost{"arch-omen": {Address: "192.168.0.99"}}},
+			SSHCA:          &SSHCAConfig{Enabled: true, Hosts: map[string]SSHHost{"build-1": {Address: "192.0.2.20"}}},
 		}
 	}
 	if err := base().validateSSHCA(); err != nil {
 		t.Fatalf("valid config refused: %v", err)
 	}
-	if got := base().SSHCAHosts()["arch-omen"].User; got != DefaultSSHUser {
+	if got := base().SSHCAHosts()["build-1"].User; got != DefaultSSHUser {
 		t.Fatalf("default user = %q", got)
 	}
 	for name, mutate := range map[string]func(*Config){
