@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.23.0 (2026-11-11)
+## v0.23.0 (2026-11-24)
 
 ### Fixed: a server restart broke every role session
 
