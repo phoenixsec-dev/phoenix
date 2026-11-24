@@ -7,7 +7,8 @@ in under two minutes, with binaries or Docker.
 ## Requirements
 
 - Go 1.25+ (if building from source)
-- Linux, macOS, or Windows
+- Linux or macOS, on amd64 or arm64. There is no Windows build; on Windows use
+  WSL2 or the Docker image.
 - No external runtime dependencies (no database, no cloud KMS, no Redis)
 
 ## Install from GitHub Releases
@@ -40,12 +41,22 @@ This produces:
 phoenix-server --init ~/.phoenix
 ```
 
-This generates:
+It asks for a dashboard password; press Enter to have one generated and shown
+once. (Without a terminal it always generates one.) This creates:
 - master encryption key (`master.key`, mode `0600`)
 - admin bearer token — **save this, it is only shown once**
 - internal CA certificate and key
 - server TLS certificate (SANs: `localhost`, `127.0.0.1`)
-- default configuration file
+- configuration file with the dashboard and access requests on; the dashboard
+  password is in it only as a bcrypt hash
+
+Run it yourself, not through an agent: the dashboard password is what stops an
+agent from approving its own requests. Lost it? Make a new hash with
+`phoenix-server --hash-password`, put it in the config as
+`dashboard.password_hash` and restart.
+
+`--init <dir> --https` also turns on the HTTPS address (`0.0.0.0:9443`), for
+Docker or a LAN.
 
 ### Admin token handling
 
@@ -125,13 +136,15 @@ phoenix get myapp/api-key
 For the full command reference (`set`, `get`, `list`, `delete`, `resolve`, `exec`,
 `import`, `export`, `audit`), see [CLI Usage](cli-usage.md).
 
-## Enable the operator dashboard (optional)
+## Sign in to the dashboard
 
-The dashboard provides a browser-based UI for approvals, sessions, audit, and
-roles. It is especially useful for access requests, where a human approves
-agent access from a phone or browser.
+The dashboard is a browser UI for approvals, sessions, audit, and roles. It is
+where a human answers agents' requests, from a phone or a desktop. `--init`
+turned it on: open `http://127.0.0.1:9090/dashboard/` and sign in with the
+password from `--init`.
 
-Generate a password hash and add to your config:
+**Older installs** (initialized before this was the default) have it off.
+Generate a password hash and add it to the config:
 
 ```bash
 phoenix-server --hash-password
@@ -150,7 +163,7 @@ After restarting, open `http://127.0.0.1:9090/dashboard/` in a browser.
 
 **Important:** The dashboard is safe over plain HTTP only when the server
 listens on loopback (`127.0.0.1`). If the server is reachable over a network,
-enable the `tls` block (or put it behind a TLS reverse proxy) first — the
+turn on `https_listener` (or put it behind a TLS reverse proxy) first — the
 server warns loudly at startup if the dashboard is enabled on a non-loopback
 bind without TLS. Do not serve the dashboard over plain HTTP on a network you
 do not control.
@@ -160,7 +173,7 @@ See [Dashboard](dashboard.md) for the full deployment guide and security model.
 
 New installs (`--init`) include an `access_requests` block with
 `"enabled": true`. An agent that is denied a secret can ask for temporary use
-of that exact path, and a human approves or denies it. See
+of that exact path, and a human approves or denies it on the dashboard. See
 [Access Requests](access-requests.md). Configs from older releases have no
 block, so the feature stays off until you add it.
 

@@ -34,7 +34,7 @@ RUN adduser -D -u 1000 phoenix && mkdir -p /data && chown phoenix:phoenix /data 
 USER phoenix
 
 VOLUME /data
-EXPOSE 9090
+EXPOSE 9090 9443
 
 # Probe whichever transport the config uses: plain HTTP (default) or TLS.
 # --no-check-certificate is fine here: this only asks "is the process

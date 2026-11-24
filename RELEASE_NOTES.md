@@ -1,5 +1,48 @@
 # Release Notes
 
+## Unreleased
+
+### A fresh install can approve
+
+`phoenix-server --init` used to turn on access requests with nobody able to
+answer them: no dashboard, no approvers. Now it also turns on the dashboard. It
+asks for the password (12 characters or more), or makes one up and shows it
+once: press Enter, or run it without a terminal (Docker, scripts). Only the
+bcrypt hash is stored.
+
+- `--init --https` writes the config with HTTPS (`0.0.0.0:9443`) already on.
+  The Docker quickstart and `docker-compose.yml` use it and publish 9443 to the
+  host's loopback, so the dashboard works without editing a file. The image now
+  also lists port 9443.
+- `--hash-password` says so when a password is over bcrypt's 72 bytes.
+
+**Upgrading:** existing installs do not change. To get the dashboard on one, run
+`phoenix-server --hash-password`, put the result in the config as
+`"dashboard": {"enabled": true, "password_hash": "..."}` and restart. Scripts that
+run `--init` at a terminal now get a question; give it `</dev/null` to have the
+password generated and printed. `docker-compose.yml` now publishes
+`127.0.0.1:9443`; remove that line if the port is taken.
+
+### Fixed: the CLI ignored proxies when it used Phoenix's own CA
+
+With `PHOENIX_CA_CERT` set, `phoenix` (and `phoenix mcp-server`) ignored
+`HTTP_PROXY` and `HTTPS_PROXY` and dialed the server directly, so HTTPS failed on
+machines that only get out through a proxy, such as hosted agents on userspace
+Tailscale. It now uses them like it already did without a CA. It also gives up
+on an unreachable server after 30 seconds instead of the system's limit.
+
+**Upgrading:** if a machine sets `HTTPS_PROXY` but reaches Phoenix directly, add
+the Phoenix host to `NO_PROXY`.
+
+### Smaller things
+
+- The end-to-end scenarios run in CI on every pull request, with two new ones:
+  upgrade from the previous release and back on the same files, and a fresh
+  install that approves a request.
+- Docs say which systems are supported (Linux and macOS; no Windows build).
+- The agent skill no longer offers `phoenix keypair generate`, which needs admin.
+- The runnable examples use the `go` on `PATH`.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine

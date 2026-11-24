@@ -12,6 +12,7 @@ PHOENIX_SERVER_BIN="$E2E_BIN_DIR/phoenix-server"
 # Phoenix role, token, certificate, seal key, or policy configuration.
 unset PHOENIX_TOKEN PHOENIX_ROLE PHOENIX_CLIENT_CERT PHOENIX_CLIENT_KEY
 unset PHOENIX_CA_CERT PHOENIX_SEAL_KEY PHOENIX_POLICY
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
 log()  { printf "${BLUE}[INFO]${NC} %s\n" "$*"; }
@@ -24,6 +25,10 @@ scenario_start() { log "Scenario $1: $2"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || skip "$1 is not installed"; }
 assert_eq() { [[ "$1" == "$2" ]] || die "${3:-values differ}: got '$1', want '$2'"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || die "${3:-output missing expected text}: $2"; }
+# token_from_init FILE / password_from_init FILE print the admin token and the
+# dashboard password that "phoenix-server --init" printed.
+token_from_init() { awk '/ADMIN TOKEN/{getline; print; exit}' "$1"; }
+password_from_init() { awk '/DASHBOARD PASSWORD/{getline; print; exit}' "$1"; }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbidden text}: $2"; }
 
 build_current() {
@@ -53,14 +58,8 @@ init_scenario() {
   build_current
   RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/phoenix-e2e-s${id}.XXXXXX")"
   SERVER_PID=""
-  "$PHOENIX_SERVER_BIN" --init "$RUN_DIR" >"$RUN_DIR/init.out"
-  ADMIN_TOKEN="$(python3 - "$RUN_DIR/init.out" <<'PY'
-import re, sys
-s=open(sys.argv[1], encoding='utf-8').read()
-m=re.search(r'ADMIN TOKEN.*?\n([a-f0-9]{32,})', s, re.S)
-print(m.group(1) if m else '')
-PY
-)"
+  "$PHOENIX_SERVER_BIN" --init "$RUN_DIR" >"$RUN_DIR/init.out" </dev/null
+  ADMIN_TOKEN="$(token_from_init "$RUN_DIR/init.out")"
   [[ -n "$ADMIN_TOKEN" ]] || die "could not parse generated admin token"
   python3 - "$RUN_DIR/config.json" "$port" <<'PY'
 import json, sys

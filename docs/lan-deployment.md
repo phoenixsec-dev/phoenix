@@ -237,15 +237,14 @@ to the server config, run `phoenix-server --check-config`, and restart.
 See [Policy and Attestation](policy-and-attestation.md) for the full reference
 on available policy fields and testing with `phoenix policy test`.
 
-## 7. Enable operator dashboard (optional)
+## 7. Operator dashboard
 
-If you want browser-based approval and session management, enable the dashboard.
-Reach it over HTTPS — the `https_listener` configured above, or a reverse proxy.
+`--init` turned the dashboard on and set its password. Reach it over HTTPS — the `https_listener` configured above, or a reverse proxy.
 The startup warning covers the other case: a dashboard on a non-loopback
 plain HTTP bind means the dashboard password and session cookie cross the
 network in cleartext.
 
-Generate a password hash and add to the server config:
+On an older install, generate a password hash and add it to the server config:
 
 ```bash
 phoenix-server --hash-password

@@ -119,5 +119,5 @@ case ":$PATH:" in
 esac
 
 echo
-echo "Next: phoenix-server --init ~/.phoenix"
+echo "Next: phoenix-server --init ~/.phoenix   (asks for a dashboard password)"
 echo "Quickstart: https://github.com/$REPO/blob/main/docs/quickstart.md"
