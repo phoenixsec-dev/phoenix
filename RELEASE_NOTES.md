@@ -268,6 +268,15 @@ the Phoenix host to `NO_PROXY`. If the proxy's own address is `https://`, add it
 CA to the `PHOENIX_CA_CERT` file, but only if you trust that CA to vouch for the
 Phoenix server itself: both connections are checked against the same file.
 
+### Fixed: `phoenix export` wrote empty values when a seal key was set
+
+With `PHOENIX_SEAL_KEY` (or `PHOENIX_ROLE`, which has its own seal key) the
+server answers sealed. `export` sent the key but looked for a plain value, so it
+printed `NAME=` for every secret and exited 0. It now opens sealed answers. If
+one can't be opened, or an answer holds no value, it stops with an error that
+names the secret and a non-zero exit. **A backup made with `export` while a seal
+key was set is empty: make it again.**
+
 ### Fixed: a name with `?`, `#` or `%` reached another secret
 
 The CLI and MCP put names into web addresses as they were, so

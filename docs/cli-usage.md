@@ -219,6 +219,10 @@ Options:
 phoenix export myapp/ --format env > .env
 ```
 
+With a seal key set, sealed answers are opened before they are written. If a
+secret can't be read or opened, `export` stops with an error and a non-zero exit:
+do not keep that file as a backup.
+
 ## Session management
 
 ```bash

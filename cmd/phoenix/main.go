@@ -901,14 +901,11 @@ func cmdExport(args []string) error {
 			resp.Body.Close()
 			return fmt.Errorf("exporting %q: %w", path, err)
 		}
-		var secret struct {
-			Value string `json:"value"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
-			resp.Body.Close()
-			return fmt.Errorf("decoding secret %q: %w", path, err)
-		}
+		value, err := readSecretValue(resp.Body, sealPrivKey)
 		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("exporting %q: %w", path, err)
+		}
 
 		// Convert path to env var name: openclaw/api-key → API_KEY
 		parts := strings.SplitN(path, "/", 2)
@@ -923,12 +920,35 @@ func cmdExport(args []string) error {
 
 		switch format {
 		case "env":
-			fmt.Printf("%s=%s\n", envName, secret.Value)
+			fmt.Printf("%s=%s\n", envName, value)
 		case "json":
-			fmt.Printf("{%q: %q}\n", envName, secret.Value)
+			fmt.Printf("{%q: %q}\n", envName, value)
 		}
 	}
 	return nil
+}
+
+// readSecretValue reads the value from a single-secret answer, opening it with
+// sealKey if the request sent one. An answer without the value that was asked
+// for is an error, never an empty value.
+func readSecretValue(body io.Reader, sealKey *[32]byte) (string, error) {
+	var secret struct {
+		Value       *string `json:"value"`
+		SealedValue any     `json:"sealed_value"`
+	}
+	if err := json.NewDecoder(body).Decode(&secret); err != nil {
+		return "", fmt.Errorf("decoding response: %w", err)
+	}
+	if sealKey != nil {
+		if secret.SealedValue == nil {
+			return "", fmt.Errorf("expected sealed_value in response but got none")
+		}
+		return decryptSealedValue(secret.SealedValue, sealKey)
+	}
+	if secret.Value == nil {
+		return "", fmt.Errorf("the server's answer has no value")
+	}
+	return *secret.Value, nil
 }
 
 func cmdImport(args []string) error {
