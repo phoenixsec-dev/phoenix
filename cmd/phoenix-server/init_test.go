@@ -38,7 +38,7 @@ func TestInitRefusesToReplaceAnything(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := runInit(dir, ""); err == nil || !strings.Contains(err.Error(), name) {
+				if err := quietInit(t, dir); err == nil || !strings.Contains(err.Error(), name) {
 					t.Errorf("runInit = %v, want a refusal naming %s", err, name)
 				}
 				if ents, _ := os.ReadDir(dir); len(ents) != 1 {
@@ -55,10 +55,24 @@ func TestInitNextToOtherFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("mine"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runInit(dir, ""); err != nil {
+	if err := quietInit(t, dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := runCheckConfig(filepath.Join(dir, "config.json")); err != nil {
 		t.Errorf("the config --init wrote: %v", err)
 	}
+}
+
+// quietInit is runInit without its output, which ends with an admin token.
+func quietInit(t *testing.T, dir string) error {
+	t.Helper()
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	stdout := os.Stdout
+	os.Stdout = null
+	defer func() { os.Stdout = stdout }()
+	return runInit(dir, "")
 }

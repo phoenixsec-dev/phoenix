@@ -51,7 +51,22 @@ func (c *Config) dataFiles() []dataFile {
 // backup). Whichever is written last would destroy the other. Files that are
 // only read may be shared.
 func (c *Config) validateDataPaths() error {
+	return checkDataFiles(c.dataFiles())
+}
+
+// ValidateReissuePaths is the same check for --reissue-cert, which also writes
+// the server certificate, its key and the CA certificate.
+func (c *Config) ValidateReissuePaths() error {
 	files := c.dataFiles()
+	for i, f := range files {
+		if strings.HasPrefix(f.field, "https_listener.") {
+			files[i].written = true
+		}
+	}
+	return checkDataFiles(files)
+}
+
+func checkDataFiles(files []dataFile) error {
 	for i, a := range files {
 		for _, b := range files[i+1:] {
 			if (a.written || b.written) && (a.hits(b) || b.hits(a)) {

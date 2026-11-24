@@ -657,6 +657,10 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 		return fmt.Errorf("config is missing https_listener.cert and https_listener.key paths")
 	}
 
+	if err := cfg.ValidateReissuePaths(); err != nil {
+		return err
+	}
+
 	// Always include localhost and loopback
 	allSANs := append([]string{"localhost", "127.0.0.1"}, sans...)
 

@@ -20,6 +20,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 const (
@@ -147,7 +149,7 @@ func (ca *CA) Save(certPath, keyPath string) error {
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
 
-	if err := os.WriteFile(certPath, ca.certPEM, 0644); err != nil {
+	if err := replaceFile(certPath, ca.certPEM, 0644); err != nil {
 		return fmt.Errorf("writing CA cert: %w", err)
 	}
 
@@ -157,7 +159,7 @@ func (ca *CA) Save(certPath, keyPath string) error {
 	}
 
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	if err := replaceFile(keyPath, keyPEM, 0600); err != nil {
 		return fmt.Errorf("writing CA key: %w", err)
 	}
 
@@ -253,15 +255,25 @@ func randomSerial() (*big.Int, error) {
 	return serial, nil
 }
 
-// SaveBundle writes a CertBundle to files in the given directory.
+// replaceFile writes a certificate or key in one step (a failed write leaves
+// the old file whole) and keeps the mode its owner gave it.
+func replaceFile(path string, data []byte, perm os.FileMode) error {
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm()
+	}
+	return fsutil.WriteFileAtomic(path, data, perm)
+}
+
+// Save writes a CertBundle to the given files. Cut off in between, the server
+// certificate and key may not match; run --reissue-cert again.
 func (b *CertBundle) Save(certPath, keyPath, caPath string) error {
-	if err := os.WriteFile(certPath, b.CertPEM, 0644); err != nil {
+	if err := replaceFile(certPath, b.CertPEM, 0644); err != nil {
 		return fmt.Errorf("writing cert: %w", err)
 	}
-	if err := os.WriteFile(keyPath, b.KeyPEM, 0600); err != nil {
+	if err := replaceFile(keyPath, b.KeyPEM, 0600); err != nil {
 		return fmt.Errorf("writing key: %w", err)
 	}
-	if err := os.WriteFile(caPath, b.CACert, 0644); err != nil {
+	if err := replaceFile(caPath, b.CACert, 0644); err != nil {
 		return fmt.Errorf("writing CA cert: %w", err)
 	}
 	return nil

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // clockSkew backdates a certificate's start so a machine whose clock runs a
@@ -50,6 +52,12 @@ func LoadOrCreate(path string) (signer ssh.Signer, created bool, err error) {
 	return signer, false, nil
 }
 
+// writeKeyFile moves a whole, synced file into place: one cut off half way
+// would keep the server from starting. Tests replace it to fail.
+var writeKeyFile = fsutil.WriteFileAtomicStrict
+
+// create makes the key. The caller checked that nothing is at path, and only
+// one server uses it (the server locks its data files).
 func create(path string) (ssh.Signer, error) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -59,17 +67,7 @@ func create(path string) (ssh.Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := f.Write(pem.EncodeToMemory(block)); err != nil {
-		f.Close()
-		os.Remove(path)
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(path)
+	if err := writeKeyFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
 		return nil, err
 	}
 	return ssh.NewSignerFromKey(priv)

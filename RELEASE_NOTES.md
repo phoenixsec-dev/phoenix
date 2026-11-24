@@ -97,6 +97,14 @@ that dies halfway can do to it. Nothing to configure; what changed:
 - **`--init` in a directory without `master.key`** (the key kept elsewhere, or
   lost) replaced `config.json` and the CA and server keys there. It now refuses
   if any file it would write, or `store.json`, is already there.
+- **`--reissue-cert` and `--init` wrote certificates and keys in place,** so a
+  full disk or a crash left them empty, the CA certificate included. They are
+  now replaced in one step, keeping mode and (as root) owner, and
+  `--reissue-cert` refuses a config that would make it write over the CA key or
+  any other Phoenix file. The new SSH signing key is written the same way: one
+  cut off half way used to stop the server from starting.
+- **Replaced files keep their owner** when Phoenix runs as root, so
+  `--protect-key` run with sudo no longer leaves a key the server cannot read.
 
 ## v0.24.0 (2026-11-24)
 

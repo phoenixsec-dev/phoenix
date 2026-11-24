@@ -253,3 +253,34 @@ func TestWriteThroughDanglingSymlinkFails(t *testing.T) {
 		t.Errorf("the link is gone: %v %v", fi, err)
 	}
 }
+
+// A replaced file keeps its owner and group where the system allows it, so a
+// command run as root (--protect-key, --reissue-cert) does not leave a file
+// the server's own user cannot read.
+func TestReplaceKeepsGroup(t *testing.T) {
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Skip(err)
+	}
+	for _, gid := range groups {
+		if gid == os.Getegid() {
+			continue
+		}
+		path := filepath.Join(t.TempDir(), "server.key")
+		if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(path, -1, gid); err != nil {
+			continue
+		}
+		if err := WriteFileAtomic(path, []byte("new"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, got, ok := owner(path)
+		if !ok || got != gid {
+			t.Errorf("group = %d %v, want %d", got, ok, gid)
+		}
+		return
+	}
+	t.Skip("this user is in only one group")
+}

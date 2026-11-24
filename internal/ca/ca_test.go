@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,5 +178,52 @@ func TestLoadCAFromPEM_RejectsNonCA(t *testing.T) {
 	_, err := LoadCAFromPEM(bundle.CertPEM, bundle.KeyPEM)
 	if err == nil {
 		t.Fatal("LoadCAFromPEM should reject non-CA certificates")
+	}
+}
+
+// Certificates and keys are replaced in one step, never rewritten in place:
+// that empties the old file first, and on a full disk nothing follows.
+func TestSaveNeverTruncates(t *testing.T) {
+	authority, err := GenerateCA("Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	in := func(n string) string { return filepath.Join(dir, n) }
+	if err := authority.Save(in("ca.crt"), in("ca.key")); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := authority.IssueServerCert([]string{"localhost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Save(in("s.crt"), in("s.key"), in("ca.crt")); err != nil {
+		t.Fatal(err)
+	}
+	inode := func(n string) os.FileInfo {
+		fi, err := os.Stat(in(n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi
+	}
+	old := map[string]os.FileInfo{}
+	for _, n := range []string{"ca.crt", "ca.key", "s.crt", "s.key"} {
+		old[n] = inode(n)
+	}
+	// An owner's chosen mode survives.
+	if err := os.Chmod(in("s.key"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(authority.Save(in("ca.crt"), in("ca.key")), bundle.Save(in("s.crt"), in("s.key"), in("ca.crt"))); err != nil {
+		t.Fatal(err)
+	}
+	for n, fi := range old {
+		if os.SameFile(fi, inode(n)) {
+			t.Errorf("%s was rewritten in place", n)
+		}
+	}
+	if m := inode("s.key").Mode().Perm(); m != 0640 {
+		t.Errorf("s.key mode = %o, want 0640 kept", m)
 	}
 }
