@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
@@ -24,12 +25,12 @@ func testACL() *ACL {
 					{Path: "*", Actions: []Action{ActionAdmin}},
 				},
 			},
-			"vector": {
-				Name:      "vector",
-				TokenHash: crypto.HashToken("vector-token"),
+			"courier": {
+				Name:      "courier",
+				TokenHash: crypto.HashToken("courier-token"),
 				Permissions: []Permission{
 					{Path: "openclaw/*", Actions: []Action{ActionList, ActionReadValue}},
-					{Path: "vector/*", Actions: []Action{ActionList, ActionReadValue, ActionWrite}},
+					{Path: "courier/*", Actions: []Action{ActionList, ActionReadValue, ActionWrite}},
 					{Path: "infra/*", Actions: []Action{ActionList, ActionReadValue}},
 				},
 			},
@@ -56,12 +57,12 @@ func TestAuthenticate(t *testing.T) {
 		t.Fatalf("expected 'admin', got %q", name)
 	}
 
-	name, err = a.Authenticate("vector-token")
+	name, err = a.Authenticate("courier-token")
 	if err != nil {
-		t.Fatalf("Authenticate vector: %v", err)
+		t.Fatalf("Authenticate courier: %v", err)
 	}
-	if name != "vector" {
-		t.Fatalf("expected 'vector', got %q", name)
+	if name != "courier" {
+		t.Fatalf("expected 'courier', got %q", name)
 	}
 }
 
@@ -89,27 +90,27 @@ func TestAuthorizeAdmin(t *testing.T) {
 	}
 }
 
-func TestAuthorizeVector(t *testing.T) {
+func TestAuthorizeCourier(t *testing.T) {
 	a := testACL()
 
-	// Vector can read openclaw/*
-	if err := a.Authorize("vector", "openclaw/api-key", ActionReadValue); err != nil {
-		t.Fatalf("vector read openclaw: %v", err)
+	// Courier can read openclaw/*
+	if err := a.Authorize("courier", "openclaw/api-key", ActionReadValue); err != nil {
+		t.Fatalf("courier read openclaw: %v", err)
 	}
 
-	// Vector can read+write vector/*
-	if err := a.Authorize("vector", "vector/config", ActionWrite); err != nil {
-		t.Fatalf("vector write vector: %v", err)
+	// Courier can read+write courier/*
+	if err := a.Authorize("courier", "courier/config", ActionWrite); err != nil {
+		t.Fatalf("courier write courier: %v", err)
 	}
 
-	// Vector CANNOT write to openclaw/*
-	if err := a.Authorize("vector", "openclaw/api-key", ActionWrite); err != ErrAccessDenied {
-		t.Fatalf("vector should not write openclaw, got %v", err)
+	// Courier CANNOT write to openclaw/*
+	if err := a.Authorize("courier", "openclaw/api-key", ActionWrite); err != ErrAccessDenied {
+		t.Fatalf("courier should not write openclaw, got %v", err)
 	}
 
-	// Vector CANNOT read proxmox/*
-	if err := a.Authorize("vector", "proxmox/admin-token", ActionReadValue); err != ErrAccessDenied {
-		t.Fatalf("vector should not read proxmox, got %v", err)
+	// Courier CANNOT read proxmox/*
+	if err := a.Authorize("courier", "proxmox/admin-token", ActionReadValue); err != ErrAccessDenied {
+		t.Fatalf("courier should not read proxmox, got %v", err)
 	}
 }
 
@@ -240,12 +241,12 @@ func TestValidatePermissions(t *testing.T) {
 func TestGetAgent(t *testing.T) {
 	a := testACL()
 
-	agent, err := a.GetAgent("vector")
+	agent, err := a.GetAgent("courier")
 	if err != nil {
 		t.Fatalf("GetAgent: %v", err)
 	}
-	if agent.Name != "vector" {
-		t.Fatalf("expected name 'vector', got %q", agent.Name)
+	if agent.Name != "courier" {
+		t.Fatalf("expected name 'courier', got %q", agent.Name)
 	}
 	if len(agent.Permissions) != 3 {
 		t.Fatalf("expected 3 permissions, got %d", len(agent.Permissions))
@@ -307,7 +308,7 @@ func TestListAgents(t *testing.T) {
 	for _, n := range names {
 		found[n] = true
 	}
-	for _, expected := range []string{"admin", "vector", "openclaw"} {
+	for _, expected := range []string{"admin", "courier", "openclaw"} {
 		if !found[expected] {
 			t.Fatalf("missing agent %q in list", expected)
 		}
@@ -736,5 +737,119 @@ func TestTokenChangeNotDoneUntilDurable(t *testing.T) {
 		if !errors.Is(err, fsutil.ErrDirSyncFailed) {
 			t.Errorf("%s: %v, want ErrDirSyncFailed", what, err)
 		}
+	}
+}
+
+// diskFaults are the two ways a save can fail: nothing was written, or the file
+// was replaced and only the directory sync failed.
+func diskFaults(write func(string, []byte, os.FileMode) error) map[string]func(string, []byte, os.FileMode) error {
+	return map[string]func(string, []byte, os.FileMode) error{
+		"disk full": func(string, []byte, os.FileMode) error { return syscall.ENOSPC },
+		"dir sync failed": func(p string, d []byte, m os.FileMode) error {
+			return errors.Join(write(p, d, m), fsutil.ErrDirSyncFailed)
+		},
+	}
+}
+
+// A change answered with an error gives nobody any access: not now, not by the
+// next save that works, and not after a restart. A replaced token stays dead
+// all the same; a token that was not replaced, or is the caller's own, works on.
+func TestFailedSaveGivesNothing(t *testing.T) {
+	keys := []string{strings.Repeat("A", 43) + "=", strings.Repeat("B", 42) + "A="}
+	all := []Permission{{Path: "**", Actions: []Action{ActionAdmin}}}
+	for name := range diskFaults(nil) {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "acl.json")
+			a, err := New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := errors.Join(a.AddAgent("same", "fake-1", nil), a.SetAgentSealKey("same", keys[0]),
+				a.AddAgent("replaced", "fake-2", nil), a.AddAgent("own", "fake-3", nil)); err != nil {
+				t.Fatal(err)
+			}
+			write := a.writeFile
+			a.writeFile = diskFaults(write)[name]
+			if a.AddAgent("late", "fake-late", all) == nil || a.SetAgentSealKey("same", keys[1]) == nil ||
+				a.UpdateAgent("same", "fake-1", all) == nil || a.UpdateOwnAgent("own", "fake-own", all, LabelChange{}) == nil {
+				t.Fatal("all should fail")
+			}
+			if err := a.UpdateAgent("replaced", "fake-new", all); !errors.Is(err, ErrReplacedNotSaved) {
+				t.Fatalf("replacing: %v, want ErrReplacedNotSaved", err)
+			}
+			check := func(when string, x *ACL) {
+				t.Helper()
+				for of, c := range map[string]struct {
+					tok  string
+					want bool
+				}{"same": {"fake-1", true}, "replaced, old": {"fake-2", false}, "own, old": {"fake-3", true},
+					"late": {"fake-late", false}, "replaced, new": {"fake-new", false}, "own, new": {"fake-own", false}} {
+					if _, err := x.Authenticate(c.tok); (err == nil) != c.want {
+						t.Errorf("%s: token of %s works %v, want %v", when, of, err == nil, c.want)
+					}
+				}
+				for _, agent := range []string{"same", "replaced", "own", "late"} {
+					if x.Authorize(agent, "x/y", ActionWrite) == nil {
+						t.Errorf("%s: %s got wider permissions", when, agent)
+					}
+				}
+				if key, _ := x.GetAgentSealKey("same"); key != keys[0] {
+					t.Errorf("%s: the seal key changed", when)
+				}
+			}
+			check("now", a)
+			a.writeFile = write
+			a.retrySave()
+			check("after the retry", a)
+			again, err := New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("after a restart", again)
+			if err := a.UpdateAgent("replaced", "fake-new", all); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Authenticate("fake-new"); err != nil {
+				t.Error("running it again did not put the new token in force")
+			}
+		})
+	}
+}
+
+// Access taken away is gone at once when the save fails, says so, and is saved
+// by the next retry.
+func TestFailedRemovalIsRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "acl.json")
+	a, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(a.AddAgent("gone", "fake-1", nil), a.AddAgent("reader", "fake-2", nil),
+		a.StageAlways("reader", AlwaysOrigin{RequestID: "req_1", By: "someone"}, []string{"infra/a"}, func(Agent) error { return nil }),
+		a.FinishAlways("reader", "req_1", func(Agent) error { return nil })); err != nil {
+		t.Fatal(err)
+	}
+	write := a.writeFile
+	a.writeFile = diskFaults(write)["disk full"]
+	if _, err := a.RemoveAlways("reader", "infra/a", "req_1"); err == nil || a.RemoveAgent("gone") == nil {
+		t.Fatal("both removals should fail")
+	}
+	check := func(when string, x *ACL) {
+		t.Helper()
+		if _, err := x.Authenticate("fake-1"); err == nil || x.Authorize("reader", "infra/a", ActionReadValue) == nil {
+			t.Errorf("%s: access that was taken away works", when)
+		}
+	}
+	check("now", a)
+	a.retrySave() // still full
+	a.writeFile = write
+	a.retrySave()
+	again, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("after the retry and a restart", again)
+	if len(a.ListAlways()) != 0 {
+		t.Error("the saved removal is still listed as unsaved")
 	}
 }

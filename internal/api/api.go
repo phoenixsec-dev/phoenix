@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/ref"
@@ -147,7 +150,9 @@ type Server struct {
 	acl           *acl.ACL
 	audit         *audit.Logger
 	auditPath     string
-	masterKeyPath string         // path to master.key file (needed for KEK rotation)
+	masterKeyPath string     // path to master.key file (needed for KEK rotation)
+	rotateMu      sync.Mutex // one master key rotation at a time
+	keyLock       *fsutil.FileLock
 	policy        *policy.Engine // nil when no attestation policy configured
 	bearerEnabled bool           // whether bearer token auth is allowed
 	startTime     time.Time      // server start time for uptime reporting
@@ -166,6 +171,7 @@ type Server struct {
 	now       func() time.Time
 	// notifyTimeout limits one access-request notification (notify.go).
 	notifyTimeout time.Duration
+	reveals       revealPings // notify_reveal.go
 }
 
 // NewServer creates a new API server with all dependencies.
@@ -209,6 +215,12 @@ func (s *Server) SetMasterKeyPath(path string) {
 	s.masterKeyPath = path
 }
 
+// SetMasterKeyLock gives rotation the lock this server shares with any other
+// server using the same master key; nil where files cannot be locked.
+func (s *Server) SetMasterKeyLock(l *fsutil.FileLock) {
+	s.keyLock = l
+}
+
 // SetPolicy configures the attestation policy engine.
 // When set, secret access is subject to attestation requirements
 // (source IP binding, sealed delivery) in addition to ACL checks.
@@ -235,13 +247,13 @@ func (s *Server) SetSessionStore(ss *session.Store) error {
 	if n := len(ended) - unbound; n > 0 {
 		log.Printf("  Sessions: ended %d whose agent was removed or whose token was replaced since the last start", n)
 	}
-	s.auditEndedSessions(nil, "system", "", "credential_not_current", ended)
+	s.auditEndedSessions(nil, systemActor, "", "credential_not_current", ended)
 	return err
 }
 
-// sessionCredentialFP is the fingerprint sessions minted with the agent's
-// current bearer token are bound to. The credential ID is in it so a token
-// taken away and given out again is a different credential.
+// sessionCredentialFP is the fingerprint of the agent's current bearer token
+// that sessions and running requests are bound to. The credential ID is in it
+// so a token taken away and given out again is a different credential.
 func sessionCredentialFP(a *acl.Agent) string {
 	return grant.BearerFingerprint(a.TokenHash + ":" + a.CredentialID)
 }
@@ -268,8 +280,12 @@ func (s *Server) changeAgentCredential(r *http.Request, actor, agent, cause stri
 	return err
 }
 
+// systemActor stands for Phoenix itself, shown as "system" in the log.
+const systemActor = ""
+
 // auditEndedSessions writes one session.ended line per session Phoenix ended
-// because of its agent's credential. actor is who caused it.
+// because of its agent's credential. actor is who caused it; systemActor when
+// Phoenix noticed by itself.
 func (s *Server) auditEndedSessions(r *http.Request, actor, ip, cause string, ended []*session.Session) {
 	for _, sess := range ended {
 		md := callerAuditMetadata(r)
@@ -277,8 +293,16 @@ func (s *Server) auditEndedSessions(r *http.Request, actor, ip, cause string, en
 			md = map[string]string{}
 		}
 		md["session.agent"], md["cause"] = sess.Agent, cause
-		if err := s.audit.LogSessionAllowedWithMetadata(actor, "session.ended", sess.ID, ip, sess.ID, md); err != nil {
-			log.Printf("WARNING: audit log write failed for session.ended %s (agent %q, by %q, cause %s): %v", sess.ID, sess.Agent, actor, cause, err)
+		e := audit.Entry{Agent: actor, Action: "session.ended", Path: sess.ID, Status: "allowed", IP: ip, SessionID: sess.ID, Metadata: md}
+		var err error
+		if actor == systemActor {
+			e.Agent = "system" // nobody's labels, even if an identity is called that
+			err = s.audit.Log(e)
+		} else {
+			err = s.writeAudit(r, e)
+		}
+		if err != nil {
+			log.Printf("WARNING: audit log write failed for session.ended %s (agent %q, by %q, cause %s): %v", sess.ID, sess.Agent, e.Agent, cause, err)
 		}
 	}
 }
@@ -302,7 +326,7 @@ func (s *Server) SetDashboard(h http.Handler) {
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.mux.ServeHTTP(w, withRequestCaller(r))
 }
 
 func (s *Server) routes() {
@@ -316,6 +340,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/agents/", s.handleDeleteAgent)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
+	s.mux.HandleFunc("POST /v1/resolve-approved", s.handleResolve)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
@@ -326,6 +351,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 	s.accessRoutes()
 	s.metadataRoutes()
+	s.identityRoutes()
 	s.sshRoutes()
 	s.removedRouteRoutes()
 }
@@ -336,7 +362,10 @@ type authInfo struct {
 	UsedBearer bool
 	IsLocal    bool   // true when client IP is loopback
 	BearerFP   string // grant.BearerFingerprint of the presented token's hash (bearer auth only)
-	SessionFP  string // sessionCredentialFP of that token, for sessions it mints (bearer auth only)
+	SessionFP  string // sessionCredentialFP of that token; see loginEnded (bearer auth only)
+
+	Labels acl.Labels   // the identity's labels when it authenticated
+	Caller audit.Caller // the same, as its audit lines show them
 
 	// Session identity (set when authenticated via session token)
 	UsedSession       bool
@@ -352,18 +381,21 @@ type authInfo struct {
 // reach admin endpoints even if the underlying agent has admin ACL.
 // Data-plane handlers use authenticateInfo() directly and enforce session
 // scope/action checks themselves.
-func (s *Server) authenticate(r *http.Request) (string, error) {
+func (s *Server) authenticate(r *http.Request) (*authInfo, error) {
 	info, err := s.authenticateInfo(r)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if info.UsedSession {
-		return "", &sessionAuthError{
-			code: "ADMIN_AUTH_REQUIRED",
-			err:  fmt.Errorf("session tokens cannot access admin endpoints"),
-		}
+		return nil, errSessionNotAdmin
 	}
-	return info.Agent, nil
+	return info, nil
+}
+
+// errSessionNotAdmin refuses a valid session token on an admin endpoint.
+var errSessionNotAdmin = &sessionAuthError{
+	code: "ADMIN_AUTH_REQUIRED",
+	err:  errors.New("session tokens cannot access admin endpoints"),
 }
 
 // authenticateInfo identifies the calling agent and collects what the
@@ -387,7 +419,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			// Extract identity for audit even from expired/revoked tokens
 			if agent, sessID, known := s.sessions.ParseClaimsInsecure(tok); known {
 				if errors.Is(err, session.ErrCredentialChanged) {
-					s.auditEndedSessions(r, "system", ip, "credential_not_current", []*session.Session{{ID: sessID, Agent: agent}})
+					s.auditEndedSessions(r, systemActor, ip, "credential_not_current", []*session.Session{{ID: sessID, Agent: agent}})
 				}
 				s.auditLogSessionDenied(r, agent, "session.auth", "", ip, code, sessID)
 			}
@@ -403,6 +435,12 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			SessionNamespaces: sess.Namespaces,
 			SessionActions:    sess.Actions,
 		}
+		// No labels if the identity was replaced since Validate.
+		var labels acl.Labels
+		if a, err := s.acl.GetAgent(sess.Agent); err == nil && sessionCredentialFP(a) == sess.CredentialFP {
+			labels = a.Labels
+		}
+		identifyCaller(r, info, labels)
 		return info, nil
 	}
 
@@ -422,7 +460,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		return nil, err
 	}
 	s.authRL.recordSuccess(ip)
-	return &authInfo{
+	info := &authInfo{
 		Agent:      agent,
 		UsedBearer: true,
 		IsLocal:    local,
@@ -430,7 +468,9 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		// this exact token (after rotation the old grants match nothing).
 		BearerFP:  grant.BearerFingerprint(crypto.HashToken(tok)),
 		SessionFP: sessionCredentialFP(record),
-	}, nil
+	}
+	identifyCaller(r, info, record.Labels)
+	return info, nil
 }
 
 // attestFull checks the attestation policy for path. Returns nil if no policy
@@ -591,27 +631,27 @@ func handleAuthError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) auditLogAllowed(r *http.Request, agent, action, path, ip string) {
-	s.logAudit(s.audit.LogAllowedWithMetadata(agent, action, path, ip, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip}))
 }
 
 func (s *Server) auditLogAllowedSealed(r *http.Request, agent, action, path, ip string, sealed bool) {
-	s.logAudit(s.audit.LogAllowedSealedWithMetadata(agent, action, path, ip, sealed, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip, Sealed: sealed}))
 }
 
 func (s *Server) auditLogDenied(r *http.Request, agent, action, path, ip, reason string) {
-	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "denied", IP: ip, Reason: reason}))
 }
 
 func (s *Server) auditLogSessionAllowed(r *http.Request, agent, action, path, ip, sessionID string) {
-	s.logAudit(s.audit.LogSessionAllowedWithMetadata(agent, action, path, ip, sessionID, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip, SessionID: sessionID}))
 }
 
 func (s *Server) auditLogSessionAllowedSealed(r *http.Request, agent, action, path, ip, sessionID string, sealed bool) {
-	s.logAudit(s.audit.LogSessionAllowedSealedWithMetadata(agent, action, path, ip, sessionID, sealed, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip, SessionID: sessionID, Sealed: sealed}))
 }
 
 func (s *Server) auditLogSessionDenied(r *http.Request, agent, action, path, ip, reason, sessionID string) {
-	s.logAudit(s.audit.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, sessionID, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "denied", IP: ip, Reason: reason, SessionID: sessionID}))
 }
 
 // auditAllowed logs an allowed action, including session ID when a session was used.
@@ -702,7 +742,7 @@ func (s *Server) checkSessionAction(w http.ResponseWriter, r *http.Request, info
 // baseAccessReason is the authorization check WITHOUT grants: session scope,
 // session action and the ACL for session callers; the ACL for
 // everyone else. It returns "" when allowed, else "session_scope",
-// "session_action", "acl" or a SESSION_ code (sessionEnded). dataAccess (access.go) layers grants on top;
+// "session_action", "acl" or why the login ended (loginEnded). dataAccess (access.go) layers grants on top;
 // handlePolicyCheck uses this directly because grants never unseal.
 func (s *Server) baseAccessReason(info *authInfo, path, sessionAction string, aclAction acl.Action) string {
 	if info.UsedSession {
@@ -716,22 +756,61 @@ func (s *Server) baseAccessReason(info *authInfo, path, sessionAction string, ac
 	if err := s.acl.Authorize(info.Agent, path, aclAction); err != nil {
 		return "acl"
 	}
-	// The ACL looks permissions up by name, so the session is checked again
-	// after it said yes. A token change and the ending of its sessions are one
-	// step for this check, so an old session can never use permissions given
-	// to a new token.
-	return s.sessionEnded(info)
+	// The ACL looks permissions up by name, so the login is checked again
+	// after it said yes. A token and its permissions change in one step, so
+	// an old login can never use permissions given to a new token.
+	return s.loginEnded(info)
 }
 
-// sessionEnded returns the SESSION_ code if the caller's session stopped being
-// valid since it logged in, else "" (also for callers without a session).
-func (s *Server) sessionEnded(info *authInfo) string {
+// reasonTokenReplaced is loginEnded's answer for a bearer caller.
+const reasonTokenReplaced = "token_replaced"
+
+// loginEnded returns why the caller's login stopped being valid since it
+// logged in, else "": the SESSION_ code of its session, or reasonTokenReplaced
+// when its bearer token is no longer the agent's (agent deleted, or token
+// replaced). Check it after a permission lookup, never before.
+func (s *Server) loginEnded(info *authInfo) string {
 	if info.UsedSession {
 		if err := s.sessions.Check(info.SessionID); err != nil {
 			return sessionErrorCode(err)
 		}
+		return ""
+	}
+	if !s.sessionCredentialCurrent(info.Agent, info.SessionFP) {
+		return reasonTokenReplaced
 	}
 	return ""
+}
+
+// writeLoginEnded answers 401 and returns true if the caller's login ended
+// while its request ran. Call it before acting on anything looked up by agent
+// name, and after reading a body: a slow body can keep a request waiting long
+// after its token was replaced.
+func (s *Server) writeLoginEnded(w http.ResponseWriter, r *http.Request, info *authInfo) bool {
+	reason := s.loginEnded(info)
+	if reason == "" {
+		return false
+	}
+	s.auditDenied(r, info, "request", r.Method+" "+r.URL.Path, clientIP(r), reason)
+	if reason == reasonTokenReplaced {
+		handleAuthError(w, acl.ErrUnauthorized)
+	} else {
+		handleAuthError(w, &sessionAuthError{code: reason, err: errors.New("the session is no longer valid")})
+	}
+	return true
+}
+
+// authorize is the ACL check for a logged-in caller. Use it, not acl.Authorize,
+// for anything the caller may do: it also refuses a login whose token was
+// replaced after it logged in.
+func (s *Server) authorize(info *authInfo, path string, action acl.Action) error {
+	if err := s.acl.Authorize(info.Agent, path, action); err != nil {
+		return err
+	}
+	if s.loginEnded(info) != "" {
+		return acl.ErrUnauthorized
+	}
+	return nil
 }
 
 // checkSessionSealKey verifies the request seal key matches the session binding.
@@ -806,6 +885,14 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Go routes HEAD here too, and would run the whole read (spending a
+	// one-time use) only to throw the value away.
+	if r.Method == http.MethodHead && path != "" && !strings.HasSuffix(path, "/") {
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
 	// A "*" in a single-secret read is someone trying to list a folder.
 	// Say so before scope, ACL and attestation, so it never reads as a
 	// permission problem; it is decided from the path alone, so it reveals
@@ -860,8 +947,8 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 			}
 			visible = append(visible, p)
 		}
-		// Not a short list: say so if the session ended meanwhile.
-		if reason := s.sessionEnded(info); reason != "" {
+		// Not a short list: say so if the login ended meanwhile.
+		if reason := s.loginEnded(info); reason != "" {
 			s.writeDataDenial(w, r, info, "list", path, ip, reason)
 			return
 		}
@@ -902,15 +989,28 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAllowedAccess(r, info, "read_value", path, ip, sealKey != nil, dec.Grant)
+	// The login and link are for callers who may list the path (GET
+	// /v1/metadata) and are never served together with the value. A copy,
+	// because a backend may hand out its cached secret.
+	noLogin := *secret
+	noLogin.Metadata.Username, noLogin.Metadata.URL = "", ""
+	secret = &noLogin
+	// Seal first: the grant's use is spent only once the answer is ready.
+	var env *crypto.SealedEnvelope
 	if sealKey != nil {
-		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
-		if err != nil {
+		if env, err = crypto.SealValue(path, "", secret.Value, sealKey); err != nil {
 			log.Printf("error sealing secret %q: %v", path, err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Cache-Control", "no-store")
+	}
+	if reason := s.useGrants(info, ip, "read_value", []string{path}, []*grant.Grant{dec.Grant}, false)[0]; reason != "" {
+		s.writeDataDenial(w, r, info, "read_value", path, ip, reason)
+		return
+	}
+	s.auditAllowedAccess(r, info, "read_value", path, ip, sealKey != nil, dec.Grant)
+	w.Header().Set("Cache-Control", "no-store")
+	if env != nil {
 		jsonOK(w, map[string]interface{}{
 			"path":         path,
 			"metadata":     secret.Metadata,
@@ -918,8 +1018,6 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, secret)
 }
 
@@ -928,6 +1026,22 @@ type setSecretRequest struct {
 	Value       string   `json:"value"`
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	// Username and URL: left out keeps what is stored, "" clears it.
+	Username *string `json:"username,omitempty"`
+	URL      *string `json:"url,omitempty"`
+}
+
+// metadataChange is the metadata part of a set request. An empty description
+// or no tags keep what is stored, as they always have.
+func (req setSecretRequest) metadataChange() store.MetadataChange {
+	ch := store.MetadataChange{Username: req.Username, URL: req.URL}
+	if req.Description != "" {
+		ch.Description = &req.Description
+	}
+	if req.Tags != nil {
+		ch.Tags = &req.Tags
+	}
+	return ch
 }
 
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
@@ -970,12 +1084,21 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ch := req.metadataChange()
+	if err := ch.Validate(); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if s.backend.ReadOnly() {
 		jsonError(w, "backend is read-only", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 
-	if err := s.backend.Set(path, req.Value, info.Agent, req.Description, req.Tags); err != nil {
+	if err := s.backend.Write(path, req.Value, info.Agent, ch, store.WriteAny); err != nil {
 		if err == store.ErrInvalidPath {
 			jsonError(w, "invalid secret path", http.StatusBadRequest)
 			return
@@ -990,7 +1113,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	// without one keeps the old one)? `phoenix set` nudges when it is false.
 	// Only for callers who may list the path, as that is the metadata
 	// permission; never the text.
-	resp := map[string]interface{}{"status": "ok", "path": path}
+	// changed names the metadata fields this write set, so a CLI can tell that
+	// an older server ignored a username or link it sent.
+	resp := map[string]interface{}{"status": "ok", "path": path, "changed": ch.Fields()}
 	if s.baseAccessReason(info, path, "list", acl.ActionList) == "" {
 		if m, err := s.backend.Metadata(path); err == nil {
 			resp["has_description"] = m.Description != ""
@@ -1044,14 +1169,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
 	// Only admin agents can query the audit log
-	if err := s.acl.Authorize(agentName, "audit", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "audit", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -1069,7 +1194,11 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	if agent := r.URL.Query().Get("agent"); agent != "" {
 		opts.Agent = agent
+		opts.FormerAgents = s.acl.FormerNames(agent)
 	}
+	opts.Who = r.URL.Query().Get("who")
+	opts.Host = r.URL.Query().Get("host")
+	opts.Authority = r.URL.Query().Get("authority")
 
 	// No limit, or one above the cap, returns the newest maxAuditQueryLimit
 	// entries: "everything" from a multi-GB log would not fit in memory.
@@ -1091,7 +1220,9 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	// truncated: the search stopped at its read cap or the newest archive
 	// before it found `limit` matches; older entries may exist.
-	jsonOK(w, map[string]interface{}{"entries": res.Entries, "truncated": res.Truncated})
+	// identity_filters: this server knows who, host and authority, so a client
+	// can tell a filtered answer from an older server's unfiltered one.
+	jsonOK(w, map[string]interface{}{"entries": res.Entries, "truncated": res.Truncated, "identity_filters": true})
 }
 
 // maxAuditQueryLimit caps how many entries one GET /v1/audit returns.
@@ -1102,17 +1233,18 @@ type createAgentRequest struct {
 	Name        string           `json:"name"`
 	Token       string           `json:"token"`
 	Permissions []acl.Permission `json:"permissions"`
+	acl.LabelChange
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
 	// Only admin agents can create other agents
-	if err := s.acl.Authorize(agentName, "agents", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "agents", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -1134,16 +1266,40 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labels, err := req.LabelChange.Normalized(req.Name)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
+
 	force := r.URL.Query().Get("force") == "true"
 
 	if force {
 		// Try update first; if agent doesn't exist, fall through to add
-		err := s.changeAgentCredential(r, agentName, req.Name, "token_replaced", func() error {
-			return s.acl.UpdateAgent(req.Name, req.Token, req.Permissions)
+		err := s.changeAgentCredential(r, info.Agent, req.Name, "token_replaced", func() error {
+			if req.Name == info.Agent {
+				return s.acl.UpdateOwnAgent(req.Name, req.Token, req.Permissions, labels)
+			}
+			return s.acl.UpdateAgentLabeled(req.Name, req.Token, req.Permissions, labels)
 		})
 		if err == nil {
-			s.auditLogAllowed(r, agentName, "update-agent", req.Name, clientIP(r))
-			jsonOK(w, map[string]string{"status": "ok", "agent": req.Name, "action": "updated"})
+			s.auditAgentChange(r, info.Agent, "update-agent", req.Name, labels, "")
+			jsonOK(w, map[string]any{"status": "ok", "agent": req.Name, "action": "updated", "identity": s.identityOf(req.Name)})
+			return
+		}
+		if errors.Is(err, acl.ErrReplacedNotSaved) {
+			log.Printf("error updating agent %q: %v", req.Name, err)
+			s.auditDenied(r, info, "update-agent", req.Name, clientIP(r), "not_saved")
+			jsonError(w, "this could not be saved: the old token no longer works and the new one is not in force. Free the disk and run this again; a restart before that may bring the old token back", http.StatusInternalServerError)
+			return
+		}
+		if errors.Is(err, acl.ErrOwnNotSaved) {
+			log.Printf("error updating agent %q: %v", req.Name, err)
+			s.auditDenied(r, info, "update-agent", req.Name, clientIP(r), "not_saved")
+			jsonError(w, "this could not be saved: your old token still works and the new one does not. Free the disk and run this again", http.StatusInternalServerError)
 			return
 		}
 		if !errors.Is(err, acl.ErrAgentNotFound) {
@@ -1154,7 +1310,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		// Agent doesn't exist — fall through to AddAgent below
 	}
 
-	if err := s.acl.AddAgent(req.Name, req.Token, req.Permissions); err != nil {
+	if err := s.acl.AddAgentLabeled(req.Name, req.Token, req.Permissions, labels); err != nil {
 		if errors.Is(err, acl.ErrAgentExists) {
 			jsonError(w, "agent already exists (use ?force=true to overwrite)", http.StatusConflict)
 			return
@@ -1164,34 +1320,38 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditLogAllowed(r, agentName, "create-agent", req.Name, clientIP(r))
-	jsonOK(w, map[string]string{"status": "ok", "agent": req.Name})
+	s.auditAgentChange(r, info.Agent, "create-agent", req.Name, labels, "")
+	jsonOK(w, map[string]any{"status": "ok", "agent": req.Name, "identity": s.identityOf(req.Name)})
 }
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
-	if err := s.acl.Authorize(agentName, "agents", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "agents", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
 
-	names := s.acl.ListAgents()
-	jsonOK(w, map[string]interface{}{"agents": names})
+	ids := s.acl.Identities()
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = id.Name
+	}
+	jsonOK(w, map[string]interface{}{"agents": names, "identities": ids})
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
-	if err := s.acl.Authorize(agentName, "agents", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "agents", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -1202,21 +1362,21 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if target == agentName {
+	if target == info.Agent {
 		jsonError(w, "cannot delete your own agent identity", http.StatusBadRequest)
 		return
 	}
 
 	// remove drops the ACL entry and ends the agent's sessions.
 	remove := func() error {
-		return s.changeAgentCredential(r, agentName, target, "agent_deleted", func() error {
+		return s.changeAgentCredential(r, info.Agent, target, "agent_deleted", func() error {
 			return s.acl.RemoveAgent(target)
 		})
 	}
 	if s.grants != nil {
 		// Revoke-before-delete (plan section 5): durably revoke the agent's
 		// grants and expire its requests, then remove the ACL entry.
-		if !s.deleteAgentWithGrants(w, r, agentName, target, remove) {
+		if !s.deleteAgentWithGrants(w, r, info.Agent, target, remove) {
 			return
 		}
 	} else if err := remove(); err != nil {
@@ -1229,19 +1389,19 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditLogAllowed(r, agentName, "delete-agent", target, clientIP(r))
+	s.auditLogAllowed(r, info.Agent, "delete-agent", target, clientIP(r))
 	jsonOK(w, map[string]string{"status": "ok", "agent": target, "action": "deleted"})
 }
 
 func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
 	// Only admin agents can rotate the master key
-	if err := s.acl.Authorize(agentName, "master-key", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "master-key", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -1266,19 +1426,54 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Backup the old master key as .prev
+	// One rotation at a time, and none while --protect-key saves the key file.
+	s.rotateMu.Lock()
+	defer s.rotateMu.Unlock()
+	lock, err := fsutil.Lock(s.masterKeyPath)
+	if errors.Is(err, fsutil.ErrLocked) {
+		jsonError(w, "the master key file is being changed by phoenix-server --protect-key; restart the server afterwards, then rotate", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		log.Printf("WARNING: cannot lock %s during rotation: %v", s.masterKeyPath, err)
+	} else {
+		defer lock.Release()
+	}
+	if s.keyLock != nil {
+		if err := s.keyLock.Exclusive(); err != nil {
+			log.Printf("rotation refused: %s: %v", s.masterKeyPath, err)
+			jsonError(w, "another running phoenix-server uses this master key, and after a rotation its store would no longer open. Give that server its own copy of the key file first (store.master_key), restart it, then rotate", http.StatusConflict)
+			return
+		}
+		defer func() { _ = s.keyLock.Share() }()
+	}
+	// The wait for another rotation may have been long.
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
+	// The rotation replaces the key file with one protected as it was at
+	// start. If it is not that file any more, saving would undo the change.
+	if err := provider.CheckKeyFile(s.masterKeyPath); err != nil {
+		log.Printf("rotation refused: %s: %v", s.masterKeyPath, err)
+		jsonError(w, "the master key file changed since the server started (new passphrase, or another key); restart the server, then rotate", http.StatusConflict)
+		return
+	}
 	oldKey, err := os.ReadFile(s.masterKeyPath)
 	if err != nil {
 		log.Printf("error reading old master key: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	defer crypto.ZeroBytes(oldKey)
 	prevPath := s.masterKeyPath + ".prev"
-	if err := os.WriteFile(prevPath, oldKey, 0600); err != nil {
-		log.Printf("error backing up master key to %s: %v", prevPath, err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
+	staged := prevPath + ".new"
+
+	if err := placeLeftoverKey(staged, prevPath, oldKey); err != nil {
+		log.Printf("rotation refused: %s, left by an earlier rotation, may hold an old key and cannot be put in its place: %v", staged, err)
+		jsonError(w, "rotation failed: an earlier rotation left a file next to the master key; see the server log", http.StatusInternalServerError)
 		return
 	}
+	backup := prevPath
 
 	// Rotate with afterSave callback: the callback writes the new key file
 	// atomically while the store lock is held, preventing any window where
@@ -1288,10 +1483,32 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		if pendingKey == nil {
 			return fmt.Errorf("no pending key after rotation")
 		}
-		if provider.Passphrase() != "" {
-			return crypto.SaveProtectedMasterKey(s.masterKeyPath, pendingKey, provider.Passphrase())
+		// The old key is put on disk first, but becomes .prev only once the
+		// new one is saved: a failed rotation must not replace the .prev from
+		// before. The plain error text keeps a directory sync failure here
+		// from being taken for one of the key file, which RotateMasterKey
+		// treats as saved.
+		if err := fsutil.WriteFileAtomicStrict(staged, oldKey, 0600); err != nil {
+			return fmt.Errorf("backing up master key to %s: %v", staged, err)
 		}
-		return crypto.SaveMasterKeyAtomic(s.masterKeyPath, pendingKey)
+		keyPath := fsutil.RealPath(s.masterKeyPath)
+		var err error
+		if provider.Passphrase() != "" {
+			err = crypto.SaveProtectedMasterKey(keyPath, pendingKey, provider.Passphrase())
+		} else {
+			err = crypto.SaveMasterKeyAtomic(keyPath, pendingKey)
+		}
+		if err != nil && !errors.Is(err, fsutil.ErrDirSyncFailed) {
+			os.Remove(staged)
+			return err
+		}
+		if rerr := os.Rename(staged, prevPath); rerr != nil {
+			backup = staged
+			log.Printf("WARNING: the old master key stays at %s: %v", staged, rerr)
+		} else if serr := fsutil.SyncDir(filepath.Dir(prevPath)); serr != nil {
+			log.Printf("WARNING: syncing the directory of %s: %v", prevPath, serr)
+		}
+		return err
 	})
 	if err != nil {
 		log.Printf("error rotating master key: %v", err)
@@ -1299,26 +1516,83 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditLogAllowed(r, agentName, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip)
-	log.Printf("master key rotated by %s: %d namespaces re-wrapped", agentName, rotated)
+	s.auditLogAllowed(r, info.Agent, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip)
+	log.Printf("master key rotated by %s: %d namespaces re-wrapped", info.Agent, rotated)
 
-	jsonOK(w, map[string]interface{}{
-		"status":  "ok",
-		"rotated": rotated,
-		"backup":  prevPath,
-	})
+	resp := map[string]interface{}{"status": "ok", "rotated": rotated}
+	if rotated > 0 {
+		resp["backup"] = backup
+	}
+	jsonOK(w, resp)
+}
+
+// placeLeftoverKey deals with a staged old key that a rotation could not finish
+// with: one that is not the current key takes its place as .prev before the
+// name is used again. Anything that cannot be read and judged is an error,
+// because writing over it could lose the only copy of a key.
+func placeLeftoverKey(staged, prevPath string, current []byte) error {
+	fi, err := os.Lstat(staged)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	left, err := os.ReadFile(staged)
+	if err != nil {
+		return err
+	}
+	defer crypto.ZeroBytes(left)
+	if bytes.Equal(left, current) {
+		return nil
+	}
+	return os.Rename(staged, prevPath)
 }
 
 // resolveRequest is the JSON body for batch reference resolution.
 // Nonce and Signature are only read to refuse them: nonce challenges and
 // signed resolve were removed, and a client still sending them should hear so.
 type resolveRequest struct {
-	Refs      []string `json:"refs"`
-	Nonce     string   `json:"nonce,omitempty"`
-	Signature string   `json:"signature,omitempty"`
+	Refs []string `json:"refs"`
+	// AllOrNothing: if any ref is refused, deliver none and spend no use.
+	// phoenix exec sends it, since it runs nothing unless every ref resolved.
+	AllOrNothing bool   `json:"all_or_nothing,omitempty"`
+	Nonce        string `json:"nonce,omitempty"`
+	Signature    string `json:"signature,omitempty"`
 }
 
+// delivery is one ref of a resolve that passed every check and is ready to send.
+type delivery struct {
+	ref, path, value string
+	sealed           *crypto.SealedEnvelope // set when the caller asked for sealed values
+	grant            *grant.Grant           // set when only a grant allows it
+}
+
+func deliveryPaths(ds []delivery) []string {
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.path
+	}
+	return out
+}
+
+func deliveryGrants(ds []delivery) []*grant.Grant {
+	out := make([]*grant.Grant, len(ds))
+	for i, d := range ds {
+		out[i] = d.grant
+	}
+	return out
+}
+
+// handleResolve: POST /v1/resolve and POST /v1/resolve-approved. The second
+// reads only what a human approved for this agent (approvedAccess). It is an
+// address of its own so a server from before it refuses instead of ignoring a
+// flag and using everything the agent may read.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	approvedOnly := r.URL.Path == "/v1/resolve-approved"
 	info, err := s.authenticateInfo(r)
 	if err != nil {
 		handleAuthError(w, err)
@@ -1376,7 +1650,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
+
+	var deliveries []delivery
+	seen := map[string]bool{}
 	for _, refStr := range req.Refs {
+		// The answer has one entry per ref, so a repeat adds nothing.
+		if seen[refStr] {
+			continue
+		}
+		seen[refStr] = true
 		path, err := ref.Parse(refStr)
 		if err != nil {
 			s.auditDenied(r, info, "resolve", refStr, ip, "malformed_ref")
@@ -1385,7 +1670,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Session scope/action, ACL, then request-use grants (per-ref).
-		dec := s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		dec := accessDecision{}
+		if approvedOnly {
+			dec = s.approvedAccess(info, path, ip)
+		} else {
+			dec = s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		}
+		if dec.Reason == reasonTokenReplaced {
+			// Not a per-ref problem: the whole request gets the 401 that
+			// every other endpoint answers.
+			s.writeDataDenial(w, r, info, "resolve", path, ip, dec.Reason)
+			return
+		}
 		if dec.Reason != "" {
 			s.auditDenied(r, info, "resolve", path, ip, dec.Reason)
 			code, msg := resolveDenial(dec.Reason)
@@ -1442,18 +1738,38 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		s.auditAllowedAccess(r, info, "resolve", path, ip, sealKey != nil, dec.Grant)
-
+		d := delivery{ref: refStr, path: path, value: secret.Value, grant: dec.Grant}
 		if sealKey != nil {
-			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
-			if err != nil {
+			if d.sealed, err = crypto.SealValue(path, refStr, secret.Value, sealKey); err != nil {
 				log.Printf("error sealing resolved secret %q: %v", path, err)
 				deny(refStr, CodeInternalError, "internal error")
 				continue
 			}
-			sealedValues[refStr] = env
-		} else {
-			values[refStr] = secret.Value
+		}
+		deliveries = append(deliveries, d)
+	}
+
+	// Everything that may be delivered is ready. Spend grant uses last, so a
+	// use goes only with a value that is really handed over.
+	if !(req.AllOrNothing && len(errors) > 0) {
+		reasons := s.useGrants(info, ip, "read_value", deliveryPaths(deliveries), deliveryGrants(deliveries), req.AllOrNothing)
+		for i, d := range deliveries {
+			if reasons[i] != "" {
+				s.auditDenied(r, info, "resolve", d.path, ip, reasons[i])
+				code, msg := resolveDenial(reasons[i])
+				denyStep(d.ref, code, msg, s.denialNextStep(code, d.path, "read_value"))
+			}
+		}
+		for _, d := range deliveries {
+			if errors[d.ref] != "" || (req.AllOrNothing && len(errors) > 0) {
+				continue
+			}
+			s.auditAllowedAccess(r, info, "resolve", d.path, ip, sealKey != nil, d.grant)
+			if d.sealed != nil {
+				sealedValues[d.ref] = d.sealed
+			} else {
+				values[d.ref] = d.value
+			}
 		}
 	}
 
@@ -1475,14 +1791,14 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 // handleStatus returns a comprehensive server status overview.
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
 	// Only admin agents can view full status
-	if err := s.acl.Authorize(agentName, "status", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "status", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -1634,13 +1950,13 @@ type generateKeyPairRequest struct {
 // seal public key. It used to generate the pair and return the private key;
 // a request without seal_public_key (an older CLI) gets a 400 saying so.
 func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
-	if err := s.acl.Authorize(agentName, "keypair", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "keypair", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -1681,6 +1997,9 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 	pubEncoded := crypto.EncodeSealKey(pubKey)
 	if err := s.acl.SetAgentSealKey(req.AgentName, pubEncoded); err != nil {
 		log.Printf("error storing seal key for %q: %v", req.AgentName, err)
@@ -1693,7 +2012,7 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 	if existing != "" {
 		auditAction = "rotate-keypair"
 	}
-	s.auditLogAllowed(r, agentName, auditAction, req.AgentName, ip)
+	s.auditLogAllowed(r, info.Agent, auditAction, req.AgentName, ip)
 
 	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, map[string]string{
@@ -1705,13 +2024,12 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 // handleAgentSubresource routes GET /v1/agents/{name}/seal-key
 func (s *Server) handleAgentSubresource(w http.ResponseWriter, r *http.Request) {
 	// Parse: /v1/agents/{name}/seal-key
-	path := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 || parts[1] != "seal-key" {
+	// An agent's name may itself hold a slash.
+	agentTarget, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/v1/agents/"), "/seal-key")
+	if !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
 	}
-	agentTarget := parts[0]
 	if agentTarget == "" {
 		jsonError(w, "agent name is required", http.StatusBadRequest)
 		return
@@ -1721,13 +2039,13 @@ func (s *Server) handleAgentSubresource(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleGetSealKey(w http.ResponseWriter, r *http.Request, agentTarget string) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
-	if err := s.acl.Authorize(agentName, "keypair", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "keypair", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -1939,7 +2257,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 // logged in, the same way logging in with it now would.
 func (s *Server) denyRenewal(w http.ResponseWriter, r *http.Request, info *authInfo, ip string, err error) {
 	if errors.Is(err, session.ErrCredentialChanged) {
-		s.auditEndedSessions(r, "system", ip, "credential_not_current", []*session.Session{{ID: info.SessionID, Agent: info.Agent}})
+		s.auditEndedSessions(r, systemActor, ip, "credential_not_current", []*session.Session{{ID: info.SessionID, Agent: info.Agent}})
 	}
 	code := sessionErrorCode(err)
 	s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, code, info.SessionID)
@@ -2009,8 +2327,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
-
+	isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
 	// Query filters
 	roleFilter := r.URL.Query().Get("role")
 	agentFilter := r.URL.Query().Get("agent")
@@ -2041,6 +2358,11 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]interface{}, 0, len(result))
 	for _, sess := range result {
 		items = append(items, sessionToMap(sess))
+	}
+	// After the lookups: an ended login is not "an ordinary agent", the name
+	// may be another's now.
+	if s.writeLoginEnded(w, r, info) {
+		return
 	}
 
 	jsonOK(w, map[string]interface{}{"sessions": items})
@@ -2100,7 +2422,10 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 	} else {
-		isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+		isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
+		if s.writeLoginEnded(w, r, info) {
+			return
+		}
 		if info.Agent != sess.Agent && !isAdmin {
 			jsonError(w, "access denied", http.StatusForbidden)
 			return
@@ -2136,7 +2461,10 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id 
 			return
 		}
 	} else {
-		isAdmin := s.acl.Authorize(info.Agent, "sessions", acl.ActionAdmin) == nil
+		isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
+		if s.writeLoginEnded(w, r, info) {
+			return
+		}
 		if info.Agent != sess.Agent && !isAdmin {
 			jsonError(w, "access denied", http.StatusForbidden)
 			return

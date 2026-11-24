@@ -53,20 +53,33 @@ There is no `-v`/`--value` flag: a value on the command line leaks to shell
 history and the process list.
 
 Always give `-d`: it is how people and other agents find the secret later.
+For a login, also give `--username <name>` and `--url <page>`, so a person can
+open it from the dashboard. Neither is secret; never put a password in them,
+in `-d` or in a tag.
+
+To add or fix a description, tags, username or link on a secret that exists:
+
+```bash
+phoenix describe <namespace/key> -d "what it is for" --username <name> --url <page>
+```
+
+It needs write on the path and never reads or writes the value. Use it instead
+of setting the value again. `""` clears a field.
 
 ### Find the secret you need
 
 ```bash
 phoenix list [folder/] [--tag <tag>]   # each path with its description
-phoenix info <namespace/key>           # description, tags, dates, who changed it
+phoenix info <namespace/key>           # description, tags, username, link, dates
 ```
 
 Use these to find a secret by what it is for. Neither shows the value, and
 both need only list access. `phoenix list --names` prints bare paths for
-scripts. MCP: `phoenix_list` returns the same descriptions.
+scripts. MCP: `phoenix_list` returns the same descriptions, with usernames and links.
 
 `services/browser`, `services/browser/` and `services/browser/*` all list
-`services/browser/`; other wildcards are refused. There is no `--prefix`
+`services/browser/`; other wildcards are refused. If `?` or `[` is part of a
+folder's name, end it with `/`: `phoenix list 'what?/'`. There is no `--prefix`
 option.
 
 Every command refuses an option it does not have with
@@ -140,8 +153,11 @@ Dry-run attestation check against the local policy file.
 ### Create an agent
 
 ```bash
-phoenix agent create <name> -t <token> --acl "namespace/*:list,read_value,write;other/*:list"
+phoenix agent create <name> --token-stdin --acl "namespace/*:list,read_value,write;other/*:list" < token-file
 ```
+
+Without `--token-stdin` it asks for the token at a terminal. Never put a token in
+the command line: it lands in shell history and the process list.
 
 Creates a new agent with the specified ACL permissions (admin only).
 Actions: `list` (see names), `read_value` (read values), `write`, `delete`,
@@ -153,10 +169,22 @@ Actions: `list` (see names), `read_value` (read values), `write`, `delete`,
 phoenix agent list
 ```
 
+### Describe an agent
+
+```bash
+phoenix agent set <name> --who <w> --authority <a> --kind <k> --formerly <old1,old2>
+phoenix agent show [name]
+```
+
+Records who uses an identity and in what role (admin only), so the audit log
+can show them apart. Its token and sessions stay. These are labels: they grant
+nothing, and no header or argument of yours can set them for your own calls.
+`phoenix whoami` shows yours.
+
 ### Export secrets
 
 ```bash
-phoenix export <prefix> -f env
+phoenix export <folder/> -f env
 ```
 
 Exports secrets under a prefix as `KEY=VALUE` pairs.
@@ -172,25 +200,43 @@ Imports `KEY=VALUE` pairs from a `.env` file into a namespace.
 ### Audit log
 
 ```bash
-phoenix audit [-n 20] [-a agent-name] [-s 2025-01-01T00:00:00Z]
+phoenix audit [-n 20] [-a agent-name] [-s 2025-01-01T00:00:00Z] [--who w] [--host h] [--authority a]
 ```
 
-Query the audit log. Filter by count, agent, or time range.
+Query the audit log. Filter by count, agent, time range, or who, host and authority.
 
-### Generate a seal key pair
+### Sealed mode
 
-```bash
-phoenix keypair generate <agent-name> [-o /path/to/<name>.seal.key] [--force]
-```
-
-Makes the key pair on this machine, writes the private key (mode `0600`,
-default `~/.config/phoenix/keys/<name>.seal.key`) and registers only the
-public key with the server, which never sees the private half. `--force`
-replaces an existing key. Set `PHOENIX_SEAL_KEY` to the private key path to
-enable.
+An admin makes your seal key; you cannot. If you get
+`SEAL_KEY_NOT_REGISTERED`, ask the user for one. Set `PHOENIX_SEAL_KEY` to
+the private key file they give you.
 
 When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 `phoenix exec` transparently encrypt/decrypt values using NaCl box.
+
+## When you are denied a secret
+
+A denial that says `next: request temporary use` means a human can allow it:
+
+```bash
+phoenix request <namespace/key> --reason "what you need it for" --wait
+```
+
+Tell the user in chat what you asked for. The answer says how far it goes, and
+`phoenix request status <req_id>` shows it again:
+
+- `one use left`: one read of each secret. Use it with
+  `phoenix exec --redact-output --env NAME=phoenix://<namespace/key> -- <command>`.
+  Get the command right first: the use is spent once the value is handed over,
+  even if your command then fails. A typo in the command name or another
+  refused reference costs nothing.
+- `until 14:32`: any number of uses until then.
+- `always`: it is on your access list now; just use it.
+- `denied`: a human said no. Do not ask again; ask the user in chat if you
+  really need it. Read the note, if there is one.
+
+When the time or uses run out, reads say `GRANT_EXPIRED`; request again only if
+you still need it.
 
 ## Root on another machine
 
@@ -204,7 +250,9 @@ approves it. Use this whenever you need root or a shell somewhere else.
    Quote the whole command as one string. Use `sudo -n` inside it for root.
 3. A human approves on their side. That can take minutes; the command waits.
    Inside an active approval, later commands run at once and `--reason` is
-   optional.
+   optional. If the human allowed it once, you got one
+   certificate: run everything you need in that one command, because the next
+   `phoenix ssh` asks again.
 4. Never ask the user to open a terminal or run sudo for you. If the machine
    is not listed, or the human denies it, say so and stop.
 
@@ -232,7 +280,9 @@ Typical flow for setting up a new secret with proper access control:
 phoenix set myapp/api-key -d "OpenAI API key"
 
 # 2. Create an agent with scoped access
-phoenix agent create deployer -t "$(openssl rand -hex 32)" --acl "myapp/*:list,read_value"
+#    (human runs this; the token file goes to the agent's machine)
+(umask 077; set -C; openssl rand -hex 32 > deployer.token) &&
+phoenix agent create deployer --token-stdin --acl "myapp/*:list,read_value" < deployer.token
 
 # 3. Verify the agent can access the secret
 phoenix policy test --agent deployer --ip 10.0.0.5 myapp/api-key

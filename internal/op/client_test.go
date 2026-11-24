@@ -66,7 +66,7 @@ func TestReadSuccess(t *testing.T) {
 		t.Fatalf("Read() failed: %v", err)
 	}
 	if val != "my-secret-value" {
-		t.Fatalf("expected 'my-secret-value', got %q", val)
+		t.Fatal("wrong value")
 	}
 }
 
@@ -124,7 +124,7 @@ func TestReadTokenRedacted(t *testing.T) {
 	}
 	errMsg := err.Error()
 	if contains(errMsg, secretToken) {
-		t.Fatalf("error message should not contain token, got: %s", errMsg)
+		t.Fatal("error message contains the token")
 	}
 	if !contains(errMsg, "[REDACTED]") {
 		t.Fatalf("error message should contain [REDACTED], got: %s", errMsg)
@@ -191,7 +191,7 @@ func TestGetItem(t *testing.T) {
 		t.Fatalf("expected 2 fields, got %d", len(item.Fields))
 	}
 	if item.Fields[1].Value != "hunter2" {
-		t.Fatalf("expected 'hunter2', got %q", item.Fields[1].Value)
+		t.Fatal("wrong field value")
 	}
 }
 

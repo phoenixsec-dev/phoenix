@@ -39,6 +39,37 @@ func splitLogName(path string) (dir, stem, ext string) {
 	return filepath.Clean(dir), strings.TrimSuffix(base, ext), ext
 }
 
+// parseArchiveName splits the file name of an archive of the log <stem><ext>.
+func parseArchiveName(stem, ext, name string) (stamp string, compressed, ok bool) {
+	rest, ok := strings.CutPrefix(name, stem+"-")
+	if !ok {
+		return "", false, false
+	}
+	if s, gz := strings.CutSuffix(rest, ext+".gz"); gz {
+		stamp, compressed = s, true
+	} else if stamp, ok = strings.CutSuffix(rest, ext); !ok {
+		return "", false, false
+	}
+	_, err := time.Parse(archiveLayout, stamp)
+	return stamp, compressed, err == nil
+}
+
+// UsesName reports whether rotating the log at logPath could write, compress or
+// remove a file at path: an archive, or one being compressed.
+func UsesName(logPath, path string) bool {
+	dir, stem, ext := splitLogName(logPath)
+	if filepath.Dir(path) != dir {
+		return false
+	}
+	name := filepath.Base(path)
+	if _, _, ok := parseArchiveName(stem, ext, name); ok {
+		return true
+	}
+	plain, tmp := strings.CutSuffix(name, ".gz.tmp")
+	_, compressed, ok := parseArchiveName(stem, ext, plain)
+	return tmp && ok && !compressed
+}
+
 // archives lists the archives of the log at path, oldest first. When a
 // rotation was cut short and both x.log and x.log.gz exist, the plain one
 // is listed.
@@ -50,22 +81,11 @@ func archives(path string) ([]archive, error) {
 	}
 	byStamp := map[string]archive{}
 	for _, de := range ents {
-		name := de.Name()
-		rest, ok := strings.CutPrefix(name, stem+"-")
+		stamp, compressed, ok := parseArchiveName(stem, ext, de.Name())
 		if !ok || de.IsDir() {
 			continue
 		}
-		a := archive{path: filepath.Join(dir, name)}
-		if s, ok := strings.CutSuffix(rest, ext+".gz"); ok {
-			a.stamp, a.compressed = s, true
-		} else if s, ok := strings.CutSuffix(rest, ext); ok {
-			a.stamp = s
-		} else {
-			continue
-		}
-		if _, err := time.Parse(archiveLayout, a.stamp); err != nil {
-			continue // not ours
-		}
+		a := archive{path: filepath.Join(dir, de.Name()), stamp: stamp, compressed: compressed}
 		if prev, dup := byStamp[a.stamp]; dup && !prev.compressed {
 			continue
 		}

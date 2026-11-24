@@ -141,3 +141,60 @@ func TestSignRefusals(t *testing.T) {
 		t.Fatal("re-signing a certificate must be refused")
 	}
 }
+
+// A key cut off while being made must not be left at its path: the server
+// would refuse to start on it. It is written elsewhere and moved into place,
+// so the path holds a whole key or nothing.
+func TestKeyIsMovedIntoPlaceWhole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ssh_ca.key")
+	var partial bool
+	write := writeKeyFile
+	defer func() { writeKeyFile = write }()
+	writeKeyFile = func(p string, data []byte, perm os.FileMode) error {
+		if p != path || len(data) == 0 || perm != 0600 {
+			t.Errorf("write %s, %d bytes, %o", p, len(data), perm)
+		}
+		_, err := os.Lstat(path)
+		partial = err == nil
+		return os.ErrInvalid // the write fails
+	}
+	if _, _, err := LoadOrCreate(path); err == nil || partial {
+		t.Fatalf("err %v, partial file %v", err, partial)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Errorf("a failed write left something: %v", err)
+	}
+	writeKeyFile = write
+	first, created, err := LoadOrCreate(path)
+	if err != nil || !created {
+		t.Fatalf("created %v, err %v", created, err)
+	}
+	again, created, err := LoadOrCreate(path)
+	if err != nil || created || PublicKey(first) != PublicKey(again) {
+		t.Errorf("reload: created %v, err %v", created, err)
+	}
+}
+
+// Two servers making the key at once end up with the same one.
+func TestConcurrentCreateAgrees(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ssh_ca.key")
+	keys := make(chan string, 8)
+	for range cap(keys) {
+		go func() {
+			ca, _, err := LoadOrCreate(path)
+			if err != nil {
+				keys <- err.Error()
+				return
+			}
+			keys <- PublicKey(ca)
+		}()
+	}
+	got := map[string]bool{}
+	for range cap(keys) {
+		got[<-keys] = true
+	}
+	ca, _, err := LoadOrCreate(path)
+	if err != nil || len(got) != 1 || !got[PublicKey(ca)] {
+		t.Errorf("%d different results, %v", len(got), err)
+	}
+}

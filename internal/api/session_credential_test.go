@@ -145,14 +145,14 @@ func (e *credEnv) create(tok string, force bool) {
 		path += "?force=true"
 	}
 	if code, body := e.do("POST", path, "admin-token", `{"name":"worker","token":"`+tok+`","permissions":`+workerACL+`}`); code != 200 {
-		e.t.Fatalf("create worker: %d %s", code, body)
+		e.t.Fatalf("create worker: %d %s", code, failBody(body))
 	}
 }
 
 func (e *credEnv) remove() {
 	e.t.Helper()
 	if code, body := e.do("DELETE", "/v1/agents/worker", "admin-token", ""); code != 200 {
-		e.t.Fatalf("delete worker: %d %s", code, body)
+		e.t.Fatalf("delete worker: %d %s", code, failBody(body))
 	}
 }
 
@@ -168,7 +168,7 @@ func (e *credEnv) wantDead(when, sess string) {
 	for _, c := range [][2]string{{"GET", "/v1/secrets/test/a"}, {"GET", "/v1/whoami"}, {"POST", "/v1/session/renew"}} {
 		code, body := e.do(c[0], c[1], sess, "{}")
 		if code != 401 || !strings.Contains(body, `"SESSION_INVALID"`) || !strings.Contains(body, `"remint_session"`) {
-			e.t.Errorf("%s: %s %s = %d %s, want 401 SESSION_INVALID", when, c[0], c[1], code, body)
+			e.t.Errorf("%s: %s %s = %d %s, want 401 SESSION_INVALID", when, c[0], c[1], code, failBody(body))
 		}
 	}
 }
@@ -176,7 +176,7 @@ func (e *credEnv) wantDead(when, sess string) {
 func (e *credEnv) wantAlive(when, sess string) {
 	e.t.Helper()
 	if code, body := e.do("GET", "/v1/secrets/test/a", sess, ""); code != 200 {
-		e.t.Errorf("%s: session read = %d %s, want 200", when, code, body)
+		e.t.Errorf("%s: session read = %d %s, want 200", when, code, failBody(body))
 	}
 }
 
@@ -207,7 +207,7 @@ func TestSessionRecordHoldsFingerprintNotToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(saved, `"credential_fp": "`+sessionCredentialFP(a)+`"`) {
-		t.Errorf("sessions file has no credential fingerprint: %s", saved)
+		t.Error("sessions file has no credential fingerprint")
 	}
 	for _, secret := range []string{"old-token", crypto.HashToken("old-token"), sess} {
 		if strings.Contains(saved, secret) {
@@ -354,6 +354,10 @@ func TestEveryEndpointChecksSessionCredential(t *testing.T) {
 		{"POST", "/v1/access-requests/req_x/approve", `{}`},
 		{"POST", "/v1/access-requests/req_x/deny", `{}`},
 		{"POST", "/v1/grants/gnt_x/revoke", ""},
+		{"POST", "/v1/access-requests/req_x/approve-limited", `{}`},
+		{"POST", "/v1/resolve-approved", `{"refs":["phoenix://test/a"]}`},
+		{"PATCH", "/v1/agents/worker/identity", `{}`},
+		{"PATCH", "/v1/metadata/test/a", `{}`},
 	}
 	wantRowPerRoute(t, endpoints)
 	changes := map[string]func(e *credEnv) error{
@@ -371,7 +375,7 @@ func TestEveryEndpointChecksSessionCredential(t *testing.T) {
 				}
 				code, body := e.do(ep[0], ep[1], sess, ep[2])
 				if code != 401 || !strings.Contains(body, `"SESSION_INVALID"`) {
-					t.Fatalf("%d %s, want 401 SESSION_INVALID", code, body)
+					t.Fatalf("%d %s, want 401 SESSION_INVALID", code, failBody(body))
 				}
 				if strings.Contains(e.savedSessions(), "worker") {
 					t.Error("session not ended on use")
@@ -440,7 +444,7 @@ func TestSessionsWithoutFingerprintEndAtStart(t *testing.T) {
 			}
 			e.wantDead("after upgrade", sess)
 			if code, body := e.do("GET", "/v1/whoami", revoked, ""); code != 401 || !strings.Contains(body, "SESSION_REVOKED") {
-				t.Errorf("revoked session after upgrade: %d %s, want SESSION_REVOKED", code, body)
+				t.Errorf("revoked session after upgrade: %d %s, want SESSION_REVOKED", code, failBody(body))
 			}
 		})
 	}
@@ -454,11 +458,11 @@ func TestSessionCannotMintSession(t *testing.T) {
 	for _, role := range []string{"local", "dev"} {
 		code, body := e.do("POST", "/v1/session/mint", sess, `{"role":"`+role+`"}`)
 		if code != 403 || !strings.Contains(body, "BOOTSTRAP_FAILED") {
-			t.Errorf("mint %s with a session: %d %s, want 403 BOOTSTRAP_FAILED", role, code, body)
+			t.Errorf("mint %s with a session: %d %s, want 403 BOOTSTRAP_FAILED", role, code, failBody(body))
 		}
 	}
 	if code, body := e.do("POST", "/v1/session/mint", "old-token", `{"role":"local"}`); code != 200 {
-		t.Errorf("mint local with the bearer token: %d %s", code, body)
+		t.Errorf("mint local with the bearer token: %d %s", code, failBody(body))
 	}
 }
 
@@ -491,7 +495,7 @@ func TestMintDuringCredentialChange(t *testing.T) {
 			code, body := e.doReader("POST", "/v1/session/mint", "old-token",
 				&hookBody{Reader: strings.NewReader(`{"role":"dev"}`), hook: func() { change(e) }})
 			if code != 401 || !strings.Contains(body, `"unauthorized"`) {
-				t.Errorf("mint = %d %s, want 401", code, body)
+				t.Errorf("mint = %d %s, want 401", code, failBody(body))
 			}
 			if live := e.sessions.List(); len(live) != 0 {
 				t.Errorf("%d live sessions left for the old credential", len(live))
@@ -513,14 +517,14 @@ func TestSealBoundSessionEndedDuringRequest(t *testing.T) {
 		Tok string `json:"session_token"`
 	}
 	if json.Unmarshal([]byte(body), &m); code != 200 {
-		t.Fatalf("mint: %d %s", code, body)
+		t.Fatalf("mint: %d %s", code, failBody(body))
 	}
 	code, body = e.doReader("POST", "/v1/resolve", m.Tok, &hookBody{
 		Reader: strings.NewReader(`{"refs":["phoenix://test/a"]}`),
 		hook:   func() { e.create("new-token", true) },
 	})
 	if code != 401 || strings.Contains(body, "synthetic-value") {
-		t.Errorf("resolve = %d %s, want 401 and no value", code, body)
+		t.Errorf("resolve = %d %s, want 401 and no value", code, failBody(body))
 	}
 }
 
@@ -569,7 +573,7 @@ func TestCredentialChangeRaces(t *testing.T) {
 						old = append(old, tok)
 						mu.Unlock()
 					} else if code != 401 || !strings.Contains(body, "SESSION_INVALID") {
-						t.Errorf("renew during replace: %d %s, want 401 SESSION_INVALID", code, body)
+						t.Errorf("renew during replace: %d %s, want 401 SESSION_INVALID", code, failBody(body))
 					}
 				}
 			}()
@@ -589,7 +593,7 @@ func TestCredentialChangeRaces(t *testing.T) {
 	}
 	for _, tok := range old {
 		if code, body := e.do("GET", "/v1/whoami", tok, ""); code != 401 || !strings.Contains(body, "SESSION_INVALID") {
-			t.Fatalf("old session: %d %s, want 401 SESSION_INVALID", code, body)
+			t.Fatalf("old session: %d %s, want 401 SESSION_INVALID", code, failBody(body))
 		}
 	}
 }
@@ -686,7 +690,17 @@ func (e *credEnv) widen() {
 	code, body := e.do("POST", "/v1/agents?force=true", "admin-token",
 		`{"name":"worker","token":"new-token","permissions":[{"path":"**","actions":["list","read_value"]}]}`)
 	if code != 200 {
-		e.t.Errorf("replace: %d %s", code, body)
+		e.t.Errorf("replace: %d %s", code, failBody(body))
+	}
+}
+
+// createWide makes the worker agent anew with what widen gives it.
+func (e *credEnv) createWide() {
+	e.t.Helper()
+	code, body := e.do("POST", "/v1/agents", "admin-token",
+		`{"name":"worker","token":"new-token","permissions":[{"path":"**","actions":["list","read_value"]}]}`)
+	if code != 200 {
+		e.t.Errorf("create: %d %s", code, body)
 	}
 }
 
@@ -704,7 +718,7 @@ func TestRunningRequestCannotUseReplacementPermissions(t *testing.T) {
 				e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(func() { ran = true; change(e) }) }}
 				code, body := e.do("GET", path, sess, "")
 				if !ran || code != 401 || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other/b") {
-					t.Errorf("ran %v, %d %s, want 401 SESSION_INVALID", ran, code, body)
+					t.Errorf("ran %v, %d %s, want 401 SESSION_INVALID", ran, code, failBody(body))
 				}
 			})
 		}
@@ -717,7 +731,7 @@ func TestRunningRequestCannotUseReplacementPermissions(t *testing.T) {
 		e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(e.widen) }}
 		code, body := e.do("POST", "/v1/resolve", sess, `{"refs":["phoenix://test/a","phoenix://other/b"]}`)
 		if code != 200 || !strings.Contains(body, "synthetic-value") || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other-value") {
-			t.Errorf("%d %s, want the first value and SESSION_INVALID for the second", code, body)
+			t.Errorf("%d %s, want the first value and SESSION_INVALID for the second", code, failBody(body))
 		}
 	})
 }
@@ -755,7 +769,7 @@ func TestAccessCheckSaysWhySessionEnded(t *testing.T) {
 			w := httptest.NewRecorder()
 			e.srv.writeDataDenial(w, httptest.NewRequest("GET", "/v1/secrets/test/a", nil), info, "read_value", "test/a", "", want)
 			if w.Code != 401 || !strings.Contains(w.Body.String(), want) {
-				t.Errorf("denial = %d %s, want 401 %s", w.Code, w.Body.String(), want)
+				t.Errorf("denial = %d %s, want 401 %s", w.Code, failBody(w.Body.String()), want)
 			}
 		})
 	}
@@ -769,5 +783,276 @@ func TestDeleteUnknownAgent(t *testing.T) {
 	}
 	if names := e.srv.acl.ListAgents(); !slices.Contains(names, "worker") {
 		t.Errorf("agents = %v", names)
+	}
+}
+
+// A bearer request that logged in before its token was replaced never uses
+// permissions that only the replacement token was given. The hook runs after
+// login and before the permission check.
+func TestRunningBearerRequestCannotUseReplacementPermissions(t *testing.T) {
+	changes := map[string]func(*credEnv){
+		"replace":           (*credEnv).widen,
+		"delete and create": func(e *credEnv) { e.remove(); e.createWide() },
+	}
+	for how, change := range changes {
+		for _, path := range []string{"/v1/secrets/other/", "/v1/metadata/other/", "/v1/secrets/empty/", "/v1/metadata/empty/"} {
+			t.Run(path+" "+how, func(t *testing.T) {
+				e := newCredEnv(t)
+				e.wideRole()
+				var once sync.Once
+				ran := false
+				e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(func() { ran = true; change(e) }) }}
+				code, body := e.do("GET", path, "old-token", "")
+				if !ran || code != 401 || strings.Contains(body, "other/b") {
+					t.Errorf("ran %v, %d %s, want 401", ran, code, body)
+				}
+			})
+		}
+		t.Run("resolve "+how, func(t *testing.T) {
+			e := newCredEnv(t)
+			e.wideRole()
+			code, body := e.doReader("POST", "/v1/resolve", "old-token", &hookBody{
+				Reader: strings.NewReader(`{"refs":["phoenix://other/b"]}`), hook: func() { change(e) }})
+			if code != 401 || strings.Contains(body, "other-value") {
+				t.Errorf("resolve = %d %s, want 401 and no value", code, body)
+			}
+		})
+	}
+}
+
+// Every permission decision made from a login, admin and approver ones
+// included, stops counting once that login's token was replaced. The same
+// token written again (--force) is still the same credential.
+func TestReplacedTokenLoginLosesEveryPermission(t *testing.T) {
+	e := newCredEnv(t)
+	e.srv.SetAccessRequests(config.AccessRequestsSettings{Enabled: true, Approvers: []string{"worker"}})
+	login := func(tok string) *authInfo {
+		r := httptest.NewRequest("GET", "/v1/whoami", nil)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		info, err := e.srv.authenticateInfo(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	allowed := func(info *authInfo) []bool {
+		return []bool{
+			e.srv.baseAccessReason(info, "test/a", "read_value", acl.ActionReadValue) == "",
+			e.srv.authorize(info, "agents", acl.ActionAdmin) == nil,
+			e.srv.isApprover(info),
+		}
+	}
+	old := login("old-token")
+	if got := allowed(old); !slices.Equal(got, []bool{true, false, true}) {
+		t.Fatalf("before: %v", got)
+	}
+	e.create("old-token", true)
+	if got := allowed(old); !slices.Equal(got, []bool{true, false, true}) {
+		t.Errorf("same token written again: %v", got)
+	}
+	all := []acl.Permission{{Path: "*", Actions: []acl.Action{acl.ActionAdmin}}}
+	if err := e.srv.acl.UpdateAgent("worker", "new-token", all); err != nil {
+		t.Fatal(err)
+	}
+	if got := allowed(old); !slices.Equal(got, []bool{false, false, false}) {
+		t.Errorf("old login after replace: %v, want nothing allowed", got)
+	}
+	if got := allowed(login("new-token")); !slices.Equal(got, []bool{true, true, true}) {
+		t.Errorf("new login: %v", got)
+	}
+}
+
+// A request that logged in and then takes its time sending its body does
+// nothing once its token is replaced: no new agent, no secret, no approval.
+func TestSlowBodyAfterTokenReplaced(t *testing.T) {
+	admin := []acl.Permission{{Path: "*", Actions: []acl.Action{acl.ActionAdmin}}}
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/v1/agents", `{"name":"backdoor","token":"fake","permissions":[]}`},
+		{"POST", "/v1/agents?force=true", `{"name":"admin","token":"fake","permissions":[]}`},
+		{"PUT", "/v1/secrets/test/b", `{"value":"x"}`},
+		{"POST", "/v1/keypair", `{"agent_name":"admin","seal_public_key":"` + strings.Repeat("A", 43) + `="}`},
+		{"POST", "/v1/access-requests", `{"paths":["test/a"],"reason":"x"}`},
+		{"POST", "/v1/access-requests/req_x/approve", `{}`},
+		{"POST", "/v1/access-requests/req_x/approve-limited", `{"uses":1}`},
+		{"POST", "/v1/access-requests/req_x/deny", `{}`},
+		{"POST", "/v1/resolve", `{"refs":["phoenix://test/a"]}`},
+		{"POST", "/v1/resolve-approved", `{"refs":["phoenix://test/a"]}`},
+		{"PATCH", "/v1/agents/admin/identity", `{"who":"someone-else"}`},
+		{"PATCH", "/v1/metadata/test/a", `{"description":"changed"}`},
+	} {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			e := newCredEnv(t)
+			e.srv.SetAccessRequests(config.AccessRequestsSettings{Enabled: true, Approvers: []string{"worker"},
+				GrantableActions: []string{"read_value"}, RequestTTL: time.Minute, DefaultGrantTTL: time.Minute, MaxGrantTTL: time.Hour})
+			if err := e.srv.acl.UpdateAgent("worker", "old-token", admin); err != nil {
+				t.Fatal(err)
+			}
+			code, body := e.doReader(c.method, c.path, "old-token", &hookBody{Reader: strings.NewReader(c.body), hook: func() {
+				if err := e.srv.acl.UpdateAgent("worker", "new-token", nil); err != nil { // fewer permissions, too
+					t.Error(err)
+				}
+			}})
+			if code != 401 {
+				t.Errorf("%d %s, want 401", code, body)
+			}
+			if log, _ := os.ReadFile(filepath.Join(e.dir, "audit.log")); !strings.Contains(string(log), `"reason":"token_replaced"`) {
+				t.Error("no token_replaced audit line")
+			}
+			if _, err := e.srv.acl.GetAgent("backdoor"); err == nil {
+				t.Error("an agent was created")
+			}
+			if a, _ := e.srv.acl.GetAgent("admin"); a.Who == "someone-else" {
+				t.Error("an identity was changed")
+			}
+			if m, _ := e.srv.backend.Metadata("test/a"); m.Description == "changed" {
+				t.Error("a secret's description was changed")
+			}
+			if _, err := e.srv.backend.Get("test/b"); err == nil {
+				t.Error("a secret was written")
+			}
+		})
+	}
+}
+
+// On a disk that takes no writes, what is answered with an error gives nobody
+// anything, not even after the disk works again. A refused replacement ends no
+// session. A replacement that could not be saved ends the old token, with its
+// sessions, and does not put the new one in force; the answer says so.
+func TestForceWithFailedSave(t *testing.T) {
+	e := newCredEnv(t)
+	seedSecret(t, e.srv, "admin-token", "other/b", "other-value")
+	sess := e.mint("old-token")
+	force := func(as, name, tok string) (int, string) {
+		return e.do("POST", "/v1/agents?force=true", as, `{"name":"`+name+`","token":"`+tok+`","permissions":[{"path":"**","actions":["read_value"]}]}`)
+	}
+	for want, refused := range map[int]func() (int, string){
+		403: func() (int, string) { return force("old-token", "worker", "eve-token") },
+		400: func() (int, string) { return force("admin-token", "worker", "") },
+		409: func() (int, string) {
+			return e.do("POST", "/v1/agents", "admin-token", `{"name":"worker","token":"eve-token","permissions":`+workerACL+`}`)
+		},
+	} {
+		if code, body := refused(); code != want {
+			t.Errorf("refused replacement: %d %s, want %d", code, failBody(body), want)
+		}
+		e.wantAlive("after a refused replacement", sess)
+	}
+
+	if err := os.Chmod(e.dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(e.dir, 0700)
+	code, body := force("admin-token", "worker", "old-token")
+	if code == 200 {
+		t.Skip("running as a user the mode does not stop")
+	}
+	if code != 500 || strings.Contains(body, "old token") {
+		t.Errorf("same token: %d %s", code, failBody(body))
+	}
+	e.wantAlive("same token, not saved", sess)
+	if code, _ := e.do("GET", "/v1/secrets/other/b", "old-token", ""); code != 403 {
+		t.Errorf("wider permissions after a failed save: %d, want 403", code)
+	}
+	if code, _ := force("admin-token", "late", "late-token"); code != 500 {
+		t.Errorf("new agent: %d, want 500", code)
+	}
+	if code, _ := e.do("PUT", "/v1/secrets/test/a", "old-token", `{"value":"half-done"}`); code != 500 {
+		t.Errorf("secret write: %d, want 500", code)
+	}
+	if code, body := force("admin-token", "admin", "other-admin-token"); code != 500 || !strings.Contains(body, "your old token still works and the new one does not") {
+		t.Errorf("own token: %d %s", code, failBody(body))
+	}
+	if l := e.lines(audit.QueryOptions{Path: "admin", Limit: 1})[0]; l.Action != "update-agent" || l.Status != "denied" || l.Reason != "not_saved" {
+		t.Errorf("own token: audit line = %+v", l)
+	}
+	if code, body := force("admin-token", "worker", "new-token"); code != 500 || !strings.Contains(body, "the old token no longer works and the new one is not in force") {
+		t.Errorf("new token: %d %s", code, failBody(body))
+	}
+	if l := e.lines(audit.QueryOptions{Path: "worker", Limit: 1})[0]; l.Action != "update-agent" || l.Status != "denied" || l.Reason != "not_saved" {
+		t.Errorf("audit line = %+v", l)
+	}
+	check := func(when string) {
+		t.Helper()
+		for i, tok := range []string{"old-token", "new-token", "late-token", "other-admin-token"} {
+			if code, _ := e.do("GET", "/v1/secrets/test/a", tok, ""); code != 401 {
+				t.Errorf("%s: token %d answered %d, want 401", when, i, code)
+			}
+		}
+		e.wantDead(when, sess)
+		if _, body := e.do("GET", "/v1/secrets/test/a", "admin-token", ""); !strings.Contains(body, "synthetic-value") {
+			t.Errorf("%s: the secret changed, or the admin's own token stopped", when)
+		}
+	}
+	check("on the full disk")
+	if err := os.Chmod(e.dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := e.do("PUT", "/v1/secrets/test/other", "admin-token", `{"value":"x"}`); code != 200 {
+		t.Fatalf("write on the repaired disk: %d", code)
+	}
+	if code, _ := e.do("POST", "/v1/agents", "admin-token", `{"name":"another","token":"another-token","permissions":[]}`); code != 200 {
+		t.Fatalf("new agent on the repaired disk: %d", code)
+	}
+	check("after the next saves")
+	e.start()
+	check("after a restart")
+	e.create("new-token", true)
+	if code, _ := e.do("GET", "/v1/secrets/test/a", "new-token", ""); code != 200 {
+		t.Errorf("run again: %d, want 200", code)
+	}
+}
+
+// Standing "always" access is looked up by name too: it must not answer a login
+// whose token was replaced after it logged in.
+func TestAlwaysAccessNeedsCurrentToken(t *testing.T) {
+	e := newCredEnv(t)
+	seedSecret(t, e.srv, "admin-token", "other/b", "other-value")
+	r := httptest.NewRequest("GET", "/v1/whoami", nil)
+	r.Header.Set("Authorization", "Bearer old-token")
+	info, err := e.srv.authenticateInfo(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	any := func(acl.Agent) error { return nil }
+	err = errors.Join(
+		e.srv.acl.StageAlways("worker", acl.AlwaysOrigin{RequestID: "req_x", By: "someone"}, []string{"other/b"}, any),
+		e.srv.acl.FinishAlways("worker", "req_x", any))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.srv.approvedAccess(info, "other/b", "127.0.0.1").Reason; got != "" {
+		t.Fatalf("before: %q", got)
+	}
+	a, _ := e.srv.acl.GetAgent("worker")
+	if err := e.srv.acl.UpdateAgent("worker", "new-token", a.Permissions); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.srv.approvedAccess(info, "other/b", "127.0.0.1").Reason; got != reasonTokenReplaced {
+		t.Errorf("after replace: %q, want %q", got, reasonTokenReplaced)
+	}
+}
+
+// The view of one request looks the agent's access up by name, so the login is
+// checked after it was built. The clock runs in the middle of that.
+func TestRequestViewIsCheckedAfterBuilding(t *testing.T) {
+	e := newCredEnv(t)
+	e.srv.SetAccessRequests(config.AccessRequestsSettings{Enabled: true, GrantableActions: []string{"read_value"},
+		RequestTTL: time.Minute, DefaultGrantTTL: time.Minute, MaxGrantTTL: time.Hour})
+	code, body := e.do("POST", "/v1/access-requests", "old-token", `{"paths":["other/b"],"reason":"x"}`)
+	var m struct{ ID string }
+	if json.Unmarshal([]byte(body), &m); code != 201 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var once sync.Once
+	e.srv.now = func() time.Time {
+		once.Do(func() {
+			if err := e.srv.acl.UpdateAgent("worker", "new-token", nil); err != nil {
+				t.Error(err)
+			}
+		})
+		return time.Now()
+	}
+	if code, body := e.do("GET", "/v1/access-requests/"+m.ID, "old-token", ""); code != 401 || strings.Contains(body, "other/b") {
+		t.Errorf("%d %s, want 401", code, body)
 	}
 }

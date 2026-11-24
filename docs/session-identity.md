@@ -127,7 +127,8 @@ agent's token. Every use, renewal included, checks this.
 - Each token the server issues gets a random `credential_id` in the ACL file, and
   the session is bound to both. So a token that was taken away and given out
   again is a new credential: its old sessions stay dead, also if the change
-  happened while sessions were disabled.
+  happened while sessions were disabled. (An identity also has a `serial`, which
+  is not about tokens: see [Who, authority and kind](authentication.md#who-authority-and-kind).)
 
 An ended session gets `401 SESSION_INVALID`. The CLI and `phoenix mcp-server`
 mint a new one by themselves once `PHOENIX_TOKEN` holds the new token; a
@@ -138,6 +139,12 @@ mint a new one.
 If the sessions file cannot be saved after the change, the sessions are still
 dead, also after a restart, because the ACL no longer holds their credential. The
 server logs it and tries again every minute.
+
+The same goes for every other save of that file on a full disk. The server starts,
+and minting and renewing work, from memory: the log says `WARNING` and the save is
+retried every minute. A restart before that forgets such a session, and the client
+mints another. A revoke that could not be saved denies at once, answers an error
+that says so and is retried too.
 
 ### Expiry
 
@@ -216,9 +223,10 @@ Data tool denials (`phoenix_get`, `phoenix_resolve`, `phoenix_list`) show the
 code and next step.
 
 The request-use tools (`phoenix_request_use`, `phoenix_request_status`,
-`phoenix_whoami`) are listed too, but requests are refused for session tokens
-(`SESSION_CANNOT_REQUEST`): run an MCP server on the agent's own bootstrap
-identity for them. See [Access requests](access-requests.md).
+`phoenix_whoami`) are listed too. Requests belong to the agent, not to a role,
+so the first two use the agent's own `PHOENIX_TOKEN`. With only a `phxs_` token
+they are refused (`SESSION_CANNOT_REQUEST`). See
+[Access requests](access-requests.md).
 
 ## Denial codes
 
@@ -284,7 +292,8 @@ Sessions survive a server restart:
   cannot be used to log in. Deleting it ends every session; clients mint
   new ones.
 - Revoked sessions stay in the file until they expire, so a revoked token keeps
-  getting `SESSION_REVOKED` after a restart.
+  getting `SESSION_REVOKED` after a restart, even if its role was removed or
+  changed.
 - A role change still takes effect at restart. The file keeps a hash of each
   role's settings; sessions of a role that was removed or changed in any way
   are dropped at start (the log says how many), and clients mint new ones under

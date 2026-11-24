@@ -21,8 +21,14 @@ and the change may roll back to the old file on power loss.
 
 Each file is safe on its own, but the two are not written as one unit. A
 crash in the moment between saving the store and saving the new key can
-leave a store that the key file cannot open. The `.pre-rotate` backup below
-covers that case.
+leave a store that the key file cannot open. The server then refuses to start
+and says what to do; the `.pre-rotate` backup below covers that case. It is
+never overwritten by a rotation that cannot read the store. (If only some
+namespaces do not open, the server starts and logs a `WARNING` naming them.)
+
+`master.key.prev` is the key from before the last rotation that worked. During a
+rotation the old key waits in `master.key.prev.new`; after a crash at the very
+end it may still be there, and then that file is the newest old key.
 
 ### If rotation fails
 
@@ -52,13 +58,16 @@ what an earlier message listed.
 If the server already stopped, or will not start (it cannot decrypt secrets):
 
 1. Stop the server and copy the whole data directory somewhere safe first.
-2. If `<store>.pre-rotate` exists: move it over the store file. Keep
-   `master.key` as it is.
+2. If `<store>.pre-rotate` exists and the server's message names it as the
+   recovery: move it over the store file. Keep `master.key` as it is. (If the
+   message does not name it, its secrets differ from the store's or it does not
+   open with this key either.)
 3. Otherwise, if `<store>.emergency-key` exists: keep the store file, and
    move `<store>.emergency-key` over `master.key`. Start with the usual
    passphrase.
-4. If neither file exists or neither works: `master.key.prev` is the key
-   from before the last rotation. Put it in place of `master.key` (this
+4. If neither file exists or neither works: the key from before the last
+   rotation is in `master.key.prev`, or in `master.key.prev.new` if a rotation
+   was cut off. Try each that exists on the safety copy first. Put it in place of `master.key` (this
    fixes a store that rolled back to the old version after a power cut).
 5. Start the server and read a few secrets to confirm.
 6. Once it works, delete the leftover recovery files and your safety copy.
@@ -105,7 +114,11 @@ phoenix-server --config /data/config.json
 phoenix-server --protect-key --config /data/config.json
 ```
 
-Enter an empty new passphrase to remove protection.
+Enter an empty new passphrase to remove protection. Restart the server
+afterwards: until then it refuses `rotate-master` with a 409, because it would
+save the new key with the passphrase it started with. If the key was rotated
+while `--protect-key` waited for you, it changes nothing and asks you to run it
+again.
 
 > **Warning:** If you lose the passphrase, you lose your secrets.
 

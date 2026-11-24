@@ -58,6 +58,11 @@
         }, 30000);
     }
 
+    // Installable app. The worker stores only static files (sw.js).
+    if ('serviceWorker' in navigator && window.isSecureContext) {
+        navigator.serviceWorker.register('/dashboard/sw.js', { scope: '/dashboard/' }).catch(function() {});
+    }
+
     // Auto-dismiss flash messages after 5s
     document.querySelectorAll('.flash:not(.flash-sticky)').forEach(function(el) {
         setTimeout(function() {

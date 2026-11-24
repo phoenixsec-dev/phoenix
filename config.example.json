@@ -68,7 +68,9 @@
   "dashboard": {
     "enabled": false,
     "password_hash": "",
-    "session_ttl": "4h"
+    "session_ttl": "4h",
+    "reveal": false,
+    "notify_on_reveal": true
   },
   "access_requests": {
     "enabled": true,

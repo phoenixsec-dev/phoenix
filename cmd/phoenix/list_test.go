@@ -82,14 +82,14 @@ func TestCmdInfoNeverPrintsValue(t *testing.T) {
 			t.Errorf("unexpected request %s", r.URL)
 		}
 		w.Write([]byte(`{"path":"svc/mail-password","description":"Mail vault login","tags":["mail","prod"],` +
-			`"created":"2026-01-02T03:04:05Z","created_by":"aaron","updated_by":"vector"}`))
+			`"created":"2026-01-02T03:04:05Z","created_by":"robin","updated_by":"courier"}`))
 	}, func() {
 		var err error
 		out := captureStdout(t, func() { err = cmdInfo([]string{"svc/mail-password"}) })
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"path:         svc/mail-password", "description:  Mail vault login", "tags:         mail, prod", "by aaron", "updated:      by vector"} {
+		for _, want := range []string{"path:         svc/mail-password", "description:  Mail vault login", "tags:         mail, prod", "by robin", "updated:      by courier"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("info output missing %q:\n%s", want, out)
 			}

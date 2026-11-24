@@ -78,7 +78,7 @@ func import1Password(vault, itemFilter, prefix string, dryRun, skipExisting bool
 			}
 
 			if skipExisting {
-				resp, err := apiRequest("GET", "/v1/secrets/"+secretPath, nil)
+				resp, err := apiRequest("GET", "/v1/secrets/"+escapeName(secretPath), nil)
 				if err == nil {
 					resp.Body.Close()
 					if resp.StatusCode == 200 {
@@ -94,7 +94,7 @@ func import1Password(vault, itemFilter, prefix string, dryRun, skipExisting bool
 				"description": fmt.Sprintf("Imported from 1Password: %s/%s", vault, full.Title),
 			})
 
-			resp, err := apiRequest("PUT", "/v1/secrets/"+secretPath, strings.NewReader(string(body)))
+			resp, err := apiRequest("PUT", "/v1/secrets/"+escapeName(secretPath), strings.NewReader(string(body)))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to import %s: %v\n", secretPath, err)
 				continue

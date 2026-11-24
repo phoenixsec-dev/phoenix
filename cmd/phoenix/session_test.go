@@ -51,7 +51,7 @@ func TestAutoMintSessionReusesCachedTokenWithoutMint(t *testing.T) {
 			t.Fatalf("expected no mint call, got %d", atomic.LoadInt32(&mintCount))
 		}
 		if token != "phxs_cached-token" {
-			t.Fatalf("token = %q, want cached token", token)
+			t.Fatal("the token is not the cached one")
 		}
 
 		// Repeated invocation should also reuse cache and not mint.
@@ -109,7 +109,7 @@ func TestAutoMintSessionRenewsNearExpiryTokenInsteadOfMinting(t *testing.T) {
 			t.Fatalf("expected one renew call, got %d", atomic.LoadInt32(&renewCount))
 		}
 		if token != "phxs_renewed-token" {
-			t.Fatalf("token = %q, want renewed token", token)
+			t.Fatal("the token is not the renewed one")
 		}
 	})
 }
@@ -147,7 +147,7 @@ func TestAutoMintSessionSucceedsUnsealedWithoutHome(t *testing.T) {
 			t.Fatalf("requireAuth without HOME: %v", err)
 		}
 		if token != "phxs_unsealed" {
-			t.Fatalf("token = %q, want minted session token", token)
+			t.Fatal("the token is not the minted session token")
 		}
 	})
 }
@@ -161,7 +161,7 @@ func TestEnsureSealKeyMissingHomeReturnsUnsealed(t *testing.T) {
 		t.Fatalf("ensureSealKey without HOME: %v", err)
 	}
 	if priv != nil || pub != "" {
-		t.Fatalf("expected unsealed result, got priv=%v pub=%q", priv, pub)
+		t.Fatalf("expected unsealed result, got a private key: %v, public %q", priv != nil, pub)
 	}
 }
 
@@ -228,7 +228,7 @@ func TestCmdGetUsesRoleSessionSealKey(t *testing.T) {
 			t.Fatalf("read stdout: %v", err)
 		}
 		if got := string(out); got != "hello" {
-			t.Fatalf("output = %q, want hello", got)
+			t.Fatal("wrong value printed")
 		}
 	})
 }

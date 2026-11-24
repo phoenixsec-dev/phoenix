@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // clockSkew backdates a certificate's start so a machine whose clock runs a
@@ -31,6 +33,9 @@ func LoadOrCreate(path string) (signer ssh.Signer, created bool, err error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		signer, err = create(path)
+		if errors.Is(err, fs.ErrExist) {
+			return LoadOrCreate(path) // another server made it first: use that one
+		}
 		return signer, err == nil, err
 	case err != nil:
 		return nil, false, err
@@ -50,6 +55,11 @@ func LoadOrCreate(path string) (signer ssh.Signer, created bool, err error) {
 	return signer, false, nil
 }
 
+// writeKeyFile puts a whole, synced file in place without replacing one: a key
+// cut off half way would keep the server from starting. Tests replace it.
+var writeKeyFile = fsutil.WriteFileNew
+
+// create makes the key; fs.ErrExist means someone else did first.
 func create(path string) (ssh.Signer, error) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -59,17 +69,7 @@ func create(path string) (ssh.Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := f.Write(pem.EncodeToMemory(block)); err != nil {
-		f.Close()
-		os.Remove(path)
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(path)
+	if err := writeKeyFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
 		return nil, err
 	}
 	return ssh.NewSignerFromKey(priv)

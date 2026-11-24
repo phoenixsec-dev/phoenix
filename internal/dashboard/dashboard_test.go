@@ -316,7 +316,8 @@ func TestLoginRateLimiting(t *testing.T) {
 func TestSecureCookieOnTLS(t *testing.T) {
 	h, _ := testHandler(t)
 
-	// Login via X-Forwarded-Proto: https
+	// Login via X-Forwarded-Proto: https. Also with no trusted_proxies, or an
+	// upgrade would take Secure away from installs behind a proxy.
 	form := url.Values{"credential": {"testpass"}}
 	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

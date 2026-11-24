@@ -108,7 +108,8 @@ troubleshooting: [Access Requests](access-requests.md).
 
 The `notify_*` keys are optional. `notify_url` gets one POST per new request
 (ntfy-style; agent, action, path count, request id, dashboard link; never the
-reason). `notify_token_ref` names a secret in this Phoenix store that is sent
+reason), and one when a secret is shown or copied in the dashboard.
+`notify_token_ref` names a secret in this Phoenix store that is sent
 as a bearer token; never put the token itself in the config. The server
 refuses to start if `notify_url` or `notify_dashboard_url` is not a plain
 `http(s)://` URL or contains a `user:password@` part, or if
@@ -119,7 +120,8 @@ refuses to start if `notify_url` or `notify_dashboard_url` is not a plain
 The operator dashboard provides a browser-based UI for approvals, sessions,
 audit, and role inspection. All assets are embedded — no CDN or build step.
 
-Generate a password hash first:
+`phoenix-server --init` turns it on and sets its password. On an older install,
+or to change the password, generate a hash (yourself, not through an agent):
 
 ```bash
 phoenix-server --hash-password
@@ -128,14 +130,16 @@ phoenix-server --hash-password
 # $2a$10$...
 ```
 
-Then add it to config:
+Then put it in the config and restart:
 
 ```json
 {
   "dashboard": {
     "enabled": true,
     "password_hash": "$2a$10$...",
-    "session_ttl": "4h"
+    "session_ttl": "4h",
+    "reveal": false,
+    "notify_on_reveal": true
   }
 }
 ```
@@ -145,6 +149,9 @@ Then add it to config:
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
+| `dashboard.trusted_proxies` | `[]string` | Reverse proxies (IPs or CIDRs) whose `X-Forwarded-For` the dashboard believes (default: none). Set it if the dashboard is behind a reverse proxy; see [Dashboard](dashboard.md#network-access-tls-reverse-proxy) |
+| `dashboard.reveal` | `bool` | Let the dashboard show and copy secret values (default `false`). Finding, adding and editing work either way. Only this file can turn it on |
+| `dashboard.notify_on_reveal` | `bool` | Ping the owner when a value is shown or copied (default `true`). Goes to `access_requests.notify_url`, also with access requests off. The audit line is always written |
 
 `password_hash` is required when the dashboard is enabled (`dashboard.pin`
 was removed; a config that still sets it will not start).
@@ -157,8 +164,7 @@ Login attempts are rate-limited with exponential backoff (5 failures before lock
 up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.
 
 **Transport security:** When a request arrives over HTTPS (`https_listener`)
-or through a TLS reverse proxy (detected via
-`X-Forwarded-Proto: https`),
+or through a TLS reverse proxy (detected via `X-Forwarded-Proto: https`),
 the session cookie is set with `Secure` flag automatically. For production use:
 
 - Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`), or
@@ -167,6 +173,42 @@ the session cookie is set with `Secure` flag automatically. For production use:
 
 Do not expose the dashboard over plain HTTP on a network you do not control —
 the server logs a loud startup warning if you do.
+
+## One server per set of files
+
+`phoenix-server` keeps its store, ACL, grants and sessions in memory and
+rewrites each file whole, so two servers on the same files would undo each
+other's writes. At start it locks every file it rewrites (store, ACL, grants
+file, sessions file, audit log) through an empty `<file>.lock` next to it, and
+refuses to start while another server holds one. Two servers may share an audit
+log if both have a negative `rotate_mb`, and a master key if their stores are
+separate. A shared key cannot be rotated (409) while both run: give the other
+server its own copy of the key file first, because after a rotation the old key
+is the only one that opens its store.
+The lock ends with the process, however it ends; a leftover `.lock` file blocks
+nothing. On a filesystem without locks the server starts and logs a `WARNING`.
+
+**Upgrading and going back:** only v0.25.0 and newer lock. An older server neither
+makes nor checks a lock, so the two can run on the same files without an error and
+undo each other's writes. The same goes for an older server's `rotate-master` or
+`--protect-key`. Stop the old server before you start the new one on its files; to
+roll back, stop the new one before you start the old one.
+
+## A missing store or access list
+
+The server refuses to start, and `--check-config` fails, when `acl.path` is not
+there, or `store.path` is not there although there was a store before. Both look the
+same as an unmounted volume or a wrong path, and the next write would put an empty
+file in the place of the real one. Mount it, fix the path, or restore a backup; the
+message also says how to start empty on purpose.
+
+`phoenix-server --init` makes both files. Before v0.25.0 the first secret made the
+store, so an older install without secrets has none. The audit log and its archives
+tell that apart: a line about a secret that was written, handed over, changed or
+deleted means there was a store. Servers that share a log see each other's lines, so
+there an older one without secrets is refused until you make the empty store. If you
+delete audit archives, log to something that is not a file, or lose the log together
+with the store, the server cannot know and starts empty.
 
 ## Audit log rotation
 
@@ -306,10 +348,11 @@ cause a restart loop for working HTTP consumers. Certificates load at startup;
 replacing a certificate requires a restart. Role sessions survive restarts (see
 [Session identity](session-identity.md#restarts)).
 
-For Docker, retain the existing port mapping and add a mapping for the selected
-HTTPS port, for example `9443:9443`, plus certificate mounts if needed. The
-server must bind a container-reachable address for a published port. The default
-Compose mapping and HTTP health check are unchanged.
+For Docker, publish the HTTPS port. The shipped `docker-compose.yml` already maps
+`127.0.0.1:9443:9443`, reachable from that host only. Drop the `127.0.0.1:` only
+for a deliberate LAN deployment (see [LAN Deployment](lan-deployment.md)). The
+server must bind a container-reachable address for a published port
+(`0.0.0.0:9443`, as `--init` writes). The HTTP health check is unchanged.
 
 To stop using the additional endpoint, restore the selected clients' previous
 URLs and disable `https_listener.enabled`, then restart during a planned window.
@@ -346,11 +389,12 @@ Docker images are published to Docker Hub as `phoenixsecdev/phoenix`
 state in the `/data` volume.
 
 ```bash
-# First run: initialize the volume (prints the admin token once)
-docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix --init /data
+# First run: initialize the volume with HTTPS on (prints the admin token and
+# the dashboard password once)
+docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix --init /data --https
 
-# Start the server
-docker run -d --name phoenix -v phoenix-data:/data \
+# Start the server; dashboard at https://127.0.0.1:9443/dashboard/
+docker run -d --name phoenix -p 127.0.0.1:9443:9443 -v phoenix-data:/data \
   --restart unless-stopped phoenixsecdev/phoenix
 
 # Use the CLI inside the container
@@ -360,17 +404,17 @@ docker exec -e PHOENIX_TOKEN phoenix phoenix status
 
 The generated config listens on `127.0.0.1:9090` *inside the container*,
 so a `-p 9090:9090` port mapping reaches nothing. To use Phoenix from the
-host or other machines, turn on `https_listener` (`--init` already bound it
-to `0.0.0.0:9443`) and publish port 9443: traffic crosses the Docker bridge,
-which Phoenix treats as an untrusted network. The exact commands (a `sed`
-one-liner, then `docker cp` of `ca.crt` for `PHOENIX_CA_CERT`) are in
+host or other machines, publish the HTTPS port, 9443 (`--init --https` turned
+it on; on an older install set `https_listener.enabled` to `true`): traffic
+crosses the Docker bridge, which Phoenix treats as an untrusted network. How to
+trust its `ca.crt` with `PHOENIX_CA_CERT` is in
 [Quickstart: reaching the container from the host](quickstart.md#reaching-the-container-from-the-host).
 
 The image healthcheck probes `/v1/health` over plain HTTP on the
 container's loopback, which stays on when HTTPS is turned on.
 
 The repo's `docker-compose.yml` builds the image from source and follows
-the same flow (`docker compose run --rm phoenix --init /data`, then
+the same flow (`docker compose run --rm phoenix --init /data --https`, then
 `docker compose up -d`).
 
 ## Checking a config and removed settings

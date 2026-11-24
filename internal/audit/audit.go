@@ -12,6 +12,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // Entry is a single audit log record.
@@ -26,6 +28,28 @@ type Entry struct {
 	SessionID string            `json:"session_id,omitempty"`
 	Sealed    bool              `json:"sealed"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	Caller
+}
+
+// Caller says who an entry is about, as separate fields. All of it comes from
+// Phoenix: the identity's record, or (Host) what Phoenix itself established
+// about the machine. Nothing is taken from what a caller says about itself.
+// All four are on every line. The text fields are empty when not known: an identity without labels, a
+// line Phoenix or the dashboard wrote, or one written before v0.25.0.
+type Caller struct {
+	Who       string `json:"who"`
+	Host      string `json:"host"`
+	Authority string `json:"authority"`
+	// Attested is true only when Phoenix checked the caller itself. A token
+	// proves nothing about who holds it, so its lines say false, and who and
+	// authority are then only declared by the operator.
+	Attested bool `json:"attested"`
+}
+
+// Declared reports whether the entry names a who or authority that nothing
+// checked.
+func (c Caller) Declared() bool {
+	return !c.Attested && (c.Who != "" || c.Authority != "")
 }
 
 // Logger writes audit entries to a file.
@@ -38,6 +62,8 @@ type Logger struct {
 	path     string
 	maxBytes int64
 	size     int64 // bytes in the current file
+	cutOff   bool  // the file ends in half a line
+	missing  bool  // a full disk kept the file from being made; Log tries again
 	kick     chan struct{}
 	wg       sync.WaitGroup
 }
@@ -50,18 +76,17 @@ func NewLogger(path string) (*Logger, error) {
 }
 
 // NewRotatingLogger is NewLogger that moves the file to a dated archive
-// once it passes maxBytes (0 = never). Archives are never deleted.
+// once it passes maxBytes (0 = never). Archives are never deleted. If the disk
+// is too full to make the file, every Log fails until it can be made.
 func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("opening audit log: %w", err)
+	path = fsutil.RealPath(path) // rotation must move the file, not a symlink to it
+	l := &Logger{path: path, maxBytes: maxBytes}
+	if err := l.open(); fsutil.NoSpace(err) {
+		l.missing = true
+		log.Printf("audit: WARNING: the disk is full, %s is not there yet and nothing can be logged: %v", path, err)
+	} else if err != nil {
+		return nil, err
 	}
-	st, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("opening audit log: %w", err)
-	}
-	l := &Logger{w: f, file: f, path: path, maxBytes: maxBytes, size: st.Size()}
 	if maxBytes > 0 {
 		l.kick = make(chan struct{}, 1)
 		l.wg.Add(1)
@@ -71,6 +96,38 @@ func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 	return l, nil
 }
 
+// open opens the log for appending, making it if it is not there.
+func (l *Logger) open() error {
+	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("opening audit log: %w", err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("opening audit log: %w", err)
+	}
+	l.w, l.file, l.size, l.cutOff, l.missing = f, f, st.Size(), endsInHalfLine(l.path, st.Size()), false
+	return nil
+}
+
+// endsInHalfLine reports whether the log's last write was cut off, by a full
+// disk or a power cut. If that cannot be read it says yes: a wrong yes only
+// costs an empty line.
+func endsInHalfLine(path string, size int64) bool {
+	if size == 0 {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	last := make([]byte, 1)
+	_, err = f.ReadAt(last, size-1)
+	return err != nil || last[0] != '\n'
+}
+
 // NewWriterLogger creates an audit logger backed by any io.Writer (useful for tests).
 func NewWriterLogger(w io.Writer) *Logger {
 	return &Logger{w: w}
@@ -78,7 +135,7 @@ func NewWriterLogger(w io.Writer) *Logger {
 
 // logWithMetadata writes a low-level audit entry with optional sanitized metadata.
 func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessionID string, sealed bool, metadata map[string]string) error {
-	entry := Entry{
+	return l.Log(Entry{
 		Agent:     agent,
 		Action:    action,
 		Path:      path,
@@ -87,12 +144,22 @@ func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessio
 		Reason:    reason,
 		SessionID: sessionID,
 		Sealed:    sealed,
-		Metadata:  cloneMetadata(metadata),
-	}
+		Metadata:  metadata,
+	})
+}
+
+// Log writes one entry, stamped with the time now.
+func (l *Logger) Log(entry Entry) error {
+	entry.Metadata = cloneMetadata(entry.Metadata)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if l.missing {
+		if err := l.open(); err != nil {
+			return err
+		}
+	}
 	// Stamped under the lock so file order follows the clock (unless the
 	// clock itself steps back; Search does not rely on it).
 	entry.Timestamp = time.Now().UTC()
@@ -100,8 +167,17 @@ func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessio
 	if err != nil {
 		return err
 	}
-	n, err := l.w.Write(append(line, '\n'))
+	line = append(line, '\n')
+	if l.cutOff {
+		// Close off the half line, or this entry becomes part of it and no
+		// search can read it.
+		line = append([]byte{'\n'}, line...)
+	}
+	n, err := l.w.Write(line)
 	l.size += int64(n)
+	if n > 0 {
+		l.cutOff = line[n-1] != '\n'
+	}
 	if err != nil {
 		return err
 	}
@@ -212,7 +288,9 @@ func (l *Logger) Close() error {
 	if l.file != nil {
 		err = l.file.Close()
 		l.file = nil
-		l.w = closedWriter{}
+	}
+	if l.path != "" {
+		l.w, l.missing = closedWriter{}, false
 	}
 	if l.kick != nil {
 		close(l.kick)

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -59,7 +61,7 @@ func TestLogFormat(t *testing.T) {
 	var buf bytes.Buffer
 	logger := NewWriterLogger(&buf)
 
-	logger.LogAllowed("vector", "read", "test/key", "10.0.0.1")
+	logger.LogAllowed("courier", "read", "test/key", "10.0.0.1")
 
 	line := strings.TrimSpace(buf.String())
 	var entry Entry
@@ -67,8 +69,8 @@ func TestLogFormat(t *testing.T) {
 		t.Fatalf("unmarshal log line: %v", err)
 	}
 
-	if entry.Agent != "vector" {
-		t.Fatalf("expected agent 'vector', got %q", entry.Agent)
+	if entry.Agent != "courier" {
+		t.Fatalf("expected agent 'courier', got %q", entry.Agent)
 	}
 	if entry.Status != "allowed" {
 		t.Fatalf("expected status 'allowed', got %q", entry.Status)
@@ -82,7 +84,7 @@ func TestLogFormatIncludesSealedField(t *testing.T) {
 	var buf bytes.Buffer
 	logger := NewWriterLogger(&buf)
 
-	logger.LogAllowedSealed("vector", "read", "test/key", "10.0.0.1", true)
+	logger.LogAllowedSealed("courier", "read", "test/key", "10.0.0.1", true)
 
 	line := strings.TrimSpace(buf.String())
 	var entry Entry
@@ -99,7 +101,7 @@ func TestLogFormatIncludesMetadataWhenPresent(t *testing.T) {
 	logger := NewWriterLogger(&buf)
 
 	metadata := map[string]string{"openclaw.agent": "claw", "empty": ""}
-	logger.LogAllowedWithMetadata("vector", "read", "test/key", "10.0.0.1", metadata)
+	logger.LogAllowedWithMetadata("courier", "read", "test/key", "10.0.0.1", metadata)
 	metadata["openclaw.agent"] = "mutated"
 
 	line := strings.TrimSpace(buf.String())
@@ -120,8 +122,8 @@ func TestQueryByPath(t *testing.T) {
 	logPath := filepath.Join(dir, "audit.log")
 
 	logger, _ := NewLogger(logPath)
-	logger.LogAllowed("vector", "read", "openclaw/api-key", "1.2.3.4")
-	logger.LogAllowed("vector", "read", "monitoring/grafana", "1.2.3.4")
+	logger.LogAllowed("courier", "read", "openclaw/api-key", "1.2.3.4")
+	logger.LogAllowed("courier", "read", "monitoring/grafana", "1.2.3.4")
 	logger.LogDenied("openclaw", "read", "proxmox/admin", "1.2.3.4", "acl")
 	logger.Close()
 
@@ -132,8 +134,8 @@ func TestQueryByPath(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry for path, got %d", len(entries))
 	}
-	if entries[0].Agent != "vector" {
-		t.Fatalf("expected agent 'vector', got %q", entries[0].Agent)
+	if entries[0].Agent != "courier" {
+		t.Fatalf("expected agent 'courier', got %q", entries[0].Agent)
 	}
 }
 
@@ -142,13 +144,13 @@ func TestQueryCombinedFilters(t *testing.T) {
 	logPath := filepath.Join(dir, "audit.log")
 
 	logger, _ := NewLogger(logPath)
-	logger.LogAllowed("vector", "read", "ns/key", "1.1.1.1")
+	logger.LogAllowed("courier", "read", "ns/key", "1.1.1.1")
 	logger.LogAllowed("admin", "write", "ns/key", "1.1.1.1")
-	logger.LogAllowed("vector", "read", "ns/other", "1.1.1.1")
+	logger.LogAllowed("courier", "read", "ns/other", "1.1.1.1")
 	logger.Close()
 
 	// Filter by agent AND path
-	entries, err := Query(logPath, QueryOptions{Agent: "vector", Path: "ns/key"})
+	entries, err := Query(logPath, QueryOptions{Agent: "courier", Path: "ns/key"})
 	if err != nil {
 		t.Fatalf("Query combined: %v", err)
 	}
@@ -249,5 +251,89 @@ func TestQueryHugeLimit(t *testing.T) {
 		if err != nil || len(got) != 2 {
 			t.Fatalf("limit %d: %d entries, err %v", limit, len(got), err)
 		}
+	}
+}
+
+// shortWriter writes only part of one line, as a full disk does.
+type shortWriter struct {
+	f     *os.File
+	short bool
+}
+
+func (s *shortWriter) Write(p []byte) (int, error) {
+	if !s.short {
+		return s.f.Write(p)
+	}
+	s.short = false
+	n, _ := s.f.Write(p[:len(p)/2])
+	return n, syscall.ENOSPC
+}
+
+// A line cut off by a full disk or a power cut must not take the next one with
+// it: that entry was reported as written, so a search has to find it.
+func TestEntryAfterCutOffLineIsReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l, err := NewLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := func(l *Logger, agent string) error { return l.LogAllowed(agent, "read_value", "ns/x", "192.0.2.1") }
+	if err := entry(l, "first"); err != nil {
+		t.Fatal(err)
+	}
+	l.w = &shortWriter{f: l.file, short: true}
+	if err := entry(l, "cut"); err == nil {
+		t.Fatal("the short write should fail")
+	}
+	if err := entry(l, "second"); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"ts":"2026-01-01T00:00:00Z","agent":"po`) // power cut
+	f.Close()
+	if l, err = NewLogger(path); err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if err := entry(l, "third"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Search(path, QueryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range res.Entries {
+		got = append(got, e.Agent)
+	}
+	if strings.Join(got, " ") != "first second third" {
+		t.Errorf("entries = %v, want first second third", got)
+	}
+}
+
+// A disk too full to make the log does not stop the server. Lines fail until
+// the file can be made.
+func TestLogThatCannotBeMadeYet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l := &Logger{path: path + "-dir/audit.log", missing: true}
+	if err := l.LogAllowed("courier", "write", "a/b", ""); err == nil {
+		t.Fatal("a line that went nowhere was reported as written")
+	}
+	l.path = path // there is room now
+	if err := l.LogAllowed("courier", "write", "a/b", ""); err != nil {
+		t.Fatal(err)
+	}
+	if es, err := Query(path, QueryOptions{}); err != nil || len(es) != 1 {
+		t.Fatalf("%d lines, %v; want 1", len(es), err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if l.LogAllowed("courier", "write", "a/b", "") == nil {
+		t.Error("a line after Close was reported as written")
 	}
 }

@@ -56,7 +56,7 @@ func setupCachedSession(t *testing.T, role string) {
 		t.Fatalf("requireAuth: %v", err)
 	}
 	if token != "phxs_old" {
-		t.Fatalf("token = %q, want cached phxs_old", token)
+		t.Fatal("the token is not the cached one")
 	}
 }
 
@@ -75,16 +75,16 @@ func TestRemintOnceAfterSessionInvalid(t *testing.T) {
 			t.Fatalf("status %d after re-mint, want 200", resp.StatusCode)
 		}
 		if f.mints != 1 || f.mintAuth[0] != "bootstrap-token" {
-			t.Errorf("mints = %d with %v, want 1 with bootstrap-token", f.mints, f.mintAuth)
+			t.Errorf("%d mints, want 1 with the agent's own token", f.mints)
 		}
 		if f.calls != 2 || f.callBodies[1] != `{"refs":["a"]}` {
 			t.Errorf("calls = %d bodies %q, want the request retried once with its body", f.calls, f.callBodies)
 		}
 		if got := getCachedSessionToken("r1", 0); got != "phxs_fresh" {
-			t.Errorf("cache = %q, want phxs_fresh", got)
+			t.Error("the cached token is not the fresh one")
 		}
 		if token != "phxs_fresh" {
-			t.Errorf("token = %q, want phxs_fresh", token)
+			t.Error("the token is not the new one")
 		}
 	})
 }
@@ -128,7 +128,7 @@ func TestRevokedSessionNotRetried(t *testing.T) {
 			t.Errorf("mints = %d calls = %d, want 0 and 1", f.mints, f.calls)
 		}
 		if got := getCachedSessionToken("r3", 0); got != "" {
-			t.Errorf("revoked session still cached: %q", got)
+			t.Error("revoked session still cached")
 		}
 	})
 }

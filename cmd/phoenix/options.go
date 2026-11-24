@@ -25,7 +25,7 @@ var cmdSpecs = map[string]cmdSpec{
 	"help":    {usage: "phoenix help"},
 	// Parents of subcommands: "phoenix agent --help" works, and an option
 	// before the subcommand is refused rather than read as one.
-	"agent":     {usage: "phoenix agent <create|list|delete>"},
+	"agent":     {usage: "phoenix agent <create|set|show|list|delete>"},
 	"policy":    {usage: "phoenix policy <show|test>"},
 	"emergency": {usage: "phoenix emergency get <path> --data-dir <dir>"},
 	"sessions":  {usage: "phoenix sessions <list|info|revoke>"},
@@ -33,16 +33,23 @@ var cmdSpecs = map[string]cmdSpec{
 	"delete":    {usage: "phoenix delete <path>"},
 	"list": {usage: "phoenix list [folder/] [--names] [--tag <tag>]   (folder, folder/ and folder/* all list folder/)",
 		opts: map[string]bool{"--names": false, "--tag": true}},
-	"info": {usage: "phoenix info <path>   (description, tags, dates; never the value)"},
-	"set": {usage: "phoenix set <path> [-d desc] [--tags t1,t2] [--multiline | --value-stdin]",
-		opts: map[string]bool{"-d": true, "--description": true, "--tags": true, "--multiline": false, "--value-stdin": false}},
-	"export": {usage: "phoenix export <prefix> -f env", opts: map[string]bool{"-f": true, "--format": true}},
+	"info": {usage: "phoenix info <path>   (description, tags, username, link, dates; never the value)"},
+	"describe": {usage: describeUsage,
+		opts: map[string]bool{"-d": true, "--description": true, "--tags": true, "--username": true, "--url": true}},
+	"set": {usage: "phoenix set <path> [-d desc] [--tags t1,t2] [--username name] [--url link] [--multiline | --value-stdin]",
+		opts: map[string]bool{"-d": true, "--description": true, "--tags": true, "--username": true, "--url": true, "--multiline": false, "--value-stdin": false}},
+	"export": {usage: "phoenix export <folder/> -f env", opts: map[string]bool{"-f": true, "--format": true}},
 	"import": {usage: "phoenix import <file> -p <prefix> | phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]",
 		opts: map[string]bool{"-p": true, "--prefix": true, "--from": true, "--vault": true, "--item": true, "--dry-run": false, "--skip-existing": false}},
-	"audit": {usage: "phoenix audit [-n N] [-a agent] [-s RFC3339-time]",
-		opts: map[string]bool{"-n": true, "--last": true, "-a": true, "--agent": true, "-s": true, "--since": true}},
-	"agent create": {usage: "phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]",
-		opts: map[string]bool{"-t": true, "--token": true, "--acl": true, "--force": false}},
+	"audit": {usage: "phoenix audit [-n N] [-a agent] [-s RFC3339-time] [--who W] [--host H] [--authority A]",
+		opts: map[string]bool{"-n": true, "--last": true, "-a": true, "--agent": true, "-s": true, "--since": true,
+			"--who": true, "--host": true, "--authority": true}},
+	"agent create": {usage: "phoenix agent create <name> --acl <path:actions;path:actions> [--token-stdin] [--who W] [--authority A] [--kind K] [--formerly old1,old2] [--force]   (asks for the token unless --token-stdin)",
+		opts: map[string]bool{"-t": true, "--token": true, "--token-stdin": false, "--acl": true, "--force": false,
+			"--who": true, "--authority": true, "--kind": true, "--formerly": true}},
+	"agent set": {usage: `phoenix agent set <name> [--who W] [--authority A] [--kind K] [--formerly old1,old2]   ("" clears one; the token and sessions carry on)`,
+		opts: map[string]bool{"--who": true, "--authority": true, "--kind": true, "--formerly": true}},
+	"agent show":             {usage: "phoenix agent show [name]"},
 	"agent list":             {usage: "phoenix agent list"},
 	"agent delete":           {usage: "phoenix agent delete <name>"},
 	"resolve":                {usage: "phoenix resolve <ref> [ref...]"},
@@ -71,8 +78,8 @@ var cmdSpecs = map[string]cmdSpec{
 		opts: map[string]bool{"-r": true, "--reason": true, "--ttl": true, "--ask-again": false, "--list": false}, child: true},
 	"whoami":  {usage: "phoenix whoami"},
 	"pending": {usage: "phoenix pending"},
-	"approve": {usage: "phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]",
-		opts: map[string]bool{"--ttl": true, "--path": true, "--yes": false, "-y": false}},
+	"approve": {usage: "phoenix approve <req_id> [--ttl 15m] [--uses N] [--path p ...] [--yes]",
+		opts: map[string]bool{"--ttl": true, "--uses": true, "--path": true, "--yes": false, "-y": false}},
 	"deny":          {usage: `phoenix deny <req_id> [--note "..."]`, opts: map[string]bool{"--note": true}},
 	"grants":        {usage: "phoenix grants [--all] [--agent <name>]", opts: map[string]bool{"--all": false, "--agent": true}},
 	"grants revoke": {usage: "phoenix grants revoke <gnt_id>"},
@@ -177,6 +184,9 @@ func usageExit(key string, spec cmdSpec, msg string) {
 func optionNames(spec cmdSpec) []string {
 	var names []string
 	for n := range spec.opts {
+		if n == "-t" || n == "--token" {
+			continue // still works, but not taught (errAgentCreateUsage)
+		}
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -187,14 +197,19 @@ func optionNames(spec cmdSpec) []string {
 // phoenix_list prefix) into the folder to list. "services/browser",
 // "services/browser/" and "services/browser/*" all mean "services/browser/".
 // Any other wildcard is an error saying what works, instead of being sent as
-// a secret name the server would answer with a misleading denial.
+// a secret name the server would answer with a misleading denial. A "?" or "["
+// can be part of a folder's name: ending it with "/" says so.
 func listFolder(p string) (string, error) {
 	if p == "" {
 		return "", nil
 	}
 	folder := strings.TrimSuffix(p, "*")
-	if strings.ContainsAny(folder, "*?[") || (folder != p && folder != "" && !strings.HasSuffix(folder, "/")) {
-		return "", fmt.Errorf("%q: list takes a folder (services/browser, services/browser/ or services/browser/*); other wildcards are not supported", p)
+	wild := "*?["
+	if strings.HasSuffix(folder, "/") {
+		wild = "*"
+	}
+	if strings.ContainsAny(folder, wild) || (folder != p && folder != "" && !strings.HasSuffix(folder, "/")) {
+		return "", fmt.Errorf("%q: list takes a folder (services/browser, services/browser/ or services/browser/*); other wildcards are not supported; if ? or [ is part of the name, end it with /", p)
 	}
 	if folder != "" && !strings.HasSuffix(folder, "/") {
 		folder += "/"

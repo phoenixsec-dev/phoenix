@@ -94,7 +94,7 @@ func waitLog(t *testing.T, buf *syncBuf, want string) string {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("log never contained %q; got:\n%s", want, buf.String())
+	t.Fatalf("log (%d bytes) never contained %q", len(buf.String()), want)
 	return ""
 }
 
@@ -109,10 +109,10 @@ func TestNotifyDefaultPayload(t *testing.T) {
 		s.NotifyDashboardURL = "https://phoenix.example.net/"
 	})
 
-	id := e.request(t, vectorTok, "infra/b2/app-key", "infra/other")
+	id := e.request(t, courierTok, "infra/b2/app-key", "infra/other")
 	h := waitHit(t, hits)
-	link := "https://phoenix.example.net/dashboard/approvals#" + id
-	for _, want := range []string{"vector", "read_value", "2 secrets", id, link} {
+	link := "https://phoenix.example.net/dashboard/requests/" + id
+	for _, want := range []string{"courier", "read_value", "2 secrets", id, link} {
 		if !strings.Contains(h.body, want) {
 			t.Errorf("body missing %q:\n%s", want, h.body)
 		}
@@ -126,15 +126,15 @@ func TestNotifyDefaultPayload(t *testing.T) {
 		t.Errorf("Click = %q, want %q", got, link)
 	}
 	if h.header.Get("Title") == "" || h.header.Get("Tags") == "" {
-		t.Errorf("missing ntfy Title/Tags headers: %v", h.header)
+		t.Error("missing ntfy Title/Tags headers")
 	}
 	if a := h.header.Get("Authorization"); a != "" {
-		t.Errorf("Authorization sent without notify_token_ref: %q", a)
+		t.Error("Authorization sent without notify_token_ref")
 	}
 
 	// Identical request while pending: 200, no second notification.
 	b := `{"paths":["infra/b2/app-key","infra/other"],"action":"read_value","reason":"backup job fails auth","ttl":"30m"}`
-	expect(t, e.do("POST", "/v1/access-requests", vectorTok, b), http.StatusOK, "")
+	expect(t, e.do("POST", "/v1/access-requests", courierTok, b), http.StatusOK, "")
 	expectNoHit(t, hits)
 }
 
@@ -153,7 +153,7 @@ func TestNotifyIncludePathsOptIn(t *testing.T) {
 		s.NotifyURL = ts.URL
 		s.NotifyIncludePaths = true
 	})
-	e.request(t, vectorTok, "infra/b2/app-key")
+	e.request(t, courierTok, "infra/b2/app-key")
 	h := waitHit(t, hits)
 	if !strings.Contains(h.body, "infra/b2/app-key") || !strings.Contains(h.body, "1 secret.") {
 		t.Errorf("opted-in body should list the path:\n%s", h.body)
@@ -178,23 +178,23 @@ func TestNotifyTokenResolvedAtSendTime(t *testing.T) {
 		s.NotifyTokenRef = "phoenix://phoenix/ntfy-token"
 	})
 
-	e.request(t, vectorTok, "infra/b2/app-key")
+	e.request(t, courierTok, "infra/b2/app-key")
 	if got := waitHit(t, hits).header.Get("Authorization"); got != "Bearer tk_first" {
-		t.Fatalf("Authorization = %q, want Bearer tk_first", got)
+		t.Fatal("the first token was not sent")
 	}
 	seedSecret(t, e.srv, adminTok, "phoenix/ntfy-token", "tk_second")
-	e.request(t, vectorTok, "infra/other")
+	e.request(t, courierTok, "infra/other")
 	if got := waitHit(t, hits).header.Get("Authorization"); got != "Bearer tk_second" {
-		t.Fatalf("Authorization = %q, want Bearer tk_second (resolved at send time)", got)
+		t.Fatal("the second token was not sent (resolved at send time)")
 	}
 
 	logs := captureLog(t)
 	e.set(func(s *config.AccessRequestsSettings) { s.NotifyTokenRef = "phoenix://phoenix/missing" })
-	e.request(t, vectorTok, "infra/third")
+	e.request(t, courierTok, "infra/third")
 	waitLog(t, logs, "notify_token_ref phoenix://phoenix/missing")
 	expectNoHit(t, hits)
 	if strings.Contains(logs.String(), "tk_") {
-		t.Fatalf("token value in log:\n%s", logs.String())
+		t.Fatal("token value in log")
 	}
 }
 
@@ -209,11 +209,11 @@ func TestNotifyFailureDoesNotBlockRequest(t *testing.T) {
 			s.NotifyTokenRef = "phoenix://phoenix/ntfy-token"
 		})
 		logs := captureLog(t)
-		e.request(t, vectorTok, "infra/b2/app-key") // 201 checked by the helper
+		e.request(t, courierTok, "infra/b2/app-key") // 201 checked by the helper
 		waitHit(t, hits)
 		out := waitLog(t, logs, "HTTP 500")
 		if strings.Contains(out, "tk_secret") {
-			t.Fatalf("token value in log:\n%s", out)
+			t.Fatal("token value in log")
 		}
 	})
 
@@ -235,7 +235,7 @@ func TestNotifyFailureDoesNotBlockRequest(t *testing.T) {
 		e.set(func(s *config.AccessRequestsSettings) { s.NotifyURL = ts.URL })
 
 		start := time.Now()
-		e.request(t, vectorTok, "infra/b2/app-key") // 201 checked by the helper
+		e.request(t, courierTok, "infra/b2/app-key") // 201 checked by the helper
 		if d := time.Since(start); d > 30*time.Second {
 			t.Fatalf("create took %v; the notification must not block it", d)
 		}
@@ -269,7 +269,7 @@ func TestNotifyFailureDoesNotBlockRequest(t *testing.T) {
 
 		start := time.Now()
 		err := e.srv.sendAccessNotify(context.Background(), cfg, grant.Request{
-			ID: "req_test", Agent: "vector", Action: "read_value", Paths: []string{"infra/b2/app-key"},
+			ID: "req_test", Agent: "courier", Action: "read_value", Paths: []string{"infra/b2/app-key"},
 		})
 		if err == nil || time.Since(start) > 5*time.Second {
 			t.Fatalf("send to a hanging server: err=%v after %v, want a timeout error", err, time.Since(start))
@@ -294,9 +294,9 @@ func TestNotifyTransportFailureDoesNotLogURL(t *testing.T) {
 	ln.Close() // nothing listens there now: connection refused
 	e.set(func(s *config.AccessRequestsSettings) { s.NotifyURL = "http://" + addr + "/private-topic-xyz" })
 	logs := captureLog(t)
-	e.request(t, vectorTok, "infra/b2/app-key")
+	e.request(t, courierTok, "infra/b2/app-key")
 	out := waitLog(t, logs, "notify for")
 	if strings.Contains(out, "private-topic-xyz") || strings.Contains(out, addr) {
-		t.Fatalf("notify failure log shows the URL:\n%s", out)
+		t.Fatal("notify failure log shows the URL")
 	}
 }

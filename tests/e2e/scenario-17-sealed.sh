@@ -6,7 +6,7 @@ init_scenario 17
 start_server
 printf '%s' synthetic-open | phoenix_admin set open/key --value-stdin >/dev/null
 printf '%s' synthetic-sealed | phoenix_admin set sealed/key --value-stdin >/dev/null
-assert_eq "$(phoenix_admin get open/key)" synthetic-open "S1 plaintext-compatible open path"
+assert_secret "$(phoenix_admin get open/key)" synthetic-open "S1 plaintext-compatible open path"
 stop_server
 cat >"$RUN_DIR/policy.json" <<'JSON'
 {"attestation":{"sealed/*":{"require_sealed":true,"allow_unseal":false},"open/*":{"allow_unseal":true}}}
@@ -18,9 +18,9 @@ phoenix_admin agent create sealed-agent -t synthetic-sealed-agent --acl 'sealed/
 keyout="$(phoenix_admin keypair generate sealed-agent -o "$keyfile")"
 [[ "$(stat -c %a "$keyfile")" == 600 ]] || die "S2 seal key mode is not 0600"
 public="$(awk '/public key:/ {print $3}' <<<"$keyout")"; [[ -n "$public" ]] || die "S2 public key missing"
-assert_eq "$(PHOENIX_TOKEN=synthetic-sealed-agent PHOENIX_SEAL_KEY="$keyfile" "$PHOENIX" get open/key)" synthetic-open "S3 sealed open read"
+assert_secret "$(PHOENIX_TOKEN=synthetic-sealed-agent PHOENIX_SEAL_KEY="$keyfile" "$PHOENIX" get open/key)" synthetic-open "S3 sealed open read"
 if PHOENIX_TOKEN=synthetic-sealed-agent "$PHOENIX" get sealed/key >"$RUN_DIR/unsealed" 2>&1; then die "S4 require_sealed allowed plaintext"; fi
-assert_eq "$(PHOENIX_TOKEN=synthetic-sealed-agent PHOENIX_SEAL_KEY="$keyfile" "$PHOENIX" get sealed/key)" synthetic-sealed "S5 sealed required read"
+assert_secret "$(PHOENIX_TOKEN=synthetic-sealed-agent PHOENIX_SEAL_KEY="$keyfile" "$PHOENIX" get sealed/key)" synthetic-sealed "S5 sealed required read"
 wire="$(curl -fsS -X POST "$PHOENIX_SERVER/v1/resolve" -H 'Authorization: Bearer synthetic-sealed-agent' -H 'Content-Type: application/json' -H "X-Phoenix-Seal-Key: $public" --data '{"refs":["phoenix://sealed/key"]}')"
 [[ "$(jq -r 'has("sealed_values") and (has("values")|not)' <<<"$wire")" == true ]] || die "S6 wire response was not sealed-only"
 code="$(curl -sS -o "$RUN_DIR/badseal" -w '%{http_code}' -X POST "$PHOENIX_SERVER/v1/resolve" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -H 'X-Phoenix-Seal-Key: invalid' --data '{"refs":["phoenix://sealed/key"]}')"

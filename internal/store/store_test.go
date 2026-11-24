@@ -32,7 +32,7 @@ func newTestStore(t *testing.T) *Store {
 func TestSetAndGet(t *testing.T) {
 	s := newTestStore(t)
 
-	err := s.Set("openclaw/api-key", "sk-12345", "vector", "test key", []string{"test"})
+	err := s.Set("openclaw/api-key", "sk-12345", "courier", "test key", []string{"test"})
 	if err != nil {
 		t.Fatalf("Set: %v", err)
 	}
@@ -45,8 +45,8 @@ func TestSetAndGet(t *testing.T) {
 	if secret.Value != "sk-12345" {
 		t.Fatalf("expected 'sk-12345', got %q", secret.Value)
 	}
-	if secret.Metadata.CreatedBy != "vector" {
-		t.Fatalf("expected creator 'vector', got %q", secret.Metadata.CreatedBy)
+	if secret.Metadata.CreatedBy != "courier" {
+		t.Fatalf("expected creator 'courier', got %q", secret.Metadata.CreatedBy)
 	}
 	if secret.Metadata.Description != "test key" {
 		t.Fatalf("expected description 'test key', got %q", secret.Metadata.Description)
@@ -65,8 +65,8 @@ func TestGetNotFound(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	s := newTestStore(t)
 
-	s.Set("test/key", "v1", "vector", "version 1", nil)
-	s.Set("test/key", "v2", "vector", "", nil) // empty desc = keep existing
+	s.Set("test/key", "v1", "courier", "version 1", nil)
+	s.Set("test/key", "v2", "courier", "", nil) // empty desc = keep existing
 
 	secret, _ := s.Get("test/key")
 	if secret.Value != "v2" {
@@ -80,7 +80,7 @@ func TestUpdate(t *testing.T) {
 func TestDelete(t *testing.T) {
 	s := newTestStore(t)
 
-	s.Set("test/key", "value", "vector", "", nil)
+	s.Set("test/key", "value", "courier", "", nil)
 	err := s.Delete("test/key")
 	if err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -104,9 +104,9 @@ func TestDeleteNotFound(t *testing.T) {
 func TestList(t *testing.T) {
 	s := newTestStore(t)
 
-	s.Set("openclaw/key1", "v1", "vector", "", nil)
-	s.Set("openclaw/key2", "v2", "vector", "", nil)
-	s.Set("monitoring/grafana", "pass", "vector", "", nil)
+	s.Set("openclaw/key1", "v1", "courier", "", nil)
+	s.Set("openclaw/key2", "v2", "courier", "", nil)
+	s.Set("monitoring/grafana", "pass", "courier", "", nil)
 
 	all := s.List("")
 	if len(all) != 3 {
@@ -152,7 +152,7 @@ func TestPersistence(t *testing.T) {
 
 	// Write with one store instance
 	s1, _ := New(storePath, masterKey)
-	s1.Set("test/persistent", "secret-value", "vector", "persisted", nil)
+	s1.Set("test/persistent", "secret-value", "courier", "persisted", nil)
 
 	// Read with a new store instance (simulates restart)
 	s2, err := New(storePath, masterKey)
@@ -200,8 +200,8 @@ func TestNamespaceIsolation(t *testing.T) {
 	s := newTestStore(t)
 
 	// Secrets in different namespaces use different DEKs
-	s.Set("ns1/key", "value1", "vector", "", nil)
-	s.Set("ns2/key", "value2", "vector", "", nil)
+	s.Set("ns1/key", "value1", "courier", "", nil)
+	s.Set("ns2/key", "value2", "courier", "", nil)
 
 	sec1, _ := s.Get("ns1/key")
 	sec2, _ := s.Get("ns2/key")
@@ -215,10 +215,10 @@ func TestRotateMasterKeySecretsReadable(t *testing.T) {
 	s := newTestStore(t)
 
 	// Seed secrets across multiple namespaces
-	s.Set("ns1/key1", "value1", "vector", "desc1", []string{"tag1"})
-	s.Set("ns1/key2", "value2", "vector", "", nil)
-	s.Set("ns2/secret", "s3cr3t", "vector", "important", nil)
-	s.Set("ns3/deep/path", "deep-value", "vector", "", nil)
+	s.Set("ns1/key1", "value1", "courier", "desc1", []string{"tag1"})
+	s.Set("ns1/key2", "value2", "courier", "", nil)
+	s.Set("ns2/secret", "s3cr3t", "courier", "important", nil)
+	s.Set("ns3/deep/path", "deep-value", "courier", "", nil)
 
 	// Rotate master key
 	rotated, err := s.RotateMasterKey(nil)
@@ -275,7 +275,7 @@ func TestRotateMasterKeyPersistence(t *testing.T) {
 
 	// Create store and seed data
 	s1, _ := New(storePath, masterKey)
-	s1.Set("test/secret", "original-value", "vector", "", nil)
+	s1.Set("test/secret", "original-value", "courier", "", nil)
 
 	// Rotate
 	_, err := s1.RotateMasterKey(nil)
@@ -310,7 +310,7 @@ func TestRotateMasterKeyRollback(t *testing.T) {
 
 	// Create store and seed data
 	s1, _ := New(storePath, masterKey)
-	s1.Set("test/secret", "rollback-value", "vector", "", nil)
+	s1.Set("test/secret", "rollback-value", "courier", "", nil)
 
 	// Save old store before rotation for rollback test
 	storeBackup := storePath + ".bak"
@@ -343,14 +343,14 @@ func TestRotateMasterKeyNewSecretsWork(t *testing.T) {
 	s := newTestStore(t)
 
 	// Seed and rotate
-	s.Set("ns1/key", "before", "vector", "", nil)
+	s.Set("ns1/key", "before", "courier", "", nil)
 	s.RotateMasterKey(nil)
 
 	// Write new secrets after rotation
-	if err := s.Set("ns1/key2", "after", "vector", "", nil); err != nil {
+	if err := s.Set("ns1/key2", "after", "courier", "", nil); err != nil {
 		t.Fatalf("Set after rotation: %v", err)
 	}
-	if err := s.Set("ns2/new", "new-ns", "vector", "", nil); err != nil {
+	if err := s.Set("ns2/new", "new-ns", "courier", "", nil); err != nil {
 		t.Fatalf("Set new namespace after rotation: %v", err)
 	}
 
@@ -376,8 +376,8 @@ func TestRotateMasterKeyCallbackFailureRollsBack(t *testing.T) {
 	storePath := filepath.Join(dir, "store.json")
 
 	s, _ := New(storePath, masterKey)
-	s.Set("ns1/key1", "value1", "vector", "", nil)
-	s.Set("ns2/key2", "value2", "vector", "", nil)
+	s.Set("ns1/key1", "value1", "courier", "", nil)
+	s.Set("ns2/key2", "value2", "courier", "", nil)
 
 	// Capture old key
 	provider := s.Provider().(*crypto.FileKeyProvider)
@@ -466,10 +466,10 @@ func rotationFailureStore(t *testing.T, passphrase string) (s *Store, storePath 
 		t.Fatalf("New: %v", err)
 	}
 	s.Provider().(*crypto.FileKeyProvider).SetPassphrase(passphrase)
-	if err := s.Set("ns1/key1", "value1", "vector", "", nil); err != nil {
+	if err := s.Set("ns1/key1", "value1", "courier", "", nil); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if err := s.Set("ns2/key2", "value2", "vector", "", nil); err != nil {
+	if err := s.Set("ns2/key2", "value2", "courier", "", nil); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	return s, storePath, append([]byte(nil), masterKey...)
@@ -497,12 +497,8 @@ func assertOpensWithKey(t *testing.T, path string, key []byte) {
 // (it still holds wrappers for some other key).
 func assertNotOpensWithKey(t *testing.T, path string, key []byte) {
 	t.Helper()
-	st, err := New(path, key)
-	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
-	}
-	if _, err := st.Get("ns1/key1"); err == nil {
-		t.Fatalf("%s unexpectedly decrypts with this key", path)
+	if _, err := New(path, key); err == nil || !strings.Contains(err.Error(), "does not open") {
+		t.Fatalf("%s: %v, want a refusal because the key does not open it", path, err)
 	}
 }
 
@@ -603,7 +599,7 @@ func TestRotateMasterKeyTotalFailureRefusesUnprotectedKey(t *testing.T) {
 	assertOpensWithKey(t, storePath, newKey) // the abandoned rotation is really on disk
 
 	repair()
-	if err := s.Set("ns1/key1", "value1", "vector", "", nil); err != nil {
+	if err := s.Set("ns1/key1", "value1", "courier", "", nil); err != nil {
 		t.Fatalf("Set after disk repair: %v", err)
 	}
 	assertOpensWithKey(t, storePath, oldKey)
@@ -782,7 +778,7 @@ func TestRotateMasterKeySaveFailureRollsBack(t *testing.T) {
 
 	// Create store and seed data (save works while dir is writable)
 	s, _ := New(storePath, masterKey)
-	s.Set("ns1/key1", "value1", "vector", "", nil)
+	s.Set("ns1/key1", "value1", "courier", "", nil)
 
 	// Make the directory read-only to force save failure
 	os.Chmod(readOnlyDir, 0500)
@@ -825,7 +821,7 @@ func TestRotateMasterKeyCallbackSuccessCommits(t *testing.T) {
 	storePath := filepath.Join(dir, "store.json")
 
 	s, _ := New(storePath, masterKey)
-	s.Set("ns1/key1", "value1", "vector", "", nil)
+	s.Set("ns1/key1", "value1", "courier", "", nil)
 
 	provider := s.Provider().(*crypto.FileKeyProvider)
 	oldKey := make([]byte, len(provider.MasterKey()))
@@ -886,14 +882,14 @@ func TestRotateMasterKeyCallbackSuccessCommits(t *testing.T) {
 func TestGetMetadata(t *testing.T) {
 	s := newTestStore(t)
 
-	s.Set("test/key", "value", "vector", "my description", []string{"tag1", "tag2"})
+	s.Set("test/key", "value", "courier", "my description", []string{"tag1", "tag2"})
 
 	meta, err := s.GetMetadata("test/key")
 	if err != nil {
 		t.Fatalf("GetMetadata: %v", err)
 	}
-	if meta.CreatedBy != "vector" {
-		t.Fatalf("expected creator 'vector', got %q", meta.CreatedBy)
+	if meta.CreatedBy != "courier" {
+		t.Fatalf("expected creator 'courier', got %q", meta.CreatedBy)
 	}
 	if meta.Description != "my description" {
 		t.Fatalf("expected description 'my description', got %q", meta.Description)
@@ -954,5 +950,31 @@ func TestProvider(t *testing.T) {
 	s := newTestStore(t)
 	if s.Provider() == nil {
 		t.Fatal("Provider() should not return nil")
+	}
+}
+
+// Two names that differ only in bytes that are not UTF-8 would become one when
+// the store is saved, so such a name is refused and nothing is lost.
+func TestNameThatIsNotUTF8IsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("app/\ufffd", "kept", "test", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("app/\xff", "lost", "test", "", nil); err != ErrInvalidPath {
+		t.Errorf("Set = %v, want ErrInvalidPath", err)
+	}
+	if s, err = New(path, key); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Get("app/\ufffd"); err != nil || got.Value != "kept" {
+		t.Errorf("after reopening: wrong value, %v", err)
 	}
 }

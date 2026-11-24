@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/grant"
 )
 
 // --- Helper tests ---
@@ -218,6 +222,144 @@ func TestCmdGetSealedMissingSealedValue(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "sealed_value") {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+// --- cmdExport sealed tests ---
+
+// useSealKey writes a seal key file, points PHOENIX_SEAL_KEY at it and returns
+// the key pair.
+func useSealKey(t *testing.T) *crypto.SealKeyPair {
+	t.Helper()
+	kp, err := crypto.GenerateSealKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "test.seal.key")
+	if err := os.WriteFile(keyPath, []byte(crypto.EncodeSealKey(&kp.PrivateKey)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHOENIX_SEAL_KEY", keyPath)
+	return kp
+}
+
+// exportServer answers a folder listing with one secret, ns/secret, and reads
+// of that secret with read.
+func exportServer(read http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			json.NewEncoder(w).Encode(map[string]any{"paths": []string{"ns/secret"}})
+			return
+		}
+		read(w, r)
+	}
+}
+
+// With a seal key the server answers sealed; export opens it, because its
+// output is used as a backup.
+func TestCmdExportSealed(t *testing.T) {
+	useSealKey(t)
+	withMockServer(t, exportServer(func(w http.ResponseWriter, r *http.Request) {
+		pub, _ := crypto.DecodeSealKey(r.Header.Get("X-Phoenix-Seal-Key"))
+		env, _ := crypto.SealValue("ns/secret", "", "fake-sealed", pub)
+		json.NewEncoder(w).Encode(map[string]any{"sealed_value": env})
+	}), func() {
+		var err error
+		out := captureStdout(t, func() { err = cmdExport([]string{"ns/", "-f", "env"}) })
+		if err != nil {
+			t.Fatalf("cmdExport: %v", err)
+		}
+		if out != "SECRET=fake-sealed\n" {
+			t.Fatal("export did not print the opened value")
+		}
+	})
+}
+
+// An answer export cannot open, or one with no value, stops it instead of
+// leaving an empty value in the backup.
+func TestCmdExportRefusesMissingValue(t *testing.T) {
+	other, _ := crypto.GenerateSealKeyPair()
+	wrongKey, _ := crypto.SealValue("ns/secret", "", "fake-sealed", &other.PublicKey)
+	mine := useSealKey(t)
+	otherSecret, _ := crypto.SealValue("ns/other", "", "fake-sealed", &mine.PublicKey)
+	mineFile := os.Getenv("PHOENIX_SEAL_KEY")
+	for name, tc := range map[string]struct {
+		key    bool
+		answer map[string]any
+	}{
+		"plain answer to a seal key": {true, map[string]any{"value": "fake-plain"}},
+		"sealed to another key":      {true, map[string]any{"sealed_value": wrongKey}},
+		"another secret's value":     {true, map[string]any{"sealed_value": otherSecret}},
+		"no value, no key":           {false, map[string]any{"path": "ns/secret"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PHOENIX_SEAL_KEY", "")
+			if tc.key {
+				t.Setenv("PHOENIX_SEAL_KEY", mineFile)
+			}
+			withMockServer(t, exportServer(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(tc.answer)
+			}), func() {
+				var err error
+				out := captureStdout(t, func() { err = cmdExport([]string{"ns/"}) })
+				if err == nil || !strings.Contains(err.Error(), "ns/secret") {
+					t.Fatalf("err = %v, want one naming the secret", err)
+				}
+				if out != "" {
+					t.Fatal("export printed a line for a secret it could not read")
+				}
+			})
+		})
+	}
+}
+
+// A one-use approval spent by export is spent on the value itself, and a second
+// export says why it stops. Against a real server, sealed as in use.
+func TestCmdExportSealedOneUse(t *testing.T) {
+	withNamesServer(t, func(e namesEnv) {
+		kp := useSealKey(t)
+		if err := errors.Join(
+			e.st.Set("vault/app-key", "fake-one-use", "test", "", nil),
+			e.acl.AddAgent("courier", "courier-token", []acl.Permission{{Path: "vault/*", Actions: []acl.Action{acl.ActionList}}}),
+			e.acl.SetAgentSealKey("courier", crypto.EncodeSealKey(&kp.PublicKey)),
+		); err != nil {
+			t.Fatal(err)
+		}
+		grants, err := grant.Open(grant.Options{Path: filepath.Join(t.TempDir(), "grants.json"), Logf: t.Logf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.srv.SetGrantStore(grants)
+		e.srv.SetAccessRequests((&config.Config{AccessRequests: config.NewInstallAccessRequests()}).AccessRequestsSettings())
+		token = "courier-token" // withMockServer puts the old one back
+
+		resp, err := apiRequest("POST", "/v1/access-requests", strings.NewReader(`{"paths":["vault/app-key"],"reason":"one use"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		asked := grants.ListRequests("courier", grant.StatusPending)
+		if len(asked) != 1 {
+			t.Fatalf("status %d, %d requests waiting, want 1", resp.StatusCode, len(asked))
+		}
+		if _, _, err := e.srv.ApproveAccessRequestAs(asked[0].ID, "dashboard@127.0.0.1", "127.0.0.1", grant.Approval{Uses: 1}); err != nil {
+			t.Fatal(err)
+		}
+
+		out := captureStdout(t, func() { err = cmdExport([]string{"vault/"}) })
+		if err != nil {
+			t.Fatalf("cmdExport: %v", err)
+		}
+		if out != "APP_KEY=fake-one-use\n" {
+			t.Fatal("the one use was spent without printing the value")
+		}
+		if g := grants.ListGrants("courier", true); len(g) != 1 || g[0].UseCount != 1 {
+			t.Fatal("export did not cost exactly one use")
+		}
+		out = captureStdout(t, func() { err = cmdExport([]string{"vault/"}) })
+		if err == nil || !strings.Contains(err.Error(), "vault/app-key") || out != "" {
+			t.Fatalf("second export: err = %v, %d bytes printed; want an error naming the secret and no output", err, len(out))
 		}
 	})
 }

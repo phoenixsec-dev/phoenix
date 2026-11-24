@@ -12,7 +12,8 @@ When init prints:
 <token>
 ```
 
-Immediately move it into a secure store:
+Immediately move it into a secure store (and the `DASHBOARD PASSWORD`, if init
+generated one, in an entry agents cannot read):
 
 - password manager entry (recommended)
 - encrypted secrets vault
@@ -38,8 +39,9 @@ Example bootstrap flow (local server, default config):
 export PHOENIX_SERVER="http://127.0.0.1:9090"
 export PHOENIX_TOKEN="<admin-token>"
 
-phoenix agent create app-runtime -t "runtime-token" --acl "myapp/**:list,read_value"
-phoenix agent create app-deployer -t "deploy-token" --acl "myapp/**:list,read_value,write"
+# each asks for the agent's token, hidden
+phoenix agent create app-runtime --acl "myapp/**:list,read_value"
+phoenix agent create app-deployer --acl "myapp/**:list,read_value,write"
 ```
 
 Then remove the admin token from your active shell:
@@ -69,8 +71,8 @@ leaked credentials. See [Session Identity](session-identity.md).
 
 - rotate application secrets on a schedule
 - rotate agent tokens when staff or infrastructure changes
-- if an agent's token leaks, replace it (`phoenix agent create <name> -t <new>
-  --acl ... --force`); that also ends its role sessions. Revoke its grants
+- if an agent's token leaks, replace it (`phoenix agent create <name>
+  --acl ... --force`, which asks for the new one); that also ends its role sessions. Revoke its grants
   (`phoenix grants --agent <name>`, `phoenix grants revoke <id>`): an SSH login
   already signed under one works until the grant ends
 - keep emergency access documented and tested

@@ -13,7 +13,8 @@ a short-lived certificate: a login pass with an expiry built in.
 - **A pass works in one place.** It names one machine, works only from the IP
   that asked, and ends when the grant ends.
 - **A revoke beats a pass that is still in date.** The machine asks Phoenix at
-  every login whether that pass's grant still stands.
+  every login whether that pass's grant still stands. Replacing the agent's token or
+  deleting the agent ends it the same way.
 
 ## The flow
 
@@ -24,14 +25,14 @@ phoenix ssh --list
 # Agent: asks if there is no approval yet, waits, then logs in and runs the command
 phoenix ssh build-1 --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
 
-# Human: dashboard -> Approvals -> approve. The card says "root login on this machine".
+# Human: dashboard -> Requests -> Once or 15 minutes. The card says "root login on <machine>".
 
 # Agent: more commands in the same window need no new approval and no --reason
 phoenix ssh build-1 -- sudo -n systemctl status something
 
 # Human: take it back. New logins stop at once, even with a pass the agent kept.
 # Open sessions under that approval end within about 30 seconds.
-#   dashboard -> Grants -> Revoke
+#   dashboard -> Requests -> Revoke
 ```
 
 It uses the [request-use grant flow](access-requests.md): the same request
@@ -118,8 +119,9 @@ alone until you run install again without it.
   afterwards; they do not prevent it.
 - **If a machine cannot reach Phoenix,** nobody new can log in, and an open session
   keeps running until it can. The timer finds out on its next run.
-- **Rotating an agent's token ends its grant for signing, not its passes.** A pass
-  already issued keeps working until it expires. Revoke the grant to end it now.
+- **Replacing an agent's token ends its passes too.** The machine's check says no
+  to a login approved for the old token, as after a revoke. (Putting the very same
+  token back does not reopen it, except for an approval from before v0.25.0.)
 - **The dashboard login is the approval.** Anyone who has that password can
   approve anything. Do not keep it where an agent can read it.
 - **Root on the Phoenix host beats all of this.** It can read `ssh_ca.key`.

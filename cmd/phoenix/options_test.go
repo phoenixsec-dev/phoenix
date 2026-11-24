@@ -51,7 +51,7 @@ func runMain(t *testing.T, argv ...string) (code int, stdout, stderr string) {
 // The commands main dispatches. Each must be in cmdSpecs, or a typo in it
 // would reach the server.
 var allCommands = []string{
-	"get", "set", "delete", "list", "info", "export", "import", "audit",
+	"get", "set", "delete", "list", "info", "describe", "export", "import", "audit",
 	"agent create", "agent list", "agent delete", "resolve", "openclaw-exec-provider",
 	"exec", "verify", "status", "policy show", "policy test", "rotate-master",
 	"emergency get", "sessions list", "sessions info", "sessions revoke",
@@ -143,7 +143,7 @@ func TestRemovedFlagsRefusedOnlyAsOptions(t *testing.T) {
 }
 
 // The three ways people write a folder all list it; any
-// other wildcard is a usage error and sends nothing. Kit's case: --prefix.
+// other wildcard is a usage error and sends nothing. One seen in use: --prefix.
 func TestListFolderForms(t *testing.T) {
 	var got []string
 	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {

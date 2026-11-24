@@ -30,11 +30,11 @@ expected="$(op read "op://$OP_VAULT/$item_name/$field_name")"
 
 init_scenario 12
 vault_json="$(jq -Rn --arg value "$OP_VAULT" '$value')"
-config_patch "d['store']['backend']='1password'; d['onepassword']={'enabled': True, 'vault': $vault_json, 'service_account_token_env': 'OP_SERVICE_ACCOUNT_TOKEN', 'cache_ttl': '0s'}"
+config_patch "d['store']['backend']='1password'; d['onepassword']={'vault': $vault_json, 'service_account_token_env': 'OP_SERVICE_ACCOUNT_TOKEN', 'cache_ttl': '0s'}"
 start_server
 
 actual="$(phoenix_admin resolve "phoenix://$secret_path")"
-assert_eq "$actual" "$expected" "Phoenix reference did not resolve the 1Password value"
+assert_secret "$actual" "$expected" "Phoenix reference did not resolve the 1Password value"
 unset actual expected
 ok "Phoenix reference resolved through the 1Password backend"
 

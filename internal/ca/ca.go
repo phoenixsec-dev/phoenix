@@ -6,6 +6,7 @@
 package ca
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -20,6 +21,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 const (
@@ -147,7 +150,7 @@ func (ca *CA) Save(certPath, keyPath string) error {
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()
 
-	if err := os.WriteFile(certPath, ca.certPEM, 0644); err != nil {
+	if err := fsutil.WriteFileAtomic(fsutil.RealPath(certPath), ca.certPEM, 0644); err != nil {
 		return fmt.Errorf("writing CA cert: %w", err)
 	}
 
@@ -157,7 +160,7 @@ func (ca *CA) Save(certPath, keyPath string) error {
 	}
 
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	if err := fsutil.WriteFileAtomic(fsutil.RealPath(keyPath), keyPEM, 0600); err != nil {
 		return fmt.Errorf("writing CA key: %w", err)
 	}
 
@@ -253,7 +256,10 @@ func randomSerial() (*big.Int, error) {
 	return serial, nil
 }
 
-// SaveBundle writes a CertBundle to files in the given directory.
+// Save writes a CertBundle to the given files. The server certificate and key
+// are written in place, so that whoever the owner lets read them (mode, owner,
+// ACL) still can, and nobody else. They can always be made again: if this is
+// cut off, run --reissue-cert again.
 func (b *CertBundle) Save(certPath, keyPath, caPath string) error {
 	if err := os.WriteFile(certPath, b.CertPEM, 0644); err != nil {
 		return fmt.Errorf("writing cert: %w", err)
@@ -261,7 +267,12 @@ func (b *CertBundle) Save(certPath, keyPath, caPath string) error {
 	if err := os.WriteFile(keyPath, b.KeyPEM, 0600); err != nil {
 		return fmt.Errorf("writing key: %w", err)
 	}
-	if err := os.WriteFile(caPath, b.CACert, 0644); err != nil {
+	// The CA certificate cannot be made again and --reissue-cert just read it
+	// from there, so it is only written where it is missing or differs.
+	if now, err := os.ReadFile(caPath); err == nil && bytes.Equal(now, b.CACert) {
+		return nil
+	}
+	if err := fsutil.WriteFileAtomic(fsutil.RealPath(caPath), b.CACert, 0644); err != nil {
 		return fmt.Errorf("writing CA cert: %w", err)
 	}
 	return nil

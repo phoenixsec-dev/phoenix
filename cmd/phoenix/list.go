@@ -22,6 +22,8 @@ type secretInfo struct {
 	CreatedBy   string     `json:"created_by"`
 	UpdatedBy   string     `json:"updated_by"`
 	RotationDue string     `json:"rotation_due"`
+	Username    string     `json:"username"`
+	URL         string     `json:"url"`
 }
 
 // errNoMetadataRoute means the server predates /v1/metadata (its mux
@@ -41,7 +43,7 @@ func fetchSecretInfos(prefix, tag string) ([]secretInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading seal key: %w", err)
 	}
-	path := "/v1/metadata/" + prefix
+	path := "/v1/metadata/" + escapeName(prefix)
 	if tag != "" {
 		path += "?tag=" + url.QueryEscape(tag)
 	}
@@ -109,6 +111,8 @@ func formatSecretInfo(w io.Writer, si secretInfo) {
 	}
 	line("description", desc)
 	line("tags", strings.Join(si.Tags, ", "))
+	line("username", si.Username)
+	line("link", si.URL)
 	line("created", stamp(si.Created, si.CreatedBy))
 	line("updated", stamp(si.Updated, si.UpdatedBy))
 	line("rotation due", si.RotationDue)
@@ -118,7 +122,7 @@ func formatSecretInfo(w io.Writer, si secretInfo) {
 // except its value. Needs only list permission on the path.
 func cmdInfo(args []string) error {
 	if len(args) != 1 || strings.HasPrefix(args[0], "-") || args[0] == "" || strings.HasSuffix(args[0], "/") {
-		return fmt.Errorf("usage: phoenix info <path>   (shows description, tags, dates; never the value)")
+		return fmt.Errorf("usage: phoenix info <path>   (shows description, tags, username, link, dates; never the value)")
 	}
 	path := args[0]
 	if err := requireAuth(); err != nil {
@@ -129,7 +133,7 @@ func cmdInfo(args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading seal key: %w", err)
 	}
-	resp, err := apiRequestWithHeaders("GET", "/v1/metadata/"+path, nil, sealHeaders(sealPrivKey))
+	resp, err := apiRequestWithHeaders("GET", "/v1/metadata/"+escapeName(path), nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}

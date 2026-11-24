@@ -9,6 +9,8 @@ import (
 	"log"
 	"os"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // signingKeyLabel is the fixed HKDF label for the session signing key.
@@ -31,7 +33,8 @@ type Options struct {
 	Path string
 	// RoleFingerprints maps each configured role to a hash of its settings
 	// (config.RoleFingerprints). Saved with the sessions; at load, a session
-	// whose role is missing here or whose hash changed is dropped.
+	// whose role is missing here or whose hash changed is dropped, unless it
+	// was revoked.
 	RoleFingerprints map[string]string
 }
 
@@ -56,26 +59,27 @@ type sessionsFile struct {
 }
 
 // loadSessions reads the sessions file and returns the unexpired records
-// whose role still exists with the same settings (fingerprint in roles).
+// whose role still exists with the same settings (fingerprint in roles), plus
+// every unexpired revoked one. dropped is true when it left any out.
 // A missing file means no sessions. A file that is not a Phoenix sessions
 // file (version 1 with a "sessions" list) is an error and is left untouched:
 // it may be another Phoenix file configured at this path (secrets, a TLS
 // key, the config), and moving or overwriting it would destroy it.
-func loadSessions(path string, roles map[string]string) (map[string]*Session, error) {
-	out := make(map[string]*Session)
+func loadSessions(path string, roles map[string]string) (out map[string]*Session, dropped bool, err error) {
+	out = make(map[string]*Session)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return out, nil
+		return out, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading sessions file: %w", err)
+		return nil, false, fmt.Errorf("reading sessions file: %w", err)
 	}
 
 	var keys map[string]json.RawMessage
 	var f sessionsFile
 	if err := json.Unmarshal(data, &keys); err != nil || keys["sessions"] == nil ||
 		json.Unmarshal(data, &f) != nil || f.Version != fileVersion {
-		return nil, fmt.Errorf("%s is not a Phoenix role sessions file, and that path is reserved for one; "+
+		return nil, false, fmt.Errorf("%s is not a Phoenix role sessions file, and that path is reserved for one; "+
 			"if it is another file, move it; if it is a damaged sessions file, delete it (that only ends sessions)", path)
 	}
 
@@ -85,7 +89,9 @@ func loadSessions(path string, roles map[string]string) (map[string]*Session, er
 		if sess == nil || sess.ID == "" || now.After(sess.ExpiresAt) {
 			continue
 		}
-		if cur, ok := roles[sess.Role]; !ok || f.Roles[sess.Role] != cur {
+		// A revoked record is kept whatever its role became: it must go on
+		// saying revoked, or the client quietly mints a replacement.
+		if cur, ok := roles[sess.Role]; !sess.Revoked && (!ok || f.Roles[sess.Role] != cur) {
 			changed++
 			continue
 		}
@@ -94,8 +100,11 @@ func loadSessions(path string, roles map[string]string) (map[string]*Session, er
 	if changed > 0 {
 		log.Printf("  Sessions: ended %d whose role was removed or changed since the last start", changed)
 	}
-	return out, nil
+	return out, len(out) != len(f.Sessions), nil
 }
+
+// writeSessionsFile saves a sessions file; tests replace it to fail.
+var writeSessionsFile = fsutil.WriteFileAtomicStrict
 
 // saveLocked writes every session record to the sessions file. The caller
 // must hold s.mu. Does nothing for a memory-only store.

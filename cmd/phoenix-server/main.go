@@ -3,11 +3,12 @@
 // Usage:
 //
 //	phoenix-server [--config /data/config.json]
-//	phoenix-server --init /data  (first-time setup)
+//	phoenix-server --init /data [--https]  (first-time setup)
 //	phoenix-server --reissue-cert --san <ip-or-host> [--san ...] --config /data/config.json
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/api"
 	"github.com/phoenixsec/phoenix/internal/audit"
@@ -29,6 +28,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/dashboard"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
@@ -51,6 +51,7 @@ func (s *sanList) Set(v string) error {
 func main() {
 	configPath := flag.String("config", "", "Path to config file (default: /data/config.json)")
 	initDir := flag.String("init", "", "Initialize a new Phoenix data directory")
+	initHTTPS := flag.Bool("https", false, "With --init: turn on the HTTPS address (0.0.0.0:9443) in the new config")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	passphraseStdin := flag.Bool("passphrase-stdin", false, "Read master key passphrase from stdin")
 	flag.String("passphrase", "", "Removed: use --passphrase-stdin or PHOENIX_MASTER_PASSPHRASE")
@@ -65,6 +66,11 @@ func main() {
 	if flagSet("passphrase") {
 		fmt.Fprintln(os.Stderr, "phoenix-server --passphrase was removed: a passphrase on the command line is visible to every user in the process list and lands in shell history. "+
 			"Pipe it in with --passphrase-stdin, or set PHOENIX_MASTER_PASSPHRASE.")
+		os.Exit(2)
+	}
+
+	if *initHTTPS && *initDir == "" {
+		fmt.Fprintln(os.Stderr, "phoenix-server --https only works together with --init; for an existing install set https_listener.enabled to true in its config.")
 		os.Exit(2)
 	}
 
@@ -95,11 +101,20 @@ func main() {
 	}
 
 	if *initDir != "" {
+		// Checked before any question is asked; runInit checks again.
+		if err := refuseExisting(*initDir); err != nil {
+			log.Fatalf("init failed: %v", err)
+		}
 		passphrase, err := initPassphrase(*passphraseStdin)
 		if err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
-		if err := runInit(*initDir, passphrase); err != nil {
+		password, generated, err := initDashboardPassword()
+		if err != nil {
+			log.Fatalf("init failed: %v", err)
+		}
+		opts := initOptions{Passphrase: passphrase, DashboardPassword: password, ShowPassword: generated, HTTPS: *initHTTPS, Reveal: initReveal()}
+		if err := runInit(*initDir, opts); err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
 		return
@@ -139,6 +154,19 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
+	// Before anything is made, lock files included, where data is missing.
+	storeThere, err := refuseMissingData(cfg)
+	if err != nil {
+		log.Fatalf("not starting: %v", err)
+	}
+
+	// Before anything is opened: opening a data file can already write to it.
+	locks, err := lockDataFiles(cfg, log.Printf)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	defer locks.release()
+
 	// Initialize backend
 	var backend store.SecretBackend
 	// Session signing key derived from the master key, so role sessions
@@ -164,59 +192,24 @@ func main() {
 		log.Printf("  Backend: 1password (vault=%s, cache=%s)", cfg.OnePassword.Vault, cacheTTL)
 
 	default: // "file"
-		// Initialize key provider
-		var keyProvider crypto.KeyProvider
-		switch cfg.Crypto.Provider {
-		case "file", "":
-			key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
-			if err == crypto.ErrPassphraseRequired {
-				passphrase, ppErr := crypto.ReadPassphrase(*passphraseStdin)
-				if ppErr != nil {
-					log.Fatalf("master key is passphrase-protected: %v", ppErr)
-				}
-				key, err = crypto.LoadMasterKeyWithPassphrase(cfg.Store.MasterKey, passphrase)
-				if err != nil {
-					log.Fatalf("decrypting master key: %v", err)
-				}
-				p, provErr := crypto.NewFileKeyProvider(key)
-				if provErr != nil {
-					log.Fatalf("creating key provider: %v", provErr)
-				}
-				p.SetPassphrase(passphrase)
-				keyProvider = p
-			} else if err != nil {
-				log.Fatalf("loading master key: %v", err)
-			} else {
-				p, provErr := crypto.NewFileKeyProvider(key)
-				if provErr != nil {
-					log.Fatalf("creating key provider: %v", provErr)
-				}
-				keyProvider = p
-			}
-		default:
-			log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
-		}
-		if fp, ok := keyProvider.(*crypto.FileKeyProvider); ok {
-			mk := fp.MasterKey()
-			sessionSigningKey, err = session.DeriveSigningKey(mk)
-			crypto.ZeroBytes(mk)
-			if err != nil {
-				log.Fatalf("%v", err)
-			}
-		}
-
-		s, err := store.NewWithProvider(cfg.Store.Path, keyProvider)
+		s, keyProvider, err := openFileStore(cfg, storeThere, func() (string, error) { return crypto.ReadPassphrase(*passphraseStdin) })
 		if err != nil {
-			log.Fatalf("initializing store: %v", err)
+			log.Fatalf("%v", err)
+		}
+		mk := keyProvider.MasterKey()
+		sessionSigningKey, err = session.DeriveSigningKey(mk)
+		crypto.ZeroBytes(mk)
+		if err != nil {
+			log.Fatalf("%v", err)
 		}
 		backend = store.NewFileBackend(s)
 		log.Printf("  Backend: file (provider=%s)", keyProvider.Name())
 	}
 
 	// Initialize ACL
-	a, err := acl.New(cfg.ACL.Path)
+	a, err := openACL(cfg)
 	if err != nil {
-		log.Fatalf("initializing ACL: %v", err)
+		log.Fatalf("%v", err)
 	}
 
 	// Initialize audit logger
@@ -230,6 +223,7 @@ func main() {
 	srv := api.NewServer(backend, a, al, cfg.Audit.Path)
 	srv.SetBearerEnabled(cfg.Auth.Bearer.Enabled)
 	srv.SetMasterKeyPath(cfg.Store.MasterKey)
+	srv.SetMasterKeyLock(locks.key)
 
 	// Load attestation policy if configured
 	var pe *policy.Engine
@@ -261,7 +255,8 @@ func main() {
 			log.Fatalf("initializing session store: %v", err)
 		}
 		if err := srv.SetSessionStore(sessionStore); err != nil {
-			log.Fatalf("initializing session store: %v", err)
+			// Ended in memory, and the ACL no longer has their credential.
+			log.Printf("WARNING: sessions that ended at start are not saved as ended yet, will retry: %v", err)
 		}
 		srv.SetSessionRoles(cfg.Session.Roles)
 		defer sessionStore.Stop()
@@ -286,14 +281,19 @@ func main() {
 	grantCtx, stopGrants := context.WithCancel(context.Background())
 	defer stopGrants()
 	go grantStore.Run(grantCtx, 30*time.Second)
+	go a.RetrySaves(grantCtx, 30*time.Second)
 	logAccessRequests(cfg, a)
 	if cfg.SSHCAEnabled() {
 		ca, created, err := sshca.LoadOrCreate(cfg.SSHCAKeyPath())
-		if err != nil {
+		switch {
+		case fsutil.NoSpace(err):
+			log.Printf("WARNING: SSH certificates are off until the next start: the disk is full and the new CA key could not be saved: %v", err)
+		case err != nil:
 			log.Fatalf("loading SSH CA key: %v", err)
+		default:
+			srv.SetSSHCA(ca, cfg.SSHCAHosts())
+			log.Printf("SSH certificates: enabled for %d host(s), new key=%v, CA %s", len(cfg.SSHCA.Hosts), created, sshca.PublicKey(ca))
 		}
-		srv.SetSSHCA(ca, cfg.SSHCAHosts())
-		log.Printf("SSH certificates: enabled for %d host(s), new key=%v, CA %s", len(cfg.SSHCA.Hosts), created, sshca.PublicKey(ca))
 	}
 
 	// Initialize dashboard if enabled
@@ -309,6 +309,8 @@ func main() {
 			Policy:       pe,
 			Grants:       grantStore,
 			Access:       srv,
+			Notify:       srv,
+			ConfigPath:   realConfigPath(resolveConfigPath(*configPath)),
 		}
 		dash, err := dashboard.New(cfg.Dashboard, deps)
 		if err != nil {
@@ -316,6 +318,7 @@ func main() {
 		}
 		srv.SetDashboard(dash)
 		log.Printf("  Dashboard: enabled at /dashboard/")
+		logReveal(cfg)
 	}
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
@@ -339,6 +342,59 @@ func main() {
 	}
 }
 
+// openFileStore loads the master key, asking passphrase for one if it is
+// protected, and opens the store with it. storeThere is whether the store file
+// was there before that: then it must still be when it is read, because the wait
+// for a passphrase can be long and a file gone by then is not an empty store.
+func openFileStore(cfg *config.Config, storeThere bool, passphrase func() (string, error)) (*store.Store, *crypto.FileKeyProvider, error) {
+	if p := cfg.Crypto.Provider; p != "file" && p != "" {
+		return nil, nil, fmt.Errorf("unknown crypto provider: %q (supported: file)", p)
+	}
+	var pass string
+	key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
+	if err == crypto.ErrPassphraseRequired {
+		if pass, err = passphrase(); err != nil {
+			return nil, nil, fmt.Errorf("master key is passphrase-protected: %w", err)
+		}
+		if key, err = crypto.LoadMasterKeyWithPassphrase(cfg.Store.MasterKey, pass); err != nil {
+			return nil, nil, fmt.Errorf("decrypting master key: %w", err)
+		}
+	} else if err != nil {
+		return nil, nil, fmt.Errorf("loading master key: %w", err)
+	}
+	provider, err := crypto.NewFileKeyProvider(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating key provider: %w", err)
+	}
+	if pass != "" {
+		provider.SetPassphrase(pass)
+	}
+	open := store.NewWithProvider
+	if storeThere {
+		open = store.NewExisting
+	}
+	s, err := open(cfg.Store.Path, provider)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initializing store: %w", err)
+	}
+	return s, provider, nil
+}
+
+// openACL opens the access list, the last data file to be read, and then checks
+// again for missing data, before anything is written: a store that was not there
+// is empty only if the audit log still says so. The log may have come back since
+// the first check, for example during the wait for a passphrase.
+func openACL(cfg *config.Config) (*acl.ACL, error) {
+	a, err := acl.NewExisting(cfg.ACL.Path)
+	if err != nil {
+		return nil, fmt.Errorf("initializing ACL: %w", err)
+	}
+	if _, err := refuseMissingData(cfg); err != nil {
+		return nil, fmt.Errorf("not starting: %w", err)
+	}
+	return a, nil
+}
+
 // resolveConfigPath picks the config file: --config, then $PHOENIX_CONFIG,
 // then /data/config.json.
 func resolveConfigPath(flagValue string) string {
@@ -349,6 +405,23 @@ func resolveConfigPath(flagValue string) string {
 		return env
 	}
 	return "/data/config.json"
+}
+
+// realConfigPath is the full path of the config file pages tell the owner to
+// edit. Links are followed first: "link/../x" is not always "x".
+func realConfigPath(path string) string {
+	// The working directory may be a link too, so it is put in front as is:
+	// Abs and Join would remove a ".." before the link was followed.
+	if wd, err := os.Getwd(); err == nil && !filepath.IsAbs(path) {
+		path = wd + string(filepath.Separator) + path
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return path
 }
 
 // runCheckConfig is --check-config: it runs the same checks startup does on
@@ -376,7 +449,10 @@ func runCheckConfig(path string) error {
 			fmt.Printf("policy OK: %s (%d rules)\n", cfg.Policy.Path, len(pe.Rules()))
 		}
 	}
-	if cfg.ACL.Path != "" {
+	if _, err := refuseMissingData(cfg); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.ACL.Path != "" && !missing(cfg.ACL.Path) {
 		a, err := acl.New(cfg.ACL.Path)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("acl %s: %w", cfg.ACL.Path, err))
@@ -416,22 +492,66 @@ func initPassphrase(stdin bool) (string, error) {
 	return crypto.ReadPassphrase(stdin)
 }
 
-func runInit(dir, passphrase string) error {
+// initOptions is what --init was asked for.
+type initOptions struct {
+	Passphrase        string // protects the master key; empty = unprotected
+	DashboardPassword string // stored only as a bcrypt hash
+	ShowPassword      bool   // print it once (it was generated)
+	HTTPS             bool   // write https_listener switched on
+	Reveal            bool   // let the dashboard show secret values
+}
+
+// refuseExisting stops --init on a directory that already has any file it would
+// write, or a store: a key, store, CA or config there is one nobody can make
+// again. Lstat, so a link that leads nowhere counts.
+func refuseExisting(dir string) error {
+	for _, name := range []string{"master.key", "store.json", "acl.json", "config.json", "ca.crt", "ca.key", "server.crt", "server.key"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("%s already exists — refusing to overwrite. --init is for a new directory; "+
+				"to start over, move the old files away first", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// runInit is --init: it fills dir with everything a first start needs (master
+// key, admin token, CA and certificate, config with the dashboard on).
+func runInit(dir string, opts initOptions) error {
+	// First, so a password that cannot be used leaves nothing half made.
+	passwordHash, err := hashDashboardPassword(opts.DashboardPassword)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
+	// Two --init at once would both find the directory empty.
+	lock, err := fsutil.Lock(filepath.Join(dir, "init"))
+	switch {
+	case err == nil:
+		defer lock.Release()
+	case errors.Is(err, fsutil.ErrLocked):
+		return fmt.Errorf("another --init is running in %s", dir)
+	default:
+		log.Printf("WARNING: cannot lock %s: %v", dir, err)
+	}
+
+	if err := refuseExisting(dir); err != nil {
+		return err
+	}
+
 	// Generate master key
 	keyPath := filepath.Join(dir, "master.key")
-	if _, err := os.Stat(keyPath); err == nil {
-		return fmt.Errorf("master key already exists at %s — refusing to overwrite", keyPath)
-	}
-	if passphrase != "" {
+	if opts.Passphrase != "" {
 		key, err := crypto.GenerateKey()
 		if err != nil {
 			return fmt.Errorf("generating master key: %w", err)
 		}
-		if err := crypto.SaveProtectedMasterKey(keyPath, key, passphrase); err != nil {
+		if err := crypto.SaveProtectedMasterKey(keyPath, key, opts.Passphrase); err != nil {
 			return fmt.Errorf("saving protected master key: %w", err)
 		}
 		fmt.Printf("Generated passphrase-protected master key: %s\n", keyPath)
@@ -465,6 +585,10 @@ func runInit(dir, passphrase string) error {
 		return fmt.Errorf("saving ACL: %w", err)
 	}
 	fmt.Printf("Created ACL: %s\n", aclPath)
+	// The store too: a missing one then means it was lost (refuseMissingData).
+	if err := store.CreateEmpty(filepath.Join(dir, "store.json")); err != nil {
+		return fmt.Errorf("creating store: %w", err)
+	}
 	fmt.Printf("\n*** ADMIN TOKEN (save this — it won't be shown again): ***\n%s\n\n", adminToken)
 
 	// Generate internal CA
@@ -499,30 +623,53 @@ func runInit(dir, passphrase string) error {
 	cfg.Store.MasterKey = keyPath
 	cfg.ACL.Path = aclPath
 	cfg.Audit.Path = filepath.Join(dir, "audit.log")
-	// HTTPS is written off: turning it on is one setting ("enabled": true)
-	// once clients have ca.crt. --reissue-cert uses ca_cert/ca_key.
+	// Without --https this is written off: turning it on is one setting
+	// ("enabled": true) once clients have ca.crt. --reissue-cert uses
+	// ca_cert/ca_key.
 	cfg.HTTPSListener = config.HTTPSListenerConfig{
-		Listen: "0.0.0.0:9443",
-		Cert:   serverCertPath,
-		Key:    serverKeyPath,
-		CACert: caCertPath,
-		CAKey:  caKeyPath,
+		Enabled: opts.HTTPS,
+		Listen:  "0.0.0.0:9443",
+		Cert:    serverCertPath,
+		Key:     serverKeyPath,
+		CACert:  caCertPath,
+		CAKey:   caKeyPath,
 	}
 	// New installs get request-use grants switched on (plan Q1); configs
 	// written before this release have no block and stay off.
 	cfg.AccessRequests = config.NewInstallAccessRequests()
+	// On, so there is somebody who can answer those requests.
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = passwordHash
+	cfg.Dashboard.Reveal = opts.Reveal
+	pingOn := true // the default, written out so the owner sees the setting
+	cfg.Dashboard.NotifyOnReveal = &pingOn
 
 	cfgData, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	if err := os.WriteFile(cfgPath, cfgData, 0600); err != nil {
+	if err := fsutil.WriteFileAtomic(cfgPath, cfgData, 0600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 	fmt.Printf("Created config: %s\n", cfgPath)
 
+	if opts.ShowPassword {
+		fmt.Printf("\n*** DASHBOARD PASSWORD (save this — it won't be shown again): ***\n%s\n", opts.DashboardPassword)
+	}
+
 	fmt.Println("\nPhoenix initialized. Start the server with:")
 	fmt.Printf("  phoenix-server --config %s\n", cfgPath)
+	dashURL := "http://" + cfg.Server.Listen
+	if opts.HTTPS {
+		dashURL = "https://127.0.0.1:9443"
+	}
+	fmt.Printf("Then sign in at %s/dashboard/ to answer agents' requests.\n", dashURL)
+	if opts.Reveal {
+		fmt.Printf("The dashboard can show and copy secrets. To turn that off, set \"reveal\": false inside \"dashboard\" in %s.\n", cfgPath)
+	} else {
+		fmt.Printf("The dashboard can find and add secrets, not show them. To turn that on, set \"reveal\": true inside \"dashboard\" in %s and restart.\n", cfgPath)
+	}
+	fmt.Println("Keep the dashboard password and the admin token away from agents.")
 
 	return nil
 }
@@ -533,6 +680,14 @@ func runProtectKey(keyPath string) error {
 	if !crypto.IsTerminal() {
 		return fmt.Errorf("--protect-key requires an interactive terminal (TTY)")
 	}
+
+	// What the prompts below are about; see replaceKeyFile.
+	before, err := os.ReadFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("loading master key: %w", err)
+	}
+
+	keyPath = fsutil.RealPath(keyPath) // replace the file, not a symlink to it
 
 	// Load current key (with old passphrase if needed)
 	key, err := crypto.LoadMasterKey(keyPath)
@@ -562,18 +717,42 @@ func runProtectKey(keyPath string) error {
 		if cErr != nil || confirm != "REMOVE" {
 			return fmt.Errorf("aborted — passphrase not changed")
 		}
-		if err := crypto.SaveMasterKeyAtomic(keyPath, key); err != nil {
+		if err := replaceKeyFile(keyPath, before, func() error { return crypto.SaveMasterKeyAtomic(keyPath, key) }); err != nil {
 			return fmt.Errorf("saving unprotected key: %w", err)
 		}
-		fmt.Println("Master key passphrase removed.")
+		fmt.Println("Master key passphrase removed. Restart the server.")
 	} else {
-		if err := crypto.SaveProtectedMasterKey(keyPath, key, newPass); err != nil {
+		if err := replaceKeyFile(keyPath, before, func() error { return crypto.SaveProtectedMasterKey(keyPath, key, newPass) }); err != nil {
 			return fmt.Errorf("saving protected key: %w", err)
 		}
-		fmt.Println("Master key passphrase updated.")
+		fmt.Println("Master key passphrase updated. Restart the server.")
 	}
 
 	return nil
+}
+
+// replaceKeyFile runs save unless the key file is no longer what it was when
+// read. A running server may have rotated the key while a person was typing a
+// passphrase; saving the old key over it would leave a store no key opens. The
+// lock is the one rotate-master holds while it works.
+func replaceKeyFile(keyPath string, before []byte, save func() error) error {
+	lock, err := fsutil.Lock(keyPath)
+	switch {
+	case err == nil:
+		defer lock.Release()
+	case errors.Is(err, fsutil.ErrLocked):
+		return fmt.Errorf("a key rotation is running, nothing was changed; run this again: %w", err)
+	default:
+		log.Printf("WARNING: cannot lock %s: %v", keyPath, err)
+	}
+	now, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(now, before) {
+		return errors.New("the key file was changed by something else meanwhile (a key rotation?), nothing was changed; run this again")
+	}
+	return save()
 }
 
 // runHashPassword prompts for a password and prints its bcrypt hash.
@@ -590,11 +769,11 @@ func runHashPassword() error {
 	if pass != confirm {
 		return fmt.Errorf("passwords do not match")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	hash, err := hashDashboardPassword(pass)
 	if err != nil {
-		return fmt.Errorf("generating hash: %w", err)
+		return err
 	}
-	fmt.Println(string(hash))
+	fmt.Println(hash)
 	return nil
 }
 
@@ -607,6 +786,10 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 	}
 	if hl.Cert == "" || hl.Key == "" {
 		return fmt.Errorf("config is missing https_listener.cert and https_listener.key paths")
+	}
+
+	if err := cfg.ValidateReissuePaths(); err != nil {
+		return err
 	}
 
 	// Always include localhost and loopback
@@ -642,8 +825,9 @@ func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger) (*grant.St
 	}
 	set := cfg.AccessRequestsSettings()
 	return grant.Open(grant.Options{
-		Path:  set.StorePath,
-		Audit: api.NewGrantAuditSink(al),
+		Path:   set.StorePath,
+		Audit:  api.NewGrantAuditSink(al),
+		Always: api.NewAlwaysRules(a),
 		AgentExists: func(name string) bool {
 			_, err := a.GetAgent(name)
 			return err == nil
@@ -686,5 +870,27 @@ func logAccessRequests(cfg *config.Config, a *acl.ACL) {
 		// Worded without "dashboard": e2e scenario 19 checks that the startup
 		// log never mentions it when that UI is off.
 		log.Printf("WARNING: access_requests is enabled but nobody can approve requests: access_requests.approvers is empty and the operator web UI is off")
+	}
+}
+
+// logReveal says at startup whether the dashboard may show secrets, and
+// whether doing so pings the owner.
+func logReveal(cfg *config.Config) {
+	if !cfg.Dashboard.Reveal {
+		log.Printf("  Dashboard: showing secrets is off (dashboard.reveal)")
+		return
+	}
+	set := cfg.AccessRequestsSettings()
+	ping := "pings the owner"
+	switch {
+	case !cfg.Dashboard.NotifyOnRevealEnabled():
+		ping = "pings nobody (dashboard.notify_on_reveal is off)"
+	case set.NotifyURL == "":
+		ping = "pings nobody (access_requests.notify_url is not set)"
+	}
+	log.Printf("  Dashboard: showing secrets is ON; a secret shown or copied %s", ping)
+	// With access requests on, logAccessRequests already says this.
+	if !set.Enabled && cfg.Dashboard.NotifyOnRevealEnabled() && set.NotifyTokenRef != "" && transport.IsPlaintextNonLoopbackURL(set.NotifyURL) {
+		log.Printf("WARNING: access_requests.notify_url uses plain http:// with notify_token_ref set: the notify token crosses the network unencrypted; use https://")
 	}
 }

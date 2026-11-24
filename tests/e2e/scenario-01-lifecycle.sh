@@ -6,7 +6,7 @@ init_scenario 01
 start_server
 printf '%s' synthetic-one | phoenix_admin set lifecycle/one --value-stdin >/dev/null
 printf 'synthetic-two' | phoenix_admin set lifecycle/two --value-stdin >/dev/null
-assert_eq "$(phoenix_admin get lifecycle/one)" synthetic-one "get"
+assert_secret "$(phoenix_admin get lifecycle/one)" synthetic-one "get"
 assert_contains "$(phoenix_admin list lifecycle/)" lifecycle/two "list"
 phoenix_admin export lifecycle/ -f env >"$RUN_DIR/export.env"
 phoenix_admin delete lifecycle/two >/dev/null

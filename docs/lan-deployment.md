@@ -4,7 +4,10 @@ Deploy one Phoenix server serving multiple machines and agents on a local networ
 
 This guide covers the topology, server setup, CA certificate distribution, agent
 provisioning, and verification for a multi-host deployment. It is written so that
-an agent (or a human) can execute it end-to-end with no prior Phoenix experience.
+an agent (or a human) can execute it with no prior Phoenix experience, except for
+two steps **a human does**: initializing the server (step 1), which shows the admin
+token and any generated dashboard password, and choosing a dashboard password on
+an older install (step 7).
 
 A LAN is the outer edge of Phoenix's supported envelope — internet/WAN
 exposure is out of scope (see [Threat Model](threat-model.md)). And a LAN is
@@ -42,7 +45,12 @@ On the server machine:
 phoenix-server --init /data/phoenix
 ```
 
-Save the admin token. You will need it for the next steps.
+**A human runs this, not an agent.** It asks for a dashboard password (Enter
+generates one and shows it once) and prints the admin token. Keep the dashboard
+password away from agents: it is what stops an agent from approving its own
+requests. You need the admin token for the next steps; an agent doing them acts
+as admin, so replace the token afterwards
+([Admin Token Lifecycle](admin-token-lifecycle.md)).
 
 ### Configure for LAN access
 
@@ -114,13 +122,14 @@ export PHOENIX_TOKEN="<admin-token>"
 export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 
 # Create agents with least-privilege ACLs
-phoenix agent create host-a-builder \
-  -t "$(openssl rand -hex 32)" \
-  --acl "build/**:list,read_value;ci/**:list,read_value"
+# Each token goes to its machine; delete the file here afterwards.
+(umask 077; set -C; openssl rand -hex 32 > host-a.token) &&
+phoenix agent create host-a-builder --token-stdin \
+  --acl "build/**:list,read_value;ci/**:list,read_value" < host-a.token
 
-phoenix agent create host-b-deployer \
-  -t "$(openssl rand -hex 32)" \
-  --acl "deploy/**:list,read_value;infra/**:list,read_value"
+(umask 077; set -C; openssl rand -hex 32 > host-b.token) &&
+phoenix agent create host-b-deployer --token-stdin \
+  --acl "deploy/**:list,read_value;infra/**:list,read_value" < host-b.token
 ```
 
 ## 3. Distribute the CA certificate to client machines
@@ -237,15 +246,15 @@ to the server config, run `phoenix-server --check-config`, and restart.
 See [Policy and Attestation](policy-and-attestation.md) for the full reference
 on available policy fields and testing with `phoenix policy test`.
 
-## 7. Enable operator dashboard (optional)
+## 7. Operator dashboard
 
-If you want browser-based approval and session management, enable the dashboard.
-Reach it over HTTPS — the `https_listener` configured above, or a reverse proxy.
+`--init` turned the dashboard on and set its password. Reach it over HTTPS — the `https_listener` configured above, or a reverse proxy.
 The startup warning covers the other case: a dashboard on a non-loopback
 plain HTTP bind means the dashboard password and session cookie cross the
 network in cleartext.
 
-Generate a password hash and add to the server config:
+On an older install, **a human** (not an agent) chooses the password and generates
+its hash; whoever knows it can approve requests. Add the hash to the server config:
 
 ```bash
 phoenix-server --hash-password
@@ -263,8 +272,11 @@ phoenix-server --hash-password
 Restart the server. Over HTTPS, the `Secure` cookie flag is set
 automatically. Access the dashboard at `https://192.168.1.10:9443/dashboard/`.
 
-If you are using a reverse proxy instead of `https_listener`, ensure the proxy
-sets `X-Forwarded-Proto: https` so Phoenix enables the `Secure` flag.
+If you are using a reverse proxy instead of `https_listener`, list its address in
+`dashboard.trusted_proxies` and ensure it sets `X-Forwarded-For` and
+`X-Forwarded-Proto: https`, so Phoenix enables the `Secure` flag and records each
+visitor's own address. See
+[Dashboard](dashboard.md#network-access-tls-reverse-proxy).
 
 **Do not** enable the dashboard on a LAN deployment without HTTPS. The session
 cookie would be transmitted in cleartext on the network.

@@ -138,13 +138,13 @@ var mcpBaseTools = []mcpTool{
 	},
 	{
 		Name:        "phoenix_list",
-		Description: "List the secrets you can see, each with its description and tags, to find the one you need. Never returns values.",
+		Description: "List the secrets you can see, each with its description, tags, and the username and link (web page) that go with it, to find the one you need. Never returns values.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"prefix": {
 					"type": "string",
-					"description": "Optional folder to list, e.g. 'myapp/' ('myapp' and 'myapp/*' mean the same; other wildcards are refused). Omit to list all accessible secrets."
+					"description": "Optional folder to list, e.g. 'myapp/' ('myapp' and 'myapp/*' mean the same; other wildcards are refused; if ? or [ is part of the folder's name, end it with /). Omit to list all accessible secrets."
 				},
 				"tag": {
 					"type": "string",
@@ -187,7 +187,7 @@ var mcpSessionTools = []mcpTool{
 var mcpAccessTools = []mcpTool{
 	{
 		Name:        "phoenix_request_use",
-		Description: "Ask a human for temporary use of exact secret paths you were denied (next step request_use). A human approves or denies in the Phoenix dashboard. Approved secrets are used through phoenix exec, not returned here. Must run on the agent's own identity, not a session.",
+		Description: "Ask a human for temporary use of exact secret paths you were denied (next step request_use). A human answers in the Phoenix dashboard: no, once (one use), a time like 15 minutes, or always. Check the answer with phoenix_request_status. After a no, do not ask again: ask the user in chat. Approved secrets are used through phoenix exec, not returned here. Runs on the agent's own identity, also when this server uses a role.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -200,7 +200,7 @@ var mcpAccessTools = []mcpTool{
 	},
 	{
 		Name:        "phoenix_request_status",
-		Description: "Check an access request (req_...) made with phoenix_request_use: pending, approved, denied or expired, and what to do next.",
+		Description: "Check an access request (req_...) made with phoenix_request_use: pending, approved, denied or expired, how far an approval goes (\"one use left\", \"until 14:32\", \"always\"), and what to do next. With one use left, get the command right first: a failed run still spends it.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -211,7 +211,7 @@ var mcpAccessTools = []mcpTool{
 	},
 	{
 		Name:        "phoenix_whoami",
-		Description: "Show which Phoenix identity this server uses, its ACL rules, active grants and pending access requests. For root or an SSH login on another machine, this server may sign one with a human's approval: run `phoenix ssh --list` in a shell to see which machines.",
+		Description: "Show which Phoenix identity this server uses (with the who, authority and kind an admin recorded for it, and whether Phoenix attested the caller), its ACL rules, active grants and pending access requests. For root or an SSH login on another machine, this server may sign one with a human's approval: run `phoenix ssh --list` in a shell to see which machines.",
 		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
 	},
 }
@@ -487,7 +487,7 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 		}
 	}
 
-	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+params.Path, nil, hdrs)
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+escapeName(params.Path), nil, hdrs)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -533,7 +533,7 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 }
 
 // mcpToolList handles the phoenix_list tool: one line per secret,
-// "path — description [tags]". Against a server without /v1/metadata it
+// "path — description [tags] (username: ...) (link: ...)". Against a server without /v1/metadata it
 // falls back to bare paths.
 func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	var params struct {
@@ -549,7 +549,7 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return err.Error(), true
 	}
 
-	path := "/v1/metadata/" + prefix
+	path := "/v1/metadata/" + escapeName(prefix)
 	if params.Tag != "" {
 		path += "?tag=" + url.QueryEscape(params.Tag)
 	}
@@ -590,6 +590,12 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		if len(si.Tags) > 0 {
 			desc += " [" + listPath(strings.Join(si.Tags, ", ")) + "]"
 		}
+		if si.Username != "" {
+			desc += " (username: " + listPath(si.Username) + ")"
+		}
+		if si.URL != "" {
+			desc += " (link: " + listPath(si.URL) + ")"
+		}
 		lines[i] = listPath(si.Path) + " — " + desc
 	}
 	return strings.Join(lines, "\n"), false
@@ -598,7 +604,7 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 // mcpToolListPaths is phoenix_list for servers that predate /v1/metadata:
 // bare paths from the list route.
 func mcpToolListPaths(prefix string, logger *log.Logger) (string, bool) {
-	resp, err := apiRequest("GET", "/v1/secrets/"+prefix, nil)
+	resp, err := apiRequest("GET", "/v1/secrets/"+escapeName(prefix), nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -674,9 +680,10 @@ func mcpToolUnseal(args json.RawMessage, logger *log.Logger) (string, bool) {
 	return payload.Value, false
 }
 
-// mcpCheckAllowUnseal queries the server's authoritative policy for allow_unseal.
+// mcpCheckAllowUnseal queries the server's authoritative policy for
+// allow_unseal. An answer about any other path is an error, never a yes.
 func mcpCheckAllowUnseal(path string) (bool, error) {
-	resp, err := apiRequest("GET", "/v1/policy/check?path="+path+"&check=allow_unseal", nil)
+	resp, err := apiRequest("GET", "/v1/policy/check?path="+url.QueryEscape(path)+"&check=allow_unseal", nil)
 	if err != nil {
 		return false, fmt.Errorf("request failed: %w", err)
 	}
@@ -687,10 +694,15 @@ func mcpCheckAllowUnseal(path string) (bool, error) {
 	}
 
 	var result struct {
-		Allowed bool `json:"allowed"`
+		Path    string `json:"path"`
+		Allowed bool   `json:"allowed"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return false, fmt.Errorf("decoding response: %w", err)
+	}
+	// Every server that has this route says which path it answered about.
+	if result.Path != path {
+		return false, fmt.Errorf("the server answered about %q, not %q", result.Path, path)
 	}
 	return result.Allowed, nil
 }
@@ -779,7 +791,7 @@ func mcpToolSessionRevoke(args json.RawMessage, logger *log.Logger) (string, boo
 		return "session_id is required", true
 	}
 
-	resp, err := apiRequest("POST", "/v1/sessions/"+params.SessionID+"/revoke", strings.NewReader("{}"))
+	resp, err := apiRequest("POST", "/v1/sessions/"+escapeSegment(params.SessionID)+"/revoke", strings.NewReader("{}"))
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -811,7 +823,7 @@ func mcpToolRequestUse(args json.RawMessage, logger *log.Logger) (string, bool) 
 		params.Paths[i] = strings.TrimPrefix(p, "phoenix://")
 	}
 	body, _ := json.Marshal(map[string]any{"paths": params.Paths, "action": "read_value", "reason": params.Reason, "ttl": params.TTL})
-	resp, err := apiRequest("POST", "/v1/access-requests", strings.NewReader(string(body)))
+	resp, err := ownIdentityRequest("POST", "/v1/access-requests", body, nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -839,7 +851,7 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 	if !requestIDPattern.MatchString(params.RequestID) {
 		return "request_id must look like req_ followed by 32 hex characters", true
 	}
-	resp, err := apiRequest("GET", "/v1/access-requests/"+params.RequestID, nil)
+	resp, err := ownIdentityRequest("GET", "/v1/access-requests/"+escapeSegment(params.RequestID), nil, nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -852,7 +864,28 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 	if err := json.Unmarshal(respBody, &rq); err != nil {
 		return fmt.Sprintf("Failed to decode response: %v", err), true
 	}
+	if !mcpOwnRequest(rq) {
+		return formatDenial(serverDenial{Code: "NOT_FOUND", Detail: "request not found", NextStep: "none"}, ""), true
+	}
 	return mcpRequestText(rq), false
+}
+
+// mcpOwnRequest guards the one way a role could see another agent's request:
+// the status tool asks with the agent's own token, and an agent that is an
+// approver may see everybody's. The server names the owner only to approvers.
+func mcpOwnRequest(rq accessRequestView) bool {
+	if ownToken() == "" || rq.Agent == "" {
+		return true
+	}
+	resp, err := ownIdentityRequest("GET", "/v1/whoami", nil, nil)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var me struct {
+		Agent string `json:"agent"`
+	}
+	return resp.StatusCode == 200 && json.NewDecoder(resp.Body).Decode(&me) == nil && me.Agent == rq.Agent
 }
 
 // mcpRequestText renders a request for the model: cleaned server facts plus
@@ -864,7 +897,10 @@ func mcpRequestText(rq accessRequestView) string {
 		"paths: " + cleanList(rq.Paths, ", "),
 	}
 	if len(rq.GrantedPaths) > 0 {
-		lines = append(lines, "granted: "+cleanList(rq.GrantedPaths, ", ")+" until "+cleanServerText(rq.GrantExpiresAt))
+		lines = append(lines, "granted: "+cleanList(rq.GrantedPaths, ", ")+", "+grantedLimit(rq))
+	}
+	if rq.Note != "" {
+		lines = append(lines, "note: "+cleanServerText(rq.Note))
 	}
 	lines = append(lines, "next: "+requestNextHint(rq))
 	return strings.Join(lines, "\n")

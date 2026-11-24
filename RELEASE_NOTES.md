@@ -1,5 +1,413 @@
 # Release Notes
 
+## v0.25.0 (2026-11-24)
+
+In short: find and use secrets from a phone, answer agents' requests on one live
+page, see who, host and authority in the audit log, and a store that survives
+crashes, full disks and mistakes. Also five security fixes.
+
+**Before upgrading:** run the new `phoenix-server --check-config` on your config,
+since it now refuses settings that name one file twice. If the dashboard is behind
+a reverse proxy, set `dashboard.trusted_proxies`. The server needs to write small
+`.lock` files next to its data files and the master key. **Stop the old server
+before you start the new one on its files,** and the new one before you go back to
+an older one: servers before v0.25.0 don't see these locks, so nothing stops both
+from running and undoing each other's writes. Update the server first, then every
+CLI. Scripts that run `phoenix export app` must say `phoenix export app/`: without
+the slash it is now refused (it exported nothing and looked like a success). Showing secret values in the dashboard is off until you turn it on.
+
+### Security: a request already running could use a replacement token's permissions
+
+A request logs in with its bearer token, then looks up permissions by agent
+name. If the token was replaced (or the agent deleted and made again) between
+those two steps, the request used the new token's permissions. The window is
+normally microseconds, but a `POST /v1/resolve` that sends its body slowly
+could hold it open for up to 15 seconds. Now every permission check, admin
+and approver checks included, also requires that the token the request logged
+in with is still the agent's. So does everything looked up by agent name
+("your" sessions, requests and grants). Requests that send a body are checked
+again after it arrived, so one kept waiting with an old token can no longer
+write a secret, make an agent or approve anything once that token is replaced.
+Such a request is refused, normally with `401 unauthorized` and audit reason
+`token_replaced`. Replaced at the very last moment it can also be a 403 (a few
+admin endpoints, a grant with a use limit), a 409 (a new access request) or a
+per-ref error in a batch resolve. Writing the same
+token again with `--force` is not a replacement. Nothing to configure.
+
+### Security: a revoked session could be quietly replaced after a role change
+
+At start the server drops sessions whose role was removed or changed. It
+dropped revoked ones too, so a revoked token then answered `SESSION_INVALID`
+("mint a new one") instead of `SESSION_REVOKED` ("ask a human"), and the CLI
+minted a fresh session on its own. Revoked sessions are now kept until they
+expire, whatever happened to their role.
+
+### Security: replacing an agent's token now ends its SSH logins
+
+A grant is bound to the token that asked, so replacing the token stopped new
+reads and new SSH certificates. An SSH login already signed carried on until
+the grant ended. The machine's own check (`/v1/ssh/window`) now also says no
+once the token was replaced or the agent deleted: a kept certificate stops
+working at once and an open session ends within about 30 seconds. Nothing to
+change on the machines.
+
+### Security: the dashboard believed X-Forwarded-For from anyone
+
+Any visitor could send their own `X-Forwarded-For`, use a new one for each
+guess to dodge the login lockout, and choose the address shown beside a login
+or an approval. The dashboard now uses the address the connection comes from.
+The API always did. `X-Forwarded-Proto: https` is still believed from anyone,
+on purpose: it gives the sender's own login cookie its `Secure` flag, can refuse
+posts from an `http://` page and leaves out the plain-HTTP warning, all for the
+sender alone, so a lie gains nothing, and no install behind a proxy loses that
+flag.
+
+**Action needed only if your dashboard is behind a reverse proxy:** add the
+proxy's address to the new `dashboard.trusted_proxies` and restart, for example
+`"trusted_proxies": ["127.0.0.1"]` for a proxy on the same host. Until you do,
+the dashboard works (as after any restart, sign in again once), but logins and
+approvals show the proxy's address, and everyone behind the proxy shares one
+login lockout (a wait of up to 60 seconds after repeated wrong passwords). The
+log names the address to add, for the first ten peers that send the header:
+`Dashboard: ignored X-Forwarded-For from <address>`. A config with the
+setting still loads on older versions, which ignore it. Details:
+[Dashboard](docs/dashboard.md#network-access-tls-reverse-proxy).
+
+### Security: an unusable PHOENIX_CA_CERT was only a warning
+
+If `PHOENIX_CA_CERT` named a file that was missing or held no certificate, the
+CLI and `phoenix mcp-server` warned and then trusted every public CA for that
+request, the token included. HTTPS requests now fail and say why. Plain HTTP,
+where the certificate is not used, works as before. **If your server's
+certificate is from a public CA and you have a stale `PHOENIX_CA_CERT`, unset
+it.**
+
+### Store safety: ways a data file could be lost
+
+Every place the server writes a file was checked for what a failed or cut-off
+write, a full disk, a wrong path, a symlink, a second server or a key rotation
+that dies halfway can do to it. Nothing to configure; what changed:
+- **A key rotation cut off by a crash could end in losing every secret.** The
+  server started on a store its key could not open, and trying `rotate-master`
+  again overwrote `<store>.pre-rotate`, the one good copy. Now the rotation
+  reads everything with the current key before it touches that backup, and the
+  server refuses to start when the key opens nothing in the store, naming the
+  backup if it works. If only some namespaces are unreadable it starts and logs
+  them. If the new key is saved but the disk could not confirm it would survive
+  a power cut, the backup is kept.
+- **A data file that was a symlink was replaced by a plain file** on its first
+  save (store, ACL, master key, audit rotation), so new content landed next to
+  the link instead of on the disk the owner pointed it at, for example inside a
+  container that is later thrown away. Writes now go to the file the link
+  points at and the link stays.
+- **Two servers on the same files silently undid each other's writes.** Each
+  keeps the store, ACL, grants and sessions in memory and rewrites them whole,
+  and even a second start that then failed on the port had already rewritten
+  the sessions file. The server now holds a lock on each file it rewrites (an
+  empty `<file>.lock` next to it, safe to leave there, gone with the process)
+  and refuses to start while another one holds it. Two servers may share an
+  audit log only if neither rotates it. Two servers with their own stores may
+  share a master key, but then neither can rotate it (409) until the other has
+  its own copy. Where locking does
+  not work the server starts and logs a `WARNING`. This protects only servers
+  that lock, v0.25.0 and newer: an older one neither makes nor checks a lock, so
+  stop it before an upgrade, and stop the new one before a rollback.
+- **`--protect-key` and `rotate-master` could overwrite each other's key
+  file.** Adding a passphrase and then rotating without a restart saved the new
+  key with no passphrase again; rotating while `--protect-key` waited for a
+  passphrase put the old key back over the new one, leaving a store no key on
+  disk opened. Both now check that the file is still the one they read:
+  `rotate-master` answers 409 and asks for a restart, `--protect-key` stops.
+- **A failed rotation no longer replaces `master.key.prev`**: the old key waits
+  in `master.key.prev.new` and takes that name once the new key is saved.
+  `rotate-master` on an empty store keeps the key and says so.
+- **A damaged namespace key or protected master key crashed the server** (a
+  wrong-length nonce). It is now an ordinary error for that namespace or file.
+- **A grants file that was really another version 1 Phoenix file** was replaced
+  by the next save. It is now set aside like a damaged one.
+- **`store.path` pointing at another JSON file** (the ACL, the config, a
+  passphrase-protected key, or a store of a newer format) loaded as an empty
+  store, and the first secret written replaced that file. The server now
+  refuses to start on anything that is not a version 1 store file.
+- **A write or delete that failed (full disk) could still happen later.** The
+  caller got an error, but the server kept the change in memory, served it and
+  saved it with the next write that worked. It is now undone.
+- **Two settings naming one file** (for example `audit.path` and
+  `store.master_key`, or `store.path` and the SSH key) could destroy it. Only
+  the grants and sessions files were checked, and not against the config file,
+  TLS keys, the SSH key or the names of audit archives. The server now refuses
+  to start, and `--check-config` fails, when a file it writes is also another of
+  its files.
+- **`--init` in a directory without `master.key`** (the key kept elsewhere, or
+  lost) replaced `config.json` and the CA and server keys there. It now refuses
+  if any file it would write, or `store.json`, is already there, or if another
+  `--init` is running there.
+- **`--reissue-cert` rewrote the CA certificate in place,** so a full disk or a
+  crash could leave it empty, and it cannot be made again. It is now left alone
+  and only ever replaced in one step, like the CA key. (The server certificate
+  and key are still written in place, so that whoever you let read them still
+  can; if that is cut off, run `--reissue-cert` again.) `--reissue-cert` also
+  refuses a config that would make it write over the CA key or any other Phoenix
+  file. The SSH signing key appears whole or not at all: one cut off half way
+  used to stop the server from starting.
+- **Replaced files keep their owner** when Phoenix runs as root, so
+  `--protect-key` run with sudo no longer leaves a key the server cannot read.
+- **An audit line cut off by a full disk or a power cut swallowed the next
+  one:** that entry was written and reported as written, but no search could
+  read it. It now starts on its own line.
+- **An access change that failed to save could still give access.** A new agent,
+  a seal key, or `agent create --force` with wider permissions or a new token was
+  kept in memory, and the next save kept it for good, although the caller was told it
+  failed. Now a change answered with an error may take access away but never gives
+  any, at once or later. If replacing a token can't be saved, the old token stays
+  dead and its sessions end, and the new one isn't in force: free the disk and run
+  it again (a restart before that may bring the old token back). Replacing your own
+  token is undone instead, or nobody could run it again: the answer says the old
+  token still works. Access that was taken away
+  but not saved, such as a removed Always, is saved by itself once the disk works.
+- **A missing `store.json` or `acl.json` looked like a healthy start** with no
+  secrets or no agents, and the next write made an empty file in its place. The server
+  (and `--check-config`) now refuses, names the file and says what to do. `--init`
+  makes both. An older install that never held a secret has no `store.json` and
+  still starts: its audit log has no line about a secret that was written or handed
+  over. If it shares its log with another server, make an empty store first; the
+  message says how.
+- **The server did not start on a full disk** (since v0.23.0), because it rewrote
+  `role-sessions.json` at every start. It now writes only what changed, and starts
+  with a `WARNING` if that fails: ended sessions stay ended, and the save is
+  retried. A missing audit log or SSH signing key that can't be made on a full disk
+  is also only a warning. Reads, the dashboard login and role sessions work on a
+  full disk: minting and renewing a session no longer fails, it goes on from memory
+  until it can be saved (a restart before that only means minting another).
+
+### One live Requests page: No, Once, 15 minutes or Always
+
+Approvals and Grants were two pages for one thing, neither updated by itself,
+and a request could expire while you looked at the page.
+
+- **Requests** (`/dashboard/requests`) replaces both. A card asks "May courier
+  use infra/b2/app-key?" with four buttons: **No**, **Once**, **15 minutes**,
+  **Always**. Below: open access with Revoke, what is on Always with Remove,
+  requests that expired unanswered, and history. The old addresses redirect.
+- **Live.** A new request appears within about two seconds on any open
+  dashboard page, as a popup when you are on another page, with a countdown.
+  Optional browser notification. A choice you are making is never wiped, and
+  an expired request stays, marked expired.
+- **Once** and "N uses or M minutes": grants can have a use limit, counted per
+  secret. Counting is exact and survives a restart; only a value the server sends
+  costs a use (also if the connection drops right then), with one exception: if
+  saving the use fails and so does undoing that save, nothing is sent but the use
+  may count as spent after a restart. `phoenix approve --uses N` for CLI approvers.
+- **Always** puts `read_value` on exactly that path on the agent's own access
+  list, marked with the request, removable on the page at once. Never a
+  wildcard, never for SSH logins, only from the dashboard.
+- **Notifications link to the request** (`/dashboard/requests/<req_id>`), also
+  through the login page.
+- A request whose agent got a new token since asking can no longer be approved
+  (`CREDENTIAL_CHANGED`). Before, the approval looked fine and did nothing.
+- `phoenix request`, `phoenix request status`, `phoenix whoami` and the MCP
+  request tools say what was granted: `one use left`, `until 14:32`, `always`.
+  MCP requests run as the agent itself also under `PHOENIX_ROLE`.
+- `phoenix exec` uses approvals also under `PHOENIX_ROLE`, resolves all or
+  nothing, and checks that the command exists before it resolves.
+
+**Upgrading:** nothing to change. On an install without an `access_requests`
+block the feature is still off; see
+[Turning it on](docs/access-requests.md#turning-it-on). **Going back:** an
+older server opens the new files and works; it ignores grants with a use limit
+and keeps Always rules as ordinary ones. Details in
+[docs/access-requests.md](docs/access-requests.md#the-grants-file-and-older-servers).
+Links in notifications sent before the upgrade still work.
+
+### Who, host and authority as fields of their own
+
+An identity's name often mashes together who uses it and what role it has.
+Both can now be recorded next to the name, and the audit log shows them as
+separate columns. The words are yours; Phoenix has no list of allowed values,
+and they decide nothing about access.
+
+- An identity can have `who`, `authority`, `kind` and `formerly` (older names).
+  Set them with `phoenix agent set <name> --who ... --authority ... --kind ...
+  --formerly old1,old2`: the token stays and no session ends. `phoenix agent
+  show [name]` prints them, `phoenix agent create` takes the same options, and
+  `phoenix whoami` and MCP `phoenix_whoami` show the caller's own. API:
+  `PATCH /v1/agents/{name}/identity`, and `identities` in `GET /v1/agents`.
+  A change is audited as `set-identity`, also when the caller may not make it.
+- Audit lines gain `who`, `host`, `authority` and `attested`. No field was
+  renamed or removed. They come from the identity's record, never from a
+  caller. A line about a refused credential, the dashboard or Phoenix itself
+  has an empty `who` and `authority`. Grant events keep the actor's labels in
+  `grants.json` until their line is written, so a delayed line stays right.
+- `attested` is `false` on every line for now: a token doesn't prove who holds
+  it. The dashboard calls such a `who` "declared". `host` is recorded only when
+  Phoenix has established it, so it is empty until the per-machine service
+  exists.
+- The dashboard Audit page has the four columns and filters by who, host and
+  authority. `phoenix audit` takes `--who`, `--host` and `--authority`, and adds
+  the fields at the end of a line. Searching for an identity by name also finds
+  its former names.
+- Each identity gets a hidden `serial` in `acl.json`. Unlike `credential_id` (one
+  per token), it stays when the token is replaced and is new when the identity
+  is deleted and made again. Nothing uses it yet.
+
+**Upgrading:** update the server first: the new CLI options say so when the
+server is too old. Otherwise nothing to change. `acl.json` and old audit lines load as they
+are; a missing field shows as `-`. Existing identities have no labels until you
+run `phoenix agent set`, and get their serial at the next change to any agent.
+
+**Going back:** an older server reads the new `acl.json` and works, but the
+first agent change it saves drops the new fields. Old audit readers skip the
+new keys.
+
+### A fresh install can approve
+
+`phoenix-server --init` used to turn on access requests with nobody able to
+answer them: no dashboard, no approvers. Now it also turns on the dashboard. It
+asks for the password (12 characters or more), or makes one up and shows it
+once: press Enter, or run it without a terminal (Docker, scripts). Only the
+bcrypt hash is stored.
+
+- `--init --https` writes the config with HTTPS (`0.0.0.0:9443`) already on.
+  The Docker quickstart and `docker-compose.yml` use it and publish 9443 to the
+  host's loopback, so the dashboard works without editing a file. The image now
+  also lists port 9443.
+- `--hash-password` says so when a password is over bcrypt's 72 bytes.
+
+**Upgrading:** existing installs do not change. To get the dashboard on one, run
+`phoenix-server --hash-password`, put the result in the config as
+`"dashboard": {"enabled": true, "password_hash": "..."}` and restart. Scripts that
+run `--init` at a terminal now get a question; give it `</dev/null` to have the
+password generated and printed. `docker-compose.yml` now publishes
+`127.0.0.1:9443`; remove that line if the port is taken.
+
+### Fixed: the CLI ignored proxies when it used Phoenix's own CA
+
+With `PHOENIX_CA_CERT` set, `phoenix` (and `phoenix mcp-server`) ignored
+`HTTPS_PROXY` and dialed the server directly, so HTTPS failed on machines that
+only get out through a proxy, such as hosted agents on userspace Tailscale. It
+now uses it for `https://` servers, like it already did without a CA. Plain
+`http://` servers are still reached directly when the CA file loads. Connecting now times out after 30
+seconds instead of the system's limit (requests themselves have no new limit).
+
+**Upgrading:** if a machine sets `HTTPS_PROXY` but reaches Phoenix directly, add
+the Phoenix host to `NO_PROXY`. If the proxy's own address is `https://`, add its
+CA to the `PHOENIX_CA_CERT` file, but only if you trust that CA to vouch for the
+Phoenix server itself: both connections are checked against the same file.
+
+### Fixed: `phoenix export` wrote empty values when a seal key was set
+
+With `PHOENIX_SEAL_KEY` (or `PHOENIX_ROLE`, which has its own seal key) the
+server answers sealed. `export` sent the key but looked for a plain value, so it
+printed `NAME=` for every secret and exited 0. It now opens sealed answers. If
+one can't be opened, or an answer holds no value, it stops with an error that
+names the secret and a non-zero exit. The same now goes for output that could not
+be written (a full disk), an unknown format, and a single secret's name instead
+of a folder (`export` takes `app/`, with the slash): each gave an empty or cut
+file and exit 0. `-f json` is now always valid JSON, one object per line. **A
+backup made with `export` while a seal key was set is empty: make it again.**
+
+### Fixed: a name with `?`, `#` or `%` reached another secret
+
+The CLI and MCP put names into web addresses as they were, so
+`phoenix set 'app/key?v2'` wrote `app/key`, `phoenix delete 'app/key#old'`
+deleted `app/key`, and `phoenix agent delete 'bob?x'` deleted the agent `bob`.
+`get`, `list`, `export`, `import`, `keypair show`, `sessions info`, `sessions
+revoke`, `phoenix_get`, `phoenix_list` and `phoenix_session_revoke` had the same
+fault. Every command now acts on exactly the name it was given, and secrets whose
+names already hold these characters can be read, listed, changed and deleted. To
+list a folder with `?` or `[` in its name, end it with `/`.
+`phoenix_unseal` now asks the server about the sealed secret's own name, and
+refuses an answer about another one.
+
+The server refuses a new secret name that is not valid UTF-8: after a restart it
+could have become another name.
+
+**Upgrading:** update the CLI wherever it is installed. Only `keypair show` for an
+agent with `/` in its name needs the new server too. If something stored secrets under names with these characters, look at
+the names without them too: they may have been overwritten. Names the server
+redirected, such as `/app/key` or `app//key`, are now refused. `set` and
+`delete` used to print ok for them and do nothing, and `get` read `app/key`.
+
+### Smaller things
+
+- `phoenix agent create` asks for the token at a terminal (hidden, twice), or
+  reads it with `--token-stdin`. `-t <token>` still works, but is no longer taught:
+  it puts the token in shell history and the process list.
+- The end-to-end scenarios run in CI on every pull request (into any branch), with two new ones:
+  upgrade from the previous release and back on the same files, and a fresh
+  install that approves a request.
+- Docs say which systems are supported (Linux and macOS; no Windows build).
+- The agent skill no longer offers `phoenix keypair generate`, which needs admin.
+- The runnable examples use the `go` on `PATH`.
+
+### Find and use a secret from your phone
+
+Getting one password used to take a terminal, the exact name, and a guess at
+the username. The dashboard now has a **Secrets** page: search by name,
+description, tag or username, open one and copy the username. With showing turned
+on you can show or copy the password, or copy it and open the page in one tap. You can add a secret (paste,
+type or generate), give one a new value, and edit its description, tags,
+username and link. The dashboard is laid out for a phone first, with one
+navigation, and can be installed as an app. Its offline cache (the
+service worker's) holds only static files. The browser also remembers the IDs of
+requests it has already shown, so it does not announce them twice.
+
+**Showing and copying secrets is off until you turn it on**, after an upgrade and
+on a new install. The dashboard password could only approve access until now; with
+showing on, anyone who knows it can read every value that no policy rule
+withholds. So it is set in the config file only, never from the dashboard:
+
+1. If the password was shared, or an agent can read it, change it first: put the
+   output of `phoenix-server --hash-password` in the config as
+   `dashboard.password_hash`.
+2. In the server's config file, change `"reveal": false` inside `"dashboard"` to
+   `"reveal": true`. If there is no `"reveal"` line (an older config), put `"reveal": true,`
+   right after `"dashboard": {`. Restart: the log says `showing secrets is ON`.
+
+`phoenix-server --init` asks once at a terminal (default no). While it is off,
+the page says so where Show and Copy would be, with that line and the name of the
+file. Finding, adding and editing work without it. A secret whose rule blocks the
+dashboard stays blocked when showing is on.
+
+**Every secret shown or copied pings you**, if notifications are set up
+(`access_requests.notify_url`, also with access requests off): which secret, and
+the login, device and address that did it, never the value. One ping per secret
+and login per 5 minutes. `"dashboard": {"notify_on_reveal": false}` turns it off
+without touching request notifications; the audit line has no switch. A ping that
+fails never stops anything and is logged. Without `notify_url` the page says once
+that nobody is pinged. The ping names the secret whatever `notify_include_paths`
+says, so check who can read that topic.
+
+How it is protected ([threat model](docs/threat-model.md#threats-specific-to-the-dashboard)):
+showing, copying or changing needs the password typed within the last 5
+minutes; every show and copy is audited (`read_value`, with the address and the
+login's ID) before the value is sent; policy rules (`source_ip`,
+`require_sealed`) hold for values in the dashboard too; values are never in a page's HTML
+and never cached; no page can be framed or run foreign script.
+
+Dashboard responses now carry a Content-Security-Policy: scripts must be files
+on the dashboard's own address, never inline. Every dashboard POST refuses
+requests from other sites. Wrong passwords sent in parallel now count one by
+one, at login too.
+
+### A secret can carry its username and link
+
+- `phoenix set` takes `--username` and `--url`. `phoenix info`, MCP
+  `phoenix_list`, `GET /v1/metadata` and the dashboard show them to callers with
+  `list` on the path. They are never in a value read.
+- `phoenix describe <path> [-d ...] [--tags ...] [--username ...] [--url ...]`
+  (`PATCH /v1/metadata/{path}`) changes them without reading or writing the
+  value. Needs `write` on the path; audited as `describe`; who wrote the value
+  and when stays as it was.
+- A save that fails now leaves the old value in use. Before, the server kept
+  serving the new value from memory although it reported an error.
+
+**Upgrading:** nothing to do. Store files load unchanged and the new fields
+appear only on secrets that have them. Going back: v0.24 opens a file with
+usernames and links and keeps every value, but drops those two fields the next
+time it writes. Update the server before the CLI: an older server cannot store
+them, and the CLI says so.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine

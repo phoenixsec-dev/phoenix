@@ -92,6 +92,9 @@ func (s *Server) handleSSHSign(w http.ResponseWriter, r *http.Request) {
 		writeAccessError(w, CodeRequestsDisabled, "access requests are turned off on this server", http.StatusNotImplemented)
 		return
 	}
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 	ip := clientIP(r)
 	path := sshPathPrefix + body.Host
 	m := s.grants.Match(s.grantCaller(info, ip), path, grant.ActionSSHLogin)
@@ -113,6 +116,12 @@ func (s *Server) handleSSHSign(w http.ResponseWriter, r *http.Request) {
 		writeAccessError(w, CodeInvalidRequest, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The certificate is the use. It can open logins until the approval's time
+	// ends or a human revokes it.
+	if reason := s.useGrants(info, ip, grant.ActionSSHLogin, []string{path}, []*grant.Grant{m.Grant}, false)[0]; reason != "" {
+		s.denySSHSign(w, r, info, path, ip, reason)
+		return
+	}
 	s.auditAllowedAccess(r, info, "ssh.sign", path, ip, false, m.Grant)
 	jsonOK(w, map[string]any{
 		"certificate": cert,
@@ -130,6 +139,12 @@ func (s *Server) denySSHSign(w http.ResponseWriter, r *http.Request, info *authI
 	switch reason {
 	case grant.ReasonGrantExpired:
 		code, detail = CodeGrantExpired, "your temporary access to this machine has ended"
+	case grant.ReasonGrantUsedUp:
+		code, detail = CodeGrantExpired, "every login certificate a human allowed for this machine has been issued"
+	case reasonUseNotSaved:
+		s.auditDeniedMetadata(info, "ssh.sign", path, ip, reason, callerAuditMetadata(r))
+		writeAccessError(w, CodeRequestsDegraded, "your approval could not be used right now; no certificate was issued", http.StatusServiceUnavailable)
+		return
 	case grant.ReasonGrantRevoked:
 		code, step, detail = CodeGrantRevoked, NextAskUser, "a human revoked your access to this machine"
 	default:
@@ -194,7 +209,8 @@ func (s *Server) handleSSHMachines(w http.ResponseWriter, r *http.Request) {
 // certificate that has not expired yet.
 //
 // Anything that is not a yes is a no, including a machine or feature that has
-// been switched off, so turning this off also ends the sessions it allowed. It
+// been switched off and a token that was replaced since, so turning this off or
+// replacing the token also ends the sessions it allowed. It
 // needs no login because a machine holds no Phoenix credential, and it tells the
 // caller only yes or no about a random id it must already know. It is not audited:
 // it would only fill the log.
@@ -204,7 +220,18 @@ func (s *Server) handleSSHWindow(w http.ResponseWriter, r *http.Request) {
 	open := false
 	if s.grantsOn() && s.sshRequestAllowed([]string{path}) && !s.grants.Health().Degraded {
 		g, ok := s.grants.GetGrant(r.PathValue("grant"))
-		open = ok && g.Action == grant.ActionSSHLogin && slices.Contains(g.Paths, path) && g.State(s.now()) == grant.GrantActive
+		open = ok && g.Action == grant.ActionSSHLogin && slices.Contains(g.Paths, path) && g.State(s.now()) == grant.GrantActive &&
+			s.GrantTokenCurrent(g)
 	}
 	jsonOK(w, map[string]any{"open": open})
+}
+
+// GrantTokenCurrent reports whether the bearer token g was given to is still
+// its agent's, and the same issue of it where that was recorded. Signing already
+// needs that token; this is for a login signed before the token was replaced, and
+// for the dashboard, which lists who has access.
+func (s *Server) GrantTokenCurrent(g grant.Grant) bool {
+	a, err := s.acl.GetAgent(g.Agent)
+	return err == nil && g.CredentialFP != "" && grant.BearerFingerprint(a.TokenHash) == g.CredentialFP &&
+		(g.IssueFP == "" || g.IssueFP == sessionCredentialFP(a))
 }

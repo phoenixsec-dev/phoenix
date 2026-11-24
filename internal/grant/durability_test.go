@@ -23,7 +23,7 @@ func TestApproveFaultsPublishNothing(t *testing.T) {
 	for _, step := range append([]string{"audit"}, fsSteps...) {
 		t.Run(step, func(t *testing.T) {
 			e := newEnv(t)
-			r := e.create("vector", "infra/key")
+			r := e.create("courier", "infra/key")
 			if step == "audit" {
 				e.sink.setFail(func(ev Event) bool { return ev.Phase == PhaseAttempt })
 			} else {
@@ -42,7 +42,7 @@ func TestApproveFaultsPublishNothing(t *testing.T) {
 			if len(e.s.ListGrants("", true)) != 0 {
 				t.Fatal("grant published after failed save")
 			}
-			if e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue).Grant != nil {
+			if e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue).Grant != nil {
 				t.Fatal("Match allowed after failed approve")
 			}
 			if e.sink.count(EventRequestApproved) != 0 {
@@ -72,7 +72,7 @@ func TestApproveFaultsPublishNothing(t *testing.T) {
 // the store is not degraded.
 func TestApproveDirSyncRollback(t *testing.T) {
 	e := newEnv(t)
-	r := e.create("vector", "infra/key")
+	r := e.create("courier", "infra/key")
 	e.fs.failOnce("dirsync")
 	_, _, err := e.s.Approve(approveIn(r.ID))
 	wantCode(t, err, CodeStoreWriteFailed)
@@ -89,7 +89,7 @@ func TestApproveDirSyncRollback(t *testing.T) {
 // The approval may survive on disk, so the error must say so honestly.
 func TestApproveDoubleFaultMessage(t *testing.T) {
 	e := newEnv(t)
-	r := e.create("vector", "infra/key")
+	r := e.create("courier", "infra/key")
 	e.fs.fail("dirsync") // first save and the rollback both fail
 	_, _, err := e.s.Approve(approveIn(r.ID))
 	wantCode(t, err, CodeStoreWriteFailed)
@@ -100,7 +100,7 @@ func TestApproveDoubleFaultMessage(t *testing.T) {
 	// A plain pre-rename failure keeps the normal message. Fresh store: the
 	// double fault above left the first one degraded.
 	e2 := newEnv(t)
-	r2 := e2.create("vector", "infra/key")
+	r2 := e2.create("courier", "infra/key")
 	e2.fs.fail("rename")
 	_, _, err = e2.s.Approve(approveIn(r2.ID))
 	wantCode(t, err, CodeStoreWriteFailed)
@@ -115,7 +115,7 @@ func TestRevokeFaults(t *testing.T) {
 	for _, step := range fsSteps {
 		t.Run(step, func(t *testing.T) {
 			e := newEnv(t)
-			g := e.approve(e.create("vector", "infra/key").ID)
+			g := e.approve(e.create("courier", "infra/key").ID)
 			e.fs.fail(step)
 
 			got, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"})
@@ -123,7 +123,7 @@ func TestRevokeFaults(t *testing.T) {
 			if got.RevokedAt.IsZero() {
 				t.Fatal("grant not revoked in memory")
 			}
-			if e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue).Grant != nil {
+			if e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue).Grant != nil {
 				t.Fatal("revoked grant still matched")
 			}
 			if h := e.s.Health(); !h.Degraded || h.WritesRefused {
@@ -158,7 +158,7 @@ func TestRevokeFaults(t *testing.T) {
 // The cleanup tick also heals a failed revoke without anyone retrying.
 func TestTickHealsFailedRevoke(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 	e.fs.fail("rename")
 	if _, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"}); CodeOf(err) != CodeRevokeNotDurable {
 		t.Fatal(err)
@@ -182,7 +182,7 @@ func TestTickHealsFailedRevoke(t *testing.T) {
 // its committed line is delivered later from audit_pending.
 func TestRevokeWithAuditDown(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 	e.sink.setFail(func(Event) bool { return true })
 	if _, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"}); err != nil {
 		t.Fatalf("revoke with audit down: %v", err)
@@ -207,7 +207,7 @@ func TestRevokeWithAuditDown(t *testing.T) {
 func TestCommittedAuditRetry(t *testing.T) {
 	e := newEnv(t)
 	e.sink.setFail(func(ev Event) bool { return ev.Phase == PhaseCommitted })
-	r := e.create("vector", "infra/key")
+	r := e.create("courier", "infra/key")
 	if e.s.Health().AuditPending != 1 {
 		t.Fatal("committed event not queued")
 	}
@@ -229,15 +229,15 @@ func TestCommittedAuditRetry(t *testing.T) {
 // DeleteAgent save failure: grants revoked in memory, ACL not touched.
 func TestDeleteAgentSaveFailure(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 	e.fs.fail("fsync")
 	called := false
-	_, err := e.s.DeleteAgent("vector", "admin", "", func() error { called = true; return nil })
+	_, err := e.s.DeleteAgent("courier", "admin", "", func() error { called = true; return nil })
 	wantCode(t, err, CodeRevokeNotDurable)
 	if called {
 		t.Fatal("ACL entry removed although the revoke was not saved")
 	}
-	if e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue).Grant != nil {
+	if e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue).Grant != nil {
 		t.Fatal("grant usable after failed delete")
 	}
 	if v, _ := e.s.GetGrant(g.ID); v.RevokedAt.IsZero() {
@@ -248,7 +248,7 @@ func TestDeleteAgentSaveFailure(t *testing.T) {
 // File on disk is 0600 and survives a save/reload round trip.
 func TestSaveReloadAfterRevoke(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 	if _, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"}); err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestSaveReloadAfterRevoke(t *testing.T) {
 		t.Fatalf("grants file mode: %v %v", info.Mode(), err)
 	}
 	e.reopen()
-	m := e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue)
+	m := e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue)
 	if m.Grant != nil || m.Reason != ReasonGrantRevoked {
 		t.Fatalf("after reload: %+v", m)
 	}
@@ -283,13 +283,13 @@ func TestCorruptFileQuarantined(t *testing.T) {
 	if len(e.s.ListGrants("", true)) != 0 || len(e.s.ListRequests("", "")) != 0 {
 		t.Fatal("expected zero records")
 	}
-	_, _, err := e.s.Create(bearerIn("vector", "infra/key"))
+	_, _, err := e.s.Create(bearerIn("courier", "infra/key"))
 	wantCode(t, err, CodeRequestsDegraded)
 }
 
 func TestFailedQuarantineRefusesWrites(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 	garbage := []byte(`{"version": 99}`)
 	if err := os.WriteFile(e.path, garbage, 0600); err != nil {
 		t.Fatal(err)
@@ -301,12 +301,12 @@ func TestFailedQuarantineRefusesWrites(t *testing.T) {
 	if !h.Degraded || !h.WritesRefused {
 		t.Fatalf("health = %+v", h)
 	}
-	if e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue).Grant != nil {
+	if e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue).Grant != nil {
 		t.Fatal("grant usable while quarantine failed")
 	}
 	_, _, err := e.s.Create(bearerIn("echo", "infra/key"))
 	wantCode(t, err, CodeRequestsDegraded)
-	_, err = e.s.DeleteAgent("vector", "admin", "", nil)
+	_, err = e.s.DeleteAgent("courier", "admin", "", nil)
 	wantCode(t, err, CodeRequestsDegraded)
 	_, err = e.s.Revoke(RevokeInput{GrantID: g.ID, By: "x"})
 	wantCode(t, err, CodeNotFound) // zero grants loaded
@@ -331,5 +331,23 @@ func TestOSFSUsesStrictWriter(t *testing.T) {
 	err := OSFS{Ops: fsutil.AtomicOps{SyncDir: func(string) error { return errInjected }}}.WriteFileAtomic(path, []byte("x"), 0600)
 	if !errors.Is(err, fsutil.ErrDirSyncFailed) {
 		t.Fatalf("err = %v, want ErrDirSyncFailed", err)
+	}
+}
+
+// Another Phoenix file that also says version 1 is set aside whole, never
+// taken for an empty grants file and replaced.
+func TestForeignVersionOneFileIsSetAside(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "grants.json")
+	content := `{"version":1,"secrets":{},"namespaces":{}}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(Options{Path: path, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aside := s.Health().QuarantinedTo
+	if b, err := os.ReadFile(aside); err != nil || string(b) != content {
+		t.Errorf("set aside at %q: %q %v", aside, b, err)
 	}
 }

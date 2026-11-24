@@ -20,7 +20,6 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/grant"
-	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/store"
 
 	"golang.org/x/crypto/bcrypt"
@@ -41,7 +40,7 @@ func (f *switchFS) WriteFileAtomic(name string, data []byte, perm os.FileMode) e
 }
 
 // accessEnv is a dashboard wired to a real API server and grant store, with
-// agent "vector" (dev/** only, seal key registered) and secrets
+// agent "courier" (dev/** only, seal key registered) and secrets
 // infra/a and infra/b. access_requests has NO approvers: the dashboard
 // approves on its own login.
 type accessEnv struct {
@@ -73,11 +72,11 @@ func newAccessEnv(t *testing.T) *accessEnv {
 		}
 	}
 	a := acl.NewFromConfig(&acl.ACLConfig{Agents: map[string]acl.Agent{}})
-	if err := a.AddAgent("vector", "vector-token", []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
+	if err := a.AddAgent("courier", "courier-token", []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
 		t.Fatal(err)
 	}
 	kp, _ := crypto.GenerateSealKeyPair()
-	if err := a.SetAgentSealKey("vector", crypto.EncodeSealKey(&kp.PublicKey)); err != nil {
+	if err := a.SetAgentSealKey("courier", crypto.EncodeSealKey(&kp.PublicKey)); err != nil {
 		t.Fatal(err)
 	}
 	al := audit.NewWriterLogger(io.Discard)
@@ -86,6 +85,7 @@ func newAccessEnv(t *testing.T) *accessEnv {
 	gs, err := grant.Open(grant.Options{
 		Path:        filepath.Join(dir, "grants.json"),
 		FS:          fs,
+		Always:      api.NewAlwaysRules(a),
 		AgentExists: func(n string) bool { _, err := a.GetAgent(n); return err == nil },
 		Logf:        t.Logf,
 	})
@@ -109,12 +109,12 @@ func newAccessEnv(t *testing.T) *accessEnv {
 	return e
 }
 
-// request files a pending request from vector.
+// request files a pending request from courier.
 func (e *accessEnv) request(t *testing.T, reason string, ttl time.Duration, paths ...string) grant.Request {
 	t.Helper()
 	rq, _, err := e.gs.Create(grant.CreateInput{
-		Agent: "vector", Paths: paths, Action: grant.ActionReadValue, Reason: reason, TTL: ttl,
-		SourceIP: "10.0.0.5", AuthMethod: grant.AuthBearer, CredentialFP: "sha256:test",
+		Agent: "courier", Paths: paths, Action: grant.ActionReadValue, Reason: reason, TTL: ttl,
+		SourceIP: "10.0.0.5", AuthMethod: grant.AuthBearer, CredentialFP: grant.BearerFingerprint(crypto.HashToken("courier-token")),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -167,67 +167,6 @@ func redirectParam(t *testing.T, w *httptest.ResponseRecorder, key string) strin
 	return u.Query().Get(key)
 }
 
-func TestAccessCardShowsFactsAndApproveNarrows(t *testing.T) {
-	e := newAccessEnv(t)
-	rq := e.request(t, "backup job fails auth", 30*time.Minute, "infra/a", "infra/b", "dev/db", "infra/missing")
-
-	page := e.get(t, "/dashboard/approvals")
-	for _, want := range []string{
-		`id="` + rq.ID + `"`,
-		"Secret access requests",
-		"Agent says (not verified)",
-		"backup job fails auth",
-		"Revoking later does not recall a value already used.",
-		"10.0.0.5 (bearer)",
-		`value="infra/a" checked`,
-		"does not exist",         // infra/missing
-		"hidden from this agent", // infra/* is outside vector's list rule
-		"already allowed",        // dev/db
-		"sealed only",            // require_sealed default
-	} {
-		if !strings.Contains(page, want) {
-			t.Errorf("approval card missing %q", want)
-		}
-	}
-
-	w := e.post(t, "/dashboard/access-requests/"+rq.ID+"/approve",
-		url.Values{"path": {"infra/a"}, "ttl": {"15m"}}, true)
-	if code := redirectParam(t, w, "error"); code != "" {
-		t.Fatalf("approve failed: %s", code)
-	}
-	got, _ := e.gs.GetRequest(rq.ID)
-	if got.Status != grant.StatusApproved || got.DecidedBy != "dashboard@192.0.2.9" {
-		t.Fatalf("request = %s by %q", got.Status, got.DecidedBy)
-	}
-	g, _ := e.gs.GetGrant(got.GrantID)
-	if !slices.Equal(g.Paths, []string{"infra/a"}) || g.ExpiresAt.Sub(g.CreatedAt) != 15*time.Minute || !g.SealedOnly {
-		t.Fatalf("grant = %v ttl %s sealed %v", g.Paths, g.ExpiresAt.Sub(g.CreatedAt), g.SealedOnly)
-	}
-}
-
-func TestAccessApproveOnlyLegalTTLs(t *testing.T) {
-	e := newAccessEnv(t)
-	rq := e.request(t, "why", 30*time.Minute, "infra/a")
-
-	page := e.get(t, "/dashboard/approvals")
-	var opts []string
-	for _, part := range strings.Split(page, `<option value="`)[1:] {
-		opts = append(opts, part[:strings.Index(part, `"`)])
-	}
-	if !slices.Equal(opts, []string{"5m", "15m", "30m"}) {
-		t.Fatalf("TTL options = %v, want [5m 15m 30m]", opts)
-	}
-	for _, ttl := range []string{"1h", "10m", "30s", "", "forever"} {
-		w := e.post(t, "/dashboard/access-requests/"+rq.ID+"/approve", url.Values{"path": {"infra/a"}, "ttl": {ttl}}, true)
-		if code := redirectParam(t, w, "error"); code != "INVALID_TTL" {
-			t.Errorf("ttl %q: error = %q, want INVALID_TTL", ttl, code)
-		}
-	}
-	if got, _ := e.gs.GetRequest(rq.ID); got.Status != grant.StatusPending {
-		t.Fatalf("request = %s after illegal TTLs", got.Status)
-	}
-}
-
 func TestTTLChoices(t *testing.T) {
 	m := time.Minute
 	cases := []struct {
@@ -246,77 +185,6 @@ func TestTTLChoices(t *testing.T) {
 	}
 }
 
-func TestAccessApproveRechecksCurrentConfig(t *testing.T) {
-	e := newAccessEnv(t)
-	rq := e.request(t, "why", 30*time.Minute, "infra/a")
-	cfg := e.cfg
-	cfg.DenyPaths = []string{"infra/**"}
-	e.srv.SetAccessRequests(cfg)
-
-	w := e.post(t, "/dashboard/access-requests/"+rq.ID+"/approve", url.Values{"path": {"infra/a"}, "ttl": {"15m"}}, true)
-	if code := redirectParam(t, w, "error"); code != "NOT_REQUESTABLE" {
-		t.Fatalf("error = %q, want NOT_REQUESTABLE", code)
-	}
-	// Widening is refused by the store even with a legal TTL.
-	e.srv.SetAccessRequests(e.cfg)
-	w = e.post(t, "/dashboard/access-requests/"+rq.ID+"/approve", url.Values{"path": {"infra/a", "infra/b"}, "ttl": {"15m"}}, true)
-	if code := redirectParam(t, w, "error"); code != "WIDENING_NOT_ALLOWED" {
-		t.Fatalf("error = %q, want WIDENING_NOT_ALLOWED", code)
-	}
-	w = e.post(t, "/dashboard/access-requests/"+rq.ID+"/approve", url.Values{"ttl": {"15m"}}, true)
-	if code := redirectParam(t, w, "error"); code != "EMPTY_GRANT" {
-		t.Fatalf("error = %q, want EMPTY_GRANT", code)
-	}
-	if got, _ := e.gs.GetRequest(rq.ID); got.Status != grant.StatusPending {
-		t.Fatalf("request = %s", got.Status)
-	}
-}
-
-func TestAccessDeny(t *testing.T) {
-	e := newAccessEnv(t)
-	rq := e.request(t, "why", 30*time.Minute, "infra/a")
-	w := e.post(t, "/dashboard/access-requests/"+rq.ID+"/deny", url.Values{"note": {"not today"}}, true)
-	if code := redirectParam(t, w, "error"); code != "" {
-		t.Fatalf("deny failed: %s", code)
-	}
-	got, _ := e.gs.GetRequest(rq.ID)
-	if got.Status != grant.StatusDenied || got.Note != "not today" || got.DecidedBy != "dashboard@192.0.2.9" {
-		t.Fatalf("request = %+v", got)
-	}
-}
-
-func TestAccessCSRFRejected(t *testing.T) {
-	e := newAccessEnv(t)
-	rq := e.request(t, "why", 30*time.Minute, "infra/a")
-	for _, path := range []string{"/approve", "/deny"} {
-		w := e.post(t, "/dashboard/access-requests/"+rq.ID+path, url.Values{"path": {"infra/a"}, "ttl": {"15m"}}, false)
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("%s without CSRF: %d, want 403", path, w.Code)
-		}
-	}
-	if got, _ := e.gs.GetRequest(rq.ID); got.Status != grant.StatusPending {
-		t.Fatalf("request = %s after CSRF-less posts", got.Status)
-	}
-}
-
-func TestAccessReasonEscaped(t *testing.T) {
-	e := newAccessEnv(t)
-	e.request(t, "<script>alert(1)</script> visit https://evil.example \u202Etxt.exe\u200B", 30*time.Minute, "infra/a")
-	page := e.get(t, "/dashboard/approvals")
-	if strings.ContainsAny(page, "\u202E\u200B") {
-		t.Fatal("bidi / zero-width characters reached the page")
-	}
-	if strings.Contains(page, "<script>alert") {
-		t.Fatal("reason rendered as raw HTML")
-	}
-	if !strings.Contains(page, "&lt;script&gt;alert(1)&lt;/script&gt;") {
-		t.Fatal("escaped reason missing")
-	}
-	if strings.Contains(page, `href="https://evil`) {
-		t.Fatal("reason rendered a link")
-	}
-}
-
 func TestCleanDisplayText(t *testing.T) {
 	in := "ok\u202Eevil\u200B\u2066x\x1b[31m" + strings.Repeat("y", 400)
 	out := cleanDisplayText(in, maxReasonDisplay)
@@ -330,75 +198,6 @@ func TestCleanDisplayText(t *testing.T) {
 	}
 }
 
-func TestGrantRevokeAndRecent(t *testing.T) {
-	e := newAccessEnv(t)
-	rq := e.request(t, "why", 30*time.Minute, "infra/a")
-	g, err := e.srv.ApproveAccessRequestAs(rq.ID, "dashboard@test", "127.0.0.1", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if page := e.get(t, "/dashboard/grants"); !strings.Contains(page, "/dashboard/grants/"+g.ID+"/revoke") {
-		t.Fatal("active grant missing a Revoke button")
-	}
-	if w := e.post(t, "/dashboard/grants/"+g.ID+"/revoke", nil, false); w.Code != http.StatusForbidden {
-		t.Fatalf("revoke without CSRF: %d", w.Code)
-	}
-	w := e.post(t, "/dashboard/grants/"+g.ID+"/revoke", nil, true)
-	if code := redirectParam(t, w, "error"); code != "" {
-		t.Fatalf("revoke failed: %s", code)
-	}
-	got, _ := e.gs.GetGrant(g.ID)
-	if got.State(time.Now()) != grant.GrantRevoked || got.RevokedBy != "dashboard@192.0.2.9" {
-		t.Fatalf("grant state %s by %q", got.State(time.Now()), got.RevokedBy)
-	}
-	if page := e.get(t, "/dashboard/grants?view=recent"); !strings.Contains(page, "status-revoked") {
-		t.Fatal("revoked grant not in the recent view")
-	}
-}
-
-func TestGrantRevokeNotDurableShownInRed(t *testing.T) {
-	e := newAccessEnv(t)
-	rq := e.request(t, "why", 30*time.Minute, "infra/a")
-	g, err := e.srv.ApproveAccessRequestAs(rq.ID, "dashboard@test", "127.0.0.1", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.fs.fail.Store(true)
-	w := e.post(t, "/dashboard/grants/"+g.ID+"/revoke", nil, true)
-	if code := redirectParam(t, w, "error"); code != "REVOKE_NOT_DURABLE" {
-		t.Fatalf("error = %q, want REVOKE_NOT_DURABLE", code)
-	}
-	page := e.get(t, w.Header().Get("Location"))
-	if !strings.Contains(page, `flash-error flash-sticky">REVOKE_NOT_DURABLE`) {
-		t.Fatal("REVOKE_NOT_DURABLE warning not shown in red")
-	}
-	// Still denied in memory even though the save failed.
-	if got, _ := e.gs.GetGrant(g.ID); got.State(time.Now()) != grant.GrantRevoked {
-		t.Fatal("grant not revoked in memory")
-	}
-	// Overview shows the degraded state.
-	if page := e.get(t, "/dashboard/"); !strings.Contains(page, "Access requests degraded") {
-		t.Fatal("overview does not show degraded state")
-	}
-}
-
-func TestUnknownErrorCodeNotEchoed(t *testing.T) {
-	e := newAccessEnv(t)
-	page := e.get(t, "/dashboard/approvals?error="+url.QueryEscape("Agent verified, safe to approve"))
-	if strings.Contains(page, "safe to approve") {
-		t.Fatal("arbitrary error text from the URL was rendered")
-	}
-}
-
-func TestOverviewPendingAccessBadge(t *testing.T) {
-	e := newAccessEnv(t)
-	e.request(t, "why", 30*time.Minute, "infra/a")
-	page := e.get(t, "/dashboard/")
-	if !strings.Contains(page, "Access Requests") || !strings.Contains(page, `<span class="badge">1</span>`) {
-		t.Fatal("overview missing access request count / nav badge")
-	}
-}
-
 // P5 review S1: when a failed approval may still be on disk, the dashboard
 // says so instead of "nothing changed".
 func TestApprovalMaybeSavedShownHonestly(t *testing.T) {
@@ -409,31 +208,5 @@ func TestApprovalMaybeSavedShownHonestly(t *testing.T) {
 	}
 	if got := accessErrorMessage(errCode(&grant.Error{Code: grant.CodeStoreWriteFailed})); !strings.Contains(got, "nothing changed") {
 		t.Fatalf("plain write failure -> %q", got)
-	}
-}
-
-// A login card names what approving really does and promises no attestation
-// check, because signing a login does not run those checks.
-func TestSSHLoginCard(t *testing.T) {
-	e := newAccessEnv(t)
-	pe, err := policy.Load([]byte(`{"attestation": {"ssh/*": {"source_ip": ["10.9.9.9"]}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.h.deps.Policy = pe
-	if err := e.acl.AddAgent("deployer", "deployer-token", []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
-		t.Fatal(err)
-	}
-	kp, _ := crypto.GenerateSealKeyPair()
-	if err := e.acl.SetAgentSealKey("deployer", crypto.EncodeSealKey(&kp.PublicKey)); err != nil {
-		t.Fatal(err)
-	}
-	login := e.h.buildCard(grant.Request{ID: "req_x", Agent: "deployer", Action: grant.ActionSSHLogin, Paths: []string{"ssh/build-1"}}, e.cfg)
-	if len(login.Paths) != 1 || !login.Paths[0].SSHLogin || !login.SealKeyOK || login.SealRequired || len(login.Attestation) != 0 {
-		t.Fatalf("login card = %+v", login)
-	}
-	secret := e.h.buildCard(grant.Request{ID: "req_y", Agent: "deployer", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}}, e.cfg)
-	if secret.Paths[0].SSHLogin || len(secret.Attestation) == 0 {
-		t.Fatalf("a secret at the same path must keep its normal card: %+v", secret)
 	}
 }

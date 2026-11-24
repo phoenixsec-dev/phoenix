@@ -44,7 +44,7 @@ func (c *testClock) Advance(d time.Duration) {
 }
 
 // grantEnv is the API approver fixture: a server with access requests on,
-// an agent "vector" (dev/** only, registered seal key), an approver agent
+// an agent "courier" (dev/** only, registered seal key), an approver agent
 // "approver" listed in access_requests.approvers, and "admin" (ACL admin on
 // everything but NOT an approver). Secrets infra/b2/app-key and
 // infra/other exist.
@@ -59,7 +59,7 @@ type grantEnv struct {
 }
 
 const (
-	vectorTok   = "vector-token"
+	courierTok  = "courier-token"
 	approverTok = "approver-token"
 	adminTok    = "admin-token"
 )
@@ -68,7 +68,7 @@ func newGrantEnv(t *testing.T, opts ...func(*grant.Options)) *grantEnv {
 	t.Helper()
 	srv, _ := setupTestServer(t)
 	e := &grantEnv{srv: srv, dir: t.TempDir(), clock: &testClock{t: time.Now().UTC()}}
-	if err := srv.acl.AddAgent("vector", vectorTok, []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
+	if err := srv.acl.AddAgent("courier", courierTok, []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.acl.AddAgent("approver", approverTok, nil); err != nil {
@@ -76,7 +76,7 @@ func newGrantEnv(t *testing.T, opts ...func(*grant.Options)) *grantEnv {
 	}
 	kp, _ := crypto.GenerateSealKeyPair()
 	e.sealKP, e.sealPub = kp, crypto.EncodeSealKey(&kp.PublicKey)
-	if err := srv.acl.SetAgentSealKey("vector", e.sealPub); err != nil {
+	if err := srv.acl.SetAgentSealKey("courier", e.sealPub); err != nil {
 		t.Fatal(err)
 	}
 	seedSecret(t, srv, adminTok, "infra/b2/app-key", "b2-secret-value")
@@ -139,11 +139,21 @@ func (e *grantEnv) do(method, path, tok, body string, hdr ...string) *httptest.R
 	return w
 }
 
+// failBody is what a failure message may show of a response: its error and
+// code. A response that should have been a refusal can hold a token or value.
+func failBody(body string) string {
+	var m struct{ Error, Code string }
+	if json.Unmarshal([]byte(body), &m) != nil || m.Error+m.Code == "" {
+		return fmt.Sprintf("(%d bytes, no error)", len(body))
+	}
+	return fmt.Sprintf("%q %s", m.Error, m.Code)
+}
+
 func jsonBody(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
-		t.Fatalf("decode %q: %v", w.Body.String(), err)
+		t.Fatalf("decode (%d bytes): %v", w.Body.Len(), err)
 	}
 	return m
 }
@@ -152,16 +162,16 @@ func jsonBody(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 func expect(t *testing.T, w *httptest.ResponseRecorder, status int, code string) map[string]any {
 	t.Helper()
 	if w.Code != status {
-		t.Fatalf("status = %d, want %d; body %s", w.Code, status, w.Body.String())
+		t.Fatalf("status = %d, want %d; body %s", w.Code, status, failBody(w.Body.String()))
 	}
 	m := jsonBody(t, w)
 	if code != "" && m["code"] != code {
-		t.Fatalf("code = %v, want %s; body %s", m["code"], code, w.Body.String())
+		t.Fatalf("code = %v, want %s; body %s", m["code"], code, failBody(w.Body.String()))
 	}
 	return m
 }
 
-// request files a request for vector and returns its id.
+// request files a request for courier and returns its id.
 func (e *grantEnv) request(t *testing.T, tok string, paths ...string) string {
 	t.Helper()
 	b, _ := json.Marshal(map[string]any{"paths": paths, "action": "read_value", "reason": "backup job fails auth", "ttl": "30m"})
@@ -172,7 +182,11 @@ func (e *grantEnv) request(t *testing.T, tok string, paths ...string) string {
 // approve approves id as "approver" and returns the grant id.
 func (e *grantEnv) approve(t *testing.T, id, body string) string {
 	t.Helper()
-	m := expect(t, e.do("POST", "/v1/access-requests/"+id+"/approve", approverTok, body), http.StatusOK, "")
+	op := "/approve"
+	if strings.Contains(body, "uses") {
+		op = "/approve-limited"
+	}
+	m := expect(t, e.do("POST", "/v1/access-requests/"+id+op, approverTok, body), http.StatusOK, "")
 	return m["grant_id"].(string)
 }
 
@@ -186,7 +200,7 @@ func (e *grantEnv) openSealed(t *testing.T, w *httptest.ResponseRecorder) string
 		SealedValue *crypto.SealedEnvelope `json:"sealed_value"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.SealedValue == nil {
-		t.Fatalf("no sealed_value in %s", w.Body.String())
+		t.Fatalf("no sealed_value in %s", failBody(w.Body.String()))
 	}
 	p, err := crypto.OpenSealedEnvelope(resp.SealedValue, &e.sealKP.PrivateKey)
 	if err != nil {
@@ -201,13 +215,13 @@ func TestRequestUseFullFlow(t *testing.T) {
 	e := newGrantEnv(t)
 
 	// Denied today, and told it may request use.
-	d := expect(t, e.sealedGet("infra/b2/app-key", vectorTok), http.StatusForbidden, CodeACLDenied)
+	d := expect(t, e.sealedGet("infra/b2/app-key", courierTok), http.StatusForbidden, CodeACLDenied)
 	if d["next_step"] != NextRequestUse {
 		t.Fatalf("next_step = %v, want request_use", d["next_step"])
 	}
 
-	id := e.request(t, vectorTok, "infra/b2/app-key", "infra/other")
-	st := expect(t, e.do("GET", "/v1/access-requests/"+id, vectorTok, ""), http.StatusOK, "")
+	id := e.request(t, courierTok, "infra/b2/app-key", "infra/other")
+	st := expect(t, e.do("GET", "/v1/access-requests/"+id, courierTok, ""), http.StatusOK, "")
 	if st["status"] != "pending" || st["next_step"] != NextWait {
 		t.Fatalf("pending view = %v", st)
 	}
@@ -215,7 +229,7 @@ func TestRequestUseFullFlow(t *testing.T) {
 		t.Fatal("agent view must not include approver-only fields")
 	}
 	// Identical pending request: 200, same id.
-	dup := e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/other","infra/b2/app-key"],"reason":"again"}`)
+	dup := e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/other","infra/b2/app-key"],"reason":"again"}`)
 	if m := expect(t, dup, http.StatusOK, ""); m["id"] != id {
 		t.Fatalf("duplicate got id %v, want %s", m["id"], id)
 	}
@@ -225,16 +239,16 @@ func TestRequestUseFullFlow(t *testing.T) {
 
 	// Approver narrows to one path and 15m.
 	gid := e.approve(t, id, `{"paths":["infra/b2/app-key"],"ttl":"15m"}`)
-	st = expect(t, e.do("GET", "/v1/access-requests/"+id, vectorTok, ""), http.StatusOK, "")
+	st = expect(t, e.do("GET", "/v1/access-requests/"+id, courierTok, ""), http.StatusOK, "")
 	if st["status"] != "approved" || st["next_step"] != NextUseExec || st["grant_id"] != gid || st["sealed_only"] != true {
 		t.Fatalf("approved view = %v", st)
 	}
 
 	// Sealed use to the registered key works and is audited with grant_id.
-	w := e.sealedGet("infra/b2/app-key", vectorTok)
+	w := e.sealedGet("infra/b2/app-key", courierTok)
 	expect(t, w, http.StatusOK, "")
 	if got := e.openSealed(t, w); got != "b2-secret-value" {
-		t.Fatalf("value = %q", got)
+		t.Fatalf("wrong value (%d bytes)", len(got))
 	}
 	entries, _ := queryAPIAuditEntries(t, e.srv, adminTok)
 	if a := findAPIAuditEntry(entries, "read_value", "infra/b2/app-key", "allowed", ""); a == nil || a.Metadata["grant_id"] != gid {
@@ -242,28 +256,28 @@ func TestRequestUseFullFlow(t *testing.T) {
 	}
 
 	// Plaintext is refused for a sealed-only grant.
-	d = expect(t, e.do("GET", "/v1/secrets/infra/b2/app-key", vectorTok, ""), http.StatusForbidden, CodeSealedRequired)
+	d = expect(t, e.do("GET", "/v1/secrets/infra/b2/app-key", courierTok, ""), http.StatusForbidden, CodeSealedRequired)
 	if d["next_step"] != NextUseExec {
 		t.Fatalf("next_step = %v", d["next_step"])
 	}
 	// Resolve through the grant (sealed) works; the narrowed-out path does not.
-	rw := e.do("POST", "/v1/resolve", vectorTok, `{"refs":["phoenix://infra/b2/app-key","phoenix://infra/other"]}`, "X-Phoenix-Seal-Key: "+e.sealPub)
+	rw := e.do("POST", "/v1/resolve", courierTok, `{"refs":["phoenix://infra/b2/app-key","phoenix://infra/other"]}`, "X-Phoenix-Seal-Key: "+e.sealPub)
 	rm := expect(t, rw, http.StatusOK, "")
 	if _, ok := rm["sealed_values"].(map[string]any)["phoenix://infra/b2/app-key"]; !ok {
-		t.Fatalf("resolve did not return the granted value: %v", rm)
+		t.Fatal("resolve did not return the granted value")
 	}
 	if c := rm["error_codes"].(map[string]any)["phoenix://infra/other"].(map[string]any)["code"]; c != CodeACLDenied {
 		t.Fatalf("other path code = %v", c)
 	}
-	expect(t, e.sealedGet("infra/other", vectorTok), http.StatusForbidden, CodeACLDenied)
+	expect(t, e.sealedGet("infra/other", courierTok), http.StatusForbidden, CodeACLDenied)
 	// Grants never cover write, delete or list.
-	expect(t, e.do("PUT", "/v1/secrets/infra/b2/app-key", vectorTok, `{"value":"x"}`), http.StatusForbidden, CodeACLDenied)
-	expect(t, e.do("DELETE", "/v1/secrets/infra/b2/app-key", vectorTok, ""), http.StatusForbidden, CodeACLDenied)
-	if l := expect(t, e.do("GET", "/v1/secrets/infra/", vectorTok, ""), http.StatusOK, ""); len(l["paths"].([]any)) != 0 {
+	expect(t, e.do("PUT", "/v1/secrets/infra/b2/app-key", courierTok, `{"value":"x"}`), http.StatusForbidden, CodeACLDenied)
+	expect(t, e.do("DELETE", "/v1/secrets/infra/b2/app-key", courierTok, ""), http.StatusForbidden, CodeACLDenied)
+	if l := expect(t, e.do("GET", "/v1/secrets/infra/", courierTok, ""), http.StatusOK, ""); len(l["paths"].([]any)) != 0 {
 		t.Fatalf("list exposed paths through a grant: %v", l)
 	}
 	// Bound to the source IP the request came from (httptest uses 192.0.2.1).
-	other := e.do("GET", "/v1/secrets/infra/b2/app-key", vectorTok, "", "X-Phoenix-Seal-Key: "+e.sealPub, "RemoteAddr: 192.0.2.99")
+	other := e.do("GET", "/v1/secrets/infra/b2/app-key", courierTok, "", "X-Phoenix-Seal-Key: "+e.sealPub, "RemoteAddr: 192.0.2.99")
 	expect(t, other, http.StatusForbidden, CodeACLDenied)
 
 	// Revoke is immediate: the very next use fails with GRANT_REVOKED.
@@ -271,11 +285,11 @@ func TestRequestUseFullFlow(t *testing.T) {
 	if rv["state"] != "revoked" {
 		t.Fatalf("revoke response = %v", rv)
 	}
-	d = expect(t, e.sealedGet("infra/b2/app-key", vectorTok), http.StatusForbidden, CodeGrantRevoked)
+	d = expect(t, e.sealedGet("infra/b2/app-key", courierTok), http.StatusForbidden, CodeGrantRevoked)
 	if d["next_step"] != NextAskUser {
 		t.Fatalf("revoked next_step = %v", d["next_step"])
 	}
-	if st = expect(t, e.do("GET", "/v1/access-requests/"+id, vectorTok, ""), http.StatusOK, ""); st["next_step"] != NextAskUser {
+	if st = expect(t, e.do("GET", "/v1/access-requests/"+id, courierTok, ""), http.StatusOK, ""); st["next_step"] != NextAskUser {
 		t.Fatalf("revoked request next_step = %v", st["next_step"])
 	}
 	// Revoke is idempotent.
@@ -284,23 +298,23 @@ func TestRequestUseFullFlow(t *testing.T) {
 
 func TestGrantExpiryIsImmediate(t *testing.T) {
 	e := newGrantEnv(t)
-	id := e.request(t, vectorTok, "infra/b2/app-key")
+	id := e.request(t, courierTok, "infra/b2/app-key")
 	gid := e.approve(t, id, `{"ttl":"5m"}`)
-	expect(t, e.sealedGet("infra/b2/app-key", vectorTok), http.StatusOK, "")
+	expect(t, e.sealedGet("infra/b2/app-key", courierTok), http.StatusOK, "")
 
 	e.clock.Advance(5*time.Minute - time.Second)
-	expect(t, e.sealedGet("infra/b2/app-key", vectorTok), http.StatusOK, "")
+	expect(t, e.sealedGet("infra/b2/app-key", courierTok), http.StatusOK, "")
 	e.clock.Advance(time.Second) // exactly at expires_at: already expired
-	d := expect(t, e.sealedGet("infra/b2/app-key", vectorTok), http.StatusForbidden, CodeGrantExpired)
+	d := expect(t, e.sealedGet("infra/b2/app-key", courierTok), http.StatusForbidden, CodeGrantExpired)
 	if d["next_step"] != NextRequestUse {
 		t.Fatalf("expired next_step = %v", d["next_step"])
 	}
-	st := expect(t, e.do("GET", "/v1/access-requests/"+id, vectorTok, ""), http.StatusOK, "")
+	st := expect(t, e.do("GET", "/v1/access-requests/"+id, courierTok, ""), http.StatusOK, "")
 	if st["next_step"] != NextRequestUse || st["grant_state"] != "expired" {
 		t.Fatalf("expired request view = %v", st)
 	}
 	// Agent may still list its own inactive grants.
-	l := expect(t, e.do("GET", "/v1/grants?include=inactive", vectorTok, ""), http.StatusOK, "")
+	l := expect(t, e.do("GET", "/v1/grants?include=inactive", courierTok, ""), http.StatusOK, "")
 	if gs := l["grants"].([]any); len(gs) != 1 || gs[0].(map[string]any)["id"] != gid {
 		t.Fatalf("grants = %v", l)
 	}
@@ -313,8 +327,8 @@ func TestAttestationStillAppliesToGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.srv.SetPolicy(pe)
-	e.approve(t, e.request(t, vectorTok, "infra/other"), "")
-	d := expect(t, e.sealedGet("infra/other", vectorTok), http.StatusForbidden, CodeAttestationRequired)
+	e.approve(t, e.request(t, courierTok, "infra/other"), "")
+	d := expect(t, e.sealedGet("infra/other", courierTok), http.StatusForbidden, CodeAttestationRequired)
 	if d["next_step"] != NextAskUser {
 		t.Fatalf("next_step = %v", d["next_step"])
 	}
@@ -333,15 +347,15 @@ func TestAccessRequestCreateErrors(t *testing.T) {
 		status          int
 		code            string
 	}{
-		{"write not grantable", vectorTok, `{"paths":["infra/x"],"action":"write","reason":"r"}`, 400, CodeActionNotGrantable},
-		{"glob path", vectorTok, `{"paths":["infra/*"],"reason":"r"}`, 400, CodeInvalidRequest},
-		{"bidi path", vectorTok, `{"paths":["infra/\u202ex"],"reason":"r"}`, 400, CodeInvalidRequest},
-		{"no paths", vectorTok, `{"paths":[],"reason":"r"}`, 400, CodeInvalidRequest},
-		{"no reason", vectorTok, `{"paths":["infra/x"]}`, 400, CodeInvalidRequest},
-		{"bad ttl", vectorTok, `{"paths":["infra/x"],"reason":"r","ttl":"soon"}`, 400, CodeInvalidRequest},
-		{"bad body", vectorTok, `{`, 400, CodeInvalidRequest},
-		{"deny_paths", vectorTok, `{"paths":["infra/x","phoenix/admin-token"],"reason":"r"}`, 403, CodeNotRequestable},
-		{"already allowed", vectorTok, `{"paths":["dev/db","dev/other"],"reason":"r"}`, 409, CodeAlreadyAllowed},
+		{"write not grantable", courierTok, `{"paths":["infra/x"],"action":"write","reason":"r"}`, 400, CodeActionNotGrantable},
+		{"glob path", courierTok, `{"paths":["infra/*"],"reason":"r"}`, 400, CodeInvalidRequest},
+		{"bidi path", courierTok, `{"paths":["infra/\u202ex"],"reason":"r"}`, 400, CodeInvalidRequest},
+		{"no paths", courierTok, `{"paths":[],"reason":"r"}`, 400, CodeInvalidRequest},
+		{"no reason", courierTok, `{"paths":["infra/x"]}`, 400, CodeInvalidRequest},
+		{"bad ttl", courierTok, `{"paths":["infra/x"],"reason":"r","ttl":"soon"}`, 400, CodeInvalidRequest},
+		{"bad body", courierTok, `{`, 400, CodeInvalidRequest},
+		{"deny_paths", courierTok, `{"paths":["infra/x","phoenix/admin-token"],"reason":"r"}`, 403, CodeNotRequestable},
+		{"already allowed", courierTok, `{"paths":["dev/db","dev/other"],"reason":"r"}`, 409, CodeAlreadyAllowed},
 		{"no seal key", "nokey-token", `{"paths":["infra/x"],"reason":"r"}`, 400, CodeSealKeyNotRegistered},
 		{"unauthenticated", "", `{"paths":["infra/x"],"reason":"r"}`, 401, ""},
 	}
@@ -353,8 +367,8 @@ func TestAccessRequestCreateErrors(t *testing.T) {
 
 	// A mixed request (one path already allowed) is accepted, and so is a
 	// path that does not exist: same 201 shape, no existence oracle.
-	mixed := expect(t, e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["dev/db","infra/nope"],"reason":"r"}`), 201, "")
-	missing := expect(t, e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/b2/app-key"],"reason":"r"}`), 201, "")
+	mixed := expect(t, e.do("POST", "/v1/access-requests", courierTok, `{"paths":["dev/db","infra/nope"],"reason":"r"}`), 201, "")
+	missing := expect(t, e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/b2/app-key"],"reason":"r"}`), 201, "")
 	if len(mixed) != len(missing) {
 		t.Fatalf("response shape differs for a missing path: %v vs %v", mixed, missing)
 	}
@@ -365,8 +379,8 @@ func TestAccessRequestCreateErrors(t *testing.T) {
 	}
 
 	// Third pending is fine, fourth is TOO_MANY_PENDING with Retry-After.
-	e.request(t, vectorTok, "infra/third")
-	w := e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/fourth"],"reason":"r"}`)
+	e.request(t, courierTok, "infra/third")
+	w := e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/fourth"],"reason":"r"}`)
 	expect(t, w, http.StatusTooManyRequests, CodeTooManyPending)
 	if w.Header().Get("Retry-After") == "" {
 		t.Fatal("429 without Retry-After")
@@ -379,24 +393,24 @@ func TestAccessRequestCreateErrors(t *testing.T) {
 
 func TestAccessRequestCooldownAndRateLimit(t *testing.T) {
 	e := newGrantEnv(t)
-	id := e.request(t, vectorTok, "infra/a", "infra/b")
+	id := e.request(t, courierTok, "infra/a", "infra/b")
 	expect(t, e.do("POST", "/v1/access-requests/"+id+"/deny", approverTok, `{"note":"not now"}`), 200, "")
 	// Any overlapping path is in cooldown; a different path is not.
-	w := e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/b"],"reason":"r"}`)
+	w := e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/b"],"reason":"r"}`)
 	expect(t, w, http.StatusTooManyRequests, CodeRequestCooldown)
 	if w.Header().Get("Retry-After") == "" {
 		t.Fatal("cooldown without Retry-After")
 	}
-	st := expect(t, e.do("GET", "/v1/access-requests/"+id, vectorTok, ""), 200, "")
+	st := expect(t, e.do("GET", "/v1/access-requests/"+id, courierTok, ""), 200, "")
 	if st["status"] != "denied" || st["next_step"] != NextAskUser || st["note"] != "not now" {
 		t.Fatalf("denied view = %v", st)
 	}
 	// 10 creates per hour (the denied one counts): 9 more, then RATE_LIMITED.
 	for i := range 9 {
-		rid := e.request(t, vectorTok, fmt.Sprintf("infra/r%d", i))
+		rid := e.request(t, courierTok, fmt.Sprintf("infra/r%d", i))
 		expect(t, e.do("POST", "/v1/access-requests/"+rid+"/deny", approverTok, ""), 200, "")
 	}
-	expect(t, e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/c"],"reason":"r"}`), http.StatusTooManyRequests, CodeRateLimited)
+	expect(t, e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/c"],"reason":"r"}`), http.StatusTooManyRequests, CodeRateLimited)
 }
 
 func TestAccessRequestStoreFailures(t *testing.T) {
@@ -407,7 +421,7 @@ func TestAccessRequestStoreFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		e := newGrantEnv(t, func(o *grant.Options) { o.Path = path })
-		expect(t, e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/x"],"reason":"r"}`), http.StatusServiceUnavailable, CodeRequestsDegraded)
+		expect(t, e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/x"],"reason":"r"}`), http.StatusServiceUnavailable, CodeRequestsDegraded)
 		st := expect(t, e.do("GET", "/v1/status", adminTok, ""), 200, "")
 		if ar := st["access_requests"].(map[string]any); ar["state"] != "degraded" || ar["quarantined_to"] == nil {
 			t.Fatalf("status access_requests = %v", ar)
@@ -418,7 +432,7 @@ func TestAccessRequestStoreFailures(t *testing.T) {
 			// The committed line for a new request cannot be written.
 			o.Audit = NewGrantAuditSink(audit.NewWriterLogger(failOn{`"access_request.created"`}))
 		})
-		e.request(t, vectorTok, "infra/x")
+		e.request(t, courierTok, "infra/x")
 		st := expect(t, e.do("GET", "/v1/status", adminTok, ""), 200, "")
 		if a := st["audit"].(map[string]any); a["state"] != "degraded" {
 			t.Fatalf("status audit = %v", a)
@@ -428,7 +442,7 @@ func TestAccessRequestStoreFailures(t *testing.T) {
 		e := newGrantEnv(t, func(o *grant.Options) {
 			o.Audit = NewGrantAuditSink(audit.NewWriterLogger(failOn{`"access_request.create.attempt"`}))
 		})
-		expect(t, e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/x"],"reason":"r"}`), 500, string(grant.CodeAuditWriteFailed))
+		expect(t, e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/x"],"reason":"r"}`), 500, string(grant.CodeAuditWriteFailed))
 	})
 }
 
@@ -450,33 +464,33 @@ func TestApproverRules(t *testing.T) {
 	if err := e.srv.acl.SetAgentSealKey("approver", e.sealPub); err != nil {
 		t.Fatal(err)
 	}
-	id := e.request(t, vectorTok, "infra/b2/app-key", "infra/other")
+	id := e.request(t, courierTok, "infra/b2/app-key", "infra/other")
 	own := e.request(t, approverTok, "infra/other")
 
 	// Admin ACL alone is not enough; sessions never approve.
 	expect(t, e.do("POST", "/v1/access-requests/"+id+"/approve", adminTok, ""), 403, CodeApproverRequired)
 	expect(t, e.do("POST", "/v1/access-requests/"+id+"/deny", adminTok, ""), 403, CodeApproverRequired)
-	expect(t, e.do("POST", "/v1/access-requests/"+id+"/approve", vectorTok, ""), 403, CodeApproverRequired)
+	expect(t, e.do("POST", "/v1/access-requests/"+id+"/approve", courierTok, ""), 403, CodeApproverRequired)
 	// Unknown ids look the same to a non-approver.
-	expect(t, e.do("POST", "/v1/access-requests/req_nope/approve", vectorTok, ""), 403, CodeApproverRequired)
+	expect(t, e.do("POST", "/v1/access-requests/req_nope/approve", courierTok, ""), 403, CodeApproverRequired)
 	// Self-approval is blocked even for a listed approver.
 	expect(t, e.do("POST", "/v1/access-requests/"+own+"/approve", approverTok, ""), 403, CodeSelfApproval)
 	expect(t, e.do("POST", "/v1/access-requests/"+own+"/deny", approverTok, ""), 403, CodeSelfApproval)
 
 	// Agents see only their own requests; others are 404.
-	expect(t, e.do("GET", "/v1/access-requests/"+own, vectorTok, ""), 404, CodeNotFound)
-	l := expect(t, e.do("GET", "/v1/access-requests", vectorTok, ""), 200, "")
+	expect(t, e.do("GET", "/v1/access-requests/"+own, courierTok, ""), 404, CodeNotFound)
+	l := expect(t, e.do("GET", "/v1/access-requests", courierTok, ""), 200, "")
 	if n := len(l["requests"].([]any)); n != 1 {
-		t.Fatalf("vector sees %d requests, want 1", n)
+		t.Fatalf("courier sees %d requests, want 1", n)
 	}
-	expect(t, e.do("GET", "/v1/access-requests?agent=approver", vectorTok, ""), 403, CodeApproverRequired)
+	expect(t, e.do("GET", "/v1/access-requests?agent=approver", courierTok, ""), 403, CodeApproverRequired)
 	// Approvers see everything, with full detail.
 	l = expect(t, e.do("GET", "/v1/access-requests?status=pending", approverTok, ""), 200, "")
 	if n := len(l["requests"].([]any)); n != 2 {
 		t.Fatalf("approver sees %d requests, want 2", n)
 	}
 	full := expect(t, e.do("GET", "/v1/access-requests/"+id, approverTok, ""), 200, "")
-	if full["agent"] != "vector" || full["source_ip"] == nil || full["reason"] == nil {
+	if full["agent"] != "courier" || full["source_ip"] == nil || full["reason"] == nil {
 		t.Fatalf("approver view = %v", full)
 	}
 
@@ -497,17 +511,17 @@ func TestApproverRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	expect(t, e.do("POST", "/v1/grants/"+gid+"/revoke", "mallory-token", ""), 404, CodeNotFound)
-	g := expect(t, e.do("GET", "/v1/grants?agent=vector", approverTok, ""), 200, "")
+	g := expect(t, e.do("GET", "/v1/grants?agent=courier", approverTok, ""), 200, "")
 	if n := len(g["grants"].([]any)); n != 1 {
-		t.Fatalf("approver sees %d vector grants", n)
+		t.Fatalf("approver sees %d courier grants", n)
 	}
-	expect(t, e.do("GET", "/v1/grants?agent=vector", "mallory-token", ""), 403, CodeApproverRequired)
-	expect(t, e.do("POST", "/v1/grants/"+gid+"/revoke", vectorTok, ""), 200, "")
+	expect(t, e.do("GET", "/v1/grants?agent=courier", "mallory-token", ""), 403, CodeApproverRequired)
+	expect(t, e.do("POST", "/v1/grants/"+gid+"/revoke", courierTok, ""), 200, "")
 }
 
 func TestApprovalRechecksCurrentConfig(t *testing.T) {
 	e := newGrantEnv(t)
-	id := e.request(t, vectorTok, "infra/b2/app-key", "infra/other")
+	id := e.request(t, courierTok, "infra/b2/app-key", "infra/other")
 
 	e.set(func(s *config.AccessRequestsSettings) { s.DenyPaths = []string{"infra/other"} })
 	expect(t, e.do("POST", "/v1/access-requests/"+id+"/approve", approverTok, ""), 403, CodeNotRequestable)
@@ -533,23 +547,20 @@ func TestApprovalRechecksCurrentConfig(t *testing.T) {
 	if m["sealed_only"] != false {
 		t.Fatalf("sealed_only = %v, want false from current require_sealed", m["sealed_only"])
 	}
-	w := e.do("GET", "/v1/secrets/infra/b2/app-key", vectorTok, "")
+	w := e.do("GET", "/v1/secrets/infra/b2/app-key", courierTok, "")
 	if expect(t, w, 200, "")["value"] != "b2-secret-value" {
-		t.Fatalf("plaintext grant read = %s", w.Body.String())
+		t.Fatal("plaintext grant read returned another value")
 	}
 
 	// require_sealed turned on later: an agent without a seal key is refused
 	// at approval, so a human never approves something unusable.
-	id2 := e.request(t, vectorTok, "infra/other2")
+	// Re-create courier without a seal key before it asks.
+	if err := e.srv.acl.RemoveAgent("courier"); err != nil {
+		t.Fatal(err)
+	}
+	e.addCourier(t, courierTok)
+	id2 := e.request(t, courierTok, "infra/other2")
 	e.set(func(s *config.AccessRequestsSettings) { s.RequireSealed = true })
-	// Re-create vector's ACL entry without a seal key (same token).
-	if err := e.srv.acl.UpdateAgent("vector", vectorTok, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.srv.acl.RemoveAgent("vector"); err != nil {
-		t.Fatal(err)
-	}
-	e.addVector(t, vectorTok)
 	expect(t, e.do("POST", "/v1/access-requests/"+id2+"/approve", approverTok, ""), 400, CodeSealKeyNotRegistered)
 }
 
@@ -571,18 +582,18 @@ func TestMissingConfigBlockMeansDisabled(t *testing.T) {
 
 	e := newGrantEnv(t)
 	// A grant made while enabled ...
-	gid := e.approve(t, e.request(t, vectorTok, "infra/b2/app-key"), "")
-	expect(t, e.sealedGet("infra/b2/app-key", vectorTok), 200, "")
+	gid := e.approve(t, e.request(t, courierTok, "infra/b2/app-key"), "")
+	expect(t, e.sealedGet("infra/b2/app-key", courierTok), 200, "")
 	// ... stops working when the feature is turned off.
 	e.srv.SetAccessRequests(cfg.AccessRequestsSettings())
-	d := expect(t, e.sealedGet("infra/b2/app-key", vectorTok), 403, CodeACLDenied)
+	d := expect(t, e.sealedGet("infra/b2/app-key", courierTok), 403, CodeACLDenied)
 	if d["next_step"] != NextAskUser {
 		t.Fatalf("disabled next_step = %v, want ask_user", d["next_step"])
 	}
-	expect(t, e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/x"],"reason":"r"}`), 501, CodeRequestsDisabled)
+	expect(t, e.do("POST", "/v1/access-requests", courierTok, `{"paths":["infra/x"],"reason":"r"}`), 501, CodeRequestsDisabled)
 	// Listing and revoking still work.
-	expect(t, e.do("GET", "/v1/grants", vectorTok, ""), 200, "")
-	expect(t, e.do("POST", "/v1/grants/"+gid+"/revoke", vectorTok, ""), 200, "")
+	expect(t, e.do("GET", "/v1/grants", courierTok, ""), 200, "")
+	expect(t, e.do("POST", "/v1/grants/"+gid+"/revoke", courierTok, ""), 200, "")
 
 	// No grant store at all: the API is 501 and nothing else changes.
 	srv, admin := setupTestServer(t)
@@ -597,23 +608,23 @@ func TestRequestUseOnlyAdvertisedWhenRequestable(t *testing.T) {
 	e := newGrantEnv(t)
 	e.set(func(s *config.AccessRequestsSettings) { s.DenyPaths = []string{"infra/other"} })
 	step := func(w *httptest.ResponseRecorder) any { return jsonBody(t, w)["next_step"] }
-	if s := step(e.sealedGet("infra/b2/app-key", vectorTok)); s != NextRequestUse {
+	if s := step(e.sealedGet("infra/b2/app-key", courierTok)); s != NextRequestUse {
 		t.Fatalf("requestable path next_step = %v", s)
 	}
-	if s := step(e.sealedGet("infra/other", vectorTok)); s != NextAskUser {
+	if s := step(e.sealedGet("infra/other", courierTok)); s != NextAskUser {
 		t.Fatalf("deny_paths next_step = %v", s)
 	}
-	if s := step(e.do("PUT", "/v1/secrets/infra/b2/app-key", vectorTok, `{"value":"x"}`)); s != NextAskUser {
+	if s := step(e.do("PUT", "/v1/secrets/infra/b2/app-key", courierTok, `{"value":"x"}`)); s != NextAskUser {
 		t.Fatalf("write next_step = %v", s)
 	}
-	rm := expect(t, e.do("POST", "/v1/resolve", vectorTok, `{"refs":["phoenix://infra/b2/app-key","phoenix://infra/other"]}`), 200, "")
+	rm := expect(t, e.do("POST", "/v1/resolve", courierTok, `{"refs":["phoenix://infra/b2/app-key","phoenix://infra/other"]}`), 200, "")
 	codes := rm["error_codes"].(map[string]any)
 	if codes["phoenix://infra/b2/app-key"].(map[string]any)["next_step"] != NextRequestUse ||
 		codes["phoenix://infra/other"].(map[string]any)["next_step"] != NextAskUser {
 		t.Fatalf("resolve error_codes = %v", codes)
 	}
 	e.set(func(s *config.AccessRequestsSettings) { s.Enabled = false })
-	if s := step(e.sealedGet("infra/b2/app-key", vectorTok)); s != NextAskUser {
+	if s := step(e.sealedGet("infra/b2/app-key", courierTok)); s != NextAskUser {
 		t.Fatalf("disabled next_step = %v", s)
 	}
 }
@@ -640,15 +651,15 @@ func (e *grantEnv) mintSession(t *testing.T, sealPub string) string {
 	if sealPub != "" {
 		body = `{"role":"wide","seal_public_key":"` + sealPub + `"}`
 	}
-	m := expect(t, e.do("POST", "/v1/session/mint", vectorTok, body), 200, "")
+	m := expect(t, e.do("POST", "/v1/session/mint", courierTok, body), 200, "")
 	return m["session_token"].(string)
 }
 
 func TestSessionCannotUseOrRequestGrant(t *testing.T) {
 	e := newGrantEnv(t)
 	e.addSessions(t)
-	e.approve(t, e.request(t, vectorTok, "infra/b2/app-key"), "")
-	expect(t, e.sealedGet("infra/b2/app-key", vectorTok), 200, "") // grant is active
+	e.approve(t, e.request(t, courierTok, "infra/b2/app-key"), "")
+	expect(t, e.sealedGet("infra/b2/app-key", courierTok), 200, "") // grant is active
 
 	// An ordinary session of the same agent, in scope, with an attacker-chosen
 	// seal key, must not reach the grant.
@@ -681,8 +692,8 @@ func TestPolicyCheckUnsealTruthTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.srv.SetPolicy(pe)
-	gid := e.approve(t, e.request(t, vectorTok, "infra/other"), "")
-	w := e.sealedGet("infra/other", vectorTok)
+	gid := e.approve(t, e.request(t, courierTok, "infra/other"), "")
+	w := e.sealedGet("infra/other", courierTok)
 	expect(t, w, 200, "") // an envelope the agent could have cached
 
 	check := func(tok, path string) any {
@@ -695,14 +706,14 @@ func TestPolicyCheckUnsealTruthTable(t *testing.T) {
 		name, tok, path string
 		want            bool
 	}{
-		{"ACL + allow_unseal", vectorTok, "dev/db", true},
-		{"ACL + allow_unseal false", vectorTok, "dev/locked", false},
+		{"ACL + allow_unseal", courierTok, "dev/db", true},
+		{"ACL + allow_unseal false", courierTok, "dev/locked", false},
 		{"ACL + no rule", "admin-token", "elsewhere/x", false},
-		{"active grant never unseals", vectorTok, "infra/other", false},
-		{"no access", vectorTok, "prod/x", false},
+		{"active grant never unseals", courierTok, "infra/other", false},
+		{"no access", courierTok, "prod/x", false},
 		{"session in scope + ACL", sess, "dev/db", true},
 		{"session in scope, ACL only via grant", sess, "infra/other", false},
-		{"openclaw probe shape", vectorTok, "openclaw/startup-preflight-auth-probe", false},
+		{"openclaw probe shape", courierTok, "openclaw/startup-preflight-auth-probe", false},
 		{"hermes session probe shape", sess, "hermes/startup-preflight-auth-probe", false},
 	}
 	for _, c := range cases {
@@ -712,12 +723,12 @@ func TestPolicyCheckUnsealTruthTable(t *testing.T) {
 	}
 	// Still false after revoke and after expiry: a cached envelope stays closed.
 	expect(t, e.do("POST", "/v1/grants/"+gid+"/revoke", approverTok, ""), 200, "")
-	if check(vectorTok, "infra/other") != false {
+	if check(courierTok, "infra/other") != false {
 		t.Fatal("unseal allowed after revoke")
 	}
-	gid2 := e.approve(t, e.request(t, vectorTok, "infra/b2/app-key"), `{"ttl":"1m"}`)
+	gid2 := e.approve(t, e.request(t, courierTok, "infra/b2/app-key"), `{"ttl":"1m"}`)
 	e.clock.Advance(2 * time.Minute)
-	if check(vectorTok, "infra/b2/app-key") != false {
+	if check(courierTok, "infra/b2/app-key") != false {
 		t.Fatalf("unseal allowed after expiry of %s", gid2)
 	}
 	expect(t, e.do("GET", "/v1/policy/check?check=allow_unseal&path=dev/db", "", ""), 401, "")
@@ -727,10 +738,10 @@ func TestPolicyCheckUnsealTruthTable(t *testing.T) {
 
 func TestAgentDeleteRevokesBeforeDelete(t *testing.T) {
 	e := newGrantEnv(t)
-	gid := e.approve(t, e.request(t, vectorTok, "infra/b2/app-key"), "")
-	pending := e.request(t, vectorTok, "infra/other")
+	gid := e.approve(t, e.request(t, courierTok, "infra/b2/app-key"), "")
+	pending := e.request(t, courierTok, "infra/other")
 
-	expect(t, e.do("DELETE", "/v1/agents/vector", adminTok, ""), 200, "")
+	expect(t, e.do("DELETE", "/v1/agents/courier", adminTok, ""), 200, "")
 	g, _ := e.store.GetGrant(gid)
 	if g.State(e.clock.Now()) != grant.GrantRevoked {
 		t.Fatalf("grant state after delete = %s", g.State(e.clock.Now()))
@@ -738,20 +749,20 @@ func TestAgentDeleteRevokesBeforeDelete(t *testing.T) {
 	if r, _ := e.store.GetRequest(pending); r.Status != grant.StatusExpired {
 		t.Fatalf("pending request after delete = %s", r.Status)
 	}
-	expect(t, e.do("DELETE", "/v1/agents/vector", adminTok, ""), 404, "")
+	expect(t, e.do("DELETE", "/v1/agents/courier", adminTok, ""), 404, "")
 
 	// Recreated with a new token: the old token is gone, and the old grant
 	// does not carry over.
-	b, _ := json.Marshal(map[string]any{"name": "vector", "token": "vector-token-2", "permissions": []acl.Permission{}})
+	b, _ := json.Marshal(map[string]any{"name": "courier", "token": "courier-token-2", "permissions": []acl.Permission{}})
 	expect(t, e.do("POST", "/v1/agents", adminTok, string(b)), 200, "")
-	e.srv.acl.SetAgentSealKey("vector", e.sealPub)
-	expect(t, e.sealedGet("infra/b2/app-key", vectorTok), 401, "")
-	expect(t, e.sealedGet("infra/b2/app-key", "vector-token-2"), 403, CodeGrantRevoked)
+	e.srv.acl.SetAgentSealKey("courier", e.sealPub)
+	expect(t, e.sealedGet("infra/b2/app-key", courierTok), 401, "")
+	expect(t, e.sealedGet("infra/b2/app-key", "courier-token-2"), 403, CodeGrantRevoked)
 }
 
-func (e *grantEnv) addVector(t *testing.T, tok string) {
+func (e *grantEnv) addCourier(t *testing.T, tok string) {
 	t.Helper()
-	if err := e.srv.acl.AddAgent("vector", tok, nil); err != nil {
+	if err := e.srv.acl.AddAgent("courier", tok, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -760,7 +771,7 @@ func TestConcurrentApproveDeleteCreate(t *testing.T) {
 	for round := range 20 {
 		e := newGrantEnv(t)
 		e.set(func(s *config.AccessRequestsSettings) { s.RequireSealed = false })
-		ids := []string{e.request(t, vectorTok, "infra/a"), e.request(t, vectorTok, "infra/b"), e.request(t, vectorTok, "infra/c")}
+		ids := []string{e.request(t, courierTok, "infra/a"), e.request(t, courierTok, "infra/b"), e.request(t, courierTok, "infra/c")}
 		var wg sync.WaitGroup
 		for _, id := range ids {
 			wg.Add(1)
@@ -773,23 +784,23 @@ func TestConcurrentApproveDeleteCreate(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				e.do("POST", "/v1/access-requests", vectorTok, fmt.Sprintf(`{"paths":["infra/n%d"],"reason":"r"}`, i))
-				e.do("GET", "/v1/secrets/infra/a", vectorTok, "")
+				e.do("POST", "/v1/access-requests", courierTok, fmt.Sprintf(`{"paths":["infra/n%d"],"reason":"r"}`, i))
+				e.do("GET", "/v1/secrets/infra/a", courierTok, "")
 			}()
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			e.do("DELETE", "/v1/agents/vector", adminTok, "")
+			e.do("DELETE", "/v1/agents/courier", adminTok, "")
 		}()
 		wg.Wait()
-		if _, err := e.srv.acl.GetAgent("vector"); err == nil {
-			t.Fatalf("round %d: vector still in ACL", round)
+		if _, err := e.srv.acl.GetAgent("courier"); err == nil {
+			t.Fatalf("round %d: courier still in ACL", round)
 		}
-		if active := e.store.ListGrants("vector", false); len(active) != 0 {
+		if active := e.store.ListGrants("courier", false); len(active) != 0 {
 			t.Fatalf("round %d: %d active grants survive agent delete", round, len(active))
 		}
-		if pend := e.store.ListRequests("vector", grant.StatusPending); len(pend) != 0 {
+		if pend := e.store.ListRequests("courier", grant.StatusPending); len(pend) != 0 {
 			t.Fatalf("round %d: %d pending requests survive agent delete", round, len(pend))
 		}
 	}
@@ -799,10 +810,10 @@ func TestConcurrentApproveDeleteCreate(t *testing.T) {
 
 func TestWhoami(t *testing.T) {
 	e := newGrantEnv(t)
-	gid := e.approve(t, e.request(t, vectorTok, "infra/other"), "")
-	pid := e.request(t, vectorTok, "infra/b2/app-key")
-	w := expect(t, e.do("GET", "/v1/whoami", vectorTok, ""), 200, "")
-	if w["agent"] != "vector" || w["auth_method"] != "bearer" {
+	gid := e.approve(t, e.request(t, courierTok, "infra/other"), "")
+	pid := e.request(t, courierTok, "infra/b2/app-key")
+	w := expect(t, e.do("GET", "/v1/whoami", courierTok, ""), 200, "")
+	if w["agent"] != "courier" || w["auth_method"] != "bearer" {
 		t.Fatalf("whoami = %v", w)
 	}
 	if rules := w["acl"].([]any); len(rules) != 1 || rules[0].(map[string]any)["path"] != "dev/**" {
@@ -846,13 +857,13 @@ func TestRequestUseFollowsCurrentSettingsEverywhere(t *testing.T) {
 	e.srv.SetSessionRoles(map[string]config.RoleConfig{
 		"narrow": {Namespaces: []string{"dev/**"}, Actions: []string{"read_value"}, BootstrapTrust: []string{"bearer"}},
 	})
-	sess := expect(t, e.do("POST", "/v1/session/mint", vectorTok, `{"role":"narrow"}`), 200, "")["session_token"].(string)
+	sess := expect(t, e.do("POST", "/v1/session/mint", courierTok, `{"role":"narrow"}`), 200, "")["session_token"].(string)
 
 	// An approved grant that has expired: its request view says request_use
 	// only while the path is still requestable.
-	expired := e.request(t, vectorTok, "infra/b2/app-key")
+	expired := e.request(t, courierTok, "infra/b2/app-key")
 	e.approve(t, expired, `{"ttl":"1m"}`)
-	active := e.request(t, vectorTok, "infra/other")
+	active := e.request(t, courierTok, "infra/other")
 	e.approve(t, active, "")
 	e.clock.Advance(2 * time.Minute)
 
@@ -870,8 +881,8 @@ func TestRequestUseFollowsCurrentSettingsEverywhere(t *testing.T) {
 		}
 		create := expect(t, e.do("POST", "/v1/access-requests", sess, `{"paths":["infra/b2/app-key"],"reason":"r"}`), 403, CodeSessionCannotRequest)
 		list := expect(t, e.do("GET", "/v1/grants", sess, ""), 403, CodeSessionCannotRequest)
-		ev := expect(t, e.do("GET", "/v1/access-requests/"+expired, vectorTok, ""), 200, "")
-		av := expect(t, e.do("GET", "/v1/access-requests/"+active, vectorTok, ""), 200, "")
+		ev := expect(t, e.do("GET", "/v1/access-requests/"+expired, courierTok, ""), 200, "")
+		av := expect(t, e.do("GET", "/v1/access-requests/"+active, courierTok, ""), 200, "")
 		return steps{get["next_step"].(string), rc["next_step"].(string), create["next_step"].(string),
 			list["next_step"].(string), ev["next_step"].(string), av["next_step"].(string)}
 	}

@@ -81,7 +81,7 @@ func TestCreateValidation(t *testing.T) {
 	}
 	e.setGone("ghost", true)
 	for name, tc := range cases {
-		in := bearerIn("vector", "infra/key")
+		in := bearerIn("courier", "infra/key")
 		tc.mod(&in)
 		_, _, err := e.s.Create(in)
 		if CodeOf(err) != tc.code {

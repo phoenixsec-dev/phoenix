@@ -39,8 +39,9 @@ See [CLI Usage](cli-usage.md) for import options including 1Password migration
 ## 4) Create least-privilege agent identities
 
 ```bash
-phoenix agent create myapp-runtime -t "runtime-token" --acl "myapp/**:list,read_value"
-phoenix agent create myapp-deployer -t "deploy-token" --acl "myapp/**:list,read_value,write"
+# each asks for the agent's token, hidden
+phoenix agent create myapp-runtime --acl "myapp/**:list,read_value"
+phoenix agent create myapp-deployer --acl "myapp/**:list,read_value,write"
 ```
 
 `myapp/**` grants access to everything under `myapp/`, including nested paths;
