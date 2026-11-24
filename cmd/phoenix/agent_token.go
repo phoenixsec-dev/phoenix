@@ -10,10 +10,10 @@ import (
 	"github.com/phoenixsec/phoenix/internal/crypto"
 )
 
-// agentCreateUsage is shown when agent create lacks a name or token. -t is left
+// errAgentCreateUsage is shown when agent create lacks a name or token. -t is left
 // out on purpose: it works, but the token is then in the shell's history and
 // readable by every user in the process list.
-var agentCreateUsage = errors.New("usage: phoenix agent create <name> --acl <path:action,action;path:action> [--force]   (asks for the token)\n       phoenix agent create <name> --token-stdin --acl ... < token-file")
+var errAgentCreateUsage = errors.New("usage: phoenix agent create <name> --acl <path:action,action;path:action> [--force]   (asks for the token)\n       phoenix agent create <name> --token-stdin --acl ... < token-file")
 
 // promptToken asks on the terminal without echo; stdinIsTerminal says whether
 // somebody can answer. Variables so tests can answer.
@@ -33,7 +33,7 @@ func readAgentToken(name string, stdin bool) (string, error) {
 		return checkAgentToken(string(data))
 	}
 	if !stdinIsTerminal() {
-		return "", agentCreateUsage
+		return "", errAgentCreateUsage
 	}
 	first, err := promptToken(fmt.Sprintf("Token for %s (input hidden): ", name))
 	if err != nil {

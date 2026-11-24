@@ -1154,13 +1154,13 @@ func cmdAgentCreate(args []string) error {
 	}
 
 	if name == "" {
-		return agentCreateUsage
+		return errAgentCreateUsage
 	}
 	if tokenGiven && tokenStdin {
 		return errors.New("--token-stdin reads the token from stdin; leave out -t")
 	}
 	if tokenGiven && agentToken == "" {
-		return agentCreateUsage
+		return errAgentCreateUsage
 	}
 
 	// Parse ACL string: "openclaw/*:list,read_value;vector/*:list"
