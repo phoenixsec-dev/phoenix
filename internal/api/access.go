@@ -898,6 +898,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		"host":      info.Caller.Host,
 		"authority": info.Caller.Authority,
 		"kind":      info.Labels.Kind,
+		"formerly":  info.Labels.Formerly,
 		"attested":  info.Caller.Attested,
 		"source_ip": clientIP(r),
 		"access_requests": map[string]any{
@@ -1013,15 +1014,10 @@ func (s *Server) grantAuditStatus() map[string]any {
 // actor (approver, agent or "system") is the audit agent, the event name is
 // the action, and the paths are joined into the audit path. Failed-phase
 // lines are logged as denied.
-type grantAuditSink struct {
-	l *audit.Logger
-	a *acl.ACL
-}
+type grantAuditSink struct{ l *audit.Logger }
 
-// NewGrantAuditSink adapts the audit logger for grant.Options.Audit. a gives
-// the actor's labels as they are when the line is written, which for a line
-// retried after a failed write is later than the event. nil = no labels.
-func NewGrantAuditSink(l *audit.Logger, a *acl.ACL) grant.AuditSink { return grantAuditSink{l, a} }
+// NewGrantAuditSink adapts the audit logger for grant.Options.Audit.
+func NewGrantAuditSink(l *audit.Logger) grant.AuditSink { return grantAuditSink{l: l} }
 
 func (g grantAuditSink) Append(e grant.Event) error {
 	md := e.Metadata()
@@ -1034,12 +1030,7 @@ func (g grantAuditSink) Append(e grant.Event) error {
 	}
 	entry := audit.Entry{
 		Agent: actor, Action: e.Name, Path: strings.Join(e.Paths, ","), Status: "allowed", IP: e.ActorIP, Metadata: md,
-	}
-	// The store itself and a person in the dashboard are not identities.
-	if g.a != nil && actor != "system" && !strings.HasPrefix(actor, "dashboard@") {
-		if ag, err := g.a.GetAgent(actor); err == nil {
-			entry.Caller = audit.Caller{Who: ag.Who, Authority: ag.Authority}
-		}
+		Caller: audit.Caller{Who: e.ActorWho, Authority: e.ActorAuthority},
 	}
 	if e.Phase == grant.PhaseFailed {
 		entry.Status, entry.Reason = "denied", "store_write_failed"

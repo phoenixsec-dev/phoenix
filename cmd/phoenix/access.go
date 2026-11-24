@@ -263,14 +263,15 @@ func cmdWhoami(args []string) error {
 		return err
 	}
 	var w struct {
-		Agent      string `json:"agent"`
-		AuthMethod string `json:"auth_method"`
-		SourceIP   string `json:"source_ip"`
-		Kind       string `json:"kind"`
-		Attested   *bool  `json:"attested"` // nil from a server without identity fields
-		Who        string `json:"who"`
-		Host       string `json:"host"`
-		Authority  string `json:"authority"`
+		Agent      string   `json:"agent"`
+		AuthMethod string   `json:"auth_method"`
+		SourceIP   string   `json:"source_ip"`
+		Kind       string   `json:"kind"`
+		Formerly   []string `json:"formerly"`
+		Attested   *bool    `json:"attested"` // nil from a server without identity fields
+		Who        string   `json:"who"`
+		Host       string   `json:"host"`
+		Authority  string   `json:"authority"`
 		ACL        []struct {
 			Path    string   `json:"path"`
 			Actions []string `json:"actions"`
@@ -306,6 +307,7 @@ func cmdWhoami(args []string) error {
 		fmt.Printf("Host:      %s\n", orDash(w.Host))
 		fmt.Printf("Authority: %s\n", orDash(w.Authority))
 		fmt.Printf("Kind:      %s\n", orDash(w.Kind))
+		fmt.Printf("Formerly:  %s\n", listOrDash(w.Formerly))
 		fmt.Printf("Attested:  %s\n", attestedText(*w.Attested))
 	}
 	if w.Session != nil {

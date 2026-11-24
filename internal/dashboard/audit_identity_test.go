@@ -44,7 +44,7 @@ func TestAuditPageIdentityColumns(t *testing.T) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		if w.Code != 200 || strings.Contains(w.Body.String(), "<robin>") {
-			t.Fatalf("%s: %d\n%s", query, w.Code, w.Body.String())
+			t.Fatalf("%s: status %d, or the label was not escaped", query, w.Code)
 		}
 		var out []string
 		for _, tr := range strings.Split(w.Body.String(), "<tr>")[1:] {

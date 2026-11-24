@@ -51,6 +51,11 @@ type Event struct {
 	Paths     []string          `json:"paths,omitempty"`
 	Action    string            `json:"action,omitempty"`
 	Detail    map[string]string `json:"detail,omitempty"` // ttl, note, error text, ...
+
+	// The actor's labels when it acted, kept so a line written later does not
+	// take a newer identity's.
+	ActorWho       string `json:"actor_who,omitempty"`
+	ActorAuthority string `json:"actor_authority,omitempty"`
 }
 
 // AuditSink receives audit lines. internal/api adapts its *audit.Logger to

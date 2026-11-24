@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -27,25 +28,27 @@ type auditCaller struct {
 	Who       string `json:"who"`
 	Host      string `json:"host"`
 	Authority string `json:"authority"`
-	Attested  bool   `json:"attested"`
+	Attested  *bool  `json:"attested"` // nil from a server without these fields
 }
 
 // suffix is the caller part of a printed audit line, after the older columns
-// so scripts that read those still work. Empty when nothing is known.
+// so scripts that read those still work.
 func (c auditCaller) suffix() string {
+	if c.Attested == nil {
+		return ""
+	}
 	out := ""
 	for _, f := range [][2]string{{"who", c.Who}, {"host", c.Host}, {"authority", c.Authority}} {
+		v := "-"
 		if f[1] != "" {
-			out += fmt.Sprintf("  %s=%q", f[0], cleanServerText(f[1]))
+			v = strconv.Quote(cleanServerText(f[1]))
 		}
+		out += "  " + f[0] + "=" + v
 	}
-	if c.Attested {
+	if *c.Attested {
 		return out + "  attested=yes"
 	}
-	if out != "" {
-		out += "  attested=no"
-	}
-	return out
+	return out + "  attested=no"
 }
 
 // attestedText says in words what attested means.
@@ -64,42 +67,50 @@ func orDash(s string) string {
 	return s
 }
 
-// takeLabelOptions pulls --who, --authority, --kind and --formerly out of
-// args, as the JSON fields the server takes, and returns the other arguments.
-func takeLabelOptions(args []string) (map[string]any, []string) {
-	fields, rest := map[string]any{}, []string{}
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--who", "--authority", "--kind", "--formerly":
-			if i+1 >= len(args) {
-				rest = append(rest, args[i])
-				continue
-			}
-			field, value := strings.TrimPrefix(args[i], "--"), args[i+1]
-			i++
-			if field != "formerly" {
-				fields[field] = value
-				continue
-			}
-			names := []string{}
-			for _, n := range strings.Split(value, ",") {
-				if n = strings.TrimSpace(n); n != "" {
-					names = append(names, n)
-				}
-			}
-			fields[field] = names
-		default:
-			rest = append(rest, args[i])
-		}
+// listOrDash shows names, or "-" when there are none.
+func listOrDash(names []string) string {
+	if len(names) == 0 {
+		return "-"
 	}
-	return fields, rest
+	return cleanList(names, ", ")
+}
+
+// labelOption reads one of --who, --authority, --kind and --formerly into
+// fields, as the JSON the server takes. ok is false for any other option.
+func labelOption(fields map[string]any, option, value string) (ok bool, err error) {
+	switch option {
+	case "--who", "--authority", "--kind":
+		fields[strings.TrimPrefix(option, "--")] = value
+		return true, nil
+	case "--formerly":
+		names := []string{}
+		if value != "" { // "" clears the list
+			for _, n := range strings.Split(value, ",") {
+				if n = strings.TrimSpace(n); n == "" {
+					return true, fmt.Errorf("--formerly: empty name in %q", value)
+				}
+				names = append(names, n)
+			}
+		}
+		fields["formerly"] = names
+		return true, nil
+	}
+	return false, nil
 }
 
 // cmdAgentSet changes an identity's who, authority, kind or former names.
 func cmdAgentSet(args []string) error {
-	fields, rest := takeLabelOptions(args)
-	if len(rest) != 1 || len(fields) == 0 {
-		return errors.New("usage: " + cmdSpecs["agent set"].usage)
+	usage := errors.New("usage: " + cmdSpecs["agent set"].usage)
+	if len(args) < 3 || len(args)%2 == 0 {
+		return usage
+	}
+	fields := map[string]any{}
+	for i := 1; i < len(args); i += 2 {
+		if ok, err := labelOption(fields, args[i], args[i+1]); err != nil {
+			return err
+		} else if !ok {
+			return usage
+		}
 	}
 	if err := requireAuth(); err != nil {
 		return err
@@ -107,7 +118,7 @@ func cmdAgentSet(args []string) error {
 	var res struct {
 		Identity identityView `json:"identity"`
 	}
-	code, err := apiJSON("PATCH", "/v1/agents/"+url.PathEscape(rest[0])+"/identity", fields, &res)
+	code, err := apiJSON("PATCH", "/v1/agents/"+url.PathEscape(args[0])+"/identity", fields, &res)
 	if code == http.StatusMethodNotAllowed {
 		return errors.New(serverTooOldForIdentity)
 	}
@@ -158,9 +169,5 @@ func printIdentity(id identityView) {
 	fmt.Printf("Who:       %s\n", orDash(id.Who))
 	fmt.Printf("Authority: %s\n", orDash(id.Authority))
 	fmt.Printf("Kind:      %s\n", orDash(id.Kind))
-	formerly := "-"
-	if len(id.Formerly) > 0 {
-		formerly = cleanList(id.Formerly, ", ")
-	}
-	fmt.Printf("Formerly:  %s\n", formerly)
+	fmt.Printf("Formerly:  %s\n", listOrDash(id.Formerly))
 }

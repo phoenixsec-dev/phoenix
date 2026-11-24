@@ -85,7 +85,7 @@ func newGrantEnv(t *testing.T, opts ...func(*grant.Options)) *grantEnv {
 
 	o := grant.Options{
 		Path:        filepath.Join(e.dir, "grants.json"),
-		Audit:       NewGrantAuditSink(srv.audit, srv.acl),
+		Audit:       NewGrantAuditSink(srv.audit),
 		Now:         e.clock.Now,
 		AgentExists: func(n string) bool { _, err := srv.acl.GetAgent(n); return err == nil },
 		Logf:        t.Logf,
@@ -416,7 +416,7 @@ func TestAccessRequestStoreFailures(t *testing.T) {
 	t.Run("audit degraded", func(t *testing.T) {
 		e := newGrantEnv(t, func(o *grant.Options) {
 			// The committed line for a new request cannot be written.
-			o.Audit = NewGrantAuditSink(audit.NewWriterLogger(failOn{`"access_request.created"`}), nil)
+			o.Audit = NewGrantAuditSink(audit.NewWriterLogger(failOn{`"access_request.created"`}))
 		})
 		e.request(t, vectorTok, "infra/x")
 		st := expect(t, e.do("GET", "/v1/status", adminTok, ""), 200, "")
@@ -426,7 +426,7 @@ func TestAccessRequestStoreFailures(t *testing.T) {
 	})
 	t.Run("audit attempt fails", func(t *testing.T) {
 		e := newGrantEnv(t, func(o *grant.Options) {
-			o.Audit = NewGrantAuditSink(audit.NewWriterLogger(failOn{`"access_request.create.attempt"`}), nil)
+			o.Audit = NewGrantAuditSink(audit.NewWriterLogger(failOn{`"access_request.create.attempt"`}))
 		})
 		expect(t, e.do("POST", "/v1/access-requests", vectorTok, `{"paths":["infra/x"],"reason":"r"}`), 500, string(grant.CodeAuditWriteFailed))
 	})

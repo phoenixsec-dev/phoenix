@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +16,10 @@ func identityServer(t *testing.T, h http.HandlerFunc) *callLog {
 	t.Helper()
 	log := &callLog{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		log.add(r)
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		h(w, r)
 	}))
 	t.Cleanup(ts.Close)
@@ -36,8 +42,57 @@ func TestAgentSetSendsOnlyWhatWasGiven(t *testing.T) {
 	if !strings.Contains(out, "Who:       robin") || !strings.Contains(out, "Kind:      -") || !strings.Contains(out, "Formerly:  a, b") {
 		t.Fatalf("output:\n%s", out)
 	}
+	for _, bad := range []string{",", "a,", "a,,b"} {
+		if err := cmdAgentSet([]string{"bot", "--formerly", bad}); err == nil || !strings.Contains(err.Error(), "empty name") {
+			t.Errorf("--formerly %q: %v", bad, err)
+		}
+	}
+	if runMain(t, "agent", "set", "bot", "--formerly="); !strings.HasSuffix(log.String(), `{"formerly":[]}`) {
+		t.Errorf("clearing formerly sent %s", log)
+	}
 	if err := cmdAgentSet([]string{"bot"}); err == nil || !strings.Contains(err.Error(), "usage:") {
 		t.Fatalf("set with nothing to set = %v", err)
+	}
+}
+
+// A value spelled like an option is a value: the credential and permissions
+// sent are the ones given.
+func TestAgentCreateOptionLikeValues(t *testing.T) {
+	var got struct {
+		Token       string
+		Permissions []struct{ Path string }
+		Who, Kind   *string
+	}
+	identityServer(t, func(w http.ResponseWriter, r *http.Request) {
+		got.Token, got.Permissions, got.Who, got.Kind = "", nil, nil, nil
+		json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"identity":{"name":"bot"}}`)
+	})
+	for _, v := range []string{"--who", "--authority", "--kind", "--formerly", "--acl", "--force"} {
+		if code, _, _ := runMain(t, "agent", "create", "bot", "-t", v, "--acl", "a/*:list", "--kind", v); code != -1 {
+			t.Errorf("%s: exit %d", v, code)
+		}
+		if got.Token != v || len(got.Permissions) != 1 || got.Permissions[0].Path != "a/*" || got.Who != nil || got.Kind == nil || *got.Kind != v {
+			t.Errorf("a value spelled %s changed the request", v)
+		}
+	}
+}
+
+// A server that does not know the filters would answer with everything.
+func TestAuditFiltersNeedServerSupport(t *testing.T) {
+	entries := `[]`
+	identityServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"entries":%s}`, entries)
+	})
+	for _, f := range []string{"--who", "--host", "--authority"} {
+		for _, entries = range []string{`[]`, `[{"agent":"other","path":"p"}]`} {
+			if err := cmdAudit([]string{f, "x"}); err == nil || !strings.Contains(err.Error(), "too old") {
+				t.Errorf("%s: %v", f, err)
+			}
+		}
+	}
+	if code, out, _ := runMain(t, "audit"); code != -1 || strings.Contains(out, "attested") {
+		t.Errorf("plain audit: exit %d, %q", code, out)
 	}
 }
 
@@ -78,22 +133,24 @@ func TestIdentityFieldsOnOlderServer(t *testing.T) {
 func TestAuditAndWhoamiShowIdentity(t *testing.T) {
 	log := identityServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/whoami" {
-			fmt.Fprint(w, `{"agent":"bot","auth_method":"bearer","source_ip":"1.1.1.1","who":"robin","host":"","authority":"night-desk","kind":"agent","attested":false}`)
+			fmt.Fprint(w, `{"agent":"bot","auth_method":"bearer","source_ip":"1.1.1.1","who":"robin","host":"","authority":"night-desk","kind":"agent","formerly":["helper"],"attested":false}`)
 			return
 		}
-		fmt.Fprint(w, `{"entries":[{"ts":"T1","agent":"bot","action":"list","path":"p","status":"allowed","ip":"1.1.1.1"},
-			{"ts":"T2","agent":"bot","action":"list","path":"p","status":"allowed","ip":"1.1.1.1","who":"ro\u001b[2Jbin","authority":"x","attested":false}]}`)
+		fmt.Fprint(w, `{"identity_filters":true,"entries":[{"ts":"T1","agent":"bot","action":"list","path":"p","status":"allowed","ip":"1.1.1.1"},
+			{"ts":"T3","agent":"bot","action":"list","path":"p","status":"allowed","ip":"1.1.1.1","who":"","host":"","authority":"","attested":false},
+			{"ts":"T2","agent":"bot","action":"list","path":"p","status":"allowed","ip":"1.1.1.1","host":"","who":"ro\u001b[2Jbin","authority":"x","attested":false}]}`)
 	})
 	_, out, _ := runMain(t, "audit", "--who", "robin", "--host", "h", "--authority", "x", "-n", "5")
 	if want := "GET /v1/audit?authority=x&host=h&limit=5&who=robin"; log.String() != want {
 		t.Errorf("sent %s, want %s", log, want)
 	}
 	lines := strings.Split(out, "\n")
-	if !strings.HasSuffix(lines[0], "1.1.1.1") || !strings.HasSuffix(lines[1], `1.1.1.1  who="ro[2Jbin"  authority="x"  attested=no`) {
+	if !strings.HasSuffix(lines[0], "1.1.1.1") || !strings.HasSuffix(lines[1], `1.1.1.1  who=-  host=-  authority=-  attested=no`) ||
+		!strings.HasSuffix(lines[2], `1.1.1.1  who="ro[2Jbin"  host=-  authority="x"  attested=no`) {
 		t.Errorf("audit output:\n%s", out)
 	}
 	_, out, _ = runMain(t, "whoami")
-	for _, want := range []string{"Who:       robin", "Host:      -", "Authority: night-desk", "Kind:      agent", "Attested:  no"} {
+	for _, want := range []string{"Who:       robin", "Host:      -", "Authority: night-desk", "Kind:      agent", "Formerly:  helper", "Attested:  no"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("whoami lacks %q:\n%s", want, out)
 		}

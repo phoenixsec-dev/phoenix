@@ -66,8 +66,9 @@ phoenix whoami                 # an agent sees its own
   needs admin, and changes neither the token nor any session.
 - **Only an admin sets them.** Nothing a caller sends (header, query or body) can
   change what is recorded about it.
-- **Every audit line shows them** as they were when the caller logged in, with
-  `host` and `attested` beside them. Older lines stay as written.
+- **Every audit line shows them** as they were when the caller made the request,
+  with `host` and `attested` beside them, also when a line about an access
+  request or grant has to be written later. Older lines stay as written.
 - **`attested` is `false` for a token,** and for a role session made from one: a
   token works for whoever holds it, so its `who` and `authority` are only
   *declared*. A line about a refused credential, the dashboard or Phoenix itself
@@ -75,7 +76,7 @@ phoenix whoami                 # an agent sees its own
 - **`host` is empty for a token.** It is only for a machine Phoenix has itself
   established.
 - **`formerly`** lets a log search for an identity also find the lines written
-  under its older names (`phoenix audit --agent`, the dashboard's agent filter).
+  under its older names. A name with a comma can be set only through the API (`phoenix audit --agent`, the dashboard's agent filter).
   To rename: make the new identity with `--formerly <old>`, move its users over,
   and delete the old one.
 

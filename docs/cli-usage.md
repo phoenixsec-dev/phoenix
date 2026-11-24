@@ -165,7 +165,7 @@ phoenix audit --who robin --authority night-desk     # also --host
 ```
 
 `--agent` also finds lines under the identity's [former names](authentication.md#who-authority-and-kind).
-Lines that know them end with `who=`, `host=`, `authority=` and `attested=`.
+Lines end with `who=`, `host=`, `authority=` and `attested=`.
 
 Secret values are never written to the audit log.
 

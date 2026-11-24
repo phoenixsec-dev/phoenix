@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -44,6 +45,12 @@ func TestCallerFieldsOldAndNewLines(t *testing.T) {
 	}
 	if after["attested"] != false || len(after) != len(before)+4 {
 		t.Errorf("new line keys = %v", after)
+	}
+	// All four keys are there when nothing is known too.
+	var buf bytes.Buffer
+	NewWriterLogger(&buf).LogAllowed("a", "list", "p", "")
+	if want := `"who":"","host":"","authority":"","attested":false}`; !strings.HasSuffix(strings.TrimSpace(buf.String()), want) {
+		t.Errorf("unlabeled line = %s", buf.String())
 	}
 }
 

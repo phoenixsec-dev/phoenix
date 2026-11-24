@@ -61,6 +61,9 @@ type Options struct {
 	// the store lock at create/approve and outside it at Match. nil = always.
 	// It must not call back into the Store.
 	AgentExists func(name string) bool
+	// ActorLabels returns the who and authority to record for an actor. Same
+	// locking rule as AgentExists. nil = none.
+	ActorLabels func(actor, ip string) (who, authority string)
 	Logf        func(format string, args ...any) // nil = log.Printf
 
 	RequestTTL      time.Duration // how long a request stays pending
@@ -297,7 +300,11 @@ func (s *Store) Health() Health {
 // --- write protocol ---------------------------------------------------------
 
 func (s *Store) newEvent(name string, phase Phase, agent, actor, ip string) Event {
-	return Event{ID: newID("evt_"), Name: name, Phase: phase, Time: s.now(), Agent: agent, Actor: actor, ActorIP: ip}
+	e := Event{ID: newID("evt_"), Name: name, Phase: phase, Time: s.now(), Agent: agent, Actor: actor, ActorIP: ip}
+	if s.opts.ActorLabels != nil {
+		e.ActorWho, e.ActorAuthority = s.opts.ActorLabels(actor, ip)
+	}
+	return e
 }
 
 // derive makes the attempt / failed twin of a committed event.

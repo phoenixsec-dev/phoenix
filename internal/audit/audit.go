@@ -32,12 +32,12 @@ type Entry struct {
 // Caller says who an entry is about, as separate fields. All of it comes from
 // Phoenix: the identity's record, or (Host) what Phoenix itself established
 // about the machine. Nothing is taken from what a caller says about itself.
-// The text fields are empty when not known: an identity without labels, a
+// All four are on every line. The text fields are empty when not known: an identity without labels, a
 // line Phoenix or the dashboard wrote, or one written before v0.25.0.
 type Caller struct {
-	Who       string `json:"who,omitempty"`
-	Host      string `json:"host,omitempty"`
-	Authority string `json:"authority,omitempty"`
+	Who       string `json:"who"`
+	Host      string `json:"host"`
+	Authority string `json:"authority"`
 	// Attested is true only when Phoenix checked the caller itself. A token
 	// proves nothing about who holds it, so its lines say false, and who and
 	// authority are then only declared by the operator.

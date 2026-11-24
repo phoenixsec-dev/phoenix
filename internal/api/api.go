@@ -235,7 +235,7 @@ func (s *Server) SetSessionStore(ss *session.Store) error {
 	if n := len(ended) - unbound; n > 0 {
 		log.Printf("  Sessions: ended %d whose agent was removed or whose token was replaced since the last start", n)
 	}
-	s.auditEndedSessions(nil, "system", "", "credential_not_current", ended)
+	s.auditEndedSessions(nil, systemActor, "", "credential_not_current", ended)
 	return err
 }
 
@@ -268,8 +268,12 @@ func (s *Server) changeAgentCredential(r *http.Request, actor, agent, cause stri
 	return err
 }
 
+// systemActor stands for Phoenix itself, shown as "system" in the log.
+const systemActor = ""
+
 // auditEndedSessions writes one session.ended line per session Phoenix ended
-// because of its agent's credential. actor is who caused it.
+// because of its agent's credential. actor is who caused it; systemActor when
+// Phoenix noticed by itself.
 func (s *Server) auditEndedSessions(r *http.Request, actor, ip, cause string, ended []*session.Session) {
 	for _, sess := range ended {
 		md := callerAuditMetadata(r)
@@ -277,10 +281,16 @@ func (s *Server) auditEndedSessions(r *http.Request, actor, ip, cause string, en
 			md = map[string]string{}
 		}
 		md["session.agent"], md["cause"] = sess.Agent, cause
-		if err := s.writeAudit(r, audit.Entry{
-			Agent: actor, Action: "session.ended", Path: sess.ID, Status: "allowed", IP: ip, SessionID: sess.ID, Metadata: md,
-		}); err != nil {
-			log.Printf("WARNING: audit log write failed for session.ended %s (agent %q, by %q, cause %s): %v", sess.ID, sess.Agent, actor, cause, err)
+		e := audit.Entry{Agent: actor, Action: "session.ended", Path: sess.ID, Status: "allowed", IP: ip, SessionID: sess.ID, Metadata: md}
+		var err error
+		if actor == systemActor {
+			e.Agent = "system" // nobody's labels, even if an identity is called that
+			err = s.audit.Log(e)
+		} else {
+			err = s.writeAudit(r, e)
+		}
+		if err != nil {
+			log.Printf("WARNING: audit log write failed for session.ended %s (agent %q, by %q, cause %s): %v", sess.ID, sess.Agent, e.Agent, cause, err)
 		}
 	}
 }
@@ -393,7 +403,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			// Extract identity for audit even from expired/revoked tokens
 			if agent, sessID, known := s.sessions.ParseClaimsInsecure(tok); known {
 				if errors.Is(err, session.ErrCredentialChanged) {
-					s.auditEndedSessions(r, "system", ip, "credential_not_current", []*session.Session{{ID: sessID, Agent: agent}})
+					s.auditEndedSessions(r, systemActor, ip, "credential_not_current", []*session.Session{{ID: sessID, Agent: agent}})
 				}
 				s.auditLogSessionDenied(r, agent, "session.auth", "", ip, code, sessID)
 			}
@@ -1109,7 +1119,9 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	// truncated: the search stopped at its read cap or the newest archive
 	// before it found `limit` matches; older entries may exist.
-	jsonOK(w, map[string]interface{}{"entries": res.Entries, "truncated": res.Truncated})
+	// identity_filters: this server knows who, host and authority, so a client
+	// can tell a filtered answer from an older server's unfiltered one.
+	jsonOK(w, map[string]interface{}{"entries": res.Entries, "truncated": res.Truncated, "identity_filters": true})
 }
 
 // maxAuditQueryLimit caps how many entries one GET /v1/audit returns.
@@ -1167,11 +1179,12 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 			return s.acl.UpdateAgentLabeled(req.Name, req.Token, req.Permissions, labels)
 		})
 		if err == nil {
-			s.auditAgentChange(r, agentName, "update-agent", req.Name, labels)
+			s.auditAgentChange(r, agentName, "update-agent", req.Name, labels, "")
 			jsonOK(w, map[string]any{"status": "ok", "agent": req.Name, "action": "updated", "identity": s.identityOf(req.Name)})
 			return
 		}
 		if !errors.Is(err, acl.ErrAgentNotFound) {
+			s.auditIfUnsynced(r, agentName, "update-agent", req.Name, labels, err)
 			log.Printf("error updating agent %q: %v", req.Name, err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -1184,12 +1197,13 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "agent already exists (use ?force=true to overwrite)", http.StatusConflict)
 			return
 		}
+		s.auditIfUnsynced(r, agentName, "create-agent", req.Name, labels, err)
 		log.Printf("error creating agent %q: %v", req.Name, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	s.auditAgentChange(r, agentName, "create-agent", req.Name, labels)
+	s.auditAgentChange(r, agentName, "create-agent", req.Name, labels, "")
 	jsonOK(w, map[string]any{"status": "ok", "agent": req.Name, "identity": s.identityOf(req.Name)})
 }
 
@@ -1205,8 +1219,12 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	names := s.acl.ListAgents()
-	jsonOK(w, map[string]interface{}{"agents": names, "identities": s.acl.Identities()})
+	ids := s.acl.Identities()
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = id.Name
+	}
+	jsonOK(w, map[string]interface{}{"agents": names, "identities": ids})
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
@@ -1964,7 +1982,7 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 // logged in, the same way logging in with it now would.
 func (s *Server) denyRenewal(w http.ResponseWriter, r *http.Request, info *authInfo, ip string, err error) {
 	if errors.Is(err, session.ErrCredentialChanged) {
-		s.auditEndedSessions(r, "system", ip, "credential_not_current", []*session.Session{{ID: info.SessionID, Agent: info.Agent}})
+		s.auditEndedSessions(r, systemActor, ip, "credential_not_current", []*session.Session{{ID: info.SessionID, Agent: info.Agent}})
 	}
 	code := sessionErrorCode(err)
 	s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, code, info.SessionID)

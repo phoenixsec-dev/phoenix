@@ -2,15 +2,23 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
+	"github.com/phoenixsec/phoenix/internal/config"
+	"github.com/phoenixsec/phoenix/internal/grant"
+	"github.com/phoenixsec/phoenix/internal/session"
 )
 
 // lines returns the audit lines matching o, oldest first.
@@ -44,7 +52,7 @@ func TestSetIdentityKeepsTokenAndSessions(t *testing.T) {
 		_, body := e.do("GET", "/v1/whoami", tok, "")
 		var w map[string]any
 		json.Unmarshal([]byte(body), &w)
-		if w["who"] != "robin" || w["authority"] != "night-desk" || w["kind"] != "agent" || w["host"] != "" || w["attested"] != false {
+		if w["who"] != "robin" || w["authority"] != "night-desk" || w["kind"] != "agent" || w["host"] != "" || w["attested"] != false || fmt.Sprint(w["formerly"]) != "[helper]" {
 			t.Errorf("whoami = %s", body)
 		}
 	}
@@ -59,20 +67,25 @@ func TestSetIdentityKeepsTokenAndSessions(t *testing.T) {
 
 	// Only an admin's own token may, and nothing outside the four fields.
 	for _, c := range []struct {
-		tok, name, body string
-		code            int
+		as, tok, name, body string // as, not tok, is what a failure prints
+		code                int
 	}{
-		{"old-token", "worker", `{"who":"eve"}`, 403},
-		{sess, "worker", `{"who":"eve"}`, 401},
-		{"admin-token", "nobody", `{"who":"x"}`, 404},
-		{"admin-token", "worker", `{"host":"x"}`, 400},
-		{"admin-token", "worker", `{"who":"x","token":"y"}`, 400},
-		{"admin-token", "worker", `{}`, 400},
-		{"admin-token", "worker", `{"who":"a\u202eb"}`, 400},
+		{"worker", "old-token", "worker", `{"who":"eve"}`, 403},
+		{"session", sess, "worker", `{"who":"eve"}`, 401},
+		{"admin", "admin-token", "nobody", `{"who":"x"}`, 404},
+		{"admin", "admin-token", "worker", `{"host":"x"}`, 400},
+		{"admin", "admin-token", "worker", `{"who":"x","token":"y"}`, 400},
+		{"admin", "admin-token", "worker", `{}`, 400},
+		{"admin", "admin-token", "worker", `{"who":"a\u202eb"}`, 400},
+		{"admin", "admin-token", "worker", `{"who":"x"} {"who":"y"}`, 400},
+		{"admin", "admin-token", "worker", `{"who":"x"} junk`, 400},
 	} {
-		if code, body := e.do("PATCH", "/v1/agents/"+c.name+"/identity", c.tok, c.body); code != c.code {
-			t.Errorf("%s by %s = %d %s, want %d", c.body, c.tok, code, body, c.code)
+		if code, _ := e.do("PATCH", "/v1/agents/"+c.name+"/identity", c.tok, c.body); code != c.code {
+			t.Errorf("%s as %s = %d, want %d", c.body, c.as, code, c.code)
 		}
+	}
+	if code, _ := e.do("PATCH", "/v1/agents/worker/identity", "admin-token", "{\"kind\":\"agent\"}\n \n"); code != 200 {
+		t.Errorf("trailing white space refused: %d", code)
 	}
 	if a, _ := e.srv.acl.GetAgent("worker"); a.Who != "robin" {
 		t.Errorf("who = %q after refused changes", a.Who)
@@ -124,24 +137,156 @@ func TestAuditLinesCarryIdentity(t *testing.T) {
 	}
 }
 
-// Grant events go through the grant store's audit sink, not a request.
+// Grant events go through the grant store's audit sink, not a request. They
+// carry the labels the actor had when it acted, also when the line is written
+// later, after a restart, with another identity under that name.
 func TestGrantLinesCarryIdentity(t *testing.T) {
-	e := newGrantEnv(t)
-	for name, body := range map[string]string{"vector": `{"who":"robin"}`, "approver": `{"who":"sam","authority":"boss"}`} {
+	var e *grantEnv
+	full := false
+	opts := func(o *grant.Options) {
+		sink := o.Audit
+		o.Audit = sinkFunc(func(ev grant.Event) error {
+			if full && ev.Phase == grant.PhaseCommitted {
+				return errors.New("disk full")
+			}
+			return sink.Append(ev)
+		})
+		o.ActorLabels = func(actor, ip string) (string, string) { return GrantActorLabels(e.srv.acl)(actor, ip) }
+	}
+	e = newGrantEnv(t, opts)
+	label := func(name, body string) {
 		expect(t, e.do("PATCH", "/v1/agents/"+name+"/identity", adminTok, body), 200, "")
 	}
-	id := e.request(t, vectorTok, "infra/b2/app-key")
-	expect(t, e.do("POST", "/v1/access-requests/"+id+"/approve", approverTok, "{}"), 200, "")
-	seen := map[string]audit.Caller{}
+	// Real identities may have names like Phoenix's own actors.
+	for _, n := range []string{"system", "dashboard@desk"} {
+		if err := e.srv.acl.AddAgent(n, n+"-token", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	label("vector", `{"who":"robin"}`)
+	label("approver", `{"who":"sam","authority":"boss"}`)
+	label("system", `{"who":"sys"}`)
+	label("dashboard@desk", `{"who":"desk"}`)
+	e.set(func(s *config.AccessRequestsSettings) {
+		s.Approvers = []string{"approver", "dashboard@desk"}
+		s.RequireSealed = false
+	})
+
+	full = true
+	first := e.request(t, vectorTok, "infra/b2/app-key")
+	e.approve(t, first, "{}")
+	label("vector", `{"who":"eve"}`)
+	if err := e.srv.acl.RemoveAgent("approver"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.srv.acl.AddAgentLabeled("approver", approverTok, nil, acl.LabelChange{Who: &[]string{"mallory"}[0]}); err != nil {
+		t.Fatal(err)
+	}
+	full = false
+	o := grant.Options{Path: filepath.Join(e.dir, "grants.json"), Audit: NewGrantAuditSink(e.srv.audit), Now: e.clock.Now, Logf: t.Logf}
+	opts(&o)
+	st, err := grant.Open(o) // a restart: the queued lines are written now
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.store = st
+	e.srv.SetGrantStore(st)
+	st.Tick()
+
+	byName := e.request(t, "system-token", "infra/other")
+	expect(t, e.do("POST", "/v1/access-requests/"+byName+"/approve", "dashboard@desk-token", "{}"), 200, "")
+	late := e.request(t, vectorTok, "infra/other")
+	if _, err := e.srv.ApproveAccessRequestAs(late, "dashboard@10.0.0.9", "10.0.0.9", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Advance(24 * time.Hour)
+	st.Tick() // expires the grants, as "system" itself
+
+	got := map[string]map[audit.Caller]bool{}
 	es, err := audit.Query(e.srv.auditPath, audit.QueryOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, l := range es {
-		seen[l.Action] = l.Caller
+		if k := l.Agent + " " + l.Action; strings.HasPrefix(l.Action, "access_request.") || strings.HasPrefix(l.Action, "grant.") {
+			if got[k] == nil {
+				got[k] = map[audit.Caller]bool{}
+			}
+			got[k][l.Caller] = true
+		}
 	}
-	if seen["access_request.created"] != (audit.Caller{Who: "robin"}) || seen["access_request.approved"] != (audit.Caller{Who: "sam", Authority: "boss"}) {
-		t.Fatalf("grant lines = %v", seen)
+	for k, want := range map[string][]audit.Caller{
+		"vector access_request.created":              {{Who: "robin"}, {Who: "eve"}},
+		"approver access_request.approved":           {{Who: "sam", Authority: "boss"}},
+		"system access_request.created":              {{Who: "sys"}},
+		"dashboard@desk access_request.approved":     {{Who: "desk"}},
+		"dashboard@10.0.0.9 access_request.approved": {{}},
+		"system grant.expired":                       {{}},
+	} {
+		set := map[audit.Caller]bool{}
+		for _, c := range want {
+			set[c] = true
+		}
+		if !reflect.DeepEqual(got[k], set) {
+			t.Errorf("%s = %v, want %v", k, got[k], set)
+		}
+	}
+}
+
+// sinkFunc is a grant.AuditSink made of a function.
+type sinkFunc func(grant.Event) error
+
+func (f sinkFunc) Append(e grant.Event) error { return f(e) }
+
+// A line Phoenix writes as "system" never borrows the labels of an identity
+// that happens to be called system.
+func TestSystemLineBorrowsNoLabels(t *testing.T) {
+	e := newCredEnv(t)
+	r := withRequestCaller(httptest.NewRequest("POST", "/v1/session/renew", nil))
+	identifyCaller(r, &authInfo{Agent: "system"}, acl.Labels{Who: "sys"})
+	e.srv.auditEndedSessions(r, systemActor, "1.1.1.1", "credential_not_current", []*session.Session{{ID: "ses_0", Agent: "system"}})
+	if got := e.lines(audit.QueryOptions{Path: "ses_0"}); len(got) != 1 || got[0].Agent != "system" || got[0].Caller != (audit.Caller{}) {
+		t.Fatalf("lines = %+v", got)
+	}
+}
+
+// A change that is in use but whose save was not synced answers 500 and is
+// still in the log.
+func TestUnsyncedLabelChangeIsAudited(t *testing.T) {
+	e := newCredEnv(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can read any directory")
+	}
+	// Files in a directory that cannot be read can be replaced, but the last
+	// step of a save, syncing the directory, fails.
+	if err := os.Chmod(e.dir, 0300); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(e.dir, 0700)
+	for action, c := range map[string][3]string{
+		"set-identity": {"PATCH", "/v1/agents/worker/identity", `{"who":"robin"}`},
+		"update-agent": {"POST", "/v1/agents?force=true", `{"name":"worker","token":"old-token","who":"sam"}`},
+		"create-agent": {"POST", "/v1/agents", `{"name":"late","token":"late-token","who":"kim"}`},
+	} {
+		if code, _ := e.do(c[0], c[1], "admin-token", c[2]); code != 500 {
+			t.Errorf("%s = %d, want 500", action, code)
+		}
+		es := e.lines(audit.QueryOptions{Agent: "admin", Limit: 1})
+		if es[0].Action != action || es[0].Reason != "saved_not_synced" || es[0].Metadata["identity.who"] == "" {
+			t.Errorf("%s line = %+v", action, es[0])
+		}
+	}
+}
+
+// The log keeps one former name with a comma apart from two names.
+func TestFormerNamesUnambiguousInLog(t *testing.T) {
+	e := newCredEnv(t)
+	e.label(`{"formerly":["a,b"]}`)
+	one := e.lines(audit.QueryOptions{Agent: "admin", Limit: 1})[0].Metadata["identity.formerly"]
+	e.label(`{"formerly":["a","b"]}`)
+	two := e.lines(audit.QueryOptions{Agent: "admin", Limit: 1})[0].Metadata["identity.formerly"]
+	if one != `["a,b"]` || two != `["a","b"]` {
+		t.Fatalf("one = %s, two = %s", one, two)
 	}
 }
 
@@ -224,9 +369,15 @@ func TestAuditQueryByIdentity(t *testing.T) {
 	e.do("GET", "/v1/secrets/test/a", "desk-token", "")
 	count := func(q string) int {
 		_, body := e.do("GET", "/v1/audit?"+q, "admin-token", "")
-		var r struct{ Entries []audit.Entry }
+		var r struct {
+			Entries         []audit.Entry
+			IdentityFilters bool `json:"identity_filters"`
+		}
 		if err := json.Unmarshal([]byte(body), &r); err != nil {
 			t.Fatal(err)
+		}
+		if !r.IdentityFilters {
+			t.Errorf("%s: identity_filters missing", q)
 		}
 		return len(r.Entries)
 	}

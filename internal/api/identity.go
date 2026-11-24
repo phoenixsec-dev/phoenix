@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // Who, authority and kind on identities, and who/host/authority/attested on
@@ -87,7 +89,8 @@ func labelAuditMetadata(r *http.Request, c acl.LabelChange) map[string]string {
 		set("kind", *c.Kind)
 	}
 	if c.Formerly != nil {
-		set("formerly", strings.Join(*c.Formerly, ","))
+		b, _ := json.Marshal(*c.Formerly) // a name may hold a comma
+		set("formerly", string(b))
 	}
 	if changed != nil {
 		md["identity.changed"] = strings.Join(changed, ",")
@@ -120,7 +123,8 @@ func (s *Server) handleSetIdentity(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	// Refused, not ignored: "host" or "token" here would look as if it worked.
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&change); err != nil {
+	err = dec.Decode(&change)
+	if _, more := dec.Token(); err != nil || more != io.EOF {
 		jsonError(w, "invalid request body: send any of who, authority, kind (text) and formerly (a list of names)", http.StatusBadRequest)
 		return
 	}
@@ -139,23 +143,46 @@ func (s *Server) handleSetIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		s.auditIfUnsynced(r, agentName, "set-identity", target, change, err)
 		log.Printf("error setting identity fields on %q: %v", target, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.logAudit(s.writeAudit(r, audit.Entry{
-		Agent: agentName, Action: "set-identity", Path: target, Status: "allowed",
-		IP: clientIP(r), Metadata: labelAuditMetadata(r, change),
-	}))
+	s.auditAgentChange(r, agentName, "set-identity", target, change, "")
 	jsonOK(w, map[string]any{"status": "ok", "identity": acl.Identity{Name: target, Labels: labels}})
 }
 
-// auditAgentChange writes the create-agent or update-agent line.
-func (s *Server) auditAgentChange(r *http.Request, actor, action, target string, labels acl.LabelChange) {
+// auditAgentChange writes a create-agent, update-agent or set-identity line.
+func (s *Server) auditAgentChange(r *http.Request, actor, action, target string, labels acl.LabelChange, reason string) {
 	s.logAudit(s.writeAudit(r, audit.Entry{
-		Agent: actor, Action: action, Path: target, Status: "allowed",
+		Agent: actor, Action: action, Path: target, Status: "allowed", Reason: reason,
 		IP: clientIP(r), Metadata: labelAuditMetadata(r, labels),
 	}))
+}
+
+// auditIfUnsynced writes the line of a change that failed only in the last
+// step of saving: it is in use and in the ACL file, but a power cut could
+// still undo it. Any other error writes nothing.
+func (s *Server) auditIfUnsynced(r *http.Request, actor, action, target string, labels acl.LabelChange, err error) {
+	if errors.Is(err, fsutil.ErrDirSyncFailed) {
+		s.auditAgentChange(r, actor, action, target, labels, "saved_not_synced")
+	}
+}
+
+// GrantActorLabels returns the labels lookup for grant.Options. It names who
+// acted in a grant event; the store's own expiries (no IP) and a person in
+// the dashboard are not identities and get none.
+func GrantActorLabels(a *acl.ACL) func(actor, ip string) (who, authority string) {
+	return func(actor, ip string) (string, string) {
+		if ip == "" || actor == "dashboard@"+ip {
+			return "", ""
+		}
+		ag, err := a.GetAgent(actor)
+		if err != nil {
+			return "", ""
+		}
+		return ag.Who, ag.Authority
+	}
 }
 
 // identityOf returns an identity's name and labels for a response.

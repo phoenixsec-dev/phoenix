@@ -1059,9 +1059,13 @@ func cmdAudit(args []string) error {
 			Reason    string `json:"reason"`
 			auditCaller
 		} `json:"entries"`
-		Truncated bool `json:"truncated"`
+		Truncated       bool `json:"truncated"`
+		IdentityFilters bool `json:"identity_filters"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.IdentityFilters && (params.Has("who") || params.Has("host") || params.Has("authority")) {
+		return errors.New(serverTooOldForIdentity) // it ignored the filter
+	}
 
 	for _, e := range result.Entries {
 		status := e.Status
@@ -1084,7 +1088,7 @@ func cmdAgentCreate(args []string) error {
 
 	var name, agentToken, aclStr string
 	var force bool
-	labels, args := takeLabelOptions(args)
+	labels := map[string]any{}
 	i := 0
 	if i < len(args) && !isOption("agent create", args[i]) {
 		name = args[i]
@@ -1104,6 +1108,16 @@ func cmdAgentCreate(args []string) error {
 			}
 		case "--force":
 			force = true
+		default:
+			if i+1 < len(args) {
+				ok, err := labelOption(labels, args[i], args[i+1])
+				if err != nil {
+					return err
+				}
+				if ok {
+					i++
+				}
+			}
 		}
 		i++
 	}

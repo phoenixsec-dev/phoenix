@@ -45,7 +45,7 @@ resolve were removed) gets `400` saying so.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/v1/audit` | Query audit entries (admin-only). Filters: `since`, `agent` (also finds the identity's former names), `who`, `host`, `authority`, `limit`. Each entry has `attested`, and `who`, `host`, `authority` when known |
+| GET | `/v1/audit` | Query audit entries (admin-only). Filters: `since`, `agent` (also finds the identity's former names), `who`, `host`, `authority`, `limit`. Each entry has `who`, `host`, `authority` (empty when not known) and `attested`. `identity_filters: true` says the server knows those filters |
 
 Query params:
 - `since` (RFC3339)
@@ -58,7 +58,7 @@ Query params:
 |---|---|---|
 | POST | `/v1/agents` | Create or update agent + permissions, and optionally `who`, `authority`, `kind`, `formerly` (admin-only) |
 | GET | `/v1/agents` | `agents`: names. `identities`: each with its `who`, `authority`, `kind`, `formerly` (admin-only) |
-| PATCH | `/v1/agents/{name}/identity` | Set any of `who`, `authority`, `kind` (text; `""` clears) and `formerly` (list of names). Fields left out stay; any other field is refused. Token, permissions and sessions are not touched (admin-only) |
+| PATCH | `/v1/agents/{name}/identity` | Set any of `who`, `authority`, `kind` (text; `""` clears) and `formerly` (list of names). Fields left out (or `null`) stay; any other field is refused. Token, permissions and sessions are not touched (admin-only) |
 | DELETE | `/v1/agents/{name}` | Delete an agent (admin-only) |
 
 `POST /v1/agents` body (use `?force=true` to update an existing agent):
@@ -175,7 +175,7 @@ a notification to `access_requests.notify_url` (no endpoint; see
 | POST | `/v1/access-requests/{id}/deny` | Deny with optional note (approvers) |
 | GET | `/v1/grants` | Own grants (approvers: all) |
 | POST | `/v1/grants/{id}/revoke` | Revoke (owner or approver) |
-| GET | `/v1/whoami` | Caller identity (`agent`, `who`, `host`, `authority`, `kind`, `attested`), ACL rules, grants, pending requests |
+| GET | `/v1/whoami` | Caller identity (`agent`, `who`, `host`, `authority`, `kind`, `formerly`, `attested`), ACL rules, grants, pending requests |
 
 ## SSH certificates
 

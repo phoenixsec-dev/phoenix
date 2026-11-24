@@ -18,7 +18,8 @@ and they decide nothing about access.
 - Audit lines gain `who`, `host`, `authority` and `attested`. No field was
   renamed or removed. They come from the identity's record, never from a
   caller. A line about a refused credential, the dashboard or Phoenix itself
-  has no `who` or `authority`.
+  has an empty `who` and `authority`. Grant events keep the actor's labels in
+  `grants.json` until their line is written, so a delayed line stays right.
 - `attested` is `false` on every line for now: a token doesn't prove who holds
   it. The dashboard calls such a `who` "declared". `host` is recorded only when
   Phoenix has established it, so it is empty until the per-machine service
@@ -31,7 +32,8 @@ and they decide nothing about access.
   per token), it stays when the token is replaced and is new when the identity
   is deleted and made again. Nothing uses it yet.
 
-**Upgrading:** nothing to change. `acl.json` and old audit lines load as they
+**Upgrading:** update the server first: the new CLI options say so when the
+server is too old. Otherwise nothing to change. `acl.json` and old audit lines load as they
 are; a missing field shows as `-`. Existing identities have no labels until you
 run `phoenix agent set`, and get their serial at the next change to any agent.
 
