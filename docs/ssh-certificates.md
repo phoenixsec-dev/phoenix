@@ -18,12 +18,15 @@ a short-lived certificate: a login pass with an expiry built in.
 ## The flow
 
 ```bash
+# Agent: which machines can I ask for, and do I already have an approval?
+phoenix ssh --list
+
 # Agent: asks if there is no approval yet, waits, then logs in and runs the command
 phoenix ssh arch-omen --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
 
 # Human: dashboard -> Approvals -> approve. The card says "root login on this machine".
 
-# Agent: more commands in the same window need no new approval
+# Agent: more commands in the same window need no new approval and no --reason
 phoenix ssh arch-omen -- sudo -n systemctl status something
 
 # Human: take it back. New logins stop at once, even with a pass the agent kept.
@@ -42,6 +45,22 @@ way to turn on logins while keeping every secret out of the request flow. One ma
 per request.
 
 The command goes to ssh as is, so quote it as you would for ssh: `phoenix ssh arch-omen -- 'cd /srv && ls'`.
+
+`phoenix ssh --list` (or plain `phoenix ssh`) asks `GET /v1/ssh/machines`. It
+shows machine names only, never addresses or login users, and marks each one
+where you already have an approval with when it ends. Any signed-in caller can
+list; with `ssh_ca` off the list is empty and says so. This is how an agent
+finds out it can ask at all: the shipped skill (`phoenix-skill/SKILL.md`) tells
+it to run this whenever it needs root or a shell on another machine.
+
+An approval belongs to one agent, token and IP. If `phoenix ssh` says a machine
+needs approval although a human just approved it, the command ran with a
+different `PHOENIX_TOKEN` from the one that asked, or from another IP. A common
+way to get a different token: a shell
+function or alias that sets `PHOENIX_TOKEN` and runs `phoenix`, then
+`timeout phoenix ...`, `env`, `xargs` or a script runs the binary directly and
+skips it. The error names the agent it ran as, and `--list` shows which machines
+that agent is approved for.
 
 After a revoke, `phoenix ssh` stops and says to ask the human. It will not file a
 new request by itself. If the human agrees, run it again with `--ask-again`.

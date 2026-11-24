@@ -343,3 +343,67 @@ func TestRootGoesToDashboard(t *testing.T) {
 		t.Fatal("only the exact root may redirect")
 	}
 }
+
+// machines fetches GET /v1/ssh/machines as tok from ip.
+func (e *grantEnv) machines(t *testing.T, tok, ip string) map[string]any {
+	t.Helper()
+	return expect(t, e.do("GET", "/v1/ssh/machines", tok, "", "RemoteAddr: "+ip), http.StatusOK, "")
+}
+
+// The machine list is how an agent finds out it can ask for a login: names for
+// anyone signed in, the caller's own approval where it has one, and never an
+// address or login user.
+func TestSSHMachinesList(t *testing.T) {
+	e := newSSHEnv(t)
+	const ip = "192.0.2.1"
+	expect(t, e.do("GET", "/v1/ssh/machines", "", ""), http.StatusUnauthorized, "")
+
+	m := e.machines(t, vectorTok, ip)
+	if m["enabled"] != true || m["agent"] != "vector" {
+		t.Fatalf("list = %v", m)
+	}
+	list := m["machines"].([]any)
+	if len(list) != 2 || list[0].(map[string]any)["name"] != "arch-omen" || list[1].(map[string]any)["name"] != "vm204" {
+		t.Fatalf("machines = %v", list)
+	}
+	if _, ok := list[0].(map[string]any)["approved_until"]; ok {
+		t.Fatal("approval shown before any approval")
+	}
+
+	gid := e.loginGrant(t, vectorTok, "arch-omen", ip)
+	g, _ := e.store.GetGrant(gid)
+	list = e.machines(t, vectorTok, ip)["machines"].([]any)
+	if list[0].(map[string]any)["approved_until"] != fmtTime(g.ExpiresAt) {
+		t.Fatalf("own approval not shown: %v", list)
+	}
+	if _, ok := list[1].(map[string]any)["approved_until"]; ok {
+		t.Fatal("approval for one machine shown on another")
+	}
+	// Only an approval this caller could use counts: not another agent's, and
+	// not from another IP.
+	for _, c := range []struct{ tok, ip string }{{approverTok, ip}, {vectorTok, "192.0.2.9"}} {
+		if _, ok := e.machines(t, c.tok, c.ip)["machines"].([]any)[0].(map[string]any)["approved_until"]; ok {
+			t.Fatalf("approval shown to %s from %s", c.tok, c.ip)
+		}
+	}
+
+	body := e.do("GET", "/v1/ssh/machines", vectorTok, "", "RemoteAddr: "+ip).Body.String()
+	for _, leak := range []string{"192.168.0.99", "192.168.0.204", `"agent":"agent"`, "address", "user"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("list leaks %q: %s", leak, body)
+		}
+	}
+	entries, _ := queryAPIAuditEntries(t, e.srv, adminTok)
+	if findAPIAuditEntry(entries, "ssh.list", "ssh/", "allowed", "") == nil {
+		t.Fatal("list was not audited")
+	}
+}
+
+// With SSH certificates off the list is an empty answer, not an error.
+func TestSSHMachinesListWhenOff(t *testing.T) {
+	e := newGrantEnv(t)
+	m := e.machines(t, vectorTok, "192.0.2.1")
+	if m["enabled"] != false || len(m["machines"].([]any)) != 0 || m["note"] == "" || m["note"] == nil {
+		t.Fatalf("off = %v", m)
+	}
+}

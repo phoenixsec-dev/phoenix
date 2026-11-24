@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -38,6 +39,7 @@ func (s *Server) sshRoutes() {
 	s.mux.HandleFunc("POST /v1/ssh/sign", s.handleSSHSign)
 	s.mux.HandleFunc("GET /v1/ssh/ca", s.handleSSHCA)
 	s.mux.HandleFunc("GET /v1/ssh/window/{host}/{grant}", s.handleSSHWindow)
+	s.mux.HandleFunc("GET /v1/ssh/machines", s.handleSSHMachines)
 }
 
 // sshRequestAllowed checks a login request: one configured machine per request,
@@ -145,6 +147,45 @@ func (s *Server) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"public_key": sshca.PublicKey(s.sshCA)})
+}
+
+// handleSSHMachines lists the machines this server can sign logins for:
+// GET /v1/ssh/machines. It is how an agent finds out that "phoenix ssh" exists
+// and where it may ask to log in. Any authenticated caller gets the names, and
+// "approved_until" on a machine where its own approval (this agent, token and
+// IP) would let it sign right now. Addresses and login users stay private: an
+// agent only gets those with a certificate. When SSH certificates are off the
+// list is empty and "enabled" is false, which is an answer, not an error.
+func (s *Server) handleSSHMachines(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	info, err := s.authenticateInfo(r)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+	ip := clientIP(r)
+	s.auditAllowed(r, info, "ssh.list", sshPathPrefix, ip)
+	machines := []map[string]any{}
+	if s.sshCA == nil {
+		jsonOK(w, map[string]any{
+			"agent": info.Agent, "enabled": false, "machines": machines,
+			"note": "SSH certificates are not enabled on this server",
+		})
+		return
+	}
+	// A session never gets a grant (grantCaller is empty for it), so it sees
+	// names only.
+	caller := s.grantCaller(info, ip)
+	for _, name := range slices.Sorted(maps.Keys(s.sshHosts)) {
+		m := map[string]any{"name": name}
+		if s.grantsOn() {
+			if g := s.grants.Match(caller, sshPathPrefix+name, grant.ActionSSHLogin).Grant; g != nil {
+				m["approved_until"] = fmtTime(g.ExpiresAt)
+			}
+		}
+		machines = append(machines, m)
+	}
+	jsonOK(w, map[string]any{"agent": info.Agent, "enabled": true, "machines": machines})
 }
 
 // handleSSHWindow says whether one approval still stands for one machine:
