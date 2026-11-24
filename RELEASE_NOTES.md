@@ -12,7 +12,8 @@ a reverse proxy, set `dashboard.trusted_proxies`. The server needs to write smal
 `.lock` files next to its data files and the master key. **Stop the old server
 before you start the new one on its files,** and the new one before you go back to
 an older one: servers before v0.25.0 don't see these locks, so nothing stops both
-from running and undoing each other's writes. Update the server first, then every CLI. Showing secret values in the dashboard is off until you turn it on.
+from running and undoing each other's writes. Update the server first, then every
+CLI. Showing secret values in the dashboard is off until you turn it on.
 
 ### Security: a request already running could use a replacement token's permissions
 
@@ -176,7 +177,9 @@ and a request could expire while you looked at the page.
   an expired request stays, marked expired.
 - **Once** and "N uses or M minutes": grants can have a use limit, counted per
   secret. Counting is exact and survives a restart; only a value that is handed
-  over costs a use. `phoenix approve --uses N` for CLI approvers.
+  over costs a use, with one exception: if saving the use fails and so does
+  undoing that save, nothing is handed over but the use may count as spent after
+  a restart. `phoenix approve --uses N` for CLI approvers.
 - **Always** puts `read_value` on exactly that path on the agent's own access
   list, marked with the request, removable on the page at once. Never a
   wildcard, never for SSH logins, only from the dashboard.
@@ -324,8 +327,9 @@ description, tag or username, open one and copy the username. With showing turne
 on you can show or copy the password, or copy it and open the page in one tap. You can add a secret (paste,
 type or generate), give one a new value, and edit its description, tags,
 username and link. The dashboard is laid out for a phone first, with one
-navigation, and can be installed as an app. Nothing is stored offline except
-its static files.
+navigation, and can be installed as an app. Its offline cache (the
+service worker's) holds only static files. The browser also remembers the IDs of
+requests it has already shown, so it does not announce them twice.
 
 **Showing and copying secrets is off until you turn it on**, after an upgrade and
 on a new install. The dashboard password could only approve access until now; with

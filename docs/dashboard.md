@@ -23,8 +23,9 @@ has a password. Everything it does can also be done via the CLI
 
 Open the dashboard over HTTPS with a certificate the device trusts, then use
 the browser's *Install app* or *Add to Home Screen*. It opens on the secrets
-list. The app keeps only its own files (styles, scripts, icons, a "can't reach
-Phoenix" page) on the device. No page, answer or secret is ever stored offline.
+list. The app's offline cache holds only its own files (styles, scripts, icons, a "can't reach
+Phoenix" page). The browser also remembers the IDs of requests it has already
+shown. No page, answer or secret is ever stored offline.
 
 ## Security model
 
