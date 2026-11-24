@@ -120,6 +120,23 @@ func TestApproveUsesOnOldServerApprovesNothing(t *testing.T) {
 	}
 }
 
+// Text from the server goes into a command to paste only when it is a real ID.
+func TestApproveMismatchNamesOnlyRealIDs(t *testing.T) {
+	for id, want := range map[string]bool{"gnt_0123456789abcdef0123456789abcdef": true, "": false, "gnt_x; rm -rf ~": false, "$(id)": false} {
+		useMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" {
+				json.NewEncoder(w).Encode(pendingRequestJSON("why"))
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"grant_id": id, "max_uses": 7})
+		})
+		err := cmdApprove([]string{testReqID, "--uses", "1", "--yes"})
+		if err == nil || strings.Contains(err.Error(), "grants revoke") != want || (!want && id != "" && strings.Contains(err.Error(), id)) {
+			t.Errorf("%q: %v", id, err)
+		}
+	}
+}
+
 // An approver's own token may see every agent's requests. Working through a
 // role, the MCP status tool shows only the agent's own.
 func TestMCPStatusUnderARoleShowsOnlyOwnRequests(t *testing.T) {

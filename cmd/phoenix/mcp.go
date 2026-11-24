@@ -888,7 +888,7 @@ func mcpRequestText(rq accessRequestView) string {
 		lines = append(lines, "granted: "+cleanList(rq.GrantedPaths, ", ")+", "+grantedLimit(rq))
 	}
 	if rq.Note != "" {
-		lines = append(lines, "note from the human: "+cleanServerText(rq.Note))
+		lines = append(lines, "note: "+cleanServerText(rq.Note))
 	}
 	lines = append(lines, "next: "+requestNextHint(rq))
 	return strings.Join(lines, "\n")

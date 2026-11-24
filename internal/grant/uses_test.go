@@ -399,22 +399,23 @@ func TestReissuedTokenIsAnotherCredential(t *testing.T) {
 	}
 }
 
-// The token is replaced while the spend waits for the store: the check runs
-// inside, so it is seen, and nothing is counted.
-func TestTokenReplacedWhileSpendWaits(t *testing.T) {
+// The token is checked inside the spend's lock, so a replacement that finished
+// while the spend waited is seen, and nothing is counted.
+func TestSpendChecksTokenUnderItsLock(t *testing.T) {
 	e := newEnv(t)
 	g := e.limited("vector", 1, "infra/a")
-	var current atomic.Bool
-	current.Store(true)
 	c := bearerCaller("vector")
-	c.Current = current.Load
-	e.s.mu.Lock()
-	done := make(chan error)
-	go func() { done <- e.s.Spend(c, ActionReadValue, []SpendItem{{g.ID, "infra/a"}}, false)[0] }()
-	current.Store(false)
-	e.s.mu.Unlock()
-	if err := <-done; err == nil {
-		t.Fatal("a replaced token spent a use")
+	asked := false
+	c.Current = func() bool {
+		asked = true
+		if e.s.mu.TryLock() {
+			e.s.mu.Unlock()
+			t.Error("asked outside the lock")
+		}
+		return false
+	}
+	if err := e.s.Spend(c, ActionReadValue, []SpendItem{{g.ID, "infra/a"}}, false)[0]; err == nil || !asked {
+		t.Fatalf("a replaced token spent a use (asked %v)", asked)
 	}
 	if got, _ := e.s.GetGrant(g.ID); got.UseCount != 0 {
 		t.Fatal("use counted")

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -548,7 +549,11 @@ func cmdApproveAccess(args []string) error {
 		return fmt.Errorf("this server is too old to limit uses; nothing was approved. Approve without --uses, or answer Once on the dashboard after updating it")
 	}
 	if uses > 0 && res.MaxUses != uses {
-		return fmt.Errorf("the server answered with a grant that has a different use limit; check it with phoenix grants, or revoke it: phoenix grants revoke %s", cleanServerText(res.GrantID))
+		msg := "the server answered with a grant that has a different use limit; check it with: phoenix grants"
+		if grantIDPattern.MatchString(res.GrantID) { // only a real ID goes into a command to paste
+			msg += "\n  or take it back: phoenix grants revoke " + res.GrantID
+		}
+		return errors.New(msg)
 	}
 	limit := ""
 	if uses > 0 {
