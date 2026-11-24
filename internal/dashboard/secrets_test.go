@@ -557,9 +557,13 @@ func (b *hookBackend) Metadata(path string) (*store.SecretMetadata, error) {
 }
 
 // signOutWriter is an audit log during whose writes every login ends.
-type signOutWriter struct{ h *Handler }
+type signOutWriter struct {
+	h   *Handler
+	out *bytes.Buffer
+}
 
 func (w signOutWriter) Write(p []byte) (int, error) {
+	w.out.Write(p)
 	for _, l := range w.h.logins.list(time.Now()) {
 		w.h.logins.removeByID(l.ID)
 	}
@@ -603,9 +607,14 @@ func TestLoginEndsDuringSlowRead(t *testing.T) {
 	hook.onGet = nil
 	e.cookie = login(t, e.h)
 	e.csrf = csrfFromCookie(t, e.h, e.cookie)
-	e.h.deps.Audit = audit.NewWriterLogger(signOutWriter{e.h})
+	id = e.h.logins.list(time.Now())[0].ID
+	e.audit.Reset()
+	e.h.deps.Audit = audit.NewWriterLogger(signOutWriter{e.h, e.audit})
 	if w := e.showValue(); w.Code == http.StatusOK || strings.Contains(w.Body.String(), fakeValue) {
 		t.Errorf("signed out during the audit write: %d", w.Code)
+	}
+	if entry := findAuditEntry(parseAuditEntries(e.audit), "read_value", "denied"); entry == nil || entry.Reason != "signed_out" || entry.Metadata["dashboard.login"] != id {
+		t.Errorf("refusal after the audit write: %+v", entry)
 	}
 }
 

@@ -308,7 +308,7 @@ All dashboard actions are logged to the same audit trail as API actions.
 | `dashboard.login_evicted` | allowed | `dashboard@<ip>` | A new login pushed out the least recently used one (path = its ID, IP = its last IP) |
 | `dashboard.login_revoke` | allowed | `dashboard@<ip>` | A login signed out from the Sessions page (path = its ID) |
 | `dashboard.reauth` | allowed / denied | `dashboard@<ip>` | Password typed again for secrets: right, wrong, or rate limited |
-| `read_value` | allowed / denied | `dashboard@<ip>` | A secret shown or copied, or refused (`attestation`, `reveal_off`, or `signed_out` when the login ended meanwhile). Metadata `dashboard.use`: `show` or `copy` |
+| `read_value` | allowed / denied | `dashboard@<ip>` | A secret shown or copied, or refused (`attestation`, `reveal_off`, or `signed_out` when the login ended, or its cookie was replaced by typing the password again, during the read). Metadata `dashboard.use`: `show` or `copy` |
 | `write` | allowed / denied | `dashboard@<ip>` | A secret added or given a new value, or refused by a policy rule |
 | `describe` | allowed | `dashboard@<ip>` | Description, tags, username or link changed (metadata `changed`) |
 | `dashboard.logout` | allowed | `dashboard@<ip>` | Explicit logout |
