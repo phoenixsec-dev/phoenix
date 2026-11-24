@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ func openTestStoreRoles(t *testing.T, path string, key []byte, roles map[string]
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(s.Stop)
+	bindTestFP(t, s)
 	return s
 }
 
@@ -42,7 +44,7 @@ func TestRestartKeepsLiveSession(t *testing.T) {
 	key := testSigningKey(t)
 
 	before := openTestStore(t, path, key)
-	tok, sess, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, sess, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +68,7 @@ func TestRestartKeepsRevokedSessionRevoked(t *testing.T) {
 	key := testSigningKey(t)
 
 	before := openTestStore(t, path, key)
-	tok, sess, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, sess, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +91,7 @@ func TestRestartKeepsRevokedSessionRevoked(t *testing.T) {
 func TestRestartWithNewKeyRejectsOldTokens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	before := openTestStore(t, path, testSigningKey(t))
-	tok, _, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, _, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +106,7 @@ func TestRestartWithNewKeyRejectsOldTokens(t *testing.T) {
 func TestSessionsFileHoldsNoToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	s := openTestStore(t, path, testSigningKey(t))
-	tok, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +131,7 @@ func TestExpiredSessionsNotLoaded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	key := testSigningKey(t)
 	before := openTestStore(t, path, key)
-	if _, _, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond); err != nil {
+	if _, _, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 	before.Stop()
@@ -198,7 +200,7 @@ func TestRestartEndsSessionsOfChangedRoles(t *testing.T) {
 
 	before := openTestStoreRoles(t, path, key, roles)
 	mint := func(role string) string {
-		tok, _, err := before.Create(role, "agent1", nil, []string{role + "/*"}, nil, "bearer", "127.0.0.1", 0)
+		tok, _, err := before.Create(role, "agent1", testFP, nil, []string{role + "/*"}, nil, "bearer", "127.0.0.1", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,7 +226,7 @@ func TestRoleChangedBackDoesNotReviveSessions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	key := testSigningKey(t)
 	first := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1"})
-	tok, _, err := first.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, _, err := first.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,5 +236,34 @@ func TestRoleChangedBackDoesNotReviveSessions(t *testing.T) {
 	back := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1"})
 	if _, err := back.Validate(tok); err != ErrSessionNotFound {
 		t.Fatalf("got %v, want ErrSessionNotFound", err)
+	}
+}
+
+// Ended sessions that could not be saved are saved by the next cleanup, so a
+// restart cannot bring them back.
+func TestEndedSessionsSavedByCleanupAfterFailedSave(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "role-sessions.json")
+	s := openTestStore(t, path, testSigningKey(t))
+	if _, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, dir+".away"); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	ended, err := s.ChangeCredential("agent1", "", func() error { ran = true; return nil })
+	if !errors.Is(err, ErrEndNotSaved) || !ran || len(ended) != 1 {
+		t.Fatalf("ChangeCredential: ended %d, ran %v, err %v", len(ended), ran, err)
+	}
+	if err := os.Rename(dir+".away", dir); err != nil {
+		t.Fatal(err)
+	}
+	s.cleanup()
+	if n := openTestStore(t, path, testSigningKey(t)).ActiveCount(); n != 0 {
+		t.Errorf("%d sessions after restart, want 0", n)
 	}
 }

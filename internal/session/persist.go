@@ -105,6 +105,7 @@ func (s *Store) saveLocked() error {
 	if s.path == "" {
 		return nil
 	}
+	s.unsaved = true
 	f := sessionsFile{Version: fileVersion, Roles: s.roleFingerprints, Sessions: make([]*Session, 0, len(s.sessions))}
 	for _, sess := range s.sessions {
 		f.Sessions = append(f.Sessions, sess)
@@ -116,5 +117,6 @@ func (s *Store) saveLocked() error {
 	if err := fsutil.WriteFileAtomic(s.path, data, 0600); err != nil {
 		return fmt.Errorf("saving sessions file: %w", err)
 	}
+	s.unsaved = false
 	return nil
 }

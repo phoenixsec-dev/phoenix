@@ -945,16 +945,14 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 // deleteAgentWithGrants runs DELETE /v1/agents/{name} through the grant store:
 // under its lock, durably revoke the agent's grants, expire its pending
 // requests and record a tombstone, THEN remove the ACL entry. If the grant
-// save fails nothing is removed (500). Writes the error response and returns
-// false on failure.
-func (s *Server) deleteAgentWithGrants(w http.ResponseWriter, r *http.Request, actor, target string) bool {
+// save fails nothing is removed (500). remove ends the agent's sessions and
+// removes the ACL entry. Writes the error response and returns false on failure.
+func (s *Server) deleteAgentWithGrants(w http.ResponseWriter, r *http.Request, actor, target string, remove func() error) bool {
 	if _, err := s.acl.GetAgent(target); err != nil {
 		jsonError(w, "agent not found", http.StatusNotFound)
 		return false
 	}
-	_, err := s.grants.DeleteAgent(target, actor, clientIP(r), func() error {
-		return s.acl.RemoveAgent(target)
-	})
+	_, err := s.grants.DeleteAgent(target, actor, clientIP(r), remove)
 	if err == nil {
 		return true
 	}

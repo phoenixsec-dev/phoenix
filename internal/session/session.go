@@ -37,6 +37,13 @@ var (
 	ErrSignatureInvalid = errors.New("invalid session token signature")
 	ErrSessionRevoked   = errors.New("session has been revoked")
 	ErrSessionNotFound  = errors.New("session not found")
+	// ErrCredentialChanged means the token that minted the session is no
+	// longer the agent's token (agent deleted, or its token replaced). The
+	// session was ended by this call.
+	ErrCredentialChanged = errors.New("session ended: the agent was deleted or its token was replaced")
+	// ErrEndNotSaved means sessions were ended in memory but the sessions
+	// file could not be written. See Store.ChangeCredential.
+	ErrEndNotSaved = errors.New("sessions ended now but that could not be saved")
 )
 
 // Default actions granted when a role's Actions list is empty.
@@ -44,9 +51,13 @@ var DefaultActions = []string{"list", "read_value"}
 
 // Session represents an active agent session.
 type Session struct {
-	ID                 string    `json:"session_id"`
-	Role               string    `json:"role"`
-	Agent              string    `json:"agent"`
+	ID    string `json:"session_id"`
+	Role  string `json:"role"`
+	Agent string `json:"agent"`
+	// CredentialFP is the fingerprint (grant.BearerFingerprint) of the bearer
+	// token the session was minted with, never the token. The session works
+	// only while that is still the agent's token.
+	CredentialFP       string    `json:"credential_fp,omitempty"`
 	SealKeyFingerprint string    `json:"seal_key_fingerprint,omitempty"`
 	Namespaces         []string  `json:"namespaces"`
 	Actions            []string  `json:"actions"`

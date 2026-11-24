@@ -2,6 +2,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -215,9 +216,76 @@ func (s *Server) SetPolicy(p *policy.Engine) {
 	s.policy = p
 }
 
-// SetSessionStore configures the session identity store.
-func (s *Server) SetSessionStore(ss *session.Store) {
+// SetSessionStore configures the session identity store and ties its sessions
+// to the ACL: from here on a session works only while the bearer token that
+// minted it is still its agent's. Loaded sessions that fail that are ended,
+// logged and audited; the error means that could not be saved.
+func (s *Server) SetSessionStore(ss *session.Store) error {
 	s.sessions = ss
+	ended, err := ss.BindCredentials(s.sessionCredentialCurrent)
+	unbound := 0
+	for _, sess := range ended {
+		if sess.CredentialFP == "" {
+			unbound++
+		}
+	}
+	if unbound > 0 {
+		log.Printf("  Sessions: ended %d saved by an older version, which did not tie sessions to the agent's token; clients mint new ones", unbound)
+	}
+	if n := len(ended) - unbound; n > 0 {
+		log.Printf("  Sessions: ended %d whose agent was removed or whose token was replaced since the last start", n)
+	}
+	s.auditEndedSessions(nil, "system", "", "credential_not_current", ended)
+	return err
+}
+
+// sessionCredentialCurrent reports whether credentialFP is the fingerprint of
+// the agent's current bearer token. False when the agent does not exist.
+func (s *Server) sessionCredentialCurrent(agent, credentialFP string) bool {
+	a, err := s.acl.GetAgent(agent)
+	if err != nil || a.TokenHash == "" || credentialFP == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(grant.BearerFingerprint(a.TokenHash)), []byte(credentialFP)) == 1
+}
+
+// changeAgentCredential runs change, which deletes agent or replaces its token
+// (newToken; "" = deleted). Every route that does either must go through here:
+// the agent's sessions made with another token are ended and audited, and no
+// mint or renewal can slip in between. session.ErrEndNotSaved means change
+// succeeded and the sessions are dead, but the sessions file was not written.
+func (s *Server) changeAgentCredential(r *http.Request, actor, agent, newToken, cause string, change func() error) error {
+	if s.sessions == nil {
+		return change()
+	}
+	newFP := ""
+	if newToken != "" {
+		newFP = grant.BearerFingerprint(crypto.HashToken(newToken))
+	}
+	ended, err := s.sessions.ChangeCredential(agent, newFP, change)
+	s.auditEndedSessions(r, actor, clientIP(r), cause, ended)
+	return err
+}
+
+// auditEndedSessions writes one session.ended line per session Phoenix ended
+// because of its agent's credential. actor is who caused it.
+func (s *Server) auditEndedSessions(r *http.Request, actor, ip, cause string, ended []*session.Session) {
+	for _, sess := range ended {
+		md := callerAuditMetadata(r)
+		if md == nil {
+			md = map[string]string{}
+		}
+		md["session.agent"], md["cause"] = sess.Agent, cause
+		s.logAudit(s.audit.LogSessionAllowedWithMetadata(actor, "session.ended", sess.ID, ip, sess.ID, md))
+	}
+}
+
+// endNotSaved logs err and answers 500 for session.ErrEndNotSaved: what was
+// asked for is done, but the operator must know the disk is failing.
+func endNotSaved(w http.ResponseWriter, agent, done string, err error) {
+	log.Printf("ERROR: agent %q %s, but %v", agent, done, err)
+	jsonError(w, fmt.Sprintf("agent %s, and its sessions are ended, but that could not be saved; "+
+		"check the server's disk (it retries every minute)", done), http.StatusInternalServerError)
 }
 
 // SetSessionRoles configures the role definitions for session minting.
@@ -278,6 +346,7 @@ type authInfo struct {
 	UsedSession       bool
 	SessionID         string
 	SessionRole       string
+	SessionCredFP     string // fingerprint of the bearer token the session was minted with
 	SessionNamespaces []string
 	SessionActions    []string
 }
@@ -326,6 +395,9 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			}
 			// Extract identity for audit even from expired/revoked tokens
 			if agent, sessID, known := s.sessions.ParseClaimsInsecure(tok); known {
+				if errors.Is(err, session.ErrCredentialChanged) {
+					s.auditEndedSessions(r, "system", ip, "credential_not_current", []*session.Session{{ID: sessID, Agent: agent}})
+				}
 				s.auditLogSessionDenied(r, agent, "session.auth", "", ip, code, sessID)
 			}
 			return nil, &sessionAuthError{code: code, err: err}
@@ -336,6 +408,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			UsedSession:       true,
 			SessionID:         sess.ID,
 			SessionRole:       sess.Role,
+			SessionCredFP:     sess.CredentialFP,
 			SessionNamespaces: sess.Namespaces,
 			SessionActions:    sess.Actions,
 		}
@@ -650,7 +723,13 @@ func (s *Server) checkSessionSealKey(w http.ResponseWriter, r *http.Request, inf
 		return true
 	}
 	sess := s.sessions.Get(info.SessionID)
-	if sess == nil || sess.SealKeyFingerprint == "" {
+	if sess == nil {
+		// Ended since this request logged in. Without the record the seal
+		// key cannot be checked, so never carry on.
+		handleAuthError(w, &sessionAuthError{code: "SESSION_INVALID", err: session.ErrSessionNotFound})
+		return false
+	}
+	if sess.SealKeyFingerprint == "" {
 		return true
 	}
 	header := r.Header.Get("X-Phoenix-Seal-Key")
@@ -1036,9 +1115,16 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 
 	if force {
 		// Try update first; if agent doesn't exist, fall through to add
-		err := s.acl.UpdateAgent(req.Name, req.Token, req.Permissions)
-		if err == nil {
+		err := s.changeAgentCredential(r, agentName, req.Name, req.Token, "token_replaced", func() error {
+			return s.acl.UpdateAgent(req.Name, req.Token, req.Permissions)
+		})
+		notSaved := errors.Is(err, session.ErrEndNotSaved)
+		if err == nil || notSaved {
 			s.auditLogAllowed(r, agentName, "update-agent", req.Name, clientIP(r))
+			if notSaved {
+				endNotSaved(w, req.Name, "updated", err)
+				return
+			}
 			jsonOK(w, map[string]string{"status": "ok", "agent": req.Name, "action": "updated"})
 			return
 		}
@@ -1103,13 +1189,26 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// remove ends the agent's sessions and drops the ACL entry. A failed save
+	// of the ended sessions is reported after the delete is done.
+	var notSaved error
+	remove := func() error {
+		err := s.changeAgentCredential(r, agentName, target, "", "agent_deleted", func() error {
+			return s.acl.RemoveAgent(target)
+		})
+		if errors.Is(err, session.ErrEndNotSaved) {
+			notSaved = err
+			return nil
+		}
+		return err
+	}
 	if s.grants != nil {
 		// Revoke-before-delete (plan section 5): durably revoke the agent's
 		// grants and record a tombstone, then remove the ACL entry.
-		if !s.deleteAgentWithGrants(w, r, agentName, target) {
+		if !s.deleteAgentWithGrants(w, r, agentName, target, remove) {
 			return
 		}
-	} else if err := s.acl.RemoveAgent(target); err != nil {
+	} else if err := remove(); err != nil {
 		if errors.Is(err, acl.ErrAgentNotFound) {
 			jsonError(w, "agent not found", http.StatusNotFound)
 			return
@@ -1120,6 +1219,10 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditLogAllowed(r, agentName, "delete-agent", target, clientIP(r))
+	if notSaved != nil {
+		endNotSaved(w, target, "deleted", notSaved)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "ok", "agent": target, "action": "deleted"})
 }
 
@@ -1717,8 +1820,22 @@ func (s *Server) handleSessionMint(w http.ResponseWriter, r *http.Request) {
 	namespaces := role.Namespaces
 	actions := role.Actions // nil -> store defaults to ["list", "read_value"]
 
-	// Mint session
-	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, sealPubKey, namespaces, actions, bootstrapMethod, ip, ttl)
+	// Mint session, bound to the bearer token this caller logged in with. A
+	// session that mints another (bootstrap_trust "local") passes on its own.
+	credFP := info.BearerFP
+	if info.UsedSession {
+		credFP = info.SessionCredFP
+	}
+	tokenStr, sess, err := s.sessions.Create(req.Role, info.Agent, credFP, sealPubKey, namespaces, actions, bootstrapMethod, ip, ttl)
+	if errors.Is(err, session.ErrCredentialChanged) {
+		// The agent was deleted or its token replaced while this request ran.
+		s.auditDenied(r, info, "session.mint", req.Role, ip, "credential_changed")
+		if info.UsedSession {
+			err = &sessionAuthError{code: "SESSION_INVALID", err: err}
+		}
+		handleAuthError(w, err)
+		return
+	}
 	if err != nil {
 		log.Printf("session mint error: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1796,6 +1913,13 @@ func (s *Server) handleSessionRenew(w http.ResponseWriter, r *http.Request) {
 	tokenStr, renewedSess, err := s.sessions.Renew(info.SessionID, ttl)
 	if err != nil {
 		switch err {
+		case session.ErrCredentialChanged, session.ErrSessionNotFound:
+			// Ended between logging in and here.
+			if err == session.ErrCredentialChanged {
+				s.auditEndedSessions(r, "system", ip, "credential_not_current", []*session.Session{sess})
+			}
+			s.auditLogSessionDenied(r, info.Agent, "session.renew", info.SessionRole, ip, "SESSION_INVALID", info.SessionID)
+			handleAuthError(w, &sessionAuthError{code: "SESSION_INVALID", err: err})
 		case session.ErrSessionRevoked:
 			jsonDenied(w, "access_denied", "SESSION_REVOKED",
 				"session has been revoked",
