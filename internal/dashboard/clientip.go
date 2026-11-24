@@ -33,11 +33,11 @@ func extractClientIP(r *http.Request) string {
 }
 
 // isTLS reports whether the request came over HTTPS, or says a proxy in front
-// did. X-Forwarded-Proto is believed from anyone on purpose: it only ever makes
-// things stricter for whoever sends it (a Secure cookie, no posts from an http
-// page in sameOrigin), so a lie gains nothing, while not believing it would take
-// Secure away from every install behind a proxy that has not set
-// trusted_proxies yet. Use it for nothing that a yes would loosen.
+// did. X-Forwarded-Proto is believed from anyone on purpose: it only affects
+// whoever sends it (a Secure cookie, no posts from an http page in sameOrigin,
+// no plain-HTTP hint on secret pages), so a lie gains nothing, while not
+// believing it would take Secure away from every install behind a proxy that
+// has not set trusted_proxies yet. Use it for nothing a lie could gain from.
 func isTLS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }

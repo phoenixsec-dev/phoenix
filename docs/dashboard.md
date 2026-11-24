@@ -170,9 +170,10 @@ signed-in browsers are not affected). The server log says
 `Dashboard: ignored X-Forwarded-For from <address>` for the first ten peers that
 send the header: if that is your proxy, that is the address to list.
 
-`X-Forwarded-Proto: https` sets the cookie's `Secure` flag whoever sends it.
-That is the only thing it does, and it can only make the sender's own cookie
-stricter.
+`X-Forwarded-Proto: https` is believed whoever sends it: it sets the cookie's
+`Secure` flag, refuses posts from an `http://` page, and leaves out the
+plain-HTTP warning on secret pages. It only affects the sender's own requests,
+so there is nothing to gain from a lie.
 
 The server itself binds to loopback. The API never reads these headers.
 

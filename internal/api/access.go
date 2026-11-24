@@ -723,6 +723,7 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 		Labels: grantLabels(info.Caller),
 		Agent:  info.Agent, Paths: paths, Action: body.Action, Reason: body.Reason, TTL: ttl,
 		SourceIP: ip, AuthMethod: c.AuthMethod, CredentialFP: c.CredentialFP, IssueFP: c.IssueFP,
+		Current: func() bool { return s.sessionCredentialCurrent(info.Agent, info.SessionFP) },
 	})
 	if err != nil {
 		s.auditRequestRejected(r, info, "access_request.create", paths, ip, string(grant.CodeOf(err)))
@@ -786,14 +787,19 @@ func (s *Server) handleAccessRequestGet(w http.ResponseWriter, r *http.Request) 
 	}
 	rq, found := s.grants.GetRequest(r.PathValue("id"))
 	approver := s.isApprover(info)
-	if s.writeLoginEnded(w, r, info) {
-		return // not "an ordinary agent": the name may be another's now
+	visible := found && (approver || rq.Agent == info.Agent)
+	var view map[string]any
+	if visible {
+		view = s.requestView(rq, approver)
 	}
-	if !found || (!approver && rq.Agent != info.Agent) {
+	if s.writeLoginEnded(w, r, info) {
+		return // after the lookups: the name may be another's now
+	}
+	if !visible {
 		writeAccessError(w, CodeNotFound, "request not found", http.StatusNotFound)
 		return
 	}
-	jsonOK(w, s.requestView(rq, approver))
+	jsonOK(w, view)
 }
 
 // handleGrantList: GET /v1/grants[?include=inactive&agent=]. Approvers see

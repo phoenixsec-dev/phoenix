@@ -974,3 +974,28 @@ func TestAlwaysAccessNeedsCurrentToken(t *testing.T) {
 		t.Errorf("after replace: %q, want %q", got, reasonTokenReplaced)
 	}
 }
+
+// The view of one request looks the agent's access up by name, so the login is
+// checked after it was built. The clock runs in the middle of that.
+func TestRequestViewIsCheckedAfterBuilding(t *testing.T) {
+	e := newCredEnv(t)
+	e.srv.SetAccessRequests(config.AccessRequestsSettings{Enabled: true, GrantableActions: []string{"read_value"},
+		RequestTTL: time.Minute, DefaultGrantTTL: time.Minute, MaxGrantTTL: time.Hour})
+	code, body := e.do("POST", "/v1/access-requests", "old-token", `{"paths":["other/b"],"reason":"x"}`)
+	var m struct{ ID string }
+	if json.Unmarshal([]byte(body), &m); code != 201 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var once sync.Once
+	e.srv.now = func() time.Time {
+		once.Do(func() {
+			if err := e.srv.acl.UpdateAgent("worker", "new-token", nil); err != nil {
+				t.Error(err)
+			}
+		})
+		return time.Now()
+	}
+	if code, body := e.do("GET", "/v1/access-requests/"+m.ID, "old-token", ""); code != 401 || strings.Contains(body, "other/b") {
+		t.Errorf("%d %s, want 401", code, body)
+	}
+}

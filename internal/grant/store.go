@@ -497,6 +497,9 @@ type CreateInput struct {
 	CredentialFP string // BearerFingerprint(hash) of the agent's token
 	Labels       Labels // the agent's
 	IssueFP      string // which issue of that token; tells A from A given out again after B
+	// Current reports whether that token is still the agent's. Asked under the
+	// lock. nil = not asked.
+	Current func() bool
 }
 
 // Create files a new pending request. It returns created=true for a new
@@ -545,6 +548,11 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 	}
 	if !s.exist(in.Agent) {
 		return Request{}, false, newErr(CodeUnknownAgent, "agent no longer exists")
+	}
+	if in.Current != nil && !in.Current() {
+		// Replaced while this call was waiting here. Below it would take the
+		// new token's requests for stale ones.
+		return Request{}, false, newErr(CodeCredentialChanged, "this agent's token was replaced; ask again with the new one")
 	}
 	now := s.now()
 	cur := s.snapshot()

@@ -119,8 +119,9 @@ alone until you run install again without it.
   afterwards; they do not prevent it.
 - **If a machine cannot reach Phoenix,** nobody new can log in, and an open session
   keeps running until it can. The timer finds out on its next run.
-- **Rotating an agent's token ends its grant for signing, not its passes.** A pass
-  already issued keeps working until it expires. Revoke the grant to end it now.
+- **Replacing an agent's token ends its passes too.** The machine's check says no
+  to a login approved for the old token, as after a revoke. (Putting the very same
+  token back does not reopen it, except for an approval from before v0.25.0.)
 - **The dashboard login is the approval.** Anyone who has that password can
   approve anything. Do not keep it where an agent can read it.
 - **Root on the Phoenix host beats all of this.** It can read `ssh_ca.key`.
