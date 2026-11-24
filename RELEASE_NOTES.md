@@ -37,7 +37,8 @@ optional in the usage line.
 
 **Upgrading:** update the server first. An older server has no
 `/v1/ssh/machines` and answers 404; `phoenix ssh --list` then says the server
-is too old. Logging in with `phoenix ssh <machine>` still works.
+is too old. Logging in with `phoenix ssh <machine>` still works on servers that
+have SSH logins (v0.20.0 and newer).
 
 ## v0.23.0 (2026-11-24)
 

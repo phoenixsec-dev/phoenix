@@ -120,7 +120,7 @@ func TestSSHList(t *testing.T) {
 // A server from before v0.24.0 has no machine list: say so, not a bare 404.
 func TestSSHListOldServer(t *testing.T) {
 	useMockServer(t, http.NotFound)
-	if err := cmdSSH([]string{"--list"}); err == nil || !strings.Contains(err.Error(), "too old") || strings.Contains(err.Error(), "404") {
+	if err := cmdSSH([]string{"--list"}); err == nil || !strings.Contains(err.Error(), "too old") || !strings.Contains(err.Error(), "update phoenix-server") || strings.Contains(err.Error(), "404") {
 		t.Fatalf("err = %v", err)
 	}
 }
