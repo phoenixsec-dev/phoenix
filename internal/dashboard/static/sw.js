@@ -2,7 +2,7 @@
 // same for everyone and hold no data. Pages, JSON answers and secrets are
 // never stored: they are not on the list, so they go straight to the server.
 
-var CACHE = 'phoenix-static-1';
+var CACHE = 'phoenix-static-2';
 var FILES = [
     '/dashboard/static/style.css',
     '/dashboard/static/dashboard.js',
@@ -25,11 +25,15 @@ var OFFLINE = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' +
 
 // storable says whether an answer really is the static file at path: not a
 // sign-in page a proxy put there, and not marked as not to be stored.
-var TYPES = { css: 'text/css', js: 'javascript', svg: 'image/svg', png: 'image/png', json: 'json' };
+var TYPES = {
+    css: ['text/css'], js: ['text/javascript', 'application/javascript'], svg: ['image/svg+xml'],
+    png: ['image/png'], json: ['application/json']
+};
 function storable(path, r) {
-    var type = r.headers.get('Content-Type') || '', cc = r.headers.get('Cache-Control') || '';
+    var type = (r.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    var cc = (r.headers.get('Cache-Control') || '').toLowerCase();
     return r.ok && r.type === 'basic' && !r.redirected && cc.indexOf('no-store') < 0 &&
-        new URL(r.url).pathname === path && type.indexOf(TYPES[path.split('.').pop()]) >= 0;
+        new URL(r.url).pathname === path && TYPES[path.split('.').pop()].indexOf(type) >= 0;
 }
 
 self.addEventListener('install', function(e) {
@@ -70,7 +74,11 @@ self.addEventListener('fetch', function(e) {
     // A page: from the server only. Offline shows a fixed "can't reach" page.
     if (e.request.mode === 'navigate') {
         e.respondWith(fetch(e.request).catch(function() {
-            return new Response(OFFLINE, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+            return new Response(OFFLINE, { headers: {
+                'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
+                'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
+                'Content-Security-Policy': "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+            } });
         }));
     }
 });

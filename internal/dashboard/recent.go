@@ -34,19 +34,6 @@ func (l dashLogin) recent(now time.Time) bool {
 	return now.Before(l.authAt.Add(recentAuthWindow))
 }
 
-// signedIn reports whether the login with this ID is still signed in. Unlike
-// valid it survives the cookie moving to a new nonce.
-func (lt *loginTable) signedIn(id string, now time.Time) bool {
-	lt.mu.Lock()
-	defer lt.mu.Unlock()
-	for _, l := range lt.byNonce {
-		if l.ID == id {
-			return now.Before(l.Expires)
-		}
-	}
-	return false
-}
-
 // reauthenticate records that the password was typed again for a login and
 // moves the login to a new cookie nonce, so a copy of the old cookie stops
 // working instead of sharing the new window. False if the login has ended.
@@ -90,14 +77,21 @@ func (h *Handler) requireRecent(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// stillSignedIn reports whether the cookie this request was admitted with is
+// still good: not signed out, and not replaced by typing the password again.
+func (h *Handler) stillSignedIn(r *http.Request) bool {
+	l, ok := requestLogin(r)
+	return ok && h.logins.valid(l.nonce, time.Now())
+}
+
 // requestLogin is the login requireRecent admitted this request for.
 func requestLogin(r *http.Request) (dashLogin, bool) {
 	l, ok := r.Context().Value(loginKey{}).(dashLogin)
 	return l, ok
 }
 
-// sameOrigin reports whether a POST came from the dashboard's own pages. It
-// backs up the CSRF token, and SameSite=Strict, which lets sibling subdomains
+// sameOrigin reports whether a POST, login included, came from the dashboard's
+// own pages. It backs up the CSRF token, and SameSite=Strict, which lets sibling subdomains
 // through. Browsers too old to say so with Sec-Fetch-Site still send Origin.
 // A client that sends neither is not a browser another site can drive.
 func sameOrigin(r *http.Request) bool {
@@ -109,7 +103,12 @@ func sameOrigin(r *http.Request) bool {
 		return true
 	}
 	u, err := url.Parse(origin)
-	return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
+	if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+		return false
+	}
+	// An http page must not post to an https dashboard. The other way round is
+	// a TLS proxy that does not say X-Forwarded-Proto.
+	return u.Scheme == "https" || !isTLS(r)
 }
 
 // handleReauth: POST /dashboard/reauth with "password". It takes the same

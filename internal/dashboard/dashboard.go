@@ -261,6 +261,13 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w, r)
+	if r.Method == http.MethodPost && !sameOrigin(r) {
+		if h.deps.Audit != nil {
+			h.deps.Audit.LogDenied("dashboard", "dashboard.csrf", r.URL.Path, extractClientIP(r), "cross_site_request")
+		}
+		http.Error(w, "This request came from another site", http.StatusForbidden)
+		return
+	}
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -403,13 +410,6 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// CSRF check on POST
 		if r.Method == "POST" {
-			if !sameOrigin(r) {
-				if h.deps.Audit != nil {
-					h.deps.Audit.LogDenied("dashboard", "dashboard.csrf", r.URL.Path, extractClientIP(r), "cross_site_request")
-				}
-				http.Error(w, "This request came from another site", http.StatusForbidden)
-				return
-			}
 			formCSRF := r.FormValue("_csrf")
 			if !hmac.Equal([]byte(payload.CSRF), []byte(formCSRF)) {
 				if h.deps.Audit != nil {

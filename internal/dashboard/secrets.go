@@ -140,7 +140,10 @@ func (h *Handler) readOnly() bool {
 // backends' Metadata does not check it, and some would also open a secret
 // under a name that is not listed and so has no policy rule of its own.
 func (h *Handler) secretMeta(path string) (*store.SecretMetadata, error) {
-	if h.deps.Backend == nil || store.ValidatePath(path) != nil {
+	if h.deps.Backend == nil {
+		return nil, errors.New("no secret backend")
+	}
+	if store.ValidatePath(path) != nil {
 		return nil, store.ErrSecretNotFound
 	}
 	paths, err := h.deps.Backend.List(path)
@@ -408,14 +411,18 @@ func (h *Handler) handleSecretValue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reading can be slow (1Password); the login may have ended meanwhile.
-	if l, ok := requestLogin(r); !ok || !h.logins.signedIn(l.ID, time.Now()) {
-		writeError(w, http.StatusUnauthorized, "You are signed out.")
+	if !h.stillSignedIn(r) {
+		h.denySecret(w, r, "read_value", path, "signed_out", "Your sign-in changed. Reload the page.", "dashboard.use", use)
 		return
 	}
 	ip := extractClientIP(r)
 	if err := h.deps.Audit.LogAllowedWithMetadata("dashboard@"+ip, "read_value", path, ip, h.auditMeta(r, "dashboard.use", use)); err != nil {
 		log.Printf("dashboard: audit write failed, value of %q not shown: %v", path, err)
 		writeError(w, http.StatusInternalServerError, "The audit log can't be written, so the value was not shown.")
+		return
+	}
+	if !h.stillSignedIn(r) { // the audit write waits for the disk
+		h.denySecret(w, r, "read_value", path, "signed_out", "Your sign-in changed. Reload the page.", "dashboard.use", use)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"value": secret.Value})

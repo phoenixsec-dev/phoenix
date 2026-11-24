@@ -230,6 +230,20 @@ func TestValueRefusesForgedRequests(t *testing.T) {
 			t.Errorf("Origin %s: logout answered %d", origin, w.Code)
 		}
 	}
+	// https dashboard (behind a TLS proxy), http page.
+	try("http Origin on https", e.do("POST", "/dashboard/secrets/value", form, "Origin", "http://example.com", "X-Forwarded-Proto", "https"))
+	if w := e.do("POST", "/dashboard/secrets/value", form, "Origin", "https://example.com", "X-Forwarded-Proto", "https"); w.Code != http.StatusOK {
+		t.Errorf("own https request refused: %d", w.Code)
+	}
+	// The login form too, and a forged one costs no attempt.
+	for i := 0; i < 2*loginMaxFailures; i++ {
+		if w := e.do("POST", "/dashboard/login", url.Values{"credential": {"wrong"}}, "Sec-Fetch-Site", "cross-site"); w.Code != http.StatusForbidden {
+			t.Fatalf("cross-site login: %d", w.Code)
+		}
+	}
+	if w := e.do("POST", "/dashboard/login", url.Values{"credential": {"testpass"}}); w.Header().Get("Location") != "/dashboard/" {
+		t.Errorf("login after forged attempts: %s", w.Header().Get("Location"))
+	}
 	for _, h := range [][]string{{"Sec-Fetch-Site", "same-origin"}, {"Origin", "https://example.com"}} { // httptest's host
 		if w := e.do("POST", "/dashboard/secrets/value", form, h...); w.Code != http.StatusOK {
 			t.Errorf("%v: own request refused: %d", h, w.Code)
@@ -542,8 +556,18 @@ func (b *hookBackend) Metadata(path string) (*store.SecretMetadata, error) {
 	return b.SecretBackend.Metadata("shop/petstore")
 }
 
-// A login that ends while the value is being read gets nothing; one that
-// moves to a new cookie meanwhile does, and the audit line still names it.
+// signOutWriter is an audit log during whose writes every login ends.
+type signOutWriter struct{ h *Handler }
+
+func (w signOutWriter) Write(p []byte) (int, error) {
+	for _, l := range w.h.logins.list(time.Now()) {
+		w.h.logins.removeByID(l.ID)
+	}
+	return len(p), nil
+}
+
+// A login that ends, or moves to a new cookie, while the value is being read
+// or the audit line written gets nothing, and the audit still names it.
 func TestLoginEndsDuringSlowRead(t *testing.T) {
 	e := newSecretsEnv(t, config.DashboardConfig{}, "")
 	hook := &hookBackend{SecretBackend: e.h.deps.Backend}
@@ -554,10 +578,10 @@ func TestLoginEndsDuringSlowRead(t *testing.T) {
 		e.h.logins.reauthenticate(payloadFromCookie(t, e.h, e.cookie).Nonce, "moved", time.Now())
 		hook.onGet = nil
 	}
-	if w := e.showValue(); w.Code != http.StatusOK {
+	if w := e.showValue(); w.Code == http.StatusOK || strings.Contains(w.Body.String(), fakeValue) {
 		t.Fatalf("cookie moved during the read: %d", w.Code)
 	}
-	if entry := findAuditEntry(parseAuditEntries(e.audit), "read_value", "allowed"); entry == nil || entry.Metadata["dashboard.login"] != id {
+	if entry := findAuditEntry(parseAuditEntries(e.audit), "read_value", "denied"); entry == nil || entry.Metadata["dashboard.login"] != id {
 		t.Errorf("audit entry: %+v", entry)
 	}
 
@@ -569,11 +593,19 @@ func TestLoginEndsDuringSlowRead(t *testing.T) {
 			e.h.logins.removeByID(l.ID)
 		}
 	}
-	if w := e.showValue(); w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), fakeValue) {
+	if w := e.showValue(); w.Code == http.StatusOK || strings.Contains(w.Body.String(), fakeValue) {
 		t.Errorf("signed out during the read: %d", w.Code)
 	}
 	if findAuditEntry(parseAuditEntries(e.audit), "read_value", "allowed") != nil {
 		t.Error("an unserved read was audited as allowed")
+	}
+
+	hook.onGet = nil
+	e.cookie = login(t, e.h)
+	e.csrf = csrfFromCookie(t, e.h, e.cookie)
+	e.h.deps.Audit = audit.NewWriterLogger(signOutWriter{e.h})
+	if w := e.showValue(); w.Code == http.StatusOK || strings.Contains(w.Body.String(), fakeValue) {
+		t.Errorf("signed out during the audit write: %d", w.Code)
 	}
 }
 
