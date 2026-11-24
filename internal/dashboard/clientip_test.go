@@ -54,37 +54,30 @@ func TestClientAddress(t *testing.T) {
 		trusted []netip.Prefix
 		peer    string
 		xff     []string
-		proto   []string
 		ip      string
-		https   bool
 	}{
-		"unset trusts nobody":               {nil, "127.0.0.1:1", []string{"198.51.100.1"}, []string{"https"}, "127.0.0.1", false},
-		"stranger":                          {proxies, "192.0.2.1:1", []string{"198.51.100.1"}, []string{"https"}, "192.0.2.1", false},
-		"stranger IPv6":                     {proxies, "[2001:db8::1]:1", []string{"198.51.100.1"}, nil, "2001:db8::1", false},
-		"proxy":                             {proxies, "10.0.0.1:1", []string{"198.51.100.1"}, []string{"https"}, "198.51.100.1", true},
-		"proxy over IPv6":                   {proxies, "[::1]:1", []string{"2001:db8::7"}, []string{"HTTPS"}, "2001:db8::7", true},
-		"proxy as IPv4-mapped":              {proxies, "[::ffff:10.0.0.1]:1", []string{"198.51.100.1"}, nil, "198.51.100.1", false},
-		"visitor's own value is ignored":    {proxies, "10.0.0.1:1", []string{"203.0.113.9, 198.51.100.1"}, nil, "198.51.100.1", false},
-		"visitor's own header line too":     {proxies, "10.0.0.1:1", []string{"203.0.113.9", "198.51.100.1"}, []string{"https", "http"}, "198.51.100.1", false},
-		"two proxies":                       {proxies, "10.0.0.1:1", []string{"203.0.113.9, 198.51.100.1, 10.0.0.2"}, nil, "198.51.100.1", false},
-		"only proxies":                      {proxies, "10.0.0.1:1", []string{"10.0.0.3, 10.0.0.2"}, nil, "10.0.0.3", false},
-		"no header":                         {proxies, "10.0.0.1:1", nil, nil, "10.0.0.1", false},
-		"not an address":                    {proxies, "10.0.0.1:1", []string{"198.51.100.1, unknown, 10.0.0.2"}, nil, "10.0.0.2", false},
-		"hop with port":                     {proxies, "10.0.0.1:1", []string{"198.51.100.1:4711"}, nil, "198.51.100.1", false},
-		"IPv6 hop with port":                {proxies, "10.0.0.1:1", []string{"[2001:db8::7]:4711"}, nil, "2001:db8::7", false},
-		"trusted but plain http to visitor": {proxies, "10.0.0.1:1", []string{"198.51.100.1"}, []string{"http"}, "198.51.100.1", false},
+		"unset trusts nobody":            {nil, "127.0.0.1:1", []string{"198.51.100.1"}, "127.0.0.1"},
+		"stranger":                       {proxies, "192.0.2.1:1", []string{"198.51.100.1"}, "192.0.2.1"},
+		"stranger IPv6":                  {proxies, "[2001:db8::1]:1", []string{"198.51.100.1"}, "2001:db8::1"},
+		"proxy":                          {proxies, "10.0.0.1:1", []string{"198.51.100.1"}, "198.51.100.1"},
+		"proxy over IPv6":                {proxies, "[::1]:1", []string{"2001:db8::7"}, "2001:db8::7"},
+		"proxy as IPv4-mapped":           {proxies, "[::ffff:10.0.0.1]:1", []string{"198.51.100.1"}, "198.51.100.1"},
+		"visitor's own value is ignored": {proxies, "10.0.0.1:1", []string{"203.0.113.9, 198.51.100.1"}, "198.51.100.1"},
+		"visitor's own header line too":  {proxies, "10.0.0.1:1", []string{"203.0.113.9", "198.51.100.1"}, "198.51.100.1"},
+		"two proxies":                    {proxies, "10.0.0.1:1", []string{"203.0.113.9, 198.51.100.1, 10.0.0.2"}, "198.51.100.1"},
+		"only proxies":                   {proxies, "10.0.0.1:1", []string{"10.0.0.3, 10.0.0.2"}, "10.0.0.3"},
+		"no header":                      {proxies, "10.0.0.1:1", nil, "10.0.0.1"},
+		"not an address":                 {proxies, "10.0.0.1:1", []string{"198.51.100.1, unknown, 10.0.0.2"}, "10.0.0.2"},
+		"hop with port":                  {proxies, "10.0.0.1:1", []string{"198.51.100.1:4711"}, "198.51.100.1"},
+		"IPv6 hop with port":             {proxies, "10.0.0.1:1", []string{"[2001:db8::7]:4711"}, "2001:db8::7"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := httptest.NewRequest("GET", "/dashboard/", nil)
 			r.RemoteAddr = c.peer
 			r.Header["X-Forwarded-For"] = c.xff
-			r.Header["X-Forwarded-Proto"] = c.proto
 			r = withClient(r, c.trusted)
 			if got := extractClientIP(r); got != c.ip {
 				t.Errorf("address = %q, want %q", got, c.ip)
-			}
-			if got := isTLS(r); got != c.https {
-				t.Errorf("https = %v, want %v", got, c.https)
 			}
 		})
 	}

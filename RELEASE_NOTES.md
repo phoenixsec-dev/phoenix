@@ -39,17 +39,19 @@ change on the machines.
 
 Any visitor could send their own `X-Forwarded-For`, use a new one for each
 guess to dodge the login lockout, and choose the address shown beside a login
-or an approval. `X-Forwarded-Proto` was believed the same way. The dashboard now uses the
-address the connection comes from. The API always did.
+or an approval. The dashboard now uses the address the connection comes from.
+The API always did. `X-Forwarded-Proto: https` is still believed from anyone,
+on purpose: all it does is give the sender's own login cookie its `Secure`
+flag, so a lie gains nothing, and no install behind a proxy loses that flag.
 
 **Action needed only if your dashboard is behind a reverse proxy:** add the
 proxy's address to the new `dashboard.trusted_proxies` and restart, for example
 `"trusted_proxies": ["127.0.0.1"]` for a proxy on the same host. Until you do,
-the dashboard works and nobody is signed out or refused, but logins and
-approvals show the proxy's address, the cookie has no `Secure` flag, and
-everyone behind the proxy shares one login lockout (a wait of up to 60 seconds
-after repeated wrong passwords). The log names the address to add:
-`Dashboard: ignored X-Forwarded headers from <address>`. A config with the
+the dashboard works (as after any restart, sign in again once), but logins and
+approvals show the proxy's address, and everyone behind the proxy shares one
+login lockout (a wait of up to 60 seconds after repeated wrong passwords). The
+log names the address to add, for the first ten peers that send the header:
+`Dashboard: ignored X-Forwarded-For from <address>`. A config with the
 setting still loads on older versions, which ignore it. Details:
 [Dashboard](docs/dashboard.md#network-access-tls-reverse-proxy).
 

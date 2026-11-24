@@ -727,6 +727,8 @@ func TestTrustedProxies(t *testing.T) {
 		cfg.Dashboard.TrustedProxies = []string{bad}
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_proxies") {
 			t.Errorf("%q: %v, want a trusted_proxies error", bad, err)
+		} else if bad == "proxy.example.net" && strings.Contains(err.Error(), bad) {
+			t.Errorf("the error quotes what was pasted: %v", err)
 		}
 	}
 }

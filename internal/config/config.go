@@ -188,8 +188,8 @@ type DashboardConfig struct {
 	PasswordHash string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
 	SessionTTL   string `json:"session_ttl,omitempty"`   // default "4h"
 	// TrustedProxies are the reverse proxies (IPs or CIDRs) whose
-	// X-Forwarded-For and X-Forwarded-Proto the dashboard believes. Unset =
-	// nobody: the address shown is the one the connection comes from.
+	// X-Forwarded-For the dashboard believes. Unset = nobody: the address
+	// shown is the one the connection comes from.
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 }
 
@@ -197,7 +197,7 @@ type DashboardConfig struct {
 // which would let any visitor choose the address Phoenix records for them.
 func (c DashboardConfig) TrustedProxyPrefixes() ([]netip.Prefix, error) {
 	var out []netip.Prefix
-	for _, s := range c.TrustedProxies {
+	for i, s := range c.TrustedProxies {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
 			var a netip.Addr
@@ -208,7 +208,8 @@ func (c DashboardConfig) TrustedProxyPrefixes() ([]netip.Prefix, error) {
 		}
 		switch {
 		case err != nil:
-			return nil, fmt.Errorf("dashboard.trusted_proxies: %q is not an IP address or CIDR", s)
+			// Not quoted: something pasted here by mistake must not reach the log.
+			return nil, fmt.Errorf("dashboard.trusted_proxies: entry %d is not an IP address or CIDR", i+1)
 		case p.Bits() == 0:
 			return nil, fmt.Errorf("dashboard.trusted_proxies: %q trusts everyone; list your proxy's own address", s)
 		case p.Addr().Is4In6():

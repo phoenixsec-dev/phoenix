@@ -11,55 +11,49 @@ import (
 )
 
 // Who is the visitor? The address the connection comes from, unless that is a
-// reverse proxy listed in dashboard.trusted_proxies: only then are the
-// X-Forwarded-For and X-Forwarded-Proto headers read. Anyone can send those
-// headers, so believing a stranger's would let a visitor dodge the login
-// lockout and choose the address shown beside a login or an approval.
-
-// client is what the dashboard knows about where a request came from.
-type client struct {
-	ip    string
-	https bool
-}
+// reverse proxy listed in dashboard.trusted_proxies: only then is
+// X-Forwarded-For read. Anyone can send that header, so believing a stranger's
+// would let a visitor dodge the login lockout and choose the address shown
+// beside a login or an approval.
 
 type clientKey struct{}
 
-// withClient works out the client once and attaches it to the request.
+// withClient works out the visitor's address once and attaches it to the request.
 func withClient(r *http.Request, trusted []netip.Prefix) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), clientKey{}, findClient(r, trusted)))
 }
 
-// clientOf returns what withClient found, or, without it, the socket's view.
-func clientOf(r *http.Request) client {
-	if c, ok := r.Context().Value(clientKey{}).(client); ok {
-		return c
+// extractClientIP is the visitor's address, for the login lockout and the
+// audit log. Without withClient it is the socket's.
+func extractClientIP(r *http.Request) string {
+	if ip, ok := r.Context().Value(clientKey{}).(string); ok {
+		return ip
 	}
 	return findClient(r, nil)
 }
 
-// extractClientIP is the visitor's address, for the login lockout and the
-// audit log.
-func extractClientIP(r *http.Request) string { return clientOf(r).ip }
+// isTLS reports whether the login cookie gets its Secure flag: the request came
+// over HTTPS, or says a proxy in front did. X-Forwarded-Proto is believed from
+// anyone on purpose. It can only make the sender's own cookie stricter, so a
+// lie gains nothing, while not believing it would take Secure away from every
+// install behind a proxy that has not set trusted_proxies yet. It must never
+// decide anything else.
+func isTLS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
 
-// isTLS reports whether the visitor reached the dashboard over HTTPS, directly
-// or through a trusted proxy.
-func isTLS(r *http.Request) bool { return clientOf(r).https }
-
-// findClient reads the forwarded headers only when the peer is trusted.
-// Proxies append to X-Forwarded-For, so it is walked from the right: the first
-// hop that is not a trusted proxy is the visitor, and everything left of it is
-// whatever the visitor chose to send.
-func findClient(r *http.Request, trusted []netip.Prefix) client {
+// findClient reads X-Forwarded-For only when the peer is trusted. Proxies
+// append to it, so it is walked from the right: the first hop that is not a
+// trusted proxy is the visitor, and everything left of it is whatever the
+// visitor chose to send.
+func findClient(r *http.Request, trusted []netip.Prefix) string {
 	peer, ok := parseHop(r.RemoteAddr)
 	if !ok {
-		return client{ip: r.RemoteAddr, https: r.TLS != nil}
+		return r.RemoteAddr
 	}
-	c := client{ip: peer.String(), https: r.TLS != nil}
+	ip := peer.String()
 	if !contains(trusted, peer) {
-		return c
-	}
-	if protos := r.Header.Values("X-Forwarded-Proto"); len(protos) > 0 && strings.EqualFold(protos[len(protos)-1], "https") {
-		c.https = true
+		return ip
 	}
 	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
 	for i := len(hops) - 1; i >= 0; i-- {
@@ -67,12 +61,12 @@ func findClient(r *http.Request, trusted []netip.Prefix) client {
 		if !ok {
 			break
 		}
-		c.ip = hop.String()
+		ip = hop.String()
 		if !contains(trusted, hop) {
 			break
 		}
 	}
-	return c
+	return ip
 }
 
 // parseHop parses an address with or without a port, in one spelling per
@@ -105,7 +99,7 @@ type proxyHints struct {
 const maxProxyHints = 10
 
 func (p *proxyHints) check(r *http.Request, trusted []netip.Prefix) {
-	if r.Header.Get("X-Forwarded-For") == "" && r.Header.Get("X-Forwarded-Proto") == "" {
+	if r.Header.Get("X-Forwarded-For") == "" {
 		return
 	}
 	peer, ok := parseHop(r.RemoteAddr)
@@ -121,6 +115,6 @@ func (p *proxyHints) check(r *http.Request, trusted []netip.Prefix) {
 		p.seen = map[string]bool{}
 	}
 	p.seen[peer.String()] = true
-	log.Printf("Dashboard: ignored X-Forwarded headers from %s. If that is your own reverse proxy, "+
-		"add it to dashboard.trusted_proxies and restart; if not, someone sent them by hand.", peer)
+	log.Printf("Dashboard: ignored X-Forwarded-For from %s. If that is your own reverse proxy, "+
+		"add it to dashboard.trusted_proxies and restart; if not, someone sent it by hand.", peer)
 }

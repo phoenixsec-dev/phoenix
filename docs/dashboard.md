@@ -107,8 +107,8 @@ Browser --[HTTPS]--> Reverse Proxy --[HTTP]--> Phoenix (127.0.0.1:9090)
 ```
 
 List the proxy's address, as Phoenix sees it, in `dashboard.trusted_proxies`,
-and have the proxy set two headers (nginx shown; Caddy, NPM and Traefik send
-both by default):
+and have the proxy set two headers (nginx shown; most proxies send both by
+default):
 
 ```json
 { "dashboard": { "trusted_proxies": ["127.0.0.1"] } }
@@ -120,20 +120,30 @@ proxy_set_header X-Forwarded-Proto $scheme;
 ```
 
 Entries are IP addresses or CIDRs (host names and `0.0.0.0/0` are refused).
-Use `127.0.0.1` (and `::1`) for a proxy on the same host, the proxy's own
-address for one on another host, and the Docker network's range or gateway
-(often `172.17.0.1`) for a published container port. With two proxies in a row,
-list both. Phoenix reads the two headers only from a listed address, and takes
-the right-most address in `X-Forwarded-For` that is not itself listed, so a
-visitor cannot choose it. Restart after changing it.
+Use `127.0.0.1` (and `::1`) for a proxy on the same host and the proxy's own
+address for one on another host. With two proxies in a row, list both. Phoenix
+reads `X-Forwarded-For` only from a listed address, and takes the right-most
+address in it that is not itself listed, so a visitor cannot choose it. Restart
+after changing it.
+
+**List only addresses that nobody but your proxy can connect from.** Whoever
+connects from a listed address can name any address for themselves. In Docker,
+give the proxy a fixed address on a network it shares with Phoenix and list
+that one address, not the whole network: other containers are on it too. Do not
+list a Docker gateway such as `172.17.0.1` if the port is also published to
+visitors directly, because they appear under the same address.
 
 **Without this setting everything still works**, but Phoenix cannot tell
-visitors apart: logins and approvals show the proxy's address, the cookie has
-no `Secure` flag, and everyone behind the proxy shares one login lockout, so one
-person's wrong passwords can make the others wait (up to 60 seconds since the last wrong password;
+visitors apart: logins and approvals show the proxy's address, and everyone
+behind the proxy shares one login lockout, so one person's wrong passwords can
+make the others wait (up to 60 seconds since the last wrong password;
 signed-in browsers are not affected). The server log says
-`Dashboard: ignored X-Forwarded headers from <address>`: if that is your proxy,
-that is the address to list.
+`Dashboard: ignored X-Forwarded-For from <address>` for the first ten peers that
+send the header: if that is your proxy, that is the address to list.
+
+`X-Forwarded-Proto: https` sets the cookie's `Secure` flag whoever sends it.
+That is the only thing it does, and it can only make the sender's own cookie
+stricter.
 
 The server itself binds to loopback. The API never reads these headers.
 
@@ -174,7 +184,7 @@ Add the hash to your server config:
 | `enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `password_hash` | `string` | bcrypt hash of operator password |
 | `session_ttl` | `string` | Browser session lifetime (default `4h`) |
-| `trusted_proxies` | `[]string` | Reverse proxies (IPs or CIDRs) whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed. Unset: nobody. See [TLS reverse proxy](#network-access-tls-reverse-proxy) |
+| `trusted_proxies` | `[]string` | Reverse proxies (IPs or CIDRs) whose `X-Forwarded-For` is believed. Unset: nobody. See [TLS reverse proxy](#network-access-tls-reverse-proxy) |
 
 `password_hash` is required (generate it with `phoenix-server
 --hash-password`). The old `pin` field was removed: it stored a short
