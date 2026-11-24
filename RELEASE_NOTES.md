@@ -94,6 +94,9 @@ that dies halfway can do to it. Nothing to configure; what changed:
   the grants and sessions files were checked, and not against the config file,
   TLS keys or the SSH key. The server now refuses to start, and
   `--check-config` fails, when a file it writes is also another of its files.
+- **`--init` in a directory without `master.key`** (the key kept elsewhere, or
+  lost) replaced `config.json` and the CA and server keys there. It now refuses
+  if any file it would write, or `store.json`, is already there.
 
 ## v0.24.0 (2026-11-24)
 

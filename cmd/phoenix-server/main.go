@@ -430,11 +430,20 @@ func runInit(dir, passphrase string) error {
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
+	// Never replace anything, not only the key: a store, CA or config here is
+	// one nobody can make again. Lstat, so a link that leads nowhere counts.
+	for _, name := range []string{"master.key", "store.json", "acl.json", "config.json", "ca.crt", "ca.key", "server.crt", "server.key"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("%s already exists — refusing to overwrite. --init is for a new directory; "+
+				"to start over, move the old files away first", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+
 	// Generate master key
 	keyPath := filepath.Join(dir, "master.key")
-	if _, err := os.Stat(keyPath); err == nil {
-		return fmt.Errorf("master key already exists at %s — refusing to overwrite", keyPath)
-	}
 	if passphrase != "" {
 		key, err := crypto.GenerateKey()
 		if err != nil {
@@ -525,7 +534,7 @@ func runInit(dir, passphrase string) error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	if err := os.WriteFile(cfgPath, cfgData, 0600); err != nil {
+	if err := fsutil.WriteFileAtomic(cfgPath, cfgData, 0600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 	fmt.Printf("Created config: %s\n", cfgPath)
