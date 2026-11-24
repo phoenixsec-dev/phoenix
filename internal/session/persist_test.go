@@ -2,11 +2,15 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // openTestStore opens a store backed by a sessions file in dir, signing with
@@ -262,5 +266,33 @@ func TestEndedSessionsSavedByCleanupAfterFailedSave(t *testing.T) {
 	s.cleanup()
 	if n := openTestStore(t, path, testSigningKey(t)).ActiveCount(); n != 0 {
 		t.Errorf("%d sessions after restart, want 0", n)
+	}
+}
+
+// A save whose directory sync failed may not survive a power cut: a revoke
+// reports it, and cleanup tries again.
+func TestDirSyncFailureCountsAsUnsaved(t *testing.T) {
+	s := openTestStore(t, filepath.Join(t.TempDir(), "role-sessions.json"), testSigningKey(t))
+	if reflect.ValueOf(s.writeFile).Pointer() != reflect.ValueOf(fsutil.WriteFileAtomicStrict).Pointer() {
+		t.Error("sessions are not saved with fsutil.WriteFileAtomicStrict")
+	}
+	_, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.writeFile = func(p string, data []byte, perm os.FileMode) error {
+		return fsutil.WriteFileAtomicStrictOps(p, data, perm, fsutil.AtomicOps{SyncDir: func(string) error { return errors.New("no sync") }})
+	}
+	if err := s.Revoke(sess.ID); !errors.Is(err, fsutil.ErrDirSyncFailed) {
+		t.Fatalf("Revoke: %v, want ErrDirSyncFailed", err)
+	}
+	s.cleanup()
+	if !s.unsaved {
+		t.Error("a failed retry must stay pending")
+	}
+	s.writeFile = fsutil.WriteFileAtomicStrict
+	s.cleanup()
+	if s.unsaved {
+		t.Error("cleanup did not retry the save")
 	}
 }

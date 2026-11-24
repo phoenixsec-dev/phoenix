@@ -120,7 +120,10 @@ agent's token. Every use, renewal included, checks this.
 - `--force` with the **same** token only changes permissions, so sessions carry
   on (permissions are checked on every request anyway).
 - A token changed by editing the ACL file takes effect at the next start; the
-  old token's sessions end then (the log says how many).
+  old token's sessions end then (the log says how many). A start with sessions
+  disabled ends none: if you then edit the same old token back in before enabling
+  sessions again, its unexpired sessions work again, as the token does. Use
+  `phoenix agent` commands instead, which always issue a new credential.
 - Each token the server issues gets a random `credential_id` in the ACL file, and
   the session is bound to both. So a token that was taken away and given out
   again is a new credential: its old sessions stay dead, also if the change
@@ -288,7 +291,7 @@ Sessions survive a server restart:
   the new settings. Sessions of unchanged roles carry on.
 - Sessions saved by v0.23.0 carry no token fingerprint. They end at the first
   start on a newer version (the log says how many); clients mint new ones.
-- The path is reserved. The server refuses to start if another Phoenix file
+- The path is reserved. With sessions enabled, the server refuses to start if another Phoenix file
   (secrets, master key, audit log, grants file) is configured there, or if a
   file at that path is not a sessions file; it never moves or overwrites it.
   A damaged sessions file can simply be deleted.

@@ -635,19 +635,21 @@ func (e *credEnv) widen() {
 // A request already running with an old session never uses permissions that
 // only the replacement token was given, and is told its session ended.
 func TestRunningRequestCannotUseReplacementPermissions(t *testing.T) {
-	for _, path := range []string{"/v1/secrets/other/", "/v1/metadata/other/"} {
-		t.Run(path, func(t *testing.T) {
-			e := newCredEnv(t)
-			e.wideRole()
-			sess := e.mint("old-token")
-			var once sync.Once
-			ran := false
-			e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(func() { ran = true; e.widen() }) }}
-			code, body := e.do("GET", path, sess, "")
-			if !ran || code != 401 || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other/b") {
-				t.Errorf("ran %v, %d %s, want 401 SESSION_INVALID", ran, code, body)
-			}
-		})
+	for _, path := range []string{"/v1/secrets/other/", "/v1/metadata/other/", "/v1/secrets/empty/", "/v1/metadata/empty/"} {
+		for how, change := range map[string]func(*credEnv){"replace": (*credEnv).widen, "delete": (*credEnv).remove} {
+			t.Run(path+" "+how, func(t *testing.T) {
+				e := newCredEnv(t)
+				e.wideRole()
+				sess := e.mint("old-token")
+				var once sync.Once
+				ran := false
+				e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(func() { ran = true; change(e) }) }}
+				code, body := e.do("GET", path, sess, "")
+				if !ran || code != 401 || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other/b") {
+					t.Errorf("ran %v, %d %s, want 401 SESSION_INVALID", ran, code, body)
+				}
+			})
+		}
 	}
 	t.Run("resolve", func(t *testing.T) {
 		e := newCredEnv(t)

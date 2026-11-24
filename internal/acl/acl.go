@@ -178,16 +178,23 @@ func (a *ACL) saveLocked() error {
 
 // Authenticate verifies a bearer token and returns the agent name.
 func (a *ACL) Authenticate(token string) (string, error) {
+	name, _, err := a.AuthenticateAgent(token)
+	return name, err
+}
+
+// AuthenticateAgent is Authenticate that also returns the agent record the
+// token matched, as it was at that moment.
+func (a *ACL) AuthenticateAgent(token string) (string, *Agent, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	hash := crypto.HashToken(token)
 	for name, agent := range a.config.Agents {
 		if agent.TokenHash == hash {
-			return name, nil
+			return name, &agent, nil
 		}
 	}
-	return "", ErrUnauthorized
+	return "", nil, ErrUnauthorized
 }
 
 // Authorize checks if an agent is allowed to perform an action on a path.

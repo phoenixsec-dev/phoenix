@@ -416,16 +416,12 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 	if tok == "" {
 		return nil, fmt.Errorf("no authentication credentials provided")
 	}
-	agent, err := s.acl.Authenticate(tok)
+	agent, record, err := s.acl.AuthenticateAgent(tok)
 	if err != nil {
 		s.authRL.recordFailure(ip)
 		return nil, err
 	}
 	s.authRL.recordSuccess(ip)
-	sessionFP := ""
-	if a, err := s.acl.GetAgent(agent); err == nil && a.TokenHash == crypto.HashToken(tok) {
-		sessionFP = sessionCredentialFP(a)
-	}
 	return &authInfo{
 		Agent:      agent,
 		UsedBearer: true,
@@ -433,7 +429,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		// Fingerprint of the hash that just matched, so a grant is bound to
 		// this exact token (after rotation the old grants match nothing).
 		BearerFP:  grant.BearerFingerprint(crypto.HashToken(tok)),
-		SessionFP: sessionFP,
+		SessionFP: sessionCredentialFP(record),
 	}, nil
 }
 
@@ -706,7 +702,7 @@ func (s *Server) checkSessionAction(w http.ResponseWriter, r *http.Request, info
 // baseAccessReason is the authorization check WITHOUT grants: session scope,
 // session action and the ACL for session callers; the ACL for
 // everyone else. It returns "" when allowed, else "session_scope",
-// "session_action", "acl" or a SESSION_ code (sessionEndedReason). dataAccess (access.go) layers grants on top;
+// "session_action", "acl" or a SESSION_ code (sessionEnded). dataAccess (access.go) layers grants on top;
 // handlePolicyCheck uses this directly because grants never unseal.
 func (s *Server) baseAccessReason(info *authInfo, path, sessionAction string, aclAction acl.Action) string {
 	if info.UsedSession {
@@ -724,18 +720,18 @@ func (s *Server) baseAccessReason(info *authInfo, path, sessionAction string, ac
 	// after it said yes. A token change and the ending of its sessions are one
 	// step for this check, so an old session can never use permissions given
 	// to a new token.
+	return s.sessionEnded(info)
+}
+
+// sessionEnded returns the SESSION_ code if the caller's session stopped being
+// valid since it logged in, else "" (also for callers without a session).
+func (s *Server) sessionEnded(info *authInfo) string {
 	if info.UsedSession {
 		if err := s.sessions.Check(info.SessionID); err != nil {
 			return sessionErrorCode(err)
 		}
 	}
 	return ""
-}
-
-// sessionEndedReason reports whether an access reason means the caller's
-// session is no longer valid, rather than that it may not do this.
-func sessionEndedReason(reason string) bool {
-	return reason == "SESSION_INVALID" || reason == "SESSION_REVOKED" || reason == "SESSION_EXPIRED"
 }
 
 // checkSessionSealKey verifies the request seal key matches the session binding.
@@ -855,12 +851,7 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		visible := []string{}
 		for _, p := range allPaths {
 			// List never consults grants: name visibility is ACL-only.
-			reason := s.baseAccessReason(info, p, "list", acl.ActionList)
-			if sessionEndedReason(reason) {
-				s.writeDataDenial(w, r, info, "list", path, ip, reason)
-				return
-			}
-			if reason != "" {
+			if s.baseAccessReason(info, p, "list", acl.ActionList) != "" {
 				continue
 			}
 			// Attestation check: hide paths the caller can't attest for
@@ -868,6 +859,11 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			visible = append(visible, p)
+		}
+		// Not a short list: say so if the session ended meanwhile.
+		if reason := s.sessionEnded(info); reason != "" {
+			s.writeDataDenial(w, r, info, "list", path, ip, reason)
+			return
 		}
 		s.auditAllowed(r, info, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"paths": visible})

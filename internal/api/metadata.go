@@ -96,12 +96,7 @@ func (s *Server) handleSecretMetadata(w http.ResponseWriter, r *http.Request) {
 		out := []secretInfo{}
 		for _, p := range allPaths {
 			// Same visibility as the list route: ACL only, then attestation.
-			reason := s.baseAccessReason(info, p, "list", acl.ActionList)
-			if sessionEndedReason(reason) {
-				s.writeDataDenial(w, r, info, "list", path, ip, reason)
-				return
-			}
-			if reason != "" {
+			if s.baseAccessReason(info, p, "list", acl.ActionList) != "" {
 				continue
 			}
 			if s.attestFull(r, p, info, sealKeyValidated) != nil {
@@ -120,6 +115,11 @@ func (s *Server) handleSecretMetadata(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			out = append(out, newSecretInfo(p, m))
+		}
+		// Not a short list: say so if the session ended meanwhile.
+		if reason := s.sessionEnded(info); reason != "" {
+			s.writeDataDenial(w, r, info, "list", path, ip, reason)
+			return
 		}
 		s.auditAllowed(r, info, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"secrets": out})

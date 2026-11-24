@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 const (
@@ -33,9 +36,11 @@ type Store struct {
 	// credentialCurrent is set by BindCredentials; nil refuses every session.
 	credentialCurrent func(agent, credentialFP string) bool
 	unsaved           bool // the last save failed; cleanup retries it
-	defaultTTL        time.Duration
-	stopCh            chan struct{}
-	stopped           bool
+	// writeFile saves the sessions file; tests replace it to fail.
+	writeFile  func(path string, data []byte, perm os.FileMode) error
+	defaultTTL time.Duration
+	stopCh     chan struct{}
+	stopped    bool
 }
 
 // NewStore creates a memory-only session store with a random signing key and
@@ -75,6 +80,7 @@ func OpenStore(opts Options) (*Store, error) {
 		signingKey:       key,
 		path:             opts.Path,
 		roleFingerprints: opts.RoleFingerprints,
+		writeFile:        fsutil.WriteFileAtomicStrict,
 		defaultTTL:       defaultTTL,
 		stopCh:           make(chan struct{}),
 	}

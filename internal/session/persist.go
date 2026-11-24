@@ -9,8 +9,6 @@ import (
 	"log"
 	"os"
 	"time"
-
-	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // signingKeyLabel is the fixed HKDF label for the session signing key.
@@ -114,7 +112,8 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("encoding sessions file: %w", err)
 	}
-	if err := fsutil.WriteFileAtomic(s.path, data, 0600); err != nil {
+	// Strict: a revoke reported as done must not be lost in a power cut.
+	if err := s.writeFile(s.path, data, 0600); err != nil {
 		return fmt.Errorf("saving sessions file: %w", err)
 	}
 	s.unsaved = false
