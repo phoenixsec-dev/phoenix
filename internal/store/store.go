@@ -323,7 +323,23 @@ func (s *Store) Set(path, value, createdBy, description string, tags []string) e
 		Metadata:  meta,
 	}
 
-	return s.save()
+	return s.saveOrUndo(path, existing, exists)
+}
+
+// saveOrUndo saves a change to one secret. If that fails the secret is put
+// back as it was (old, if it existed): the caller is told nothing changed, so
+// the next save that works must not carry the change after all. A namespace
+// key made for a new secret may stay; it is empty and harmless.
+func (s *Store) saveOrUndo(path string, old encryptedSecret, existed bool) error {
+	err := s.save()
+	if err != nil {
+		if existed {
+			s.data.Secrets[path] = old
+		} else {
+			delete(s.data.Secrets, path)
+		}
+	}
+	return err
 }
 
 // Get retrieves a secret by path.
@@ -375,12 +391,13 @@ func (s *Store) Delete(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.data.Secrets[path]; !ok {
+	old, ok := s.data.Secrets[path]
+	if !ok {
 		return ErrSecretNotFound
 	}
 
 	delete(s.data.Secrets, path)
-	return s.save()
+	return s.saveOrUndo(path, old, true)
 }
 
 // List returns all secret paths, optionally filtered by prefix.

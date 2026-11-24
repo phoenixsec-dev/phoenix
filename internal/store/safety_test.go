@@ -163,3 +163,43 @@ func TestForeignFileIsRefusedAsStore(t *testing.T) {
 		})
 	}
 }
+
+// A Set or Delete whose save failed changed nothing: not what is read now, and
+// not what the next save that works writes to disk.
+func TestFailedSaveIsNotSavedLater(t *testing.T) {
+	s, storePath, key := rotationFailureStore(t, "")
+	if err := s.Set("ns1/gone", "first", "vector", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	repair := breakStoreDisk(t)
+	for what, err := range map[string]error{
+		"update": s.Set("ns1/key1", "half-done", "vector", "", nil),
+		"create": s.Set("new/key", "half-done", "vector", "", nil),
+		"delete": s.Delete("ns2/key2"),
+	} {
+		if err == nil {
+			t.Fatalf("%s should fail", what)
+		}
+	}
+	check := func(when string, st *Store) {
+		t.Helper()
+		for p, want := range map[string]string{"ns1/key1": "value1", "ns2/key2": "value2"} {
+			if sec, err := st.Get(p); err != nil || sec.Value != want {
+				t.Errorf("%s: %s = %v %v, want %q", when, p, sec, err, want)
+			}
+		}
+		if _, err := st.Get("new/key"); err != ErrSecretNotFound {
+			t.Errorf("%s: new/key: %v, want not found", when, err)
+		}
+	}
+	check("after the failures", s)
+	repair()
+	if err := s.Delete("ns1/gone"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := New(storePath, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("after the next save", again)
+}

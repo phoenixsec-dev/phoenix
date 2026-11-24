@@ -86,6 +86,9 @@ that dies halfway can do to it. Nothing to configure; what changed:
   passphrase-protected key, or a store of a newer format) loaded as an empty
   store, and the first secret written replaced that file. The server now
   refuses to start on anything that is not a version 1 store file.
+- **A write or delete that failed (full disk) could still happen later.** The
+  caller got an error, but the server kept the change in memory, served it and
+  saved it with the next write that worked. It is now undone.
 
 ## v0.24.0 (2026-11-24)
 
