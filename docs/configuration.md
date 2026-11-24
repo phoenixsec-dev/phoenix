@@ -120,7 +120,7 @@ The operator dashboard provides a browser-based UI for approvals, sessions,
 audit, and role inspection. All assets are embedded — no CDN or build step.
 
 `phoenix-server --init` turns it on and sets its password. On an older install,
-or to change the password, generate a hash:
+or to change the password, generate a hash (yourself, not through an agent):
 
 ```bash
 phoenix-server --hash-password

@@ -14,8 +14,10 @@ unset PHOENIX_TOKEN PHOENIX_ROLE PHOENIX_CLIENT_CERT PHOENIX_CLIENT_KEY
 unset PHOENIX_CA_CERT PHOENIX_SEAL_KEY PHOENIX_POLICY
 # Fixture servers are local; a developer's proxy must not see their traffic.
 # The proxy itself stays set: builds and scenario 12 may need it.
-NO_PROXY="127.0.0.1,localhost,0.0.0.0${NO_PROXY:+,$NO_PROXY}"; no_proxy="$NO_PROXY"
-export NO_PROXY no_proxy
+# Each spelling keeps its own list (or the other's, if only that one is set).
+no_proxy_upper="${NO_PROXY:-${no_proxy:-}}"; no_proxy_lower="${no_proxy:-${NO_PROXY:-}}"
+export NO_PROXY="127.0.0.1,localhost,0.0.0.0${no_proxy_upper:+,$no_proxy_upper}"
+export no_proxy="127.0.0.1,localhost,0.0.0.0${no_proxy_lower:+,$no_proxy_lower}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
 log()  { printf "${BLUE}[INFO]${NC} %s\n" "$*"; }
@@ -34,11 +36,12 @@ token_from_init() { awk '/ADMIN TOKEN/{getline; print; exit}' "$1"; }
 password_from_init() { awk '/DASHBOARD PASSWORD/{getline; print; exit}' "$1"; }
 # dashboard_login URL PASSWORD JAR [curl args]: signs in and proves it by opening
 # a protected page. The login answer alone proves nothing: a wrong password is
-# also a 303.
+# also a 303. --no-location: a ~/.curlrc that follows redirects would turn the
+# refusal into the login form's 200.
 dashboard_login() {
   local url="$1" password="$2" jar="$3"; shift 3
   curl -sS "$@" -c "$jar" -o /dev/null --data-urlencode "credential=$password" "$url/dashboard/login" || return 1
-  [[ "$(curl -sS "$@" -b "$jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")" == 200 ]]
+  [[ "$(curl -sS --no-location "$@" -b "$jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")" == 200 ]]
 }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbidden text}: $2"; }
 

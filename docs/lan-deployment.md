@@ -5,8 +5,9 @@ Deploy one Phoenix server serving multiple machines and agents on a local networ
 This guide covers the topology, server setup, CA certificate distribution, agent
 provisioning, and verification for a multi-host deployment. It is written so that
 an agent (or a human) can execute it with no prior Phoenix experience, except for
-initializing the server in step 1: **a human does that**, because it shows the
-dashboard password and the admin token.
+two steps **a human does**: initializing the server (step 1), which shows the admin
+token and any generated dashboard password, and choosing a dashboard password on
+an older install (step 7).
 
 A LAN is the outer edge of Phoenix's supported envelope — internet/WAN
 exposure is out of scope (see [Threat Model](threat-model.md)). And a LAN is
@@ -251,7 +252,8 @@ The startup warning covers the other case: a dashboard on a non-loopback
 plain HTTP bind means the dashboard password and session cookie cross the
 network in cleartext.
 
-On an older install, generate a password hash and add it to the server config:
+On an older install, **a human** (not an agent) chooses the password and generates
+its hash; whoever knows it can approve requests. Add the hash to the server config:
 
 ```bash
 phoenix-server --hash-password

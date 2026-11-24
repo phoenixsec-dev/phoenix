@@ -89,7 +89,7 @@ assert_eq "$(jq -r .allowed "$RUN_DIR/resp")" false "allow_unseal for a grant-on
 # 5b. Dashboard leg: log in, approve a narrowed request, use it through
 # phoenix exec --redact-output, revoke it on the grants page.
 jar="$RUN_DIR/dash.cookies"
-dash() { curl -sS -b "$jar" -c "$jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
+dash() { curl -sS --no-location -b "$jar" -c "$jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
 assert_eq "$(dash -X POST --data-urlencode credential=e2e-dash-password "$PHOENIX_SERVER/dashboard/login")" 303 "dashboard login"
 call "$AGENT" POST /v1/access-requests '{"paths":["infra/dash","infra/dash-extra"],"reason":"e2e: <script>dash</script>","ttl":"30m"}'
 assert_eq "$HTTP_CODE" 201 "dashboard request"

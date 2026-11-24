@@ -29,12 +29,13 @@ With `PHOENIX_CA_CERT` set, `phoenix` (and `phoenix mcp-server`) ignored
 `HTTPS_PROXY` and dialed the server directly, so HTTPS failed on machines that
 only get out through a proxy, such as hosted agents on userspace Tailscale. It
 now uses it for `https://` servers, like it already did without a CA. Plain
-`http://` servers are still reached directly. Connecting now times out after 30
+`http://` servers are still reached directly when the CA file loads. Connecting now times out after 30
 seconds instead of the system's limit (requests themselves have no new limit).
 
 **Upgrading:** if a machine sets `HTTPS_PROXY` but reaches Phoenix directly, add
 the Phoenix host to `NO_PROXY`. If the proxy's own address is `https://`, add its
-CA to the `PHOENIX_CA_CERT` file.
+CA to the `PHOENIX_CA_CERT` file, but only if you trust that CA to vouch for the
+Phoenix server itself: both connections are checked against the same file.
 
 ### Smaller things
 

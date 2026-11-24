@@ -113,6 +113,7 @@ meta_before="$(api_admin GET /v1/metadata/app/one | jq -S .)"
 agents_before="$(phoenix_admin agent list)"
 stop_server
 keep_audit
+cp -a "$RUN_DIR/state" "$RUN_DIR/state.before"
 
 # check_old_data WHO: everything step 1 made, except the session, checked
 # against whatever server is running.
@@ -195,7 +196,9 @@ fingerprint() { (cd "$RUN_DIR/state" && find . -type f ! -name 'audit.log*' -exe
 # --- 4. The previous release on the new files ---
 use_old
 before="$(fingerprint)"
-rc=0; timeout 3 "$PHOENIX_SERVER_BIN" --config "$RUN_DIR/config.json" >"$RUN_DIR/rollback.log" 2>&1 || rc=$?
+# try_start LOG: starts the server for 3 seconds; exit 124 means it ran.
+try_start() { timeout 3 "$PHOENIX_SERVER_BIN" --config "$RUN_DIR/config.json" >"$1" 2>&1; }
+rc=0; try_start "$RUN_DIR/rollback.log" || rc=$?
 if [[ "$rc" -eq 124 ]]; then
   # It starts (the timeout stopped it), so everything must be there.
   start_server
@@ -205,6 +208,8 @@ if [[ "$rc" -eq 124 ]]; then
   check_session "$new_session" "$PREV on the new files"
   put app/rolled-back synthetic-rolled-back -d "written by the previous release"
   stop_server
+  check_audit "$PREV on the new files"
+  keep_audit   # what it added must survive the next start too
   rolled_back=1
   ok "rolling back to $PREV works"
 else
@@ -214,6 +219,12 @@ else
   tail -1 "$RUN_DIR/rollback.log" | grep -qE '^[0-9/]+ [0-9:]+ (loading|initializing|opening|invalid config)' || { cat "$RUN_DIR/rollback.log" >&2; die "$PREV stopped on the new files without saying which file it cannot load"; }
   assert_eq "$(fingerprint)" "$before" "$PREV refused the new files but changed them"
   check_audit "$PREV refusing the new files"
+  # It must be the new data it refuses: the very same command still starts on
+  # the files as they were before the upgrade.
+  mv "$RUN_DIR/state" "$RUN_DIR/state.after"; mv "$RUN_DIR/state.before" "$RUN_DIR/state"
+  rc=0; try_start "$RUN_DIR/control.log" || rc=$?
+  mv "$RUN_DIR/state" "$RUN_DIR/state.before"; mv "$RUN_DIR/state.after" "$RUN_DIR/state"
+  assert_eq "$rc" 124 "$PREV must still start on its own files, or the refusal is not about the data"
   rolled_back=0
   ok "$PREV refuses the new files and leaves them alone: $(tail -1 "$RUN_DIR/rollback.log")"
 fi
@@ -224,6 +235,8 @@ start_server
 check_old_data "this build again"
 check_new_data "this build again"
 check_session "$old_session" "this build again"
+# After a refused rollback nothing touched this build's own session.
+[[ "$rolled_back" -eq 1 ]] || SESSIONS_SURVIVE=1
 check_session "$new_session" "this build again"
 [[ "$rolled_back" -eq 0 ]] || assert_eq "$(phoenix_admin get app/rolled-back)" synthetic-rolled-back "secret written during the rollback"
 ok "Scenario 23 PASS"

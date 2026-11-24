@@ -122,7 +122,8 @@ exposure — it warns and continues; fixing the config is on you.
 
 New installs have the dashboard on: `phoenix-server --init` asks for its
 password (or generates one and shows it once) and writes only the bcrypt hash.
-To turn it on for an older install, or to change the password, generate a hash:
+To turn it on for an older install, or to change the password, generate a hash
+(yourself, not through an agent):
 
 ```bash
 phoenix-server --hash-password

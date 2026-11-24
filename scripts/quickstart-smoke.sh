@@ -45,12 +45,13 @@ password_from_init() { awk '/DASHBOARD PASSWORD/{getline; print; exit}' "$1"; }
 
 # dashboard_login URL [curl args...]: signs in with the printed password and
 # opens a protected page. The login answer alone proves nothing: a wrong
-# password is also a 303.
+# password is also a 303. --no-location: a ~/.curlrc that follows redirects
+# would turn the refusal into the login form's 200.
 dashboard_login() {
   local url="$1"; shift
   local code
   curl -sS "$@" -c "$WORK/jar" -o /dev/null --data-urlencode "credential=$DASH_PASSWORD" "$url/dashboard/login"
-  code="$(curl -sS "$@" -b "$WORK/jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")"
+  code="$(curl -sS --no-location "$@" -b "$WORK/jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")"
   [[ "$code" == 200 ]] || fail "dashboard login failed (approvals page answered $code)"
 }
 

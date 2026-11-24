@@ -144,7 +144,8 @@ turned it on: open `http://127.0.0.1:9090/dashboard/` and sign in with the
 password from `--init`.
 
 **Older installs** (initialized before this was the default) have it off.
-Generate a password hash and add it to the config:
+Generate a password hash (yourself, not through an agent) and add it to the
+config:
 
 ```bash
 phoenix-server --hash-password

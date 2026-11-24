@@ -25,7 +25,7 @@ if agent exec --env KEY=phoenix://demo/api-key -- true >"$RUN_DIR/denied" 2>&1; 
 out="$(agent request demo/api-key --reason "e2e: fresh install" --ttl 5m)"
 req="$(awk '/^Request:/ {print $2}' <<<"$out")"; [[ "$req" == req_* ]] || die "phoenix request printed no id: $out"
 
-dash() { curl -sS -b "$RUN_DIR/jar" -c "$RUN_DIR/jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
+dash() { curl -sS --no-location -b "$RUN_DIR/jar" -c "$RUN_DIR/jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
 # A wrong password shows the login form again and gives no login.
 dash -X POST --data-urlencode "credential=wrong-$password" "$PHOENIX_SERVER/dashboard/login" >/dev/null
 [[ "$(dash "$PHOENIX_SERVER/dashboard/approvals")" != 200 ]] || die "a wrong password logged in"
@@ -47,10 +47,10 @@ stop_server
 assert_eq "$(jq -r .https_listener.enabled "$RUN_DIR/https/config.json")" true "--https turns HTTPS on"
 assert_contains "$("$PHOENIX_SERVER_BIN" --check-config --config "$RUN_DIR/https/config.json")" "config OK" "--https config"
 https_port="$(free_port)"
-python3 - "$RUN_DIR/https/config.json" "$(free_port)" "$https_port" <<'PY'
+python3 - "$RUN_DIR/https/config.json" "$https_port" <<'PY'
 import json, sys
-p, http, https = sys.argv[1:]; d = json.load(open(p))
-d['server']['listen'] = '127.0.0.1:' + http
+p, https = sys.argv[1:]; d = json.load(open(p))
+d['server']['listen'] = '127.0.0.1:0'
 d['https_listener']['listen'] = '127.0.0.1:' + https
 json.dump(d, open(p, 'w'), indent=2)
 PY
@@ -60,7 +60,8 @@ url="https://127.0.0.1:$https_port"; ca="$RUN_DIR/https/ca.crt"
 for _ in $(seq 1 100); do curl -fsS --cacert "$ca" "$url/v1/health" >/dev/null 2>&1 && break; sleep 0.1; done
 dashboard_login "$url" "$(password_from_init "$RUN_DIR/https.out")" "$RUN_DIR/jar-https" --cacert "$ca" || die "dashboard over HTTPS with the printed password"
 if dashboard_login "$url" "not-the-password" "$RUN_DIR/jar-wrong" --cacert "$ca"; then die "a wrong password signed in over HTTPS"; fi
-if curl -sS --cacert "$ca" --resolve "wrong.invalid:$https_port:127.0.0.1" "https://wrong.invalid:$https_port/v1/health" >/dev/null 2>&1; then die "the certificate is accepted for any name"; fi
+rc=0; curl -sS --noproxy '*' --cacert "$ca" --resolve "wrong.invalid:$https_port:127.0.0.1" "https://wrong.invalid:$https_port/v1/health" >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" 60 "curl must reject the certificate for another name (exit 60)"
 stop_server
 rc=0; "$PHOENIX_SERVER_BIN" --https >"$RUN_DIR/https-alone" 2>&1 || rc=$?
 assert_eq "$rc" 2 "--https without --init"
