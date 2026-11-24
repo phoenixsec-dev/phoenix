@@ -311,6 +311,10 @@ func main() {
 
 	// Initialize dashboard if enabled
 	if cfg.Dashboard.Enabled {
+		cfgPath, err := filepath.Abs(resolveConfigPath(*configPath)) // pages name it
+		if err != nil {
+			log.Fatalf("finding the config file: %v", err)
+		}
 		deps := dashboard.Deps{
 			Sessions:     sessionStore,
 			SessionRoles: cfg.Session.Roles,
@@ -323,7 +327,7 @@ func main() {
 			Grants:       grantStore,
 			Access:       srv,
 			Notify:       srv,
-			ConfigPath:   resolveConfigPath(*configPath),
+			ConfigPath:   cfgPath,
 		}
 		dash, err := dashboard.New(cfg.Dashboard, deps)
 		if err != nil {
