@@ -46,14 +46,18 @@ stop_server
 "$PHOENIX_SERVER_BIN" --init "$RUN_DIR/https" --https >"$RUN_DIR/https.out" </dev/null
 assert_eq "$(jq -r .https_listener.enabled "$RUN_DIR/https/config.json")" true "--https turns HTTPS on"
 assert_contains "$("$PHOENIX_SERVER_BIN" --check-config --config "$RUN_DIR/https/config.json")" "config OK" "--https config"
-https_port="$(free_port)"
-python3 - "$RUN_DIR/https/config.json" "$https_port" <<'PY'
-import json, sys
-p, https = sys.argv[1:]; d = json.load(open(p))
-d['server']['listen'] = '127.0.0.1:0'
-d['https_listener']['listen'] = '127.0.0.1:' + https
+https_port="$(python3 - "$RUN_DIR/https/config.json" <<'PY'
+import json, socket, sys
+p = sys.argv[1]; d = json.load(open(p))
+with socket.socket() as a, socket.socket() as b:  # both held, so they differ
+    a.bind(('127.0.0.1', 0)); b.bind(('127.0.0.1', 0))
+    http, https = a.getsockname()[1], b.getsockname()[1]
+d['server']['listen'] = '127.0.0.1:%d' % http
+d['https_listener']['listen'] = '127.0.0.1:%d' % https
 json.dump(d, open(p, 'w'), indent=2)
+print(https)
 PY
+)"
 "$PHOENIX_SERVER_BIN" --config "$RUN_DIR/https/config.json" >"$RUN_DIR/https.log" 2>&1 &
 SERVER_PID=$!
 url="https://127.0.0.1:$https_port"; ca="$RUN_DIR/https/ca.crt"

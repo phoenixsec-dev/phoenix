@@ -209,7 +209,6 @@ if [[ "$rc" -eq 124 ]]; then
   put app/rolled-back synthetic-rolled-back -d "written by the previous release"
   stop_server
   check_audit "$PREV on the new files"
-  keep_audit   # what it added must survive the next start too
   rolled_back=1
   ok "rolling back to $PREV works"
 else
@@ -228,6 +227,8 @@ else
   rolled_back=0
   ok "$PREV refuses the new files and leaves them alone: $(tail -1 "$RUN_DIR/rollback.log")"
 fi
+
+keep_audit   # whatever that start added must survive the next one
 
 # --- 5. This build again ---
 use_new
