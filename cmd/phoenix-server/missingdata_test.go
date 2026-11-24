@@ -102,7 +102,7 @@ func TestLostStoreSeenThroughLinkedLog(t *testing.T) {
 // example one that shares it with a server in use, and a lost one is noticed.
 func TestInitMakesTheStore(t *testing.T) {
 	dir := t.TempDir()
-	if err := runInit(dir, initOptions{DashboardPassword: "synthetic-password"}); err != nil {
+	if err := quietInit(t, dir); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(filepath.Join(dir, "config.json"))
