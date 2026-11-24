@@ -233,10 +233,22 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 		Permissions:  permissions,
 	}
 
-	if a.path != "" {
-		return a.saveLocked()
+	return a.saveOrUndo(func() { delete(a.config.Agents, name) })
+}
+
+// saveOrUndo saves a change that adds something, and undoes it in memory if
+// the file still holds the old content, so the next save does not carry what
+// the caller was told failed. Not for replacing a token or removing an agent:
+// there the old token must stay dead even if the save failed.
+func (a *ACL) saveOrUndo(undo func()) error {
+	if a.path == "" {
+		return nil
 	}
-	return nil
+	err := a.saveLocked()
+	if err != nil && !errors.Is(err, fsutil.ErrDirSyncFailed) {
+		undo()
+	}
+	return err
 }
 
 // newCredentialID returns a random ID for a newly issued token.
@@ -336,13 +348,11 @@ func (a *ACL) SetAgentSealKey(name string, publicKey string) error {
 		return ErrAgentNotFound
 	}
 
+	old := agent
 	agent.SealPublicKey = publicKey
 	a.config.Agents[name] = agent
 
-	if a.path != "" {
-		return a.saveLocked()
-	}
-	return nil
+	return a.saveOrUndo(func() { a.config.Agents[name] = old })
 }
 
 // GetAgentSealKey returns an agent's registered public seal key.

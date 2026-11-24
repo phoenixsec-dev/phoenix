@@ -108,6 +108,11 @@ that dies halfway can do to it. Nothing to configure; what changed:
 - **An audit line cut off by a full disk or a power cut swallowed the next
   one:** that entry was written and reported as written, but no search could
   read it. It now starts on its own line.
+- **A new agent or seal key whose save failed** was likewise kept in memory and
+  saved later. With a seal key that locked the agent out of its sealed secrets,
+  because the CLI had already thrown the private key away. Both are undone now.
+  Replacing a token or deleting an agent still takes effect at once even if the
+  save fails, so the old token stays dead until a restart.
 
 ## v0.24.0 (2026-11-24)
 

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
@@ -736,5 +737,56 @@ func TestTokenChangeNotDoneUntilDurable(t *testing.T) {
 		if !errors.Is(err, fsutil.ErrDirSyncFailed) {
 			t.Errorf("%s: %v, want ErrDirSyncFailed", what, err)
 		}
+	}
+}
+
+// A new agent or seal key whose save failed was not added: not now, and not by
+// the next save that works. The CLI has thrown the private half away by then,
+// so a kept seal key would make the agent's sealed secrets unreadable. If the
+// file was replaced and only the directory sync failed, both keep the new one.
+func TestFailedSaveOfNewAgentOrSealKeyIsUndone(t *testing.T) {
+	keys := []string{strings.Repeat("A", 43) + "=", strings.Repeat("B", 42) + "A="}
+	for name, c := range map[string]struct {
+		err  error
+		keep bool
+	}{
+		"disk full":       {syscall.ENOSPC, false},
+		"dir sync failed": {fsutil.ErrDirSyncFailed, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "acl.json")
+			a, err := New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := errors.Join(a.AddAgent("worker", "fake-1", nil), a.SetAgentSealKey("worker", keys[0])); err != nil {
+				t.Fatal(err)
+			}
+			write := a.writeFile
+			a.writeFile = func(p string, d []byte, m os.FileMode) error {
+				if c.keep {
+					return errors.Join(write(p, d, m), c.err)
+				}
+				return c.err
+			}
+			if a.AddAgent("late", "fake-2", nil) == nil || a.SetAgentSealKey("worker", keys[1]) == nil {
+				t.Fatal("both should fail")
+			}
+			a.writeFile = write
+			if err := a.AddAgent("other", "fake-3", nil); err != nil {
+				t.Fatal(err)
+			}
+			again, err := New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for when, x := range map[string]*ACL{"now": a, "after a restart": again} {
+				_, missing := x.GetAgent("late")
+				key, _ := x.GetAgentSealKey("worker")
+				if (missing == nil) != c.keep || (key == keys[1]) != c.keep {
+					t.Errorf("%s: late kept %v, new key kept %v, want %v", when, missing == nil, key == keys[1], c.keep)
+				}
+			}
+		})
 	}
 }
