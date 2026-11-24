@@ -66,6 +66,28 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+  # Real server and CLI, end to end, on throwaway data. Left out: 09 (needs a
+  # PostgreSQL container) and 12 (needs a 1Password account). --no-skips: a
+  # scenario that cannot run fails the job instead of passing unseen.
+  # About two minutes; one of them is scenario 21 waiting out the shortest
+  # legal approval.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history and tags: the upgrade scenarios build older releases.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: End-to-end scenarios
+        run: ./tests/e2e/run-all.sh --skip 09,12 --no-skips
+
   # Builds the release Docker image for both platforms without pushing, so
   # a broken Dockerfile shows up on the PR instead of at release time.
   # Publishing happens only in release.yml, on a version tag.

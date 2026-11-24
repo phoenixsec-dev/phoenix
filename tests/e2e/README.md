@@ -7,14 +7,19 @@ The canonical Phoenix e2e suite. It runs only throwaway state, localhost-bound s
 ```bash
 ./tests/e2e/run-all.sh --list
 ./tests/e2e/run-all.sh --scenarios 01,13,17
+./tests/e2e/run-all.sh --skip 09,12 --no-skips   # what CI runs on every pull request
 ./tests/e2e/run-all.sh --format jsonl   # or: --format tap
 ```
+
+CI (`.github/workflows/ci.yml`, job `e2e`) runs every scenario except 09 and 12,
+which need an outside service. A new scenario file is picked up by itself.
+`--no-skips` counts a skip as a failure.
 
 The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PATH Go executable, `E2E_BIN_DIR` to reuse prebuilt binaries, or `E2E_REBUILD=1` to force a rebuild.
 
 > Binaries in `E2E_BIN_DIR` are reused whenever they already exist. After changing server behavior, run with `E2E_REBUILD=1` — otherwise scenarios silently test the previously built binary and a new assertion fails as if the feature were broken.
 
-Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run project and free localhost port. Scenario 12 is opt-in: it needs the `op` CLI, `OP_SERVICE_ACCOUNT_TOKEN`, and a read-only synthetic vault selected by `PHOENIX_E2E_OP_VAULT` (default `phoenix-test`). Manual `stack.sh` use can override `COMPOSE_PROJECT_NAME` and the `E2E_*_PORT` variables. Scenario 18 builds Git commit `21a6ca4` (v0.13.5) and the current checkout.
+Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run project and free localhost port. Scenario 12 is opt-in: it needs the `op` CLI, `OP_SERVICE_ACCOUNT_TOKEN`, and a read-only synthetic vault selected by `PHOENIX_E2E_OP_VAULT` (default `phoenix-test`). Manual `stack.sh` use can override `COMPOSE_PROJECT_NAME` and the `E2E_*_PORT` variables. Scenario 18 builds Git commit `21a6ca4` (v0.13.5) and the current checkout. Scenario 23 builds the newest published release tag that is not newer than `internal/version` (and is not this very tree); `E2E_PREV_REF=<tag or commit>` picks another, back to v0.23.0. Both need the git history and tags, so a shallow clone is not enough.
 
 ## Add a scenario
 
@@ -51,5 +56,7 @@ Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run p
 | 20 | Hermes caller metadata: capture, sanitization/cap, unlisted-header exclusion, ACL spoof resistance, tool headers (`X-Hermes-Tool` hint only, `X-Phoenix-Tool` ignored) | implemented |
 | 21 | Request-use grants: ACL deny with `request_use`, request, human deny, cooldown (also after restart), narrowed API approval, sealed use via `phoenix exec`, plaintext refused, `allow_unseal` false, dashboard login + narrowed approve (CSRF enforced, reason escaped) + `phoenix exec --redact-output` (stdout/stderr redacted, exit code passed through, no `PHOENIX_TOKEN` in child) + dashboard revoke, CLI `request` / `pending` / `approve req_ --yes` / `request status`, revoke, restart keeps state, 1-minute expiry | implemented; takes ~65s (shortest legal grant is 1m) |
 | 22 | Removed settings: config and policy with removed fields fail `phoenix-server --check-config` (exit 1, one line per field) and startup; clean files pass; removed API route answers 410; removed CLI command explains itself | implemented |
+| 23 | Previous release → current → previous → current on the same files: secrets, descriptions, policy, agents, deleted agent, seal key, active/revoked/pending grants, role session, dashboard login; the previous release on the new files must work with everything there, or refuse and change nothing | implemented |
+| 24 | Fresh install: `--init` (no config editing) ends with a dashboard login that approves an agent's request; the password is printed once and is not on disk; `--init --https` | implemented |
 
 Scenario 18 verifies that a session signed by the old server's random key is rejected after the upgrade, that the preserved role configuration can mint a new session, that the new session survives a restart (no token in `role-sessions.json`), and that the CLI replaces a dead cached role session once on its own.

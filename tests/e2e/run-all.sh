@@ -6,10 +6,13 @@ source "$ROOT_DIR/lib.sh"
 
 usage() {
   cat <<'EOF'
-Usage: ./run-all.sh [--list] [--scenarios 01,05,13-foo] [--format human|jsonl|tap]
+Usage: ./run-all.sh [--list] [--scenarios 01,05,13-foo] [--skip 09,12] [--no-skips]
+                    [--format human|jsonl|tap]
 
 Scenarios are auto-discovered from executable scenario-NN-name.sh files.
 Exit 0 = pass, 77 = skip, any other nonzero = fail.
+--skip leaves scenarios out (numbers or names). --no-skips counts a skip as a
+failure, so a missing tool cannot quietly turn a scenario off (CI uses both).
 EOF
 }
 
@@ -17,11 +20,13 @@ discover() {
   find "$ROOT_DIR" -maxdepth 1 -type f -name 'scenario-[0-9][0-9]-*.sh' -perm -u+x -printf '%f\n' | LC_ALL=C sort
 }
 
-LIST=0; SELECTED=""; FORMAT=human
+LIST=0; SELECTED=""; SKIP=""; NO_SKIPS=0; FORMAT=human
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --list) LIST=1; shift ;;
     --scenarios) [[ $# -ge 2 ]] || die "--scenarios requires a value"; SELECTED="$2"; shift 2 ;;
+    --skip) [[ $# -ge 2 ]] || die "--skip requires a value"; SKIP="$2"; shift 2 ;;
+    --no-skips) NO_SKIPS=1; shift ;;
     --format) [[ $# -ge 2 ]] || die "--format requires a value"; FORMAT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -38,11 +43,13 @@ if [[ "$LIST" -eq 1 ]]; then
   exit 0
 fi
 
-SELECTED_FILES=()
-if [[ -z "$SELECTED" ]]; then
-  SELECTED_FILES=("${ALL[@]}")
-else
-  IFS=',' read -r -a wanted <<<"$SELECTED"
+# match LIST: sets MATCHED to the scenario files a comma-separated list names.
+# An unknown name stops the run.
+match() {
+  local -a wanted matches
+  local raw item file slug id
+  MATCHED=()
+  IFS=',' read -r -a wanted <<<"$1"
   for raw in "${wanted[@]}"; do
     item="${raw//[[:space:]]/}"
     matches=()
@@ -51,8 +58,20 @@ else
       if [[ "$item" == "$id" || "$item" == "$slug" || "$item" == "$file" ]]; then matches+=("$file"); fi
     done
     [[ ${#matches[@]} -eq 1 ]] || die "unknown or ambiguous scenario: $item"
-    SELECTED_FILES+=("${matches[0]}")
+    MATCHED+=("${matches[0]}")
   done
+}
+
+SELECTED_FILES=("${ALL[@]}")
+if [[ -n "$SELECTED" ]]; then match "$SELECTED"; SELECTED_FILES=("${MATCHED[@]}"); fi
+if [[ -n "$SKIP" ]]; then
+  match "$SKIP"
+  kept=()
+  for file in "${SELECTED_FILES[@]}"; do
+    [[ " ${MATCHED[*]} " == *" $file "* ]] || kept+=("$file")
+  done
+  SELECTED_FILES=("${kept[@]}")
+  [[ ${#SELECTED_FILES[@]} -gt 0 ]] || die "--skip left no scenarios to run"
 fi
 
 [[ "$FORMAT" != tap ]] || printf '1..%d\n' "${#SELECTED_FILES[@]}"
@@ -65,7 +84,7 @@ for file in "${SELECTED_FILES[@]}"; do
   rc=$?
   set -e
   duration=$(( $(date +%s) - started ))
-  if [[ $rc -eq 0 ]]; then status=pass; elif [[ $rc -eq 77 ]]; then status=skip; else status=fail; failures=$((failures + 1)); fi
+  if [[ $rc -eq 0 ]]; then status=pass; elif [[ $rc -eq 77 && $NO_SKIPS -eq 0 ]]; then status=skip; else status=fail; failures=$((failures + 1)); fi
 
   case "$FORMAT" in
     human)
