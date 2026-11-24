@@ -3,7 +3,10 @@
 <h1 class="page-title">Audit Log</h1>
 
 <form class="filter-bar" method="GET" action="/dashboard/audit">
-    <input type="text" name="agent" class="input input-sm" placeholder="Agent..." value="{{.AgentFilter}}">
+    <input type="text" name="agent" class="input input-sm" placeholder="Agent..." value="{{.AgentFilter}}" aria-label="Agent">
+    <input type="text" name="who" class="input input-sm" placeholder="Who..." value="{{.WhoFilter}}" aria-label="Who">
+    <input type="text" name="host" class="input input-sm" placeholder="Host..." value="{{.HostFilter}}" aria-label="Host">
+    <input type="text" name="authority" class="input input-sm" placeholder="Authority..." value="{{.AuthorityFilter}}" aria-label="Authority">
     <select name="status" class="input input-sm">
         <option value="">All Status</option>
         <option value="allowed"{{if eq .StatusFilter "allowed"}} selected{{end}}>Allowed</option>
@@ -26,6 +29,9 @@
     Older entries may match but are not shown.
 </div>
 {{end}}
+{{if .FormerAgents}}
+<p class="revoke-note">Includes lines under this identity's former names: {{join .FormerAgents ", "}}</p>
+{{end}}
 {{if .Entries}}
 <div class="table-wrap">
 <table class="data-table">
@@ -33,6 +39,10 @@
         <tr>
             <th>Timestamp</th>
             <th>Agent</th>
+            <th>Who</th>
+            <th>Host</th>
+            <th>Authority</th>
+            <th title="Yes: Phoenix itself checked who was asking. No: the caller held a token, and who and authority are what an admin declared for it.">Attested</th>
             <th>Action</th>
             <th>Path</th>
             <th>Status</th>
@@ -46,6 +56,10 @@
         <tr>
             <td class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
             <td>{{.Agent}}</td>
+            <td>{{or .Who "-"}}</td>
+            <td>{{or .Host "-"}}</td>
+            <td>{{or .Authority "-"}}</td>
+            <td>{{if .Attested}}yes{{else if .Declared}}no (declared){{else}}no{{end}}</td>
             <td class="mono">{{.Action}}</td>
             <td class="mono path-full">{{.Path}}</td>
             <td><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
