@@ -13,7 +13,8 @@ a short-lived certificate: a login pass with an expiry built in.
 - **A pass works in one place.** It names one machine, works only from the IP
   that asked, and ends when the grant ends.
 - **A revoke beats a pass that is still in date.** The machine asks Phoenix at
-  every login whether that pass's grant still stands.
+  every login whether that pass's grant still stands. Replacing the agent's token or
+  deleting the agent ends it the same way.
 
 ## The flow
 

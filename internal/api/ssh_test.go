@@ -407,3 +407,32 @@ func TestSSHMachinesListWhenOff(t *testing.T) {
 		t.Fatalf("off = %v", m)
 	}
 }
+
+// Replacing the token an approval was given to, or deleting the agent, ends a
+// login already signed under it: the machine's next window check says no.
+func TestReplacingTokenClosesTheSSHWindow(t *testing.T) {
+	const ip = "192.0.2.30"
+	changes := map[string]struct {
+		change func(e *grantEnv) error
+		open   bool
+	}{
+		"same token again": {func(e *grantEnv) error { return e.srv.acl.UpdateAgent("vector", vectorTok, nil) }, true},
+		"replaced":         {func(e *grantEnv) error { return e.srv.acl.UpdateAgent("vector", "synthetic-new-token", nil) }, false},
+		"deleted":          {func(e *grantEnv) error { return e.srv.acl.RemoveAgent("vector") }, false},
+	}
+	for name, c := range changes {
+		t.Run(name, func(t *testing.T) {
+			e := newSSHEnv(t)
+			gid := e.loginGrant(t, vectorTok, "build-1", ip)
+			if code, _ := e.sign(t, vectorTok, "build-1", ip); code != http.StatusOK || !e.windowOpen(t, "build-1", gid) {
+				t.Fatalf("sign = %d; the window should be open", code)
+			}
+			if err := c.change(e); err != nil {
+				t.Fatal(err)
+			}
+			if got := e.windowOpen(t, "build-1", gid); got != c.open {
+				t.Errorf("window open = %v, want %v", got, c.open)
+			}
+		})
+	}
+}

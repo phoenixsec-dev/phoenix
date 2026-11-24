@@ -22,6 +22,15 @@ dropped revoked ones too, so a revoked token then answered `SESSION_INVALID`
 minted a fresh session on its own. Revoked sessions are now kept until they
 expire, whatever happened to their role.
 
+### Security: replacing an agent's token now ends its SSH logins
+
+A grant is bound to the token that asked, so replacing the token stopped new
+reads and new SSH certificates. An SSH login already signed carried on until
+the grant ended. The machine's own check (`/v1/ssh/window`) now also says no
+once the token was replaced or the agent deleted: a kept certificate stops
+working at once and an open session ends within about 30 seconds. Nothing to
+change on the machines.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine

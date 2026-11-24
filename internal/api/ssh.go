@@ -194,7 +194,8 @@ func (s *Server) handleSSHMachines(w http.ResponseWriter, r *http.Request) {
 // certificate that has not expired yet.
 //
 // Anything that is not a yes is a no, including a machine or feature that has
-// been switched off, so turning this off also ends the sessions it allowed. It
+// been switched off and a token that was replaced since, so turning this off or
+// replacing the token also ends the sessions it allowed. It
 // needs no login because a machine holds no Phoenix credential, and it tells the
 // caller only yes or no about a random id it must already know. It is not audited:
 // it would only fill the log.
@@ -204,7 +205,16 @@ func (s *Server) handleSSHWindow(w http.ResponseWriter, r *http.Request) {
 	open := false
 	if s.grantsOn() && s.sshRequestAllowed([]string{path}) && !s.grants.Health().Degraded {
 		g, ok := s.grants.GetGrant(r.PathValue("grant"))
-		open = ok && g.Action == grant.ActionSSHLogin && slices.Contains(g.Paths, path) && g.State(s.now()) == grant.GrantActive
+		open = ok && g.Action == grant.ActionSSHLogin && slices.Contains(g.Paths, path) && g.State(s.now()) == grant.GrantActive &&
+			s.grantTokenCurrent(g)
 	}
 	jsonOK(w, map[string]any{"open": open})
+}
+
+// grantTokenCurrent reports whether the bearer token g was given to is still
+// its agent's. Signing already needs that token; this is for a login signed
+// before the token was replaced.
+func (s *Server) grantTokenCurrent(g grant.Grant) bool {
+	a, err := s.acl.GetAgent(g.Agent)
+	return err == nil && g.CredentialFP != "" && grant.BearerFingerprint(a.TokenHash) == g.CredentialFP
 }
