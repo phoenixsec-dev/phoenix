@@ -60,7 +60,9 @@ func TestDataPathCollisionsAreRefused(t *testing.T) {
 		"key as an audit archive":      func(c *Config) { c.Store.MasterKey = in("audit-20261108T120000.000Z.log") },
 		"store as a gzipped archive":   func(c *Config) { c.Store.Path = in("audit-20261108T120000.000Z.log.gz") },
 		"ACL as a half-gzipped one":    func(c *Config) { c.ACL.Path = in("audit-20261108T120000.000Z.log.gz.tmp") },
-		"store over the users lock":    func(c *Config) { c.Store.Path = c.Store.MasterKey + ".users" },
+		"store over the users lock":    func(c *Config) { c.Store.Path = c.Store.MasterKey + ".users.lock" },
+		"store locks the users lock":   func(c *Config) { c.Store.Path = c.Store.MasterKey + ".users" },
+		"policy over the users lock":   func(c *Config) { c.Policy.Path = c.Store.MasterKey + ".users.lock" },
 		"key as a .gz log's archive": func(c *Config) {
 			c.Audit.Path, c.Store.MasterKey = in("audit.gz"), in("audit-20261108T120000.000Z.gz")
 		},
@@ -159,6 +161,13 @@ func TestHarmlessPathSharingIsAllowed(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	// Only a real lock file's name is taken: these make none of their own, and
+	// nothing locks the SSH key.
+	cfg = dataPathsConfig(t, t.TempDir())
+	cfg.Policy.Path, cfg.HTTPSListener.Cert = cfg.Store.MasterKey+".users", cfg.SSHCAKeyPath()+".lock"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("lock lookalikes: %v", err)
 	}
 	// Without rotation there are no archives.
 	cfg = dataPathsConfig(t, t.TempDir())

@@ -17,6 +17,7 @@ type dataFile struct {
 	path     string
 	written  bool     // the server writes it (else it only reads it)
 	besides  []string // suffixes of files the server writes next to it
+	locks    []string // suffixes of the empty lock files it holds next to it
 	archives bool     // the server also makes dated archives of it (audit log)
 	resolved []string // where it really is, and its name as written
 }
@@ -45,10 +46,11 @@ func resolved(p string) string {
 
 // dataFiles lists every file this config makes Phoenix read or write.
 func (c *Config) dataFiles() []dataFile {
+	lock := []string{".lock"}
 	files := []dataFile{
-		{field: "acl.path", path: c.ACL.Path, written: true},
-		{field: "audit.path", path: c.Audit.Path, written: true, archives: c.AuditRotateBytes() > 0},
-		{field: grantsField, path: c.GrantStorePath(), written: true},
+		{field: "acl.path", path: c.ACL.Path, written: true, locks: lock},
+		{field: "audit.path", path: c.Audit.Path, written: true, locks: lock, archives: c.AuditRotateBytes() > 0},
+		{field: grantsField, path: c.GrantStorePath(), written: true, locks: lock},
 		{field: "config file", path: c.file},
 		{field: "policy.path", path: c.Policy.Path},
 		{field: "https_listener.cert", path: c.HTTPSListener.Cert},
@@ -58,11 +60,11 @@ func (c *Config) dataFiles() []dataFile {
 	}
 	if c.Backend() == "file" {
 		files = append(files,
-			dataFile{field: "store.path", path: c.Store.Path, written: true, besides: []string{".pre-rotate", ".emergency-key"}},
-			dataFile{field: "store.master_key", path: c.Store.MasterKey, written: true, besides: []string{".prev", ".prev.new", ".users", ".users.lock"}})
+			dataFile{field: "store.path", path: c.Store.Path, written: true, locks: lock, besides: []string{".pre-rotate", ".emergency-key"}},
+			dataFile{field: "store.master_key", path: c.Store.MasterKey, written: true, locks: []string{".lock", ".users.lock"}, besides: []string{".prev", ".prev.new"}})
 	}
 	if c.Session.Enabled {
-		files = append(files, dataFile{field: "role sessions file", path: c.SessionStorePath(), written: true})
+		files = append(files, dataFile{field: "role sessions file", path: c.SessionStorePath(), written: true, locks: lock})
 	}
 	if c.SSHCAEnabled() {
 		files = append(files, dataFile{field: "ssh_ca key", path: c.SSHCAKeyPath(), written: true})
@@ -118,8 +120,15 @@ func (a dataFile) hits(b dataFile) bool {
 			if p == q {
 				return true
 			}
-			if a.written && q == p+".lock" {
-				return true
+			for _, l := range a.locks {
+				if q == p+l {
+					return true
+				}
+				for _, m := range b.locks { // both would hold one lock file
+					if p+l == q+m {
+						return true
+					}
+				}
 			}
 			if a.archives && audit.UsesName(p, q) {
 				return true
