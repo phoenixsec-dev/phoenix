@@ -68,8 +68,8 @@ jobs:
   # Real server and CLI, end to end, on throwaway data. Left out: 09 (needs a
   # PostgreSQL container) and 12 (needs a 1Password account). --no-skips: a
   # scenario that cannot run fails the job instead of passing unseen.
-  # About two minutes; one of them is scenario 21 waiting out the shortest
-  # legal approval.
+  # About four minutes; one is scenario 21 waiting out the shortest legal
+  # approval, one is scenario 25 waiting for a full disk's saves to be retried.
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 10
