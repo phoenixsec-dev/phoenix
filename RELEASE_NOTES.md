@@ -26,17 +26,19 @@ password generated and printed. `docker-compose.yml` now publishes
 ### Fixed: the CLI ignored proxies when it used Phoenix's own CA
 
 With `PHOENIX_CA_CERT` set, `phoenix` (and `phoenix mcp-server`) ignored
-`HTTP_PROXY` and `HTTPS_PROXY` and dialed the server directly, so HTTPS failed on
-machines that only get out through a proxy, such as hosted agents on userspace
-Tailscale. It now uses them like it already did without a CA. It also gives up
-on an unreachable server after 30 seconds instead of the system's limit.
+`HTTPS_PROXY` and dialed the server directly, so HTTPS failed on machines that
+only get out through a proxy, such as hosted agents on userspace Tailscale. It
+now uses it for `https://` servers, like it already did without a CA. Plain
+`http://` servers are still reached directly. Connecting now times out after 30
+seconds instead of the system's limit (requests themselves have no new limit).
 
 **Upgrading:** if a machine sets `HTTPS_PROXY` but reaches Phoenix directly, add
-the Phoenix host to `NO_PROXY`.
+the Phoenix host to `NO_PROXY`. If the proxy's own address is `https://`, add its
+CA to the `PHOENIX_CA_CERT` file.
 
 ### Smaller things
 
-- The end-to-end scenarios run in CI on every pull request, with two new ones:
+- The end-to-end scenarios run in CI on every pull request (into any branch), with two new ones:
   upgrade from the previous release and back on the same files, and a fresh
   install that approves a request.
 - Docs say which systems are supported (Linux and macOS; no Windows build).

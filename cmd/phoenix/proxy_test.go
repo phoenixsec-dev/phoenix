@@ -27,6 +27,11 @@ func TestCACertClientUsesProxy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Plain http must not go through the proxy: it would see the token.
+		if resp, err := buildHTTPClient().Get("http://phoenix.invalid/v1/health"); err == nil {
+			resp.Body.Close()
+			t.Fatal("a plain http request was answered, so it went through the proxy")
+		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if string(body) != "through" {
@@ -66,7 +71,7 @@ func TestCACertClientUsesProxy(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect || r.Host != "phoenix.invalid:443" {
 			http.Error(w, "unexpected proxy request", http.StatusBadGateway)
-			return
+			return // answered, so the child sees a response, not an error
 		}
 		connects.Add(1)
 		upstream, err := net.Dial("tcp", server.Listener.Addr().String())
@@ -87,7 +92,7 @@ func TestCACertClientUsesProxy(t *testing.T) {
 	defer proxy.Close()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestCACertClientUsesProxy$")
-	cmd.Env = []string{"PHOENIX_TEST_PROXY_CHILD=1", "PHOENIX_CA_CERT=" + caPath, "HTTPS_PROXY=" + proxy.URL}
+	cmd.Env = []string{"PHOENIX_TEST_PROXY_CHILD=1", "PHOENIX_CA_CERT=" + caPath, "HTTPS_PROXY=" + proxy.URL, "HTTP_PROXY=" + proxy.URL}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {

@@ -1,8 +1,10 @@
 # Quickstart: first secret in under 2 minutes
 
 Two paths: native binaries or Docker. Both end with a secret stored and
-read back, and a dashboard where you can answer agents' requests. Everything after the install step
-is exercised by [`scripts/quickstart-smoke.sh`](../scripts/quickstart-smoke.sh);
+read back, and a dashboard where you can answer agents' requests. Storing,
+reading and signing in to the dashboard are exercised by
+[`scripts/quickstart-smoke.sh`](../scripts/quickstart-smoke.sh), and the
+request-and-approve part by end-to-end scenario 24;
 the installer itself is checked on every release
 ([Release Runbook](release-runbook.md)).
 
@@ -24,8 +26,8 @@ phoenix-server --init ~/.phoenix
 ```
 
 It asks for a dashboard password (press Enter to have one generated), then
-prints the `ADMIN TOKEN` and, if it made one, the `DASHBOARD PASSWORD`. Copy
-both: they are shown once and never again. The password is stored only as a
+prints the `ADMIN TOKEN` and, if it made one, the `DASHBOARD PASSWORD`. Copy what
+it prints: it is shown once and never again. The password is stored only as a
 bcrypt hash.
 
 Run this yourself, not through an agent: the dashboard password is what stops
@@ -124,11 +126,12 @@ Make an agent that may read nothing, and let it ask. With Docker, run the
 
 ```bash
 # as admin: the agent, and a seal key so it only ever gets encrypted values
-phoenix agent create demo-agent -t "<a long random token>" --acl 'demo-none/*:list'
+AGENT_TOKEN="$(openssl rand -hex 32)"
+phoenix agent create demo-agent -t "$AGENT_TOKEN" --acl 'demo-none/*:list'
 phoenix keypair generate demo-agent -o /tmp/demo-agent.seal.key
 
 # as the agent
-export PHOENIX_TOKEN="<the agent's token>" PHOENIX_SEAL_KEY=/tmp/demo-agent.seal.key
+export PHOENIX_TOKEN="$AGENT_TOKEN" PHOENIX_SEAL_KEY=/tmp/demo-agent.seal.key
 phoenix request demo/api-key --reason "trying it out" --ttl 15m
 # you: dashboard -> Approvals -> Approve
 phoenix exec --env API_KEY=phoenix://demo/api-key -- sh -c 'echo "API_KEY has ${#API_KEY} chars"'

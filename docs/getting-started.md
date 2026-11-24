@@ -162,9 +162,10 @@ phoenix-server --hash-password
 After restarting, open `http://127.0.0.1:9090/dashboard/` in a browser.
 
 **Important:** The dashboard is safe over plain HTTP only when the server
-listens on loopback (`127.0.0.1`). If the server is reachable over a network,
-turn on `https_listener` (or put it behind a TLS reverse proxy) first — the
-server warns loudly at startup if the dashboard is enabled on a non-loopback
+listens on loopback (`127.0.0.1`). To reach it over a network, keep
+`server.listen` on loopback and turn on `https_listener` (or put a TLS reverse
+proxy in front). Turning on HTTPS does not close a plain HTTP address that is
+already reachable. The server warns loudly at startup if the dashboard is enabled on a non-loopback
 bind without TLS. Do not serve the dashboard over plain HTTP on a network you
 do not control.
 See [Dashboard](dashboard.md) for the full deployment guide and security model.

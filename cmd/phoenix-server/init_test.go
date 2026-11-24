@@ -28,6 +28,15 @@ func TestInitPassphraseFromEnv(t *testing.T) {
 // as is, with the dashboard on and only a hash of its password on disk.
 func TestInitTurnsDashboardOn(t *testing.T) {
 	const password = "synthetic-dash-password"
+	// runInit prints the admin token; keep it out of the test output.
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	stdout := os.Stdout
+	os.Stdout = devNull
+	defer func() { os.Stdout = stdout }()
 	for _, https := range []bool{false, true} {
 		dir := filepath.Join(t.TempDir(), "data")
 		if err := runInit(dir, initOptions{DashboardPassword: password, HTTPS: https}); err != nil {
@@ -96,6 +105,9 @@ func TestAskDashboardPassword(t *testing.T) {
 	}
 	if _, _, err := ask("short"); err == nil {
 		t.Fatal("a short password was accepted")
+	}
+	if _, _, err := ask("\U0001F525\U0001F525\U0001F525"); err == nil {
+		t.Fatal("three characters of four bytes each were accepted")
 	}
 	p1, generated, err := ask("")
 	if err != nil || !generated || len(p1) != 23 {

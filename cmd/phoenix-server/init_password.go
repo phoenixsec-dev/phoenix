@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -46,7 +47,7 @@ func askDashboardPassword() (password string, generated bool, err error) {
 		password, err = generateDashboardPassword()
 		return password, true, err
 	}
-	if len(password) < minDashboardPassword {
+	if utf8.RuneCountInString(password) < minDashboardPassword {
 		return "", false, fmt.Errorf("the dashboard password needs at least %d characters; nothing was created, run it again", minDashboardPassword)
 	}
 	confirm, err := promptHidden("Type it again: ")

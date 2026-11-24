@@ -307,10 +307,11 @@ cause a restart loop for working HTTP consumers. Certificates load at startup;
 replacing a certificate requires a restart. Role sessions survive restarts (see
 [Session identity](session-identity.md#restarts)).
 
-For Docker, retain the existing port mapping and add a mapping for the selected
-HTTPS port, for example `9443:9443`, plus certificate mounts if needed. The
-server must bind a container-reachable address for a published port. The default
-Compose mapping and HTTP health check are unchanged.
+For Docker, publish the HTTPS port. The shipped `docker-compose.yml` already maps
+`127.0.0.1:9443:9443`, reachable from that host only. Drop the `127.0.0.1:` only
+for a deliberate LAN deployment (see [LAN Deployment](lan-deployment.md)). The
+server must bind a container-reachable address for a published port
+(`0.0.0.0:9443`, as `--init` writes). The HTTP health check is unchanged.
 
 To stop using the additional endpoint, restore the selected clients' previous
 URLs and disable `https_listener.enabled`, then restart during a planned window.

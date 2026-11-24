@@ -13,7 +13,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 23 upgrade-from-previous-release
-for cmd in git tar curl python3 jq sha256sum; do require_cmd "$cmd"; done
+for cmd in git tar curl python3 jq sha256sum timeout cmp; do require_cmd "$cmd"; done
 
 # previous_release prints the tag to upgrade from; nothing if there is none.
 previous_release() {
@@ -74,7 +74,10 @@ grant_of() { api_token "$APPROVER" GET "/v1/access-requests/$1" | jq -r .grant_i
 mint() { api_token "$READER" POST /v1/session/mint '{"role":"reader"}' | jq -r .session_token; }
 # http_code TOKEN PATH prints the status of a read, keeping the body in RUN_DIR/body.
 http_code() { curl -sS -o "$RUN_DIR/body" -w '%{http_code}' "$PHOENIX_SERVER$2" -H "Authorization: Bearer $1"; }
-audit_lines() { wc -l <"$RUN_DIR/state/audit.log"; }
+# keep_audit / check_audit WHO: every byte of the audit log that keep_audit saw
+# is still there; later lines may follow.
+keep_audit() { cp "$RUN_DIR/state/audit.log" "$RUN_DIR/audit.kept"; }
+check_audit() { cmp -s -n "$(stat -c %s "$RUN_DIR/audit.kept")" "$RUN_DIR/audit.kept" "$RUN_DIR/state/audit.log" || die "$1: audit history changed"; }
 
 # --- 1. Fill it with the previous release ---
 start_server
@@ -108,8 +111,8 @@ assert_eq "$(http_code "$old_session" /v1/secrets/app/one)" 200 "session works o
 secrets_before="$(phoenix_admin list --names)"
 meta_before="$(api_admin GET /v1/metadata/app/one | jq -S .)"
 agents_before="$(phoenix_admin agent list)"
-audit_before="$(audit_lines)"
 stop_server
+keep_audit
 
 # check_old_data WHO: everything step 1 made, except the session, checked
 # against whatever server is running.
@@ -133,13 +136,21 @@ check_old_data() {
   assert_eq "$(ask_exec vault/granted)" synthetic-granted "$who: active grant and seal key"
   if ask_exec vault/revoked >"$RUN_DIR/revoked" 2>&1; then die "$who: revoked grant came back"; fi
   assert_contains "$(cat "$RUN_DIR/revoked")" GRANT_REVOKED "$who: revoked grant"
-  assert_eq "$(curl -sS -o /dev/null -w '%{http_code}' --data-urlencode credential=e2e-dash-password "$PHOENIX_SERVER/dashboard/login")" 303 "$who: dashboard password"
+  dashboard_login "$PHOENIX_SERVER" e2e-dash-password "$(mktemp "$RUN_DIR/jar.XXXXXX")" || die "$who: dashboard password"
+  check_audit "$who"
 }
-# check_session TOKEN WHO: the session works, or it is refused as a session the
-# client replaces by itself, and that replacement works.
+# Sessions saved before v0.23.1 end once, on purpose (see its release notes).
+# From that release on every session must survive every step here. A release
+# that ends sessions on purpose has to change this line, and say so.
+SESSIONS_SURVIVE=0
+if [[ "$(printf '%s\nv0.23.1\n' "$PREV_VERSION" | sort -V | head -1)" == v0.23.1 ]]; then SESSIONS_SURVIVE=1; fi
+# check_session TOKEN WHO: the exact session works. Before v0.23.1 it may be
+# refused instead, as a session the client replaces by itself, and that
+# replacement must work.
 check_session() {
   local code home; code="$(http_code "$1" /v1/secrets/app/one)"
   if [[ "$code" != 200 ]]; then
+    [[ "$SESSIONS_SURVIVE" -eq 0 ]] || die "$2: a role session was lost ($code)"
     assert_eq "$code $(jq -r .code "$RUN_DIR/body")" "401 SESSION_INVALID" "$2: session"
     log "$2: ended the role session; checking that clients mint a new one"
   fi
@@ -158,13 +169,8 @@ use_new
 assert_contains "$("$NEW_SERVER" --check-config --config "$RUN_DIR/config.json")" "config OK" "the previous release's config must pass --check-config"
 start_server
 check_old_data "this build"
-# Sessions saved before v0.23.1 end once, on purpose (see its release notes);
-# from that release on they must survive an upgrade.
-if [[ "$(printf '%s\nv0.23.1\n' "$PREV_VERSION" | sort -V | head -1)" == v0.23.1 ]]; then
-  assert_eq "$(http_code "$old_session" /v1/secrets/app/one)" 200 "role session survives the upgrade"
-fi
 check_session "$old_session" "this build"
-[[ "$(audit_lines)" -gt "$audit_before" ]] || die "audit log was not kept and appended to"
+[[ "$(stat -c %s "$RUN_DIR/state/audit.log")" -gt "$(stat -c %s "$RUN_DIR/audit.kept")" ]] || die "nothing was added to the audit log"
 approve "$r_pending" || die "a request left waiting by the previous release could not be approved"
 assert_eq "$(ask_exec vault/pending)" synthetic-pending "request answered after the upgrade"
 ok "upgrade from $PREV: nothing lost, every credential works"
@@ -175,14 +181,15 @@ put app/late synthetic-late -d "made after the upgrade"
 phoenix_admin agent create late -t "$LATE" --acl 'app/*:list,read_value' >/dev/null
 new_session="$(mint)"
 stop_server
+keep_audit
 
 # check_new_data WHO: step 3's data (and the grant approved in step 2).
 check_new_data() {
   assert_eq "$(agent "$LATE" get app/late)" synthetic-late "$1: agent and secret made after the upgrade"
   assert_eq "$(ask_exec vault/pending)" synthetic-pending "$1: grant approved after the upgrade"
 }
-# Every data file with its checksum, except the audit log, which even a
-# refused start may add a line to.
+# Every data file with its checksum, except the audit log: check_audit covers
+# it, and even a refused start may add a line.
 fingerprint() { (cd "$RUN_DIR/state" && find . -type f ! -name 'audit.log*' -exec sha256sum {} + | LC_ALL=C sort); }
 
 # --- 4. The previous release on the new files ---
@@ -194,16 +201,19 @@ if [[ "$rc" -eq 124 ]]; then
   start_server
   check_old_data "$PREV on the new files"
   check_new_data "$PREV on the new files"
+  check_session "$old_session" "$PREV on the new files"
   check_session "$new_session" "$PREV on the new files"
   put app/rolled-back synthetic-rolled-back -d "written by the previous release"
   stop_server
   rolled_back=1
   ok "rolling back to $PREV works"
 else
-  [[ "$rc" -ne 0 ]] || die "$PREV exited 0 on the new files"
-  if grep -qE '^(panic:|fatal error:|goroutine [0-9]+)' "$RUN_DIR/rollback.log"; then die "$PREV crashed on the new files"; fi
-  [[ -s "$RUN_DIR/rollback.log" ]] || die "$PREV refused the new files without saying why"
+  # A clean refusal is exit 1 with a message about loading its files. A crash, a
+  # taken port or a command that never ran is not one.
+  assert_eq "$rc" 1 "$PREV exit code on the new files"
+  tail -1 "$RUN_DIR/rollback.log" | grep -qE '^[0-9/]+ [0-9:]+ (loading|initializing|opening|invalid config)' || { cat "$RUN_DIR/rollback.log" >&2; die "$PREV stopped on the new files without saying which file it cannot load"; }
   assert_eq "$(fingerprint)" "$before" "$PREV refused the new files but changed them"
+  check_audit "$PREV refusing the new files"
   rolled_back=0
   ok "$PREV refuses the new files and leaves them alone: $(tail -1 "$RUN_DIR/rollback.log")"
 fi
@@ -213,6 +223,7 @@ use_new
 start_server
 check_old_data "this build again"
 check_new_data "this build again"
+check_session "$old_session" "this build again"
 check_session "$new_session" "this build again"
 [[ "$rolled_back" -eq 0 ]] || assert_eq "$(phoenix_admin get app/rolled-back)" synthetic-rolled-back "secret written during the rollback"
 ok "Scenario 23 PASS"

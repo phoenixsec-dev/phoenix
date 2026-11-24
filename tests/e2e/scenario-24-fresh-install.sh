@@ -2,7 +2,8 @@
 # A fresh install can approve: nothing but "phoenix-server --init" and CLI
 # commands (no config editing), then an agent's request is answered on the
 # dashboard with the password --init printed. Also checks that the password is
-# not on disk and that --init --https serves the dashboard over HTTPS.
+# not on disk and that --init --https serves the dashboard over HTTPS with a
+# certificate that verifies.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 24 fresh-install-can-approve
@@ -40,11 +41,27 @@ assert_eq "$(agent exec --env KEY=phoenix://demo/api-key -- sh -c 'printf %s "$K
 ok "a fresh install approves on the dashboard with no file editing"
 stop_server
 
-# --https: the new config has HTTPS on, with a certificate that verifies.
-# The address is fixed (0.0.0.0:9443), so only the check runs here.
+# --https: the new config has HTTPS on. Only the two ports are changed before
+# it runs, so it cannot collide with a real server.
 "$PHOENIX_SERVER_BIN" --init "$RUN_DIR/https" --https >"$RUN_DIR/https.out" </dev/null
 assert_eq "$(jq -r .https_listener.enabled "$RUN_DIR/https/config.json")" true "--https turns HTTPS on"
 assert_contains "$("$PHOENIX_SERVER_BIN" --check-config --config "$RUN_DIR/https/config.json")" "config OK" "--https config"
+https_port="$(free_port)"
+python3 - "$RUN_DIR/https/config.json" "$(free_port)" "$https_port" <<'PY'
+import json, sys
+p, http, https = sys.argv[1:]; d = json.load(open(p))
+d['server']['listen'] = '127.0.0.1:' + http
+d['https_listener']['listen'] = '127.0.0.1:' + https
+json.dump(d, open(p, 'w'), indent=2)
+PY
+"$PHOENIX_SERVER_BIN" --config "$RUN_DIR/https/config.json" >"$RUN_DIR/https.log" 2>&1 &
+SERVER_PID=$!
+url="https://127.0.0.1:$https_port"; ca="$RUN_DIR/https/ca.crt"
+for _ in $(seq 1 100); do curl -fsS --cacert "$ca" "$url/v1/health" >/dev/null 2>&1 && break; sleep 0.1; done
+dashboard_login "$url" "$(password_from_init "$RUN_DIR/https.out")" "$RUN_DIR/jar-https" --cacert "$ca" || die "dashboard over HTTPS with the printed password"
+if dashboard_login "$url" "not-the-password" "$RUN_DIR/jar-wrong" --cacert "$ca"; then die "a wrong password signed in over HTTPS"; fi
+if curl -sS --cacert "$ca" --resolve "wrong.invalid:$https_port:127.0.0.1" "https://wrong.invalid:$https_port/v1/health" >/dev/null 2>&1; then die "the certificate is accepted for any name"; fi
+stop_server
 rc=0; "$PHOENIX_SERVER_BIN" --https >"$RUN_DIR/https-alone" 2>&1 || rc=$?
 assert_eq "$rc" 2 "--https without --init"
 ok "Scenario 24 PASS"

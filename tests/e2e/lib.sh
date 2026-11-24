@@ -12,7 +12,10 @@ PHOENIX_SERVER_BIN="$E2E_BIN_DIR/phoenix-server"
 # Phoenix role, token, certificate, seal key, or policy configuration.
 unset PHOENIX_TOKEN PHOENIX_ROLE PHOENIX_CLIENT_CERT PHOENIX_CLIENT_KEY
 unset PHOENIX_CA_CERT PHOENIX_SEAL_KEY PHOENIX_POLICY
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+# Fixture servers are local; a developer's proxy must not see their traffic.
+# The proxy itself stays set: builds and scenario 12 may need it.
+NO_PROXY="127.0.0.1,localhost,0.0.0.0${NO_PROXY:+,$NO_PROXY}"; no_proxy="$NO_PROXY"
+export NO_PROXY no_proxy
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
 log()  { printf "${BLUE}[INFO]${NC} %s\n" "$*"; }
@@ -29,6 +32,14 @@ assert_contains() { [[ "$1" == *"$2"* ]] || die "${3:-output missing expected te
 # dashboard password that "phoenix-server --init" printed.
 token_from_init() { awk '/ADMIN TOKEN/{getline; print; exit}' "$1"; }
 password_from_init() { awk '/DASHBOARD PASSWORD/{getline; print; exit}' "$1"; }
+# dashboard_login URL PASSWORD JAR [curl args]: signs in and proves it by opening
+# a protected page. The login answer alone proves nothing: a wrong password is
+# also a 303.
+dashboard_login() {
+  local url="$1" password="$2" jar="$3"; shift 3
+  curl -sS "$@" -c "$jar" -o /dev/null --data-urlencode "credential=$password" "$url/dashboard/login" || return 1
+  [[ "$(curl -sS "$@" -b "$jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")" == 200 ]]
+}
 assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbidden text}: $2"; }
 
 build_current() {

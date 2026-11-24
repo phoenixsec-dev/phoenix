@@ -3,9 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever branch it is based on (release PRs are stacked).
   pull_request:
-    # release/** too, so stacked release PRs (each based on the one before) get tested.
-    branches: [main, "release/**"]
 
 permissions:
   contents: read
