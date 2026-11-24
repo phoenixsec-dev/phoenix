@@ -27,9 +27,8 @@ already has an approval.
   server is v0.24.0 or newer, names the agent the CLI ran as. Before, it only
   said to run again with `--reason`.
 - It says so plainly when the approval has ended.
-- `phoenix ssh --list` uses the agent's own token even with `PHOENIX_ROLE` set,
-  so it shows the approvals a login would use. With a session token in
-  `PHOENIX_TOKEN` it lists names only.
+- When `PHOENIX_TOKEN` holds the agent's own token, `phoenix ssh --list` uses it
+  even with `PHOENIX_ROLE` set, so it shows the approvals a login would use.
 - The usage line shows `--reason` as optional. Inside an active approval it was
   never required.
 
