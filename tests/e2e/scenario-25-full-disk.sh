@@ -112,6 +112,7 @@ PY
   assert_eq "$(force reader "$READER")" 500 "$HOW: same token"
   want 200 "$live" GET /v1/secrets/app/one
   assert_eq "$(force admin synthetic-full-admin)" 500 "$HOW: own token"
+  assert_contains "$(cat "$RUN_DIR/body")" "your old token still works" "$HOW: own token"
   assert_eq "$(code "$READER" POST '/v1/agents?force=true' '{"name":"reader","token":"synthetic-full-eve","permissions":[]}')" 403 "$HOW: refused replacement"
   want 200 "$live" GET /v1/secrets/app/one
 

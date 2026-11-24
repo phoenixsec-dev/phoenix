@@ -959,8 +959,11 @@ func TestForceWithFailedSave(t *testing.T) {
 	if code, _ := e.do("PUT", "/v1/secrets/test/a", "old-token", `{"value":"half-done"}`); code != 500 {
 		t.Errorf("secret write: %d, want 500", code)
 	}
-	if code, _ := force("admin-token", "admin", "other-admin-token"); code != 500 {
-		t.Errorf("own token: %d, want 500", code)
+	if code, body := force("admin-token", "admin", "other-admin-token"); code != 500 || !strings.Contains(body, "your old token still works and the new one does not") {
+		t.Errorf("own token: %d %s", code, failBody(body))
+	}
+	if l := e.lines(audit.QueryOptions{Path: "admin", Limit: 1})[0]; l.Action != "update-agent" || l.Status != "denied" || l.Reason != "not_saved" {
+		t.Errorf("own token: audit line = %+v", l)
 	}
 	if code, body := force("admin-token", "worker", "new-token"); code != 500 || !strings.Contains(body, "the old token no longer works and the new one is not in force") {
 		t.Errorf("new token: %d %s", code, failBody(body))

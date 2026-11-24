@@ -162,7 +162,8 @@ that dies halfway can do to it. Nothing to configure; what changed:
   any, at once or later. If replacing a token can't be saved, the old token stays
   dead and its sessions end, and the new one isn't in force: free the disk and run
   it again (a restart before that may bring the old token back). Replacing your own
-  token is undone instead, or nobody could run it again. Access that was taken away
+  token is undone instead, or nobody could run it again: the answer says the old
+  token still works. Access that was taken away
   but not saved, such as a removed Always, is saved by itself once the disk works.
 - **A missing `store.json` or `acl.json` looked like a healthy start** with no
   secrets or no agents, and the next write made an empty file in its place. The server

@@ -45,6 +45,10 @@ var (
 	// token no longer works until a restart, and the new one is not in force.
 	ErrReplacedNotSaved = errors.New("old token ended, new one not saved and not in force")
 
+	// ErrOwnNotSaved means an agent replacing its own token could not be saved:
+	// the old token still works and the new one is not in force.
+	ErrOwnNotSaved = errors.New("own token not replaced, the change could not be saved")
+
 	// ValidActions is the set of recognized action strings.
 	ValidActions = map[Action]bool{
 		ActionList:      true,
@@ -376,7 +380,8 @@ func (a *ACL) updateAgent(name, token string, permissions []Permission, labels L
 		SealPublicKey: existing.SealPublicKey,
 	}
 
-	replaced := hash != existing.TokenHash && !own
+	newToken := hash != existing.TokenHash
+	replaced := newToken && !own
 	err = a.saveOrUndo(func() {
 		undone := existing
 		undone.Serial = a.config.Agents[name].Serial // the save may have given it one
@@ -385,6 +390,9 @@ func (a *ACL) updateAgent(name, token string, permissions []Permission, labels L
 		}
 		a.config.Agents[name] = undone
 	})
+	if err != nil && newToken && own {
+		return fmt.Errorf("%w: %w", ErrOwnNotSaved, err)
+	}
 	if err != nil && replaced {
 		return fmt.Errorf("%w: %w", ErrReplacedNotSaved, err)
 	}

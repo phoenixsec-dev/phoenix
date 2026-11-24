@@ -266,6 +266,7 @@ phoenix agent create deployer --token-stdin < deployer.token \
 # Update an existing agent (re-create with --force). A different token ends
 # the agent's role sessions. If it answers that it could not be saved (full disk),
 # the old token has ended and the new one is not in force: fix that, run it again.
+# (Your own old token goes on working, so that you can.)
 (umask 077; set -C; openssl rand -hex 32 > deployer-new.token) &&
 phoenix agent create deployer --token-stdin < deployer-new.token \
   --acl "myapp/**:list,read_value,write" --force
