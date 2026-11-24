@@ -82,3 +82,14 @@ self.addEventListener('fetch', function(e) {
         }));
     }
 });
+
+// Android shows a request's notification through this worker. Tapping it opens
+// that request, in a Phoenix window that is already open if there is one.
+self.addEventListener('notificationclick', function(e) {
+    e.notification.close();
+    var url = new URL((e.notification.data || {}).url || '/dashboard/requests', self.location.origin);
+    if (url.origin !== self.location.origin || url.pathname.indexOf('/dashboard/') !== 0) return;
+    e.waitUntil(clients.matchAll({ type: 'window' }).then(function(open) {
+        return open.length ? open[0].focus().then(function(c) { return c.navigate(url.href); }) : clients.openWindow(url.href);
+    }));
+});
