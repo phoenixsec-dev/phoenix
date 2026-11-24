@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -209,8 +210,8 @@ func (s *Store) Create(role, agent, credentialFP string, sealPubKey []byte, name
 		Agent:              agent,
 		CredentialFP:       credentialFP,
 		SealKeyFingerprint: fingerprint,
-		Namespaces:         namespaces,
-		Actions:            actions,
+		Namespaces:         slices.Clone(namespaces),
+		Actions:            slices.Clone(actions),
 		BootstrapMethod:    bootstrapMethod,
 		SourceIP:           sourceIP,
 		CreatedAt:          now,
@@ -248,10 +249,10 @@ func (s *Store) Create(role, agent, credentialFP string, sealPubKey []byte, name
 }
 
 // snapshot is a copy to hand to callers: the stored record changes when the
-// session is renewed or revoked. Its slices are never modified, so they are
-// shared.
+// session is renewed or revoked, and nothing a caller does may change it.
 func (sess *Session) snapshot() *Session {
 	c := *sess
+	c.Namespaces, c.Actions = slices.Clone(sess.Namespaces), slices.Clone(sess.Actions)
 	return &c
 }
 

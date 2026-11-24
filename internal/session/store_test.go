@@ -623,9 +623,13 @@ func TestReturnedSessionsAreSnapshots(t *testing.T) {
 	}
 	wg.Wait()
 	for how, sess := range held {
+		sess.Namespaces[0], sess.Actions[0] = "**", "admin"
 		if sess.Revoked || time.Until(sess.ExpiresAt) > time.Hour {
 			t.Errorf("%s returned the live record", how)
 		}
+	}
+	if now := s.Get(id); now.Namespaces[0] != "dev/*" || now.Actions[0] == "admin" || DefaultActions[0] == "admin" {
+		t.Errorf("a caller changed the stored scope: %v %v", now.Namespaces, now.Actions)
 	}
 	if now := s.Get(id); !now.Revoked || time.Until(now.ExpiresAt) <= time.Hour {
 		t.Error("Get does not show the renewal and revoke")
