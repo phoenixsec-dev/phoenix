@@ -141,6 +141,14 @@ configuration.
 The dashboard **cannot**: read or write secret values, create or modify agents, or
 change server configuration.
 
+`phoenix-server --init` turns the dashboard on, because a new install also lets
+agents ask for access and somebody has to be able to answer. It is served where
+the server listens: `server.listen` (loopback by default; keep it there) and
+`https_listener` when that is on. Its password is stored only as a bcrypt hash.
+Someone who reads the `--init` output (an agent that ran it, a captured log) has
+the admin token, and the dashboard password too if it was generated (100 random
+bits, shown once). A password typed at the prompt is never printed.
+
 Approval is the highest-risk action — it grants an agent temporary use of secrets.
 
 ### Authentication model

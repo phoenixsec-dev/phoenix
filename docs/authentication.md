@@ -134,6 +134,7 @@ configuration. For temporary human-approved access to more paths, see
 | `PHOENIX_SERVER` | Server URL (default: `http://127.0.0.1:9090`) |
 | `PHOENIX_TOKEN` | Bearer token |
 | `PHOENIX_CA_CERT` | CA certificate for HTTPS verification (the server's `ca.crt`) |
+| `HTTPS_PROXY`, `NO_PROXY` | Standard proxy settings for an `https://` server; used with and without `PHOENIX_CA_CERT`. If the proxy's own address is `https://`, its CA must be in the `PHOENIX_CA_CERT` file too; whoever holds that CA can then also pose as the Phoenix server, so only add one you trust that far. Once the `PHOENIX_CA_CERT` file is loaded, a plain `http://` server is reached directly (if the file cannot be loaded, the CLI warns and behaves as without it) |
 | `PHOENIX_ALLOW_PLAINTEXT` | Hosts (comma-separated) to skip the plaintext `http://` warning for; see [LAN deployment](lan-deployment.md#plaintext-on-a-single-host-opt-out) |
 | `PHOENIX_SEAL_KEY` | Seal private key file path |
 | `PHOENIX_ROLE` | Role name for auto-mint session identity |

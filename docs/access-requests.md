@@ -37,8 +37,9 @@ New installs (`phoenix-server --init`, `config.example.json`) have it on.
 Upgraded installs have no `access_requests` block, which means **off**.
 
 1. Add the block below to the server config (all defaults shown).
-2. Make sure someone can approve: enable the dashboard, or list an agent in
-   `approvers`. The server warns at startup if nobody can.
+2. Make sure someone can approve: enable the dashboard (`--init` already did on
+   a new install), or list an agent in `approvers`. The server warns at startup
+   if nobody can.
 3. Give each agent that will ask a registered seal key (an admin runs
    `phoenix keypair generate <agent>`; the agent sets `PHOENIX_SEAL_KEY` to
    the private key file). With `require_sealed` on, agents without one are

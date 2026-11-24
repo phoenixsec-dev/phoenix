@@ -13,7 +13,7 @@ are no external dependencies, no CDN loads, and no build step.
 - Tailing the audit log without SSH access to the server
 - Inspecting role configuration at a glance
 
-The dashboard is optional. Everything it does can also be done via the CLI
+The dashboard is optional, and on in new installs. Everything it does can also be done via the CLI
 (`phoenix approve`, `phoenix sessions list`, etc.) or the API.
 
 ## Security model
@@ -120,7 +120,10 @@ exposure — it warns and continues; fixing the config is on you.
 
 ## Configuration
 
-Generate a password hash:
+New installs have the dashboard on: `phoenix-server --init` asks for its
+password (or generates one and shows it once) and writes only the bcrypt hash.
+To turn it on for an older install, or to change the password, generate a hash
+(yourself, not through an agent):
 
 ```bash
 phoenix-server --hash-password
@@ -275,6 +278,7 @@ but-invalid cookies generate `dashboard.auth` denied entries.
 ## Deployment checklist
 
 Use this checklist when enabling the dashboard on an existing Phoenix server.
+(`--init` did steps 2 to 4 on a new one.)
 
 1. Choose transport mode:
    - [ ] Loopback only (`server.listen: "127.0.0.1:..."`, the default), or

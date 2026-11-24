@@ -84,6 +84,7 @@ func init() {
 
 // buildHTTPClient creates an HTTP client with optional TLS configuration.
 // Set PHOENIX_CA_CERT to trust the Phoenix CA for TLS connections.
+// HTTPS_PROXY and NO_PROXY apply with and without it.
 func buildHTTPClient() *http.Client {
 	caCertPath := os.Getenv("PHOENIX_CA_CERT")
 	if os.Getenv("PHOENIX_CLIENT_CERT") != "" || os.Getenv("PHOENIX_CLIENT_KEY") != "" {
@@ -112,11 +113,22 @@ func buildHTTPClient() *http.Client {
 		MinVersion: tls.VersionTLS12,
 	}
 
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsCfg,
-		},
+	// Copy the default transport instead of starting from an empty one: an
+	// empty transport ignores the proxy variables and has no dial timeout.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = tlsCfg
+	tr.Proxy = proxyHTTPSOnly
+	return &http.Client{Transport: tr}
+}
+
+// proxyHTTPSOnly is the proxy choice for a client with Phoenix's CA: HTTPS
+// requests follow the environment. Plain http ones always go direct, as they
+// did before, so a token for a host-local server is never handed to a proxy.
+func proxyHTTPSOnly(r *http.Request) (*url.URL, error) {
+	if r.URL.Scheme != "https" {
+		return nil, nil
 	}
+	return http.ProxyFromEnvironment(r)
 }
 
 func main() {

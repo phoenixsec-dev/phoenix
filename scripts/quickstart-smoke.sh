@@ -4,7 +4,7 @@
 # change a quickstart command, change it here too.
 #
 #   scripts/quickstart-smoke.sh                  # binaries on PATH (Option A)
-#   scripts/quickstart-smoke.sh --docker IMAGE   # Docker image (Option B + TLS-from-host)
+#   scripts/quickstart-smoke.sh --docker IMAGE   # Docker image (Option B + HTTPS from the host)
 #
 # Env: PHOENIX_SMOKE_PORT (default 19090) is the host port used instead of
 # 9090, so the smoke never collides with a real server on this machine.
@@ -39,13 +39,35 @@ wait_for() {
   "$@" # one last time, with output, so the failure is visible
 }
 
-token_from_init() { awk '/ADMIN TOKEN/{getline; print; exit}'; }
+# token_from_init FILE / password_from_init FILE: what --init printed.
+token_from_init() { awk '/ADMIN TOKEN/{getline; print; exit}' "$1"; }
+password_from_init() { awk '/DASHBOARD PASSWORD/{getline; print; exit}' "$1"; }
+
+# dashboard_login URL [curl args...]: signs in with the printed password and
+# opens a protected page. The login answer alone proves nothing: a wrong
+# password is also a 303. --no-location: a ~/.curlrc that follows redirects
+# would turn the refusal into the login form's 200.
+dashboard_login() {
+  local url="$1"; shift
+  local code
+  curl -sS "$@" -c "$WORK/jar" -o /dev/null --data-urlencode "credential=$DASH_PASSWORD" "$url/dashboard/login"
+  code="$(curl -sS --no-location "$@" -b "$WORK/jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")"
+  [[ "$code" == 200 ]] || fail "dashboard login failed (approvals page answered $code)"
+}
+
+# read_init_output sets PHOENIX_TOKEN and DASH_PASSWORD from $WORK/init.out.
+read_init_output() {
+  PHOENIX_TOKEN="$(token_from_init "$WORK/init.out")"
+  DASH_PASSWORD="$(password_from_init "$WORK/init.out")"
+  [[ -n "$PHOENIX_TOKEN" ]] || fail "no admin token in --init output"
+  [[ -n "$DASH_PASSWORD" ]] || fail "no dashboard password in --init output"
+  export PHOENIX_TOKEN
+}
 
 smoke_binaries() {
   echo "==> init"
-  PHOENIX_TOKEN="$(phoenix-server --init "$WORK/phoenix" | token_from_init)"
-  [[ -n "$PHOENIX_TOKEN" ]] || fail "no admin token in --init output"
-  export PHOENIX_TOKEN
+  phoenix-server --init "$WORK/phoenix" >"$WORK/init.out" </dev/null
+  read_init_output
   sed -i.bak "s/127.0.0.1:9090/127.0.0.1:$PORT/" "$WORK/phoenix/config.json"
   export PHOENIX_SERVER="http://127.0.0.1:$PORT"
 
@@ -59,6 +81,9 @@ smoke_binaries() {
   [[ "$(phoenix get demo/api-key)" == "sk-demo-123" ]] || fail "get returned the wrong value"
   out="$(phoenix exec --env API_KEY=phoenix://demo/api-key -- sh -c 'echo "API_KEY has ${#API_KEY} chars"')"
   [[ "$out" == "API_KEY has 11 chars" ]] || fail "exec output: $out"
+
+  echo "==> dashboard login"
+  dashboard_login "$PHOENIX_SERVER"
 }
 
 smoke_docker() {
@@ -67,12 +92,11 @@ smoke_docker() {
   CONTAINER="phoenix-quickstart-$$"
 
   echo "==> init (docker)"
-  PHOENIX_TOKEN="$(docker run --rm -v "$VOLUME:/data" "$image" --init /data | token_from_init)"
-  [[ -n "$PHOENIX_TOKEN" ]] || fail "no admin token in --init output"
-  export PHOENIX_TOKEN
+  docker run --rm -v "$VOLUME:/data" "$image" --init /data --https >"$WORK/init.out"
+  read_init_output
 
-  echo "==> start (docker, loopback only)"
-  docker run -d --name "$CONTAINER" -v "$VOLUME:/data" "$image" >/dev/null
+  echo "==> start (docker)"
+  docker run -d --name "$CONTAINER" -p "127.0.0.1:$PORT:9443" -v "$VOLUME:/data" "$image" >/dev/null
   wait_for docker exec -e PHOENIX_TOKEN "$CONTAINER" phoenix status || fail "server did not come up"
 
   echo "==> set / get (docker exec)"
@@ -81,11 +105,6 @@ smoke_docker() {
     || fail "get returned the wrong value"
 
   echo "==> HTTPS from host"
-  docker rm -f "$CONTAINER" >/dev/null
-  docker run --rm -v "$VOLUME:/data" --entrypoint sed "$image" -i \
-    -e '/"https_listener": {/{n;s/"enabled": false/"enabled": true/;}' \
-    /data/config.json
-  docker run -d --name "$CONTAINER" -p "127.0.0.1:$PORT:9443" -v "$VOLUME:/data" "$image" >/dev/null
   # The host may not have the phoenix CLI; use the one inside the image,
   # but on the host network namespace so the request really crosses the
   # published port with certificate verification.
@@ -96,6 +115,9 @@ smoke_docker() {
     --entrypoint phoenix "$image" get demo/api-key)
   wait_for "${host_get[@]}" || fail "HTTPS from host failed"
   [[ "$("${host_get[@]}")" == "sk-demo-123" ]] || fail "HTTPS get returned the wrong value"
+
+  echo "==> dashboard login from host"
+  dashboard_login "https://127.0.0.1:$PORT" --cacert "$WORK/ca.crt"
 }
 
 if [[ "${1:-}" == "--docker" ]]; then

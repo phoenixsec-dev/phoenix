@@ -4,7 +4,10 @@ Deploy one Phoenix server serving multiple machines and agents on a local networ
 
 This guide covers the topology, server setup, CA certificate distribution, agent
 provisioning, and verification for a multi-host deployment. It is written so that
-an agent (or a human) can execute it end-to-end with no prior Phoenix experience.
+an agent (or a human) can execute it with no prior Phoenix experience, except for
+two steps **a human does**: initializing the server (step 1), which shows the admin
+token and any generated dashboard password, and choosing a dashboard password on
+an older install (step 7).
 
 A LAN is the outer edge of Phoenix's supported envelope — internet/WAN
 exposure is out of scope (see [Threat Model](threat-model.md)). And a LAN is
@@ -42,7 +45,12 @@ On the server machine:
 phoenix-server --init /data/phoenix
 ```
 
-Save the admin token. You will need it for the next steps.
+**A human runs this, not an agent.** It asks for a dashboard password (Enter
+generates one and shows it once) and prints the admin token. Keep the dashboard
+password away from agents: it is what stops an agent from approving its own
+requests. You need the admin token for the next steps; an agent doing them acts
+as admin, so replace the token afterwards
+([Admin Token Lifecycle](admin-token-lifecycle.md)).
 
 ### Configure for LAN access
 
@@ -237,15 +245,15 @@ to the server config, run `phoenix-server --check-config`, and restart.
 See [Policy and Attestation](policy-and-attestation.md) for the full reference
 on available policy fields and testing with `phoenix policy test`.
 
-## 7. Enable operator dashboard (optional)
+## 7. Operator dashboard
 
-If you want browser-based approval and session management, enable the dashboard.
-Reach it over HTTPS — the `https_listener` configured above, or a reverse proxy.
+`--init` turned the dashboard on and set its password. Reach it over HTTPS — the `https_listener` configured above, or a reverse proxy.
 The startup warning covers the other case: a dashboard on a non-loopback
 plain HTTP bind means the dashboard password and session cookie cross the
 network in cleartext.
 
-Generate a password hash and add to the server config:
+On an older install, **a human** (not an agent) chooses the password and generates
+its hash; whoever knows it can approve requests. Add the hash to the server config:
 
 ```bash
 phoenix-server --hash-password

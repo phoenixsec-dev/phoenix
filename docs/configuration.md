@@ -119,7 +119,8 @@ refuses to start if `notify_url` or `notify_dashboard_url` is not a plain
 The operator dashboard provides a browser-based UI for approvals, sessions,
 audit, and role inspection. All assets are embedded — no CDN or build step.
 
-Generate a password hash first:
+`phoenix-server --init` turns it on and sets its password. On an older install,
+or to change the password, generate a hash (yourself, not through an agent):
 
 ```bash
 phoenix-server --hash-password
@@ -128,7 +129,7 @@ phoenix-server --hash-password
 # $2a$10$...
 ```
 
-Then add it to config:
+Then put it in the config and restart:
 
 ```json
 {
@@ -306,10 +307,11 @@ cause a restart loop for working HTTP consumers. Certificates load at startup;
 replacing a certificate requires a restart. Role sessions survive restarts (see
 [Session identity](session-identity.md#restarts)).
 
-For Docker, retain the existing port mapping and add a mapping for the selected
-HTTPS port, for example `9443:9443`, plus certificate mounts if needed. The
-server must bind a container-reachable address for a published port. The default
-Compose mapping and HTTP health check are unchanged.
+For Docker, publish the HTTPS port. The shipped `docker-compose.yml` already maps
+`127.0.0.1:9443:9443`, reachable from that host only. Drop the `127.0.0.1:` only
+for a deliberate LAN deployment (see [LAN Deployment](lan-deployment.md)). The
+server must bind a container-reachable address for a published port
+(`0.0.0.0:9443`, as `--init` writes). The HTTP health check is unchanged.
 
 To stop using the additional endpoint, restore the selected clients' previous
 URLs and disable `https_listener.enabled`, then restart during a planned window.
@@ -346,11 +348,12 @@ Docker images are published to Docker Hub as `phoenixsecdev/phoenix`
 state in the `/data` volume.
 
 ```bash
-# First run: initialize the volume (prints the admin token once)
-docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix --init /data
+# First run: initialize the volume with HTTPS on (prints the admin token and
+# the dashboard password once)
+docker run --rm -v phoenix-data:/data phoenixsecdev/phoenix --init /data --https
 
-# Start the server
-docker run -d --name phoenix -v phoenix-data:/data \
+# Start the server; dashboard at https://127.0.0.1:9443/dashboard/
+docker run -d --name phoenix -p 127.0.0.1:9443:9443 -v phoenix-data:/data \
   --restart unless-stopped phoenixsecdev/phoenix
 
 # Use the CLI inside the container
@@ -360,17 +363,17 @@ docker exec -e PHOENIX_TOKEN phoenix phoenix status
 
 The generated config listens on `127.0.0.1:9090` *inside the container*,
 so a `-p 9090:9090` port mapping reaches nothing. To use Phoenix from the
-host or other machines, turn on `https_listener` (`--init` already bound it
-to `0.0.0.0:9443`) and publish port 9443: traffic crosses the Docker bridge,
-which Phoenix treats as an untrusted network. The exact commands (a `sed`
-one-liner, then `docker cp` of `ca.crt` for `PHOENIX_CA_CERT`) are in
+host or other machines, publish the HTTPS port, 9443 (`--init --https` turned
+it on; on an older install set `https_listener.enabled` to `true`): traffic
+crosses the Docker bridge, which Phoenix treats as an untrusted network. How to
+trust its `ca.crt` with `PHOENIX_CA_CERT` is in
 [Quickstart: reaching the container from the host](quickstart.md#reaching-the-container-from-the-host).
 
 The image healthcheck probes `/v1/health` over plain HTTP on the
 container's loopback, which stays on when HTTPS is turned on.
 
 The repo's `docker-compose.yml` builds the image from source and follows
-the same flow (`docker compose run --rm phoenix --init /data`, then
+the same flow (`docker compose run --rm phoenix --init /data --https`, then
 `docker compose up -d`).
 
 ## Checking a config and removed settings
