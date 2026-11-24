@@ -61,7 +61,7 @@ func TestLogFormat(t *testing.T) {
 	var buf bytes.Buffer
 	logger := NewWriterLogger(&buf)
 
-	logger.LogAllowed("vector", "read", "test/key", "10.0.0.1")
+	logger.LogAllowed("courier", "read", "test/key", "10.0.0.1")
 
 	line := strings.TrimSpace(buf.String())
 	var entry Entry
@@ -69,8 +69,8 @@ func TestLogFormat(t *testing.T) {
 		t.Fatalf("unmarshal log line: %v", err)
 	}
 
-	if entry.Agent != "vector" {
-		t.Fatalf("expected agent 'vector', got %q", entry.Agent)
+	if entry.Agent != "courier" {
+		t.Fatalf("expected agent 'courier', got %q", entry.Agent)
 	}
 	if entry.Status != "allowed" {
 		t.Fatalf("expected status 'allowed', got %q", entry.Status)
@@ -84,7 +84,7 @@ func TestLogFormatIncludesSealedField(t *testing.T) {
 	var buf bytes.Buffer
 	logger := NewWriterLogger(&buf)
 
-	logger.LogAllowedSealed("vector", "read", "test/key", "10.0.0.1", true)
+	logger.LogAllowedSealed("courier", "read", "test/key", "10.0.0.1", true)
 
 	line := strings.TrimSpace(buf.String())
 	var entry Entry
@@ -101,7 +101,7 @@ func TestLogFormatIncludesMetadataWhenPresent(t *testing.T) {
 	logger := NewWriterLogger(&buf)
 
 	metadata := map[string]string{"openclaw.agent": "claw", "empty": ""}
-	logger.LogAllowedWithMetadata("vector", "read", "test/key", "10.0.0.1", metadata)
+	logger.LogAllowedWithMetadata("courier", "read", "test/key", "10.0.0.1", metadata)
 	metadata["openclaw.agent"] = "mutated"
 
 	line := strings.TrimSpace(buf.String())
@@ -122,8 +122,8 @@ func TestQueryByPath(t *testing.T) {
 	logPath := filepath.Join(dir, "audit.log")
 
 	logger, _ := NewLogger(logPath)
-	logger.LogAllowed("vector", "read", "openclaw/api-key", "1.2.3.4")
-	logger.LogAllowed("vector", "read", "monitoring/grafana", "1.2.3.4")
+	logger.LogAllowed("courier", "read", "openclaw/api-key", "1.2.3.4")
+	logger.LogAllowed("courier", "read", "monitoring/grafana", "1.2.3.4")
 	logger.LogDenied("openclaw", "read", "proxmox/admin", "1.2.3.4", "acl")
 	logger.Close()
 
@@ -134,8 +134,8 @@ func TestQueryByPath(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry for path, got %d", len(entries))
 	}
-	if entries[0].Agent != "vector" {
-		t.Fatalf("expected agent 'vector', got %q", entries[0].Agent)
+	if entries[0].Agent != "courier" {
+		t.Fatalf("expected agent 'courier', got %q", entries[0].Agent)
 	}
 }
 
@@ -144,13 +144,13 @@ func TestQueryCombinedFilters(t *testing.T) {
 	logPath := filepath.Join(dir, "audit.log")
 
 	logger, _ := NewLogger(logPath)
-	logger.LogAllowed("vector", "read", "ns/key", "1.1.1.1")
+	logger.LogAllowed("courier", "read", "ns/key", "1.1.1.1")
 	logger.LogAllowed("admin", "write", "ns/key", "1.1.1.1")
-	logger.LogAllowed("vector", "read", "ns/other", "1.1.1.1")
+	logger.LogAllowed("courier", "read", "ns/other", "1.1.1.1")
 	logger.Close()
 
 	// Filter by agent AND path
-	entries, err := Query(logPath, QueryOptions{Agent: "vector", Path: "ns/key"})
+	entries, err := Query(logPath, QueryOptions{Agent: "courier", Path: "ns/key"})
 	if err != nil {
 		t.Fatalf("Query combined: %v", err)
 	}

@@ -1150,7 +1150,7 @@ func TestOpenClawSessionKeyDoesNotSatisfySealedPolicyOrLeak(t *testing.T) {
 }
 
 func addSpoofedHermesHeaders(req *http.Request) {
-	req.Header.Set("X-Hermes-Profile", "kit\u202emain")
+	req.Header.Set("X-Hermes-Profile", "demo\u202emain")
 	req.Header.Set("X-Hermes-Session-Id", " hermes-session-77 ")
 	req.Header.Set("X-Hermes-Channel", "telegram\tdm")
 	req.Header.Set("X-Hermes-Tool", "phoenix_get")
@@ -1190,7 +1190,7 @@ func TestHermesHeadersCapturedAsSanitizedAuditMetadataOnly(t *testing.T) {
 		t.Fatalf("audit agent = %q, want authenticated Phoenix agent %q", entry.Agent, "reader")
 	}
 	expected := map[string]string{
-		"hermes.profile":    "kitmain",
+		"hermes.profile":    "demomain",
 		"hermes.session_id": "hermes-session-77",
 		"hermes.channel":    "telegram dm",
 		"hermes.tool":       "phoenix_get",
@@ -1372,7 +1372,7 @@ func TestOpenClawAndHermesFamiliesCoexist(t *testing.T) {
 		"openclaw.channel":          "growth ops",
 		"openclaw.requester_sender": "aaron@example",
 		"openclaw.sender_is_owner":  "true",
-		"hermes.profile":            "kitmain",
+		"hermes.profile":            "demomain",
 		"hermes.session_id":         "hermes-session-77",
 		"hermes.channel":            "telegram dm",
 		"hermes.tool":               "phoenix_get",

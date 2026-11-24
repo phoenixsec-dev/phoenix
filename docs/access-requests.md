@@ -144,7 +144,7 @@ as the agent itself even when the MCP server runs with `PHOENIX_ROLE`.
 ### In the dashboard
 
 **Requests** (`/dashboard/requests`) is the one page for this. A waiting
-request is a card that asks one question, "May vector use infra/b2/app-key?",
+request is a card that asks one question, "May courier use infra/b2/app-key?",
 with who asked and from which address, the agent's reason, the time left, and
 four buttons:
 
@@ -355,7 +355,7 @@ Tags: key
 Click: https://phoenix.example.net/dashboard/requests/req_...   (only with notify_dashboard_url)
 Authorization: Bearer <token>                                     (only with notify_token_ref)
 
-vector asks for read_value on 1 secret.
+courier asks for read_value on 1 secret.
 Request req_...: answer it in the Phoenix dashboard.
 https://phoenix.example.net/dashboard/requests/req_...
 ```

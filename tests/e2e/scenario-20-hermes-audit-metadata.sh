@@ -8,7 +8,7 @@ printf '%s' synthetic-hermes-audit | phoenix_admin set hermesmeta/allowed --valu
 printf '%s' synthetic-restricted | phoenix_admin set restricted/key --value-stdin >/dev/null
 printf '%s' synthetic-tooled | phoenix_admin set tooled/key --value-stdin >/dev/null
 phoenix_admin agent create hermes-reader -t synthetic-hermes-reader --acl 'hermesmeta/*:list,read_value;tooled/*:list,read_value' >/dev/null
-long="$(python3 -c 'print("x"*300)')"; formatted=$'kit\u202Emain'; sentinel=synthetic-hermes-key-must-not-log
+long="$(python3 -c 'print("x"*300)')"; formatted=$'demo\u202Emain'; sentinel=synthetic-hermes-key-must-not-log
 
 # All five Hermes headers, plus unlisted and credential-shaped headers that must be ignored.
 curl -fsS "$PHOENIX_SERVER/v1/secrets/hermesmeta/allowed" -H 'Authorization: Bearer synthetic-hermes-reader' \
@@ -25,7 +25,7 @@ audit="$(api_admin GET /v1/audit)"
 assert_not_contains "$audit" "$sentinel" "hermes session key leaked"
 entry="$(jq -c '[.entries[] | select(.path=="hermesmeta/allowed" and .action=="read_value")][-1]' <<<"$audit")"
 assert_eq "$(jq -r .agent <<<"$entry")" hermes-reader "authenticated agent preserved"
-assert_eq "$(jq -r '.metadata["hermes.profile"]' <<<"$entry")" kitmain "format controls stripped"
+assert_eq "$(jq -r '.metadata["hermes.profile"]' <<<"$entry")" demomain "format controls stripped"
 assert_eq "$(jq -r '.metadata["hermes.session_id"]' <<<"$entry")" hermes-session-77
 assert_eq "$(jq -r '.metadata["hermes.channel"] | length' <<<"$entry")" 256 "256-char cap"
 assert_eq "$(jq -r '.metadata["hermes.tool"]' <<<"$entry")" phoenix_get

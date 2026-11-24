@@ -43,7 +43,7 @@ func (e *accessEnv) feed(t *testing.T, rev string) (int, requestFeed) {
 }
 
 func (e *accessEnv) canRead(path string) bool {
-	return e.acl.Authorize("vector", path, acl.ActionReadValue) == nil
+	return e.acl.Authorize("courier", path, acl.ActionReadValue) == nil
 }
 
 func TestRequestCardShowsFacts(t *testing.T) {
@@ -51,7 +51,7 @@ func TestRequestCardShowsFacts(t *testing.T) {
 	rq := e.request(t, "backup job fails auth <script>alert(1)</script> \u202Etxt.exe\u200B", 30*time.Minute, "infra/a", "dev/db", "infra/missing")
 	page := e.get(t, "/dashboard/requests")
 	for _, want := range []string{
-		`id="` + rq.ID + `"`, "May vector use 3 secrets?", "10.0.0.5", "Agent says (not verified)",
+		`id="` + rq.ID + `"`, "May courier use 3 secrets?", "10.0.0.5", "Agent says (not verified)",
 		"&lt;script&gt;alert(1)&lt;/script&gt;", "does not exist", "hidden from this agent", "already allowed",
 		">No</button>", ">Once</button>", ">15 minutes</button>", ">Always</button>",
 		"Taking access back later does not recall a value already handed over.",
@@ -114,15 +114,15 @@ func TestAnswerAlwaysAndRemove(t *testing.T) {
 	}
 	// Exactly the ticked path, reading only.
 	if !e.canRead("infra/a") || e.canRead("infra/b") || e.canRead("infra/a/x") ||
-		e.acl.Authorize("vector", "infra/a", acl.ActionWrite) == nil || e.acl.Authorize("vector", "infra/a", acl.ActionList) == nil {
+		e.acl.Authorize("courier", "infra/a", acl.ActionWrite) == nil || e.acl.Authorize("courier", "infra/a", acl.ActionList) == nil {
 		t.Fatal("always did not add exactly read_value on infra/a")
 	}
 	page := e.get(t, "/dashboard/requests")
 	if !strings.Contains(page, `name="path" value="infra/a"`) || !strings.Contains(page, "Always, by dashboard@192.0.2.9") {
 		t.Fatal("always entry not on the page")
 	}
-	remove := url.Values{"agent": {"vector"}, "path": {"infra/a"}, "request": {rq.ID}}
-	stale := url.Values{"agent": {"vector"}, "path": {"infra/a"}, "request": {"req_older"}}
+	remove := url.Values{"agent": {"courier"}, "path": {"infra/a"}, "request": {rq.ID}}
+	stale := url.Values{"agent": {"courier"}, "path": {"infra/a"}, "request": {"req_older"}}
 	if code := redirectParam(t, e.post(t, "/dashboard/requests/always/remove", stale, true), "error"); code != "NOT_FOUND" || !e.canRead("infra/a") {
 		t.Fatalf("an old page removed a newer answer: %q", code)
 	}
@@ -167,7 +167,7 @@ func TestAnswersAtOnce(t *testing.T) {
 		}
 		wg.Wait()
 		got, _ := e.gs.GetRequest(rq.ID)
-		grants := e.gs.ListGrants("vector", false)
+		grants := e.gs.ListGrants("courier", false)
 		wantGrants := 0
 		if got.Status == grant.StatusApproved && !got.Always {
 			wantGrants = 1
@@ -213,7 +213,7 @@ func TestAnswerRefusals(t *testing.T) {
 		t.Errorf("answer without CSRF: %d", w.Code)
 	}
 	// The token that asked was replaced: no answer but No reaches anybody.
-	if err := e.acl.UpdateAgent("vector", "another-token", nil); err != nil {
+	if err := e.acl.UpdateAgent("courier", "another-token", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, choice := range []string{"once", "time", "always"} {
@@ -222,7 +222,7 @@ func TestAnswerRefusals(t *testing.T) {
 	if !strings.Contains(e.get(t, "/dashboard/requests"), "token was replaced after it asked") {
 		t.Error("card does not say the token changed")
 	}
-	e.acl.RemoveAgent("vector")
+	e.acl.RemoveAgent("courier")
 	expect("UNKNOWN_AGENT", "always", nil)
 	if got, _ := e.gs.GetRequest(rq.ID); got.Status != grant.StatusPending || e.canRead("infra/a") {
 		t.Fatalf("request = %s", got.Status)
@@ -237,7 +237,7 @@ func TestSSHLoginCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.h.deps.Policy = pe
-	login := e.h.card(grant.Request{ID: "req_x", Agent: "vector", Action: grant.ActionSSHLogin, Paths: []string{"ssh/build-1"}, RequestedTTL: time.Hour}, "")
+	login := e.h.card(grant.Request{ID: "req_x", Agent: "courier", Action: grant.ActionSSHLogin, Paths: []string{"ssh/build-1"}, RequestedTTL: time.Hour}, "")
 	if login.Machine != "build-1" || login.AlwaysOK || len(login.Attest) != 0 {
 		t.Fatalf("login card = %+v", login)
 	}
@@ -245,7 +245,7 @@ func TestSSHLoginCard(t *testing.T) {
 	if !strings.Contains(html, "Once issues one certificate") || !strings.Contains(html, "root login on <strong>build-1</strong>") || strings.Contains(html, `value="always"`) || !strings.Contains(html, `value="once"`) {
 		t.Fatalf("login card html:\n%s", html)
 	}
-	secret := e.h.card(grant.Request{ID: "req_y", Agent: "vector", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}, RequestedTTL: time.Hour}, "")
+	secret := e.h.card(grant.Request{ID: "req_y", Agent: "courier", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}, RequestedTTL: time.Hour}, "")
 	if secret.Machine != "" || !secret.AlwaysOK || len(secret.Attest) == 0 {
 		t.Fatalf("a secret at the same path must keep its normal card: %+v", secret)
 	}
@@ -296,7 +296,7 @@ func TestRemoveSaysWhatIsLeft(t *testing.T) {
 		if code := redirectParam(t, e.answer(t, rq.ID, "always", nil), "error"); code != "" {
 			t.Fatal(code)
 		}
-		w := e.post(t, "/dashboard/requests/always/remove", url.Values{"agent": {"vector"}, "path": {"infra/a"}, "request": {rq.ID}}, true)
+		w := e.post(t, "/dashboard/requests/always/remove", url.Values{"agent": {"courier"}, "path": {"infra/a"}, "request": {rq.ID}}, true)
 		return redirectParam(t, w, "done")
 	}
 	if got := done(func(*accessEnv) {}); got != "removed" {
@@ -308,7 +308,7 @@ func TestRemoveSaysWhatIsLeft(t *testing.T) {
 		t.Errorf("open grant: %q", got)
 	}
 	if got := done(func(e *accessEnv) {
-		e.acl.UpdateAgent("vector", "vector-token", []acl.Permission{{Path: "infra/*", Actions: []acl.Action{acl.ActionReadValue}}})
+		e.acl.UpdateAgent("courier", "courier-token", []acl.Permission{{Path: "infra/*", Actions: []acl.Action{acl.ActionReadValue}}})
 	}); got != "removed-still" {
 		t.Errorf("another rule: %q", got)
 	}
@@ -321,7 +321,7 @@ func TestExpiredStaysVisible(t *testing.T) {
 	if badge != "expired" || !strings.Contains(row, "nobody answered") {
 		t.Fatalf("outcome = %q %q", row, badge)
 	}
-	if _, err := e.gs.DeleteAgent("vector", "admin", "", nil); err != nil { // expires it
+	if _, err := e.gs.DeleteAgent("courier", "admin", "", nil); err != nil { // expires it
 		t.Fatal(err)
 	}
 	if page := e.get(t, "/dashboard/requests/"+rq.ID); !strings.Contains(page, "status-expired") || strings.Contains(page, `value="once"`) {

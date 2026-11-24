@@ -46,7 +46,7 @@ const testReqID = "req_0123456789abcdef0123456789abcdef"
 
 func pendingRequestJSON(reason string) map[string]any {
 	return map[string]any{
-		"id": testReqID, "status": "pending", "agent": "vector", "source_ip": "10.0.0.5", "auth_method": "bearer",
+		"id": testReqID, "status": "pending", "agent": "courier", "source_ip": "10.0.0.5", "auth_method": "bearer",
 		"paths": []string{"infra/a", "infra/b"}, "action": "read_value", "reason": reason,
 		"requested_ttl": "30m0s", "already_allowed_paths": []string{"infra/b"},
 	}
@@ -58,7 +58,7 @@ func TestApprovalPromptShowsEveryPath(t *testing.T) {
 	json.Unmarshal(b, &rq)
 	p := approvalPrompt(rq, []string{"infra/a"}, "15m", 1)
 	for _, want := range []string{
-		testReqID, "vector (bearer from 10.0.0.5)", "Action:  read_value",
+		testReqID, "courier (bearer from 10.0.0.5)", "Action:  read_value",
 		"+ infra/a", "- infra/b  (already allowed)", "TTL:     15m (requested 30m0s)", "Uses:    1 of each path",
 		"Agent says (not verified): need it", "Revoking later does not recall",
 	} {
@@ -182,7 +182,7 @@ func TestMCPRequestUseTool(t *testing.T) {
 func TestApprovalPromptShowsLongPathsInFull(t *testing.T) {
 	prefix := "infra/" + strings.Repeat("x", 300)
 	a, b := prefix+"/staging", prefix+"/production"
-	rq := accessRequestView{ID: testReqID, Agent: "vector", Action: "read_value", Paths: []string{a, b}}
+	rq := accessRequestView{ID: testReqID, Agent: "courier", Action: "read_value", Paths: []string{a, b}}
 	p := approvalPrompt(rq, nil, "15m", 0)
 	if !strings.Contains(p, a) || !strings.Contains(p, b) {
 		t.Fatalf("prompt does not show both full paths:\n%s", p)

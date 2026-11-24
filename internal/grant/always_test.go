@@ -23,7 +23,7 @@ type fakeACL struct {
 }
 
 func newFakeACL() *fakeACL {
-	return &fakeACL{staged: map[string][]string{}, live: map[string][]string{}, tok: map[string]string{"vector": "fp-vector"}}
+	return &fakeACL{staged: map[string][]string{}, live: map[string][]string{}, tok: map[string]string{"courier": "fp-courier"}}
 }
 
 func (f *fakeACL) check(r Request) error {
@@ -94,7 +94,7 @@ func alwaysIn(id string) AlwaysInput {
 
 func TestApproveAlways(t *testing.T) {
 	e, acl := alwaysEnv(t)
-	r := e.create("vector", "infra/a", "infra/b")
+	r := e.create("courier", "infra/a", "infra/b")
 	in := alwaysIn(r.ID)
 	in.Paths = []string{"infra/a"}
 	got, err := e.s.ApproveAlways(in)
@@ -126,7 +126,7 @@ func TestApproveAlways(t *testing.T) {
 
 func TestApproveAlwaysRefusals(t *testing.T) {
 	e, acl := alwaysEnv(t)
-	r := e.create("vector", "infra/a")
+	r := e.create("courier", "infra/a")
 	try := func(want Code, in AlwaysInput) {
 		t.Helper()
 		_, err := e.s.ApproveAlways(in)
@@ -142,30 +142,30 @@ func TestApproveAlwaysRefusals(t *testing.T) {
 	glob.Paths = []string{"infra/*"}
 	try(CodeInvalidRequest, glob)
 	self := alwaysIn(r.ID)
-	self.Approver = "vector"
+	self.Approver = "courier"
 	try(CodeSelfApproval, self)
-	acl.tok["vector"] = "fp-other"
+	acl.tok["courier"] = "fp-other"
 	try(CodeCredentialChanged, alwaysIn(r.ID))
-	acl.tok["vector"] = "fp-vector"
+	acl.tok["courier"] = "fp-courier"
 	acl.fail = errors.New("disk full")
 	try(CodeACLWriteFailed, alwaysIn(r.ID))
 	acl.fail = nil
-	e.setGone("vector", true)
+	e.setGone("courier", true)
 	try(CodeUnknownAgent, alwaysIn(r.ID))
-	e.setGone("vector", false)
+	e.setGone("courier", false)
 	if _, err := e.s.Deny(DenyInput{RequestID: r.ID, Denier: "dashboard@x"}); err != nil {
 		t.Fatal(err)
 	}
 	try(CodeNotPending, alwaysIn(r.ID))
 
-	login := bearerIn("vector", "ssh/build-1")
+	login := bearerIn("courier", "ssh/build-1")
 	login.Action = ActionSSHLogin
 	lr, _, err := e.s.Create(login)
 	if err != nil {
 		t.Fatal(err)
 	}
 	try(CodeAlwaysNotAllowed, alwaysIn(lr.ID))
-	late := e.create("vector", "infra/late")
+	late := e.create("courier", "infra/late")
 	e.clock.Advance(DefaultRequestTTL)
 	try(CodeNotPending, alwaysIn(late.ID))
 }
@@ -176,7 +176,7 @@ func TestApproveAlwaysSaveFailureGivesNothing(t *testing.T) {
 	for _, step := range []string{"write", "fsync", "rename", "dirsync"} {
 		for _, dropErr := range []error{nil, errors.New("disk full")} {
 			e, acl := alwaysEnv(t)
-			r := e.create("vector", "infra/a")
+			r := e.create("courier", "infra/a")
 			acl.hook = func() {
 				e.fs.failOnce(step)
 				if len(acl.live) != 0 {
@@ -209,7 +209,7 @@ func TestApproveAlwaysSaveFailureGivesNothing(t *testing.T) {
 // hold the answer. A restart must not give more than that answer.
 func TestApproveAlwaysDoubleFault(t *testing.T) {
 	e, acl := alwaysEnv(t)
-	r := e.create("vector", "infra/a")
+	r := e.create("courier", "infra/a")
 	acl.hook = func() { e.fs.fail("dirsync") }
 	_, err := e.s.ApproveAlways(alwaysIn(r.ID))
 	wantCode(t, err, CodeStoreWriteFailed)
@@ -226,15 +226,15 @@ func TestApproveAlwaysDoubleFault(t *testing.T) {
 // The server dies between the steps. Only a saved "always" is finished.
 func TestRestartBetweenSteps(t *testing.T) {
 	e, acl := alwaysEnv(t)
-	done := e.create("vector", "infra/done")
+	done := e.create("courier", "infra/done")
 	acl.finish = errors.New("died here")
 	if _, err := e.s.ApproveAlways(alwaysIn(done.ID)); err != nil || len(acl.live) != 0 {
 		t.Fatalf("%v live %v", err, acl.live)
 	}
 	acl.finish = nil
-	pending := e.create("vector", "infra/pending")
-	denied := e.create("vector", "infra/denied")
-	once := e.create("vector", "infra/once")
+	pending := e.create("courier", "infra/pending")
+	denied := e.create("courier", "infra/denied")
+	once := e.create("courier", "infra/once")
 	if _, err := e.s.Deny(DenyInput{RequestID: denied.ID, Denier: "dashboard@x"}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,13 +258,13 @@ func TestRestartBetweenSteps(t *testing.T) {
 // The token changed while the server was down, before the last step.
 func TestRestartFinishChecksTheToken(t *testing.T) {
 	e, acl := alwaysEnv(t)
-	r := e.create("vector", "infra/a")
+	r := e.create("courier", "infra/a")
 	acl.finish = errors.New("died here")
 	if _, err := e.s.ApproveAlways(alwaysIn(r.ID)); err != nil {
 		t.Fatal(err)
 	}
 	acl.finish = nil
-	acl.tok["vector"] = "fp-other"
+	acl.tok["courier"] = "fp-other"
 	e.reopen()
 	if len(acl.live)+len(acl.staged) != 0 {
 		t.Fatalf("live %v staged %v", acl.live, acl.staged)

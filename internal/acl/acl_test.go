@@ -25,12 +25,12 @@ func testACL() *ACL {
 					{Path: "*", Actions: []Action{ActionAdmin}},
 				},
 			},
-			"vector": {
-				Name:      "vector",
-				TokenHash: crypto.HashToken("vector-token"),
+			"courier": {
+				Name:      "courier",
+				TokenHash: crypto.HashToken("courier-token"),
 				Permissions: []Permission{
 					{Path: "openclaw/*", Actions: []Action{ActionList, ActionReadValue}},
-					{Path: "vector/*", Actions: []Action{ActionList, ActionReadValue, ActionWrite}},
+					{Path: "courier/*", Actions: []Action{ActionList, ActionReadValue, ActionWrite}},
 					{Path: "infra/*", Actions: []Action{ActionList, ActionReadValue}},
 				},
 			},
@@ -57,12 +57,12 @@ func TestAuthenticate(t *testing.T) {
 		t.Fatalf("expected 'admin', got %q", name)
 	}
 
-	name, err = a.Authenticate("vector-token")
+	name, err = a.Authenticate("courier-token")
 	if err != nil {
-		t.Fatalf("Authenticate vector: %v", err)
+		t.Fatalf("Authenticate courier: %v", err)
 	}
-	if name != "vector" {
-		t.Fatalf("expected 'vector', got %q", name)
+	if name != "courier" {
+		t.Fatalf("expected 'courier', got %q", name)
 	}
 }
 
@@ -90,27 +90,27 @@ func TestAuthorizeAdmin(t *testing.T) {
 	}
 }
 
-func TestAuthorizeVector(t *testing.T) {
+func TestAuthorizeCourier(t *testing.T) {
 	a := testACL()
 
-	// Vector can read openclaw/*
-	if err := a.Authorize("vector", "openclaw/api-key", ActionReadValue); err != nil {
-		t.Fatalf("vector read openclaw: %v", err)
+	// Courier can read openclaw/*
+	if err := a.Authorize("courier", "openclaw/api-key", ActionReadValue); err != nil {
+		t.Fatalf("courier read openclaw: %v", err)
 	}
 
-	// Vector can read+write vector/*
-	if err := a.Authorize("vector", "vector/config", ActionWrite); err != nil {
-		t.Fatalf("vector write vector: %v", err)
+	// Courier can read+write courier/*
+	if err := a.Authorize("courier", "courier/config", ActionWrite); err != nil {
+		t.Fatalf("courier write courier: %v", err)
 	}
 
-	// Vector CANNOT write to openclaw/*
-	if err := a.Authorize("vector", "openclaw/api-key", ActionWrite); err != ErrAccessDenied {
-		t.Fatalf("vector should not write openclaw, got %v", err)
+	// Courier CANNOT write to openclaw/*
+	if err := a.Authorize("courier", "openclaw/api-key", ActionWrite); err != ErrAccessDenied {
+		t.Fatalf("courier should not write openclaw, got %v", err)
 	}
 
-	// Vector CANNOT read proxmox/*
-	if err := a.Authorize("vector", "proxmox/admin-token", ActionReadValue); err != ErrAccessDenied {
-		t.Fatalf("vector should not read proxmox, got %v", err)
+	// Courier CANNOT read proxmox/*
+	if err := a.Authorize("courier", "proxmox/admin-token", ActionReadValue); err != ErrAccessDenied {
+		t.Fatalf("courier should not read proxmox, got %v", err)
 	}
 }
 
@@ -241,12 +241,12 @@ func TestValidatePermissions(t *testing.T) {
 func TestGetAgent(t *testing.T) {
 	a := testACL()
 
-	agent, err := a.GetAgent("vector")
+	agent, err := a.GetAgent("courier")
 	if err != nil {
 		t.Fatalf("GetAgent: %v", err)
 	}
-	if agent.Name != "vector" {
-		t.Fatalf("expected name 'vector', got %q", agent.Name)
+	if agent.Name != "courier" {
+		t.Fatalf("expected name 'courier', got %q", agent.Name)
 	}
 	if len(agent.Permissions) != 3 {
 		t.Fatalf("expected 3 permissions, got %d", len(agent.Permissions))
@@ -308,7 +308,7 @@ func TestListAgents(t *testing.T) {
 	for _, n := range names {
 		found[n] = true
 	}
-	for _, expected := range []string{"admin", "vector", "openclaw"} {
+	for _, expected := range []string{"admin", "courier", "openclaw"} {
 		if !found[expected] {
 			t.Fatalf("missing agent %q in list", expected)
 		}

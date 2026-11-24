@@ -40,7 +40,7 @@ func (f *switchFS) WriteFileAtomic(name string, data []byte, perm os.FileMode) e
 }
 
 // accessEnv is a dashboard wired to a real API server and grant store, with
-// agent "vector" (dev/** only, seal key registered) and secrets
+// agent "courier" (dev/** only, seal key registered) and secrets
 // infra/a and infra/b. access_requests has NO approvers: the dashboard
 // approves on its own login.
 type accessEnv struct {
@@ -72,11 +72,11 @@ func newAccessEnv(t *testing.T) *accessEnv {
 		}
 	}
 	a := acl.NewFromConfig(&acl.ACLConfig{Agents: map[string]acl.Agent{}})
-	if err := a.AddAgent("vector", "vector-token", []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
+	if err := a.AddAgent("courier", "courier-token", []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
 		t.Fatal(err)
 	}
 	kp, _ := crypto.GenerateSealKeyPair()
-	if err := a.SetAgentSealKey("vector", crypto.EncodeSealKey(&kp.PublicKey)); err != nil {
+	if err := a.SetAgentSealKey("courier", crypto.EncodeSealKey(&kp.PublicKey)); err != nil {
 		t.Fatal(err)
 	}
 	al := audit.NewWriterLogger(io.Discard)
@@ -109,12 +109,12 @@ func newAccessEnv(t *testing.T) *accessEnv {
 	return e
 }
 
-// request files a pending request from vector.
+// request files a pending request from courier.
 func (e *accessEnv) request(t *testing.T, reason string, ttl time.Duration, paths ...string) grant.Request {
 	t.Helper()
 	rq, _, err := e.gs.Create(grant.CreateInput{
-		Agent: "vector", Paths: paths, Action: grant.ActionReadValue, Reason: reason, TTL: ttl,
-		SourceIP: "10.0.0.5", AuthMethod: grant.AuthBearer, CredentialFP: grant.BearerFingerprint(crypto.HashToken("vector-token")),
+		Agent: "courier", Paths: paths, Action: grant.ActionReadValue, Reason: reason, TTL: ttl,
+		SourceIP: "10.0.0.5", AuthMethod: grant.AuthBearer, CredentialFP: grant.BearerFingerprint(crypto.HashToken("courier-token")),
 	})
 	if err != nil {
 		t.Fatal(err)

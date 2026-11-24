@@ -11,15 +11,15 @@ import (
 
 func TestTransitionsAndIdempotency(t *testing.T) {
 	e := newEnv(t)
-	r := e.create("vector", "infra/b2/app-key")
+	r := e.create("courier", "infra/b2/app-key")
 	if r.Status != StatusPending || r.ExpiresAt != t0.Add(DefaultRequestTTL) {
 		t.Fatalf("new request: %+v", r)
 	}
 
 	// The requester can never decide its own request.
-	_, _, err := e.s.Approve(ApproveInput{RequestID: r.ID, Approver: "vector"})
+	_, _, err := e.s.Approve(ApproveInput{RequestID: r.ID, Approver: "courier"})
 	wantCode(t, err, CodeSelfApproval)
-	_, err = e.s.Deny(DenyInput{RequestID: r.ID, Denier: "vector"})
+	_, err = e.s.Deny(DenyInput{RequestID: r.ID, Denier: "courier"})
 	wantCode(t, err, CodeSelfApproval)
 	_, _, err = e.s.Approve(ApproveInput{RequestID: "req_nope", Approver: "x"})
 	wantCode(t, err, CodeNotFound)
@@ -48,7 +48,7 @@ func TestTransitionsAndIdempotency(t *testing.T) {
 	wantCode(t, err, CodeNotPending)
 
 	// Deny: repeat with same note is idempotent; different note or approve is 409.
-	d := e.create("vector", "infra/other")
+	d := e.create("courier", "infra/other")
 	if _, err := e.s.Deny(DenyInput{RequestID: d.ID, Denier: "dashboard@x", Note: "no"}); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestTransitionsAndIdempotency(t *testing.T) {
 
 func TestApproveNarrowing(t *testing.T) {
 	e := newEnv(t)
-	in := bearerIn("vector", "infra/a", "infra/b", "infra/c")
+	in := bearerIn("courier", "infra/a", "infra/b", "infra/c")
 	in.TTL = 2 * time.Hour
 	r, _, err := e.s.Create(in)
 	if err != nil {
@@ -118,7 +118,7 @@ func TestApproveNarrowing(t *testing.T) {
 	if !slices.Equal(g.Paths, []string{"infra/a", "infra/c"}) || g.ExpiresAt.Sub(g.CreatedAt) != 30*time.Minute {
 		t.Fatalf("grant paths %v ttl %v", g.Paths, g.ExpiresAt.Sub(g.CreatedAt))
 	}
-	if g.SealedOnly || g.BoundSourceIP != "" || g.AuthMethod != AuthBearer || g.CredentialFP != "fp-vector" {
+	if g.SealedOnly || g.BoundSourceIP != "" || g.AuthMethod != AuthBearer || g.CredentialFP != "fp-courier" {
 		t.Fatalf("grant binding fields: %+v", g)
 	}
 
@@ -133,15 +133,15 @@ func TestLimits(t *testing.T) {
 	e := newEnv(t)
 
 	// 3 pending per agent; an identical request is a 200 duplicate even at the cap.
-	first := e.create("vector", "ns/a")
+	first := e.create("courier", "ns/a")
 	e.clock.Advance(time.Minute)
-	e.create("vector", "ns/b")
-	e.create("vector", "ns/c")
-	dup, created, err := e.s.Create(bearerIn("vector", "ns/a"))
+	e.create("courier", "ns/b")
+	e.create("courier", "ns/c")
+	dup, created, err := e.s.Create(bearerIn("courier", "ns/a"))
 	if err != nil || created || dup.ID != first.ID {
 		t.Fatalf("duplicate: %v created=%v err=%v", dup.ID, created, err)
 	}
-	_, _, err = e.s.Create(bearerIn("vector", "ns/d"))
+	_, _, err = e.s.Create(bearerIn("courier", "ns/d"))
 	wantCode(t, err, CodeTooManyPending)
 	var ge *Error
 	if !errors.As(err, &ge) || ge.RetryAfter != first.ExpiresAt.Sub(e.clock.Now()) {
@@ -202,40 +202,40 @@ func TestLimits(t *testing.T) {
 
 func TestCooldown(t *testing.T) {
 	e := newEnv(t)
-	r := e.create("vector", "ns/a", "ns/b")
+	r := e.create("courier", "ns/a", "ns/b")
 	if _, err := e.s.Deny(DenyInput{RequestID: r.ID, Denier: "dashboard@x"}); err != nil {
 		t.Fatal(err)
 	}
 	e.clock.Advance(3 * time.Minute)
 
 	// Any overlapping path is blocked, with retry-after to the end of the cooldown.
-	_, _, err := e.s.Create(bearerIn("vector", "ns/b", "ns/c"))
+	_, _, err := e.s.Create(bearerIn("courier", "ns/b", "ns/c"))
 	wantCode(t, err, CodeRequestCooldown)
 	var ge *Error
 	if errors.As(err, &ge); ge.RetryAfter != 7*time.Minute {
 		t.Fatalf("retry-after = %v, want 7m", ge.RetryAfter)
 	}
 	// Non-overlapping path and other agents are not blocked.
-	e.create("vector", "ns/c")
+	e.create("courier", "ns/c")
 	e.create("echo", "ns/a")
 
 	// Restart during cooldown: still blocked (derived from stored decided_at).
 	e.reopen()
-	_, _, err = e.s.Create(bearerIn("vector", "ns/a"))
+	_, _, err = e.s.Create(bearerIn("courier", "ns/a"))
 	wantCode(t, err, CodeRequestCooldown)
 
 	// Exactly 10 minutes after the denial the cooldown is over.
 	e.clock.Set(t0.Add(DenyCooldown))
-	e.create("vector", "ns/a")
+	e.create("courier", "ns/a")
 }
 
 func TestMatch(t *testing.T) {
 	e := newEnv(t)
-	r := e.create("vector", "infra/key", "infra/other")
+	r := e.create("courier", "infra/key", "infra/other")
 	g := e.approve(r.ID)
 
 	nm := func(c Caller, path, action string) MatchResult { return e.s.Match(c, path, action) }
-	ok := bearerCaller("vector")
+	ok := bearerCaller("courier")
 	if m := nm(ok, "infra/key", ActionReadValue); m.Grant == nil || m.Grant.ID != g.ID {
 		t.Fatalf("matching caller: %+v", m)
 	}
@@ -247,21 +247,21 @@ func TestMatch(t *testing.T) {
 		"other path":     {ok, "infra/nope", ActionReadValue},
 		"other action":   {ok, "infra/key", "write"},
 		"other agent":    {bearerCaller("echo"), "infra/key", ActionReadValue},
-		"wrong token fp": {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: AuthBearer, CredentialFP: "fp-rotated"}, "infra/key", ActionReadValue},
-		"wrong ip":       {Caller{Agent: "vector", SourceIP: "10.0.0.6", AuthMethod: AuthBearer, CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
-		"other method":   {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "mtls", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
-		"session":        {Caller{Agent: "vector", SourceIP: "10.0.0.5", AuthMethod: "session", CredentialFP: "fp-vector"}, "infra/key", ActionReadValue},
+		"wrong token fp": {Caller{Agent: "courier", SourceIP: "10.0.0.5", AuthMethod: AuthBearer, CredentialFP: "fp-rotated"}, "infra/key", ActionReadValue},
+		"wrong ip":       {Caller{Agent: "courier", SourceIP: "10.0.0.6", AuthMethod: AuthBearer, CredentialFP: "fp-courier"}, "infra/key", ActionReadValue},
+		"other method":   {Caller{Agent: "courier", SourceIP: "10.0.0.5", AuthMethod: "mtls", CredentialFP: "fp-courier"}, "infra/key", ActionReadValue},
+		"session":        {Caller{Agent: "courier", SourceIP: "10.0.0.5", AuthMethod: "session", CredentialFP: "fp-courier"}, "infra/key", ActionReadValue},
 	}
 	for name, tc := range misses {
 		if m := nm(tc.c, tc.path, tc.action); m.Grant != nil || m.Reason != "" {
 			t.Errorf("%s: got %+v, want no grant and no reason", name, m)
 		}
 	}
-	e.setGone("vector", true)
+	e.setGone("courier", true)
 	if m := nm(ok, "infra/key", ActionReadValue); m.Grant != nil {
 		t.Fatal("agent removed from ACL still matched")
 	}
-	e.setGone("vector", false)
+	e.setGone("courier", false)
 
 	// Token binding: same token fingerprint required; bind_source_ip off allows other IPs.
 	in := bearerIn("mtls-agent", "infra/key")
@@ -301,7 +301,7 @@ func TestMatch(t *testing.T) {
 
 func TestRevoke(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 
 	// Another agent acting as owner sees NOT_FOUND (no existence oracle).
 	_, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "echo", OwnerOnly: true})
@@ -309,11 +309,11 @@ func TestRevoke(t *testing.T) {
 
 	// Revoke at T: a Match at the same instant already fails.
 	e.clock.Advance(time.Minute)
-	got, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "vector", OwnerOnly: true})
-	if err != nil || got.State(e.clock.Now()) != GrantRevoked || got.RevokedBy != "vector" {
+	got, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "courier", OwnerOnly: true})
+	if err != nil || got.State(e.clock.Now()) != GrantRevoked || got.RevokedBy != "courier" {
 		t.Fatalf("owner revoke: %+v %v", got, err)
 	}
-	if m := e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue); m.Grant != nil || m.Reason != ReasonGrantRevoked {
+	if m := e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue); m.Grant != nil || m.Reason != ReasonGrantRevoked {
 		t.Fatalf("after revoke: %+v", m)
 	}
 	// Idempotent: no second committed line.
@@ -327,12 +327,12 @@ func TestRevoke(t *testing.T) {
 
 func TestDeleteAgent(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/a").ID)
-	pending := e.create("vector", "infra/b")
+	g := e.approve(e.create("courier", "infra/a").ID)
+	pending := e.create("courier", "infra/b")
 	other := e.approve(e.create("echo", "infra/a").ID)
 
 	called := false
-	res, err := e.s.DeleteAgent("vector", "admin", "10.0.0.9", func() error { called = true; return nil })
+	res, err := e.s.DeleteAgent("courier", "admin", "10.0.0.9", func() error { called = true; return nil })
 	if err != nil || !called {
 		t.Fatalf("delete: %v called=%v", err, called)
 	}
@@ -361,7 +361,7 @@ func TestDeleteAgent(t *testing.T) {
 
 func TestTickExpiryUsageRetention(t *testing.T) {
 	e := newEnv(t)
-	r := e.create("vector", "infra/key")
+	r := e.create("courier", "infra/key")
 	g := e.approve(r.ID)
 	e.s.RecordUse(g.ID)
 	e.s.RecordUse(g.ID)
@@ -413,12 +413,12 @@ func TestTickExpiryUsageRetention(t *testing.T) {
 // agent exists must still win; Match decides on the state after the call.
 func TestMatchSeesRevokeDuringAgentExists(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 	entered, release := make(chan struct{}), make(chan struct{})
 	e.setHook(func(string) { close(entered); <-release })
 
 	done := make(chan MatchResult)
-	go func() { done <- e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue) }()
+	go func() { done <- e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue) }()
 	<-entered
 	if _, err := e.s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"}); err != nil {
 		t.Fatal(err)
@@ -433,12 +433,12 @@ func TestMatchSeesRevokeDuringAgentExists(t *testing.T) {
 // across a restart) must not bring the grant back.
 func TestRecordedExpiryIgnoresClockStepBack(t *testing.T) {
 	e := newEnv(t)
-	g := e.approve(e.create("vector", "infra/key").ID)
+	g := e.approve(e.create("courier", "infra/key").ID)
 	e.clock.Set(g.ExpiresAt)
 	e.s.Tick()
 	e.clock.Set(g.ExpiresAt.Add(-time.Second))
 	e.reopen()
-	if m := e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue); m.Grant != nil {
+	if m := e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue); m.Grant != nil {
 		t.Fatalf("expired grant active again after clock step back: %+v", m.Grant)
 	}
 	if v, _ := e.s.GetGrant(g.ID); v.State(e.clock.Now()) != GrantExpired {
@@ -480,7 +480,7 @@ func TestAuditSinkCannotMutateRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, _, err := s.Create(bearerIn("vector", "infra/key"))
+	r, _, err := s.Create(bearerIn("courier", "infra/key"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestAuditSinkCannotMutateRecords(t *testing.T) {
 	if got, _ := s.GetGrant(g.ID); !slices.Equal(got.Paths, []string{"infra/key"}) {
 		t.Fatalf("grant paths changed by sink: %v", got.Paths)
 	}
-	if m := s.Match(bearerCaller("vector"), "infra/key", ActionReadValue); m.Grant == nil {
+	if m := s.Match(bearerCaller("courier"), "infra/key", ActionReadValue); m.Grant == nil {
 		t.Fatal("grant no longer matches its real path")
 	}
 	if _, err := s.Revoke(RevokeInput{GrantID: g.ID, By: "dashboard@x"}); err != nil {
@@ -510,19 +510,19 @@ func TestAuditSinkCannotMutateRecords(t *testing.T) {
 // do not succeed or fail at random (map order).
 func TestMatchPrefersPlainCapableGrant(t *testing.T) {
 	e := newEnv(t)
-	plain := approveIn(e.create("vector", "infra/key").ID)
+	plain := approveIn(e.create("courier", "infra/key").ID)
 	plain.SealedOnly = false
 	if _, _, err := e.s.Approve(plain); err != nil {
 		t.Fatal(err)
 	}
-	e.approve(e.create("vector", "infra/key", "infra/other").ID) // sealed-only
+	e.approve(e.create("courier", "infra/key", "infra/other").ID) // sealed-only
 	for i := 0; i < 50; i++ {
-		m := e.s.Match(bearerCaller("vector"), "infra/key", ActionReadValue)
+		m := e.s.Match(bearerCaller("courier"), "infra/key", ActionReadValue)
 		if m.Grant == nil || m.Grant.SealedOnly {
 			t.Fatalf("try %d: got %+v, want the plain-capable grant", i, m.Grant)
 		}
 	}
-	if m := e.s.Match(bearerCaller("vector"), "infra/other", ActionReadValue); m.Grant == nil || !m.Grant.SealedOnly {
+	if m := e.s.Match(bearerCaller("courier"), "infra/other", ActionReadValue); m.Grant == nil || !m.Grant.SealedOnly {
 		t.Fatalf("infra/other: got %+v, want the sealed-only grant", m.Grant)
 	}
 }

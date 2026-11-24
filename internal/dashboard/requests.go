@@ -70,7 +70,7 @@ type requestCard struct {
 	Agent      string
 	SourceIP   string
 	AuthMethod string
-	Question   string // "May kit use infra/b2/app-key?"
+	Question   string // "May courier use infra/b2/app-key?"
 	Machine    string // the machine of an SSH login, else ""
 	Reason     string
 	Paths      []pathFact

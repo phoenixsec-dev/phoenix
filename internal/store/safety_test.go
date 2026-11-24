@@ -173,13 +173,13 @@ func TestForeignFileIsRefusedAsStore(t *testing.T) {
 // not what the next save that works writes to disk.
 func TestFailedSaveIsNotSavedLater(t *testing.T) {
 	s, storePath, key := rotationFailureStore(t, "")
-	if err := s.Set("ns1/gone", "first", "vector", "", nil); err != nil {
+	if err := s.Set("ns1/gone", "first", "courier", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	repair := breakStoreDisk(t)
 	for what, err := range map[string]error{
-		"update": s.Set("ns1/key1", "half-done", "vector", "", nil),
-		"create": s.Set("new/key", "half-done", "vector", "", nil),
+		"update": s.Set("ns1/key1", "half-done", "courier", "", nil),
+		"create": s.Set("new/key", "half-done", "courier", "", nil),
 		"delete": s.Delete("ns2/key2"),
 	} {
 		if err == nil {

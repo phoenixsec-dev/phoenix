@@ -162,7 +162,7 @@ func TestGrantLinesCarryIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	label("vector", `{"who":"robin"}`)
+	label("courier", `{"who":"robin"}`)
 	label("approver", `{"who":"sam","authority":"boss"}`)
 	label("system", `{"who":"sys"}`)
 	label("dashboard@desk", `{"who":"desk"}`)
@@ -172,9 +172,9 @@ func TestGrantLinesCarryIdentity(t *testing.T) {
 	})
 
 	full = true
-	first := e.request(t, vectorTok, "infra/b2/app-key")
+	first := e.request(t, courierTok, "infra/b2/app-key")
 	e.approve(t, first, "{}")
-	label("vector", `{"who":"eve"}`)
+	label("courier", `{"who":"eve"}`)
 	if err := e.srv.acl.RemoveAgent("approver"); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestGrantLinesCarryIdentity(t *testing.T) {
 
 	byName := e.request(t, "system-token", "infra/other")
 	expect(t, e.do("POST", "/v1/access-requests/"+byName+"/approve", "dashboard@desk-token", "{}"), 200, "")
-	late := e.request(t, vectorTok, "infra/other")
+	late := e.request(t, courierTok, "infra/other")
 	if _, _, err := e.srv.ApproveAccessRequestAs(late, "dashboard@10.0.0.9", "10.0.0.9", grant.Approval{}); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestGrantLinesCarryIdentity(t *testing.T) {
 		}
 	}
 	for k, want := range map[string][]audit.Caller{
-		"vector access_request.created":              {{Who: "robin"}, {Who: "eve"}},
+		"courier access_request.created":             {{Who: "robin"}, {Who: "eve"}},
 		"approver access_request.approved":           {{Who: "sam", Authority: "boss"}},
 		"system access_request.created":              {{Who: "sys"}},
 		"dashboard@desk access_request.approved":     {{Who: "desk"}},
@@ -271,21 +271,21 @@ func TestGrantLinesUseAuthenticatedLabels(t *testing.T) {
 		s.Approvers = []string{"approver", twin}
 		s.RequireSealed = false
 	})
-	slow(vectorTok, "vector", "POST", "/v1/access-requests", `{"paths":["infra/b2/app-key"],"reason":"r","ttl":"30m"}`)
-	id := e.store.ListRequests("vector", grant.StatusPending)[0].ID
+	slow(courierTok, "courier", "POST", "/v1/access-requests", `{"paths":["infra/b2/app-key"],"reason":"r","ttl":"30m"}`)
+	id := e.store.ListRequests("courier", grant.StatusPending)[0].ID
 	slow(approverTok, "approver", "POST", "/v1/access-requests/"+id+"/approve", "{}")
-	slow(approverTok, "approver", "POST", "/v1/access-requests/"+e.request(t, vectorTok, "infra/other")+"/deny", "{}")
+	slow(approverTok, "approver", "POST", "/v1/access-requests/"+e.request(t, courierTok, "infra/other")+"/deny", "{}")
 
 	set(twin, "desk")
-	asked := e.request(t, vectorTok, "infra/x")
+	asked := e.request(t, courierTok, "infra/x")
 	expect(t, e.do("POST", "/v1/access-requests/"+asked+"/approve", "twin-token", "{}"), 200, "")
-	asked = e.request(t, vectorTok, "infra/y")
+	asked = e.request(t, courierTok, "infra/y")
 	if _, _, err := e.srv.ApproveAccessRequestAs(asked, twin, "192.0.2.1", grant.Approval{}); err != nil {
 		t.Fatal(err)
 	}
-	e.request(t, vectorTok, "infra/z") // pending, so deleting writes all three kinds
+	e.request(t, courierTok, "infra/z") // pending, so deleting writes all three kinds
 	set("admin", "boss")
-	expect(t, e.do("DELETE", "/v1/agents/vector", adminTok, ""), 200, "")
+	expect(t, e.do("DELETE", "/v1/agents/courier", adminTok, ""), 200, "")
 
 	es, err := audit.Query(e.srv.auditPath, audit.QueryOptions{})
 	if err != nil {

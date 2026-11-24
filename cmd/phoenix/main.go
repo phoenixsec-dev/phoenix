@@ -1177,7 +1177,7 @@ func cmdAgentCreate(args []string) error {
 		return errAgentCreateUsage
 	}
 
-	// Parse ACL string: "openclaw/*:list,read_value;vector/*:list"
+	// Parse ACL string: "openclaw/*:list,read_value;courier/*:list"
 	// Rules separated by ";", actions within a rule separated by ","
 	var permissions []map[string]interface{}
 	if aclStr != "" {

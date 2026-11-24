@@ -286,17 +286,17 @@ func TestSSHPrefixIsOrdinaryWhenOff(t *testing.T) {
 	e := newGrantEnv(t)
 	seedSecret(t, e.srv, adminTok, "ssh/deploy-key", "deploy-value")
 	b, _ := json.Marshal(sshSignBody{Host: "build-1", PublicKey: newPublicKey(t)})
-	expect(t, e.do("POST", "/v1/ssh/sign", vectorTok, string(b)), http.StatusNotFound, CodeNotFound)
+	expect(t, e.do("POST", "/v1/ssh/sign", courierTok, string(b)), http.StatusNotFound, CodeNotFound)
 	expect(t, e.do("GET", "/v1/ssh/ca", "", ""), http.StatusNotFound, CodeNotFound)
 	if m := expect(t, e.do("GET", "/v1/ssh/window/build-1/gnt_x", "", ""), http.StatusOK, ""); m["open"] != false {
 		t.Fatalf("window = %v", m)
 	}
 	login, _ := json.Marshal(map[string]any{"paths": []string{"ssh/build-1"}, "action": grant.ActionSSHLogin, "reason": "x"})
-	expect(t, e.do("POST", "/v1/access-requests", vectorTok, string(login)), http.StatusForbidden, CodeNotRequestable)
+	expect(t, e.do("POST", "/v1/access-requests", courierTok, string(login)), http.StatusForbidden, CodeNotRequestable)
 
-	id := e.request(t, vectorTok, "ssh/deploy-key")
+	id := e.request(t, courierTok, "ssh/deploy-key")
 	e.approve(t, id, "")
-	if w := e.sealedGet("ssh/deploy-key", vectorTok); w.Code != http.StatusOK {
+	if w := e.sealedGet("ssh/deploy-key", courierTok); w.Code != http.StatusOK {
 		t.Fatalf("granted secret under ssh/: %d %s", w.Code, w.Body.String())
 	}
 }
@@ -430,18 +430,18 @@ func TestReplacingTokenClosesTheSSHWindow(t *testing.T) {
 		change func(e *grantEnv) error
 		open   bool
 	}{
-		"same token again": {func(e *grantEnv) error { return e.srv.acl.UpdateAgent("vector", vectorTok, nil) }, true},
-		"replaced":         {func(e *grantEnv) error { return e.srv.acl.UpdateAgent("vector", "synthetic-new-token", nil) }, false},
-		"deleted":          {func(e *grantEnv) error { return e.srv.acl.RemoveAgent("vector") }, false},
+		"same token again": {func(e *grantEnv) error { return e.srv.acl.UpdateAgent("courier", courierTok, nil) }, true},
+		"replaced":         {func(e *grantEnv) error { return e.srv.acl.UpdateAgent("courier", "synthetic-new-token", nil) }, false},
+		"deleted":          {func(e *grantEnv) error { return e.srv.acl.RemoveAgent("courier") }, false},
 		"replaced and back": {func(e *grantEnv) error {
-			return errors.Join(e.srv.acl.UpdateAgent("vector", "synthetic-new-token", nil), e.srv.acl.UpdateAgent("vector", vectorTok, nil))
+			return errors.Join(e.srv.acl.UpdateAgent("courier", "synthetic-new-token", nil), e.srv.acl.UpdateAgent("courier", courierTok, nil))
 		}, false},
 	}
 	for name, c := range changes {
 		t.Run(name, func(t *testing.T) {
 			e := newSSHEnv(t)
-			gid := e.loginGrant(t, vectorTok, "build-1", ip)
-			if code, _ := e.sign(t, vectorTok, "build-1", ip); code != http.StatusOK || !e.windowOpen(t, "build-1", gid) {
+			gid := e.loginGrant(t, courierTok, "build-1", ip)
+			if code, _ := e.sign(t, courierTok, "build-1", ip); code != http.StatusOK || !e.windowOpen(t, "build-1", gid) {
 				t.Fatalf("sign = %d; the window should be open", code)
 			}
 			if err := c.change(e); err != nil {

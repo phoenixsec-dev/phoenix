@@ -1,6 +1,16 @@
 # Release Notes
 
-## Unreleased
+## v0.25.0 (2026-11-24)
+
+In short: find and use secrets from a phone, answer agents' requests on one live
+page, see who, host and authority in the audit log, and a store that survives
+crashes, full disks and mistakes. Also five security fixes.
+
+**Before upgrading:** run the new `phoenix-server --check-config` on your config,
+since it now refuses settings that name one file twice. If the dashboard is behind
+a reverse proxy, set `dashboard.trusted_proxies`. The server needs to write small
+`.lock` files next to its data files and the master key. Update the server first,
+then every CLI. Showing secret values in the dashboard is off until you turn it on.
 
 ### Security: a request already running could use a replacement token's permissions
 
@@ -146,12 +156,13 @@ that dies halfway can do to it. Nothing to configure; what changed:
   three are undone now. Replacing a token or deleting an agent still takes
   effect at once even if the save fails, so the old token stays dead at least
   until a restart; the answer to a failed `--force` now says so.
+
 ### One live Requests page: No, Once, 15 minutes or Always
 
 Approvals and Grants were two pages for one thing, neither updated by itself,
 and a request could expire while you looked at the page.
 
-- **Requests** (`/dashboard/requests`) replaces both. A card asks "May vector
+- **Requests** (`/dashboard/requests`) replaces both. A card asks "May courier
   use infra/b2/app-key?" with four buttons: **No**, **Once**, **15 minutes**,
   **Always**. Below: open access with Revoke, what is on Always with Remove,
   requests that expired unanswered, and history. The old addresses redirect.
