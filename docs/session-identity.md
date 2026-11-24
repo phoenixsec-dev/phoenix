@@ -121,8 +121,10 @@ agent's token. Every use, renewal included, checks this.
   on (permissions are checked on every request anyway).
 - A token changed by editing the ACL file takes effect at the next start; the
   old token's sessions end then (the log says how many).
-- A start with `session.enabled` false ends the saved sessions, since nothing
-  would end them when a token changes meanwhile.
+- Each token the server issues gets a random `credential_id` in the ACL file, and
+  the session is bound to both. So a token that was taken away and given out
+  again is a new credential: its old sessions stay dead, also if the change
+  happened while sessions were disabled.
 
 An ended session gets `401 SESSION_INVALID`. The CLI and `phoenix mcp-server`
 mint a new one by themselves once `PHOENIX_TOKEN` holds the new token; a
@@ -130,11 +132,9 @@ running MCP server has to be restarted to see it, like any environment change.
 A `phxs_` token used directly in `PHOENIX_TOKEN` cannot recover on its own:
 mint a new one.
 
-If the server answers 500 "could not be saved" to the delete or replace, the
-change is done and the sessions are dead, but the disk needs looking at. The
-server tries to save again every minute. Until that works, going back to the
-token whose sessions were ended is refused (500 "agent not changed"), because a
-restart could revive them; any other token is accepted.
+If the sessions file cannot be saved after the change, the sessions are still
+dead, also after a restart, because the ACL no longer holds their credential. The
+server logs it and tries again every minute.
 
 ### Expiry
 
@@ -246,7 +246,7 @@ All session lifecycle events are logged to the audit trail:
 | `session.renewed` | allowed | Session renewed |
 | `session.renew` | denied | Renewal failed (for example bootstrap_failed) |
 | `session.revoke` | allowed | Session revoked |
-| `session.ended` | allowed | Phoenix ended a session because of its agent's token. The agent field is who caused it (`system` at start or on use); metadata has `session.agent` and `cause`: `agent_deleted`, `token_replaced`, `credential_not_current` or `sessions_disabled` |
+| `session.ended` | allowed | Phoenix ended a session because of its agent's token. The agent field is who caused it (`system` at start or on use); metadata has `session.agent` and `cause`: `agent_deleted`, `token_replaced` or `credential_not_current` |
 | `session.auth` | denied | Expired, revoked or ended session used for a request |
 | `session.list` | allowed | Sessions listed |
 | `session.info` | allowed | Session details viewed |
@@ -277,8 +277,8 @@ Sessions survive a server restart:
 - Session records are saved to `role-sessions.json` in the same directory as
   the ACL file, on every mint, renew, revoke and cleanup (mode 0600). The file
   holds who, which role, scope, expiry and a fingerprint of the agent's token
-  (a hash of its stored hash, as in `grants.json`), never a token or key, so a
-  copy of it cannot be used to log in. Deleting it ends every session; clients mint
+  (a hash of its stored hash and its ID), never a token or key, so a copy of it
+  cannot be used to log in. Deleting it ends every session; clients mint
   new ones.
 - Revoked sessions stay in the file until they expire, so a revoked token keeps
   getting `SESSION_REVOKED` after a restart.

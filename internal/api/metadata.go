@@ -96,7 +96,12 @@ func (s *Server) handleSecretMetadata(w http.ResponseWriter, r *http.Request) {
 		out := []secretInfo{}
 		for _, p := range allPaths {
 			// Same visibility as the list route: ACL only, then attestation.
-			if s.baseAccessReason(info, p, "list", acl.ActionList) != "" {
+			reason := s.baseAccessReason(info, p, "list", acl.ActionList)
+			if sessionEndedReason(reason) {
+				s.writeDataDenial(w, r, info, "list", path, ip, reason)
+				return
+			}
+			if reason != "" {
 				continue
 			}
 			if s.attestFull(r, p, info, sealKeyValidated) != nil {

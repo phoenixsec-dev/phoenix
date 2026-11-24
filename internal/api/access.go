@@ -108,7 +108,7 @@ func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 // --- enforcement (plan section 8) --------------------------------------------
 
 // accessDecision is dataAccess's answer. Reason is "" when allowed, else
-// "session_scope", "session_action", "acl", "session_ended", "grant_expired" or
+// "session_scope", "session_action", "acl", a SESSION_ code, "grant_expired" or
 // "grant_revoked". Grant is set when access comes only from a grant.
 type accessDecision struct {
 	Reason string

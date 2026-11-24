@@ -547,7 +547,7 @@ func TestChangeCredentialHoldsOffMintAndUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	minted, used := make(chan error, 1), make(chan error, 1)
-	_, err = s.ChangeCredential("agent1", "", func() error {
+	_, err = s.ChangeCredential("agent1", func() error {
 		go func() { _, err := mint(); minted <- err }()
 		go func() { _, err := s.Validate(tok); used <- err }()
 		time.Sleep(50 * time.Millisecond) // long enough for both to get in if they could
@@ -573,19 +573,16 @@ func TestRevokeDuringStaleCleanupWins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revoked := make(chan error, 1)
-	s.mu.Lock()
-	s.credentialCurrent = func(_, _ string) bool {
-		go func() { revoked <- s.Revoke(sess.ID) }()
-		time.Sleep(50 * time.Millisecond) // Revoke is now waiting first in line
-		return false
+	s.credentialCurrent = func(_, _ string) bool { return false }
+	found, stale, err := s.lookup(sess.ID)
+	if err != nil || !stale {
+		t.Fatalf("lookup: stale %v, err %v", stale, err)
 	}
-	s.mu.Unlock()
-	if _, err := s.Validate(tok); err != ErrSessionRevoked {
-		t.Errorf("Validate: %v, want ErrSessionRevoked", err)
+	if err := s.Revoke(sess.ID); err != nil {
+		t.Fatal(err)
 	}
-	if err := <-revoked; err != nil {
-		t.Errorf("Revoke: %v", err)
+	if err := s.endStale(found); err != ErrSessionRevoked {
+		t.Errorf("endStale: %v, want ErrSessionRevoked", err)
 	}
 	if _, err := s.Validate(tok); err != ErrSessionRevoked {
 		t.Errorf("Validate after: %v, want ErrSessionRevoked", err)

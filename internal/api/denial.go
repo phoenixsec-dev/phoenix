@@ -8,7 +8,6 @@ import (
 
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
-	"github.com/phoenixsec/phoenix/internal/session"
 )
 
 // Denial contract shared by every access denial the API returns.
@@ -178,9 +177,10 @@ func (s *Server) writeDataDenial(w http.ResponseWriter, r *http.Request, info *a
 			fmt.Sprintf("action %q is not permitted by session role %q", action, info.SessionRole),
 			"request a session with a role that includes this action",
 			s.denialNextStep(CodeActionDenied, path, action), http.StatusForbidden)
-	case "session_ended":
+	case "SESSION_INVALID", "SESSION_REVOKED", "SESSION_EXPIRED":
+		// The session stopped being valid while this request ran.
 		s.auditDenied(r, info, action, path, ip, reason)
-		handleAuthError(w, &sessionAuthError{code: "SESSION_INVALID", err: session.ErrSessionNotFound})
+		handleAuthError(w, &sessionAuthError{code: reason, err: errors.New("the session is no longer valid")})
 	case grant.ReasonGrantExpired:
 		s.auditDenied(r, info, action, path, ip, reason)
 		jsonDeniedStep(w, "access_denied", CodeGrantExpired,
@@ -207,8 +207,8 @@ func resolveDenial(reason string) (code, msg string) {
 		return CodeScopeExceeded, "path outside session scope"
 	case "session_action":
 		return CodeActionDenied, "action read_value not permitted by session role"
-	case "session_ended":
-		return "SESSION_INVALID", "session has ended"
+	case "SESSION_INVALID", "SESSION_REVOKED", "SESSION_EXPIRED":
+		return reason, "the session is no longer valid"
 	case grant.ReasonGrantExpired:
 		return CodeGrantExpired, "access denied: temporary grant has ended"
 	case grant.ReasonGrantRevoked:

@@ -2,15 +2,11 @@ package session
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // openTestStore opens a store backed by a sessions file in dir, signing with
@@ -242,8 +238,7 @@ func TestRoleChangedBackDoesNotReviveSessions(t *testing.T) {
 	}
 }
 
-// Ended sessions that could not be saved are saved by the next cleanup, so a
-// restart cannot bring them back.
+// Ended sessions that could not be saved are saved by the next cleanup.
 func TestEndedSessionsSavedByCleanupAfterFailedSave(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "d")
 	if err := os.Mkdir(dir, 0700); err != nil {
@@ -257,10 +252,9 @@ func TestEndedSessionsSavedByCleanupAfterFailedSave(t *testing.T) {
 	if err := os.Rename(dir, dir+".away"); err != nil {
 		t.Fatal(err)
 	}
-	ran := false
-	ended, err := s.ChangeCredential("agent1", "", func() error { ran = true; return nil })
-	if !errors.Is(err, ErrEndNotSaved) || !ran || len(ended) != 1 {
-		t.Fatalf("ChangeCredential: ended %d, ran %v, err %v", len(ended), ran, err)
+	ended, err := s.ChangeCredential("agent1", func() error { s.credentialCurrent = func(_, _ string) bool { return false }; return nil })
+	if err != nil || len(ended) != 1 || s.ActiveCount() != 0 {
+		t.Fatalf("ChangeCredential: ended %d, %d active, err %v", len(ended), s.ActiveCount(), err)
 	}
 	if err := os.Rename(dir+".away", dir); err != nil {
 		t.Fatal(err)
@@ -268,38 +262,5 @@ func TestEndedSessionsSavedByCleanupAfterFailedSave(t *testing.T) {
 	s.cleanup()
 	if n := openTestStore(t, path, testSigningKey(t)).ActiveCount(); n != 0 {
 		t.Errorf("%d sessions after restart, want 0", n)
-	}
-}
-
-// A save whose directory sync failed may not survive a power cut, so it counts
-// as failed and is retried.
-func TestDirSyncFailureCountsAsUnsaved(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "role-sessions.json")
-	s := openTestStore(t, path, testSigningKey(t))
-	if _, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0); err != nil {
-		t.Fatal(err)
-	}
-	s.writeFile = func(p string, data []byte, perm os.FileMode) error {
-		return fsutil.WriteFileAtomicStrictOps(p, data, perm, fsutil.AtomicOps{SyncDir: func(string) error { return errors.New("no sync") }})
-	}
-	_, err := s.ChangeCredential("agent1", "", func() error { return nil })
-	if !errors.Is(err, ErrEndNotSaved) || !errors.Is(err, fsutil.ErrDirSyncFailed) {
-		t.Fatalf("err = %v, want ErrEndNotSaved from the directory sync", err)
-	}
-	if err := s.AddCredential("agent1", testFP, func() error { t.Error("token brought back"); return nil }); !errors.Is(err, ErrReuseNotSaved) {
-		t.Errorf("AddCredential: %v, want ErrReuseNotSaved", err)
-	}
-	s.writeFile = fsutil.WriteFileAtomicStrict
-	s.cleanup()
-	if err := s.AddCredential("agent1", testFP, func() error { return nil }); err != nil {
-		t.Errorf("AddCredential after the retry: %v", err)
-	}
-}
-
-// A real store writes durably: the default writer is the strict one.
-func TestStoreUsesStrictWriter(t *testing.T) {
-	s := openTestStore(t, filepath.Join(t.TempDir(), "role-sessions.json"), testSigningKey(t))
-	if reflect.ValueOf(s.writeFile).Pointer() != reflect.ValueOf(fsutil.WriteFileAtomicStrict).Pointer() {
-		t.Error("sessions are not saved with fsutil.WriteFileAtomicStrict")
 	}
 }

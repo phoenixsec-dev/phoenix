@@ -50,7 +50,10 @@ it. Other agents' clients mint new sessions (CLIs older than v0.23.0 need
   `--force` with the same token keeps them.
 - A session can no longer mint another session (a role trusting `local` let it,
   although the docs said not). The new one did not keep its scope or seal key.
-- Starting with sessions disabled ends the saved ones.
+- Each token the server issues gets a random `credential_id` in `acl.json`
+  (written by the server; nothing to set). A token taken away and given out again
+  does not bring its old sessions back.
+- The ACL file is synced to disk before a change is reported done.
 - An ended session gets `401 SESSION_INVALID`, which the CLI and
   `phoenix mcp-server` (v0.23.0 and newer) recover from by minting once with
   their current `PHOENIX_TOKEN`.

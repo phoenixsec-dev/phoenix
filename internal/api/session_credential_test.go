@@ -200,7 +200,11 @@ func TestSessionRecordHoldsFingerprintNotToken(t *testing.T) {
 	e := newCredEnv(t)
 	sess := e.mint("old-token")
 	saved := e.savedSessions()
-	if !strings.Contains(saved, grant.BearerFingerprint(crypto.HashToken("old-token"))) {
+	a, err := e.srv.acl.GetAgent("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(saved, `"credential_fp": "`+sessionCredentialFP(a)+`"`) {
 		t.Errorf("sessions file has no credential fingerprint: %s", saved)
 	}
 	for _, secret := range []string{"old-token", crypto.HashToken("old-token"), sess} {
@@ -532,108 +536,67 @@ func TestCredentialChangeRaces(t *testing.T) {
 	}
 }
 
-// When the ended sessions cannot be saved, the change still happens, the
-// sessions are dead, the operator gets a 500, and a restart changes nothing.
-func TestCredentialChangeWhenSessionsCannotBeSaved(t *testing.T) {
-	changes := map[string][2]string{
-		"delete":  {"DELETE", "/v1/agents/worker"},
-		"replace": {"POST", "/v1/agents?force=true"},
+// breakSessionsFile makes every save of the sessions file fail until the
+// returned func is called, which also puts the file back as it was.
+func (e *credEnv) breakSessionsFile() (repair func()) {
+	e.t.Helper()
+	dir := filepath.Dir(e.sessionsPath())
+	if err := errors.Join(os.Rename(dir, dir+".away"), os.WriteFile(dir, nil, 0600)); err != nil {
+		e.t.Fatal(err)
 	}
-	for name, c := range changes {
+	return func() {
+		e.t.Helper()
+		if err := errors.Join(os.Remove(dir), os.Rename(dir+".away", dir)); err != nil {
+			e.t.Fatal(err)
+		}
+	}
+}
+
+// A session made with a token that was taken away stays dead when the very
+// same token is given out again, even if its old record is still in the
+// sessions file at the next start.
+func TestReissuedTokenDoesNotReviveSessions(t *testing.T) {
+	cases := map[string]struct {
+		change        func(e *credEnv, sessionID string)
+		saveFails     bool
+		sessionsOffTo bool // the change happens while sessions are disabled
+	}{
+		"delete, save fails":               {saveFails: true, change: func(e *credEnv, _ string) { e.remove(); e.create("old-token", false) }},
+		"delete, save fails, force create": {saveFails: true, change: func(e *credEnv, _ string) { e.remove(); e.create("old-token", true) }},
+		"replace and back, save fails":     {saveFails: true, change: func(e *credEnv, _ string) { e.create("new-token", true); e.create("old-token", true) }},
+		"revoke not saved, then delete": {saveFails: true, change: func(e *credEnv, id string) {
+			if err := e.sessions.Revoke(id); err == nil {
+				e.t.Error("revoke should report the failed save")
+			}
+			e.remove()
+			e.create("old-token", false)
+		}},
+		"delete while sessions are off":           {sessionsOffTo: true, change: func(e *credEnv, _ string) { e.remove(); e.create("old-token", false) }},
+		"replace and back while sessions are off": {sessionsOffTo: true, change: func(e *credEnv, _ string) { e.create("new-token", true); e.create("old-token", true) }},
+	}
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newCredEnv(t)
 			sess := e.mint("old-token")
-			dir := filepath.Dir(e.sessionsPath())
-			if err := os.Rename(dir, dir+".away"); err != nil {
-				t.Fatal(err)
+			_, id, _ := e.sessions.ParseClaimsInsecure(sess)
+			saved := e.savedSessions()
+			repair := func() {}
+			if c.saveFails {
+				repair = e.breakSessionsFile()
 			}
-			if err := os.WriteFile(dir, nil, 0600); err != nil { // a file where the directory was
-				t.Fatal(err)
+			if c.sessionsOffTo {
+				e.srv.sessions = nil
 			}
-			code, body := e.do(c[0], c[1], "admin-token", `{"name":"worker","token":"new-token","permissions":`+workerACL+`}`)
-			if code != 500 || !strings.Contains(body, "could not be saved") {
-				t.Errorf("%d %s, want 500 saying it was not saved", code, body)
+			c.change(e, id)
+			repair()
+			if e.savedSessions() != saved {
+				t.Fatal("test setup: the old record should still be in the sessions file")
 			}
-			if code, _ := e.do("GET", "/v1/whoami", "old-token", ""); code != 401 {
-				t.Errorf("old bearer still works: %d", code)
-			}
-			e.wantDead("after failed save", sess)
-
-			// The old token may not come back while its ended session is
-			// still on disk; any other token is fine.
-			for _, path := range []string{"/v1/agents", "/v1/agents?force=true"} {
-				if name == "replace" && path == "/v1/agents" {
-					continue // the agent exists: 409 either way
-				}
-				code, body = e.do("POST", path, "admin-token", `{"name":"worker","token":"old-token","permissions":`+workerACL+`}`)
-				if code != 500 || !strings.Contains(body, "not changed") {
-					t.Errorf("old token back via %s: %d %s, want 500 not changed", path, code, body)
-				}
-			}
-			if code, body = e.do("POST", "/v1/agents?force=true", "admin-token", `{"name":"worker","token":"third-token","permissions":`+workerACL+`}`); code != 200 {
-				t.Errorf("another token while the save is failing: %d %s, want 200", code, body)
-			}
-
-			if err := errors.Join(os.Remove(dir), os.Rename(dir+".away", dir)); err != nil {
-				t.Fatal(err)
-			}
-			// Saving works again: the old token may come back, its session not.
-			e.create("old-token", true)
-			e.wantDead("after the old token is back", sess)
 			e.start()
 			e.wantDead("after restart", sess)
+			e.wantEnded("system", "credential_not_current")
+			e.wantAlive("a new session", e.mint("old-token"))
 		})
-	}
-}
-
-// Replacing one agent's token reports only its own sessions: a save that
-// failed earlier for another agent is not blamed on it.
-func TestFailedSaveIsNotReportedForAnotherAgent(t *testing.T) {
-	e := newCredEnv(t)
-	e.mint("old-token")
-	dir := filepath.Dir(e.sessionsPath())
-	if err := errors.Join(os.Rename(dir, dir+".away"), os.WriteFile(dir, nil, 0600)); err != nil {
-		t.Fatal(err)
-	}
-	if code, body := e.do("DELETE", "/v1/agents/worker", "admin-token", ""); code != 500 {
-		t.Fatalf("delete: %d %s, want 500", code, body)
-	}
-	for _, tok := range []string{"other-1", "other-2"} {
-		if code, body := e.do("POST", "/v1/agents?force=true", "admin-token", `{"name":"other","token":"`+tok+`","permissions":`+workerACL+`}`); code != 200 {
-			t.Errorf("another agent's token: %d %s, want 200", code, body)
-		}
-	}
-}
-
-// Sessions saved before a start with sessions disabled do not come back when
-// they are enabled again, whatever happened to the token in between.
-func TestDisablingSessionsEndsSavedOnes(t *testing.T) {
-	e := newCredEnv(t)
-	sess, revoked := e.mint("old-token"), e.mint("old-token")
-	_, id, _ := e.sessions.ParseClaimsInsecure(revoked)
-	if err := e.sessions.Revoke(id); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.srv.EndSavedSessions(e.sessionsPath()); err != nil { // what a disabled start does
-		t.Fatal(err)
-	}
-	e.wantEnded("system", "sessions_disabled")
-	e.start()
-	e.wantDead("after enabling again", sess)
-	if code, body := e.do("GET", "/v1/whoami", revoked, ""); code != 401 || !strings.Contains(body, "SESSION_REVOKED") {
-		t.Errorf("revoked session: %d %s, want SESSION_REVOKED", code, body)
-	}
-
-	// Anything else at that path is left alone.
-	other := filepath.Join(e.dir, "acl.json")
-	before, _ := os.ReadFile(other)
-	for _, path := range []string{other, filepath.Join(e.dir, "missing.json")} {
-		if err := e.srv.EndSavedSessions(path); err != nil {
-			t.Errorf("%s: %v", path, err)
-		}
-	}
-	if after, _ := os.ReadFile(other); !bytes.Equal(before, after) {
-		t.Error("a file that is not a sessions file was changed")
 	}
 }
 
@@ -653,36 +616,86 @@ func (p *pausedBackend) Get(path string) (*store.Secret, error) {
 	return p.SecretBackend.Get(path)
 }
 
+// wideRole lets the "dev" role reach everything, so only the ACL limits it.
+func (e *credEnv) wideRole() {
+	e.srv.sessionRoles["dev"] = config.RoleConfig{Namespaces: []string{"**"}, BootstrapTrust: []string{"bearer"}}
+	seedSecret(e.t, e.srv, "admin-token", "other/b", "other-value")
+}
+
+// widen replaces the worker's token with one that may read everything.
+func (e *credEnv) widen() {
+	e.t.Helper()
+	code, body := e.do("POST", "/v1/agents?force=true", "admin-token",
+		`{"name":"worker","token":"new-token","permissions":[{"path":"**","actions":["list","read_value"]}]}`)
+	if code != 200 {
+		e.t.Errorf("replace: %d %s", code, body)
+	}
+}
+
 // A request already running with an old session never uses permissions that
-// only the replacement token was given.
+// only the replacement token was given, and is told its session ended.
 func TestRunningRequestCannotUseReplacementPermissions(t *testing.T) {
-	cases := map[string][3]string{
-		"list":     {"GET", "/v1/secrets/other/", ""},
-		"metadata": {"GET", "/v1/metadata/other/", ""},
-		"resolve":  {"POST", "/v1/resolve", `{"refs":["phoenix://test/a","phoenix://other/b"]}`},
+	for _, path := range []string{"/v1/secrets/other/", "/v1/metadata/other/"} {
+		t.Run(path, func(t *testing.T) {
+			e := newCredEnv(t)
+			e.wideRole()
+			sess := e.mint("old-token")
+			var once sync.Once
+			ran := false
+			e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(func() { ran = true; e.widen() }) }}
+			code, body := e.do("GET", path, sess, "")
+			if !ran || code != 401 || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other/b") {
+				t.Errorf("ran %v, %d %s, want 401 SESSION_INVALID", ran, code, body)
+			}
+		})
+	}
+	t.Run("resolve", func(t *testing.T) {
+		e := newCredEnv(t)
+		e.wideRole()
+		sess := e.mint("old-token")
+		var once sync.Once
+		e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(e.widen) }}
+		code, body := e.do("POST", "/v1/resolve", sess, `{"refs":["phoenix://test/a","phoenix://other/b"]}`)
+		if code != 200 || !strings.Contains(body, "synthetic-value") || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other-value") {
+			t.Errorf("%d %s, want the first value and SESSION_INVALID for the second", code, body)
+		}
+	})
+}
+
+// The access check passes on why the session stopped being valid: a client
+// must not replace a revoked session, so it may not look like an ended one.
+func TestAccessCheckSaysWhySessionEnded(t *testing.T) {
+	cases := map[string]struct {
+		want string
+		end  func(e *credEnv, id string)
+	}{
+		"token replaced": {"SESSION_INVALID", func(e *credEnv, _ string) { e.widen() }},
+		"replaced past the routes": {"SESSION_INVALID", func(e *credEnv, _ string) {
+			e.srv.acl.UpdateAgent("worker", "new-token", []acl.Permission{{Path: "**", Actions: []acl.Action{acl.ActionReadValue}}})
+		}},
+		"revoked": {"SESSION_REVOKED", func(e *credEnv, id string) { e.sessions.Revoke(id) }},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
+			want := c.want
 			e := newCredEnv(t)
-			e.srv.sessionRoles["dev"] = config.RoleConfig{Namespaces: []string{"**"}, BootstrapTrust: []string{"bearer"}}
-			seedSecret(t, e.srv, "admin-token", "other/b", "other-value")
-			sess := e.mint("old-token")
-			var once sync.Once
-			e.srv.backend = &pausedBackend{e.srv.backend, func() {
-				once.Do(func() {
-					code, body := e.do("POST", "/v1/agents?force=true", "admin-token",
-						`{"name":"worker","token":"new-token","permissions":[{"path":"**","actions":["list","read_value"]}]}`)
-					if code != 200 {
-						t.Errorf("replace: %d %s", code, body)
-					}
-				})
-			}}
-			code, body := e.do(c[0], c[1], sess, c[2])
-			if strings.Contains(body, "other-value") || strings.Contains(body, `"other/b"`) {
-				t.Errorf("%d %s: used the new token's permissions", code, body)
+			e.wideRole()
+			sess, err := e.sessions.Validate(e.mint("old-token"))
+			if err != nil {
+				t.Fatal(err)
 			}
-			if name == "resolve" && (!strings.Contains(body, "synthetic-value") || !strings.Contains(body, "SESSION_INVALID")) {
-				t.Errorf("resolve = %d %s, want the first value and SESSION_INVALID for the second", code, body)
+			info := &authInfo{Agent: "worker", UsedSession: true, SessionID: sess.ID, SessionNamespaces: sess.Namespaces, SessionActions: sess.Actions}
+			c.end(e, sess.ID)
+			if got := e.srv.baseAccessReason(info, "test/a", "read_value", acl.ActionReadValue); got != want {
+				t.Errorf("reason = %q, want %q", got, want)
+			}
+			if code, _ := resolveDenial(want); code != want {
+				t.Errorf("resolve code = %q, want %q", code, want)
+			}
+			w := httptest.NewRecorder()
+			e.srv.writeDataDenial(w, httptest.NewRequest("GET", "/v1/secrets/test/a", nil), info, "read_value", "test/a", "", want)
+			if w.Code != 401 || !strings.Contains(w.Body.String(), want) {
+				t.Errorf("denial = %d %s, want 401 %s", w.Code, w.Body.String(), want)
 			}
 		})
 	}

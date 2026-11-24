@@ -65,9 +65,20 @@ type sessionsFile struct {
 // key, the config), and moving or overwriting it would destroy it.
 func loadSessions(path string, roles map[string]string) (map[string]*Session, error) {
 	out := make(map[string]*Session)
-	f, err := readSessionsFile(path)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return out, nil
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading sessions file: %w", err)
+	}
+
+	var keys map[string]json.RawMessage
+	var f sessionsFile
+	if err := json.Unmarshal(data, &keys); err != nil || keys["sessions"] == nil ||
+		json.Unmarshal(data, &f) != nil || f.Version != fileVersion {
+		return nil, fmt.Errorf("%s is not a Phoenix role sessions file, and that path is reserved for one; "+
+			"if it is another file, move it; if it is a damaged sessions file, delete it (that only ends sessions)", path)
 	}
 
 	now := time.Now()
@@ -88,66 +99,10 @@ func loadSessions(path string, roles map[string]string) (map[string]*Session, er
 	return out, nil
 }
 
-// errNotSessionsFile marks a file at the sessions path that is something else.
-var errNotSessionsFile = errors.New("not a Phoenix role sessions file")
-
-// readSessionsFile reads and checks the sessions file. Missing means empty.
-func readSessionsFile(path string) (sessionsFile, error) {
-	var f sessionsFile
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return f, nil
-	}
-	if err != nil {
-		return f, fmt.Errorf("reading sessions file: %w", err)
-	}
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(data, &keys); err != nil || keys["sessions"] == nil ||
-		json.Unmarshal(data, &f) != nil || f.Version != fileVersion {
-		return f, fmt.Errorf("%s is %w, and that path is reserved for one; "+
-			"if it is another file, move it; if it is a damaged sessions file, delete it (that only ends sessions)", path, errNotSessionsFile)
-	}
-	return f, nil
-}
-
-// EndSaved removes every live session from the sessions file at path, without
-// opening a store, and returns them. Revoked ones stay. A missing file, or one
-// that is not a sessions file, is left untouched.
-func EndSaved(path string) ([]*Session, error) {
-	f, err := readSessionsFile(path)
-	if errors.Is(err, errNotSessionsFile) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var ended, keep []*Session
-	for _, sess := range f.Sessions {
-		if sess != nil && sess.Revoked {
-			keep = append(keep, sess)
-		} else if sess != nil {
-			ended = append(ended, sess)
-		}
-	}
-	if len(ended) == 0 {
-		return nil, nil
-	}
-	f.Sessions = append([]*Session{}, keep...)
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encoding sessions file: %w", err)
-	}
-	if err := fsutil.WriteFileAtomicStrict(path, data, 0600); err != nil {
-		return nil, fmt.Errorf("saving sessions file: %w", err)
-	}
-	return ended, nil
-}
-
 // saveLocked writes every session record to the sessions file. The caller
 // must hold s.mu. Does nothing for a memory-only store.
 func (s *Store) saveLocked() error {
 	if s.path == "" {
-		s.endedUnsaved = nil
 		return nil
 	}
 	s.unsaved = true
@@ -159,10 +114,9 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("encoding sessions file: %w", err)
 	}
-	// Strict: an ended session must not come back after a power cut.
-	if err := s.writeFile(s.path, data, 0600); err != nil {
+	if err := fsutil.WriteFileAtomic(s.path, data, 0600); err != nil {
 		return fmt.Errorf("saving sessions file: %w", err)
 	}
-	s.unsaved, s.endedUnsaved = false, nil
+	s.unsaved = false
 	return nil
 }

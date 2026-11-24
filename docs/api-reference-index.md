@@ -66,10 +66,7 @@ Query params:
 - `permissions` (array of `{path, actions[]}`; validated server-side)
 
 Deleting an agent, or updating it with a different token, ends its role sessions
-(see [Session identity](session-identity.md#ended-with-the-agents-token)). A 500
-saying "could not be saved" means the change and the ending are done, but the
-sessions file could not be written. A 500 saying "agent not changed" refuses to
-bring back a token whose ended sessions are in that state.
+(see [Session identity](session-identity.md#ended-with-the-agents-token)).
 
 ## Key management
 
