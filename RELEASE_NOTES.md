@@ -55,6 +55,15 @@ log names the address to add, for the first ten peers that send the header:
 setting still loads on older versions, which ignore it. Details:
 [Dashboard](docs/dashboard.md#network-access-tls-reverse-proxy).
 
+### Security: an unusable PHOENIX_CA_CERT was only a warning
+
+If `PHOENIX_CA_CERT` named a file that was missing or held no certificate, the
+CLI and `phoenix mcp-server` warned and then trusted every public CA for that
+request, the token included. HTTPS requests now fail and say why. Plain HTTP,
+where the certificate is not used, works as before. **If your server's
+certificate is from a public CA and you have a stale `PHOENIX_CA_CERT`, unset
+it.**
+
 ### Store safety: ways a data file could be lost
 
 Every place the server writes a file was checked for what a failed or cut-off

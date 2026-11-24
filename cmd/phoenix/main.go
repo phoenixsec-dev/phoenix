@@ -93,14 +93,12 @@ func buildHTTPClient() *http.Client {
 
 	caCert, err := os.ReadFile(caCertPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cannot read PHOENIX_CA_CERT %q: %v\n", caCertPath, err)
-		return http.DefaultClient
+		return noHTTPSClient(fmt.Errorf("cannot read PHOENIX_CA_CERT: %w", err))
 	}
 
 	rootPool := x509.NewCertPool()
 	if !rootPool.AppendCertsFromPEM(caCert) {
-		fmt.Fprintf(os.Stderr, "warning: PHOENIX_CA_CERT contains no valid certificates\n")
-		return http.DefaultClient
+		return noHTTPSClient(fmt.Errorf("PHOENIX_CA_CERT %q contains no valid certificates", caCertPath))
 	}
 
 	tlsCfg := &tls.Config{
@@ -113,6 +111,22 @@ func buildHTTPClient() *http.Client {
 			TLSClientConfig: tlsCfg,
 		},
 	}
+}
+
+// noHTTPSClient is the client when PHOENIX_CA_CERT is set but unusable: https
+// fails with err instead of trusting every public CA. Plain http does not use
+// the certificate, so it works as before.
+func noHTTPSClient(err error) *http.Client {
+	return &http.Client{Transport: noHTTPS{err}}
+}
+
+type noHTTPS struct{ err error }
+
+func (n noHTTPS) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Scheme == "https" {
+		return nil, n.err
+	}
+	return http.DefaultTransport.RoundTrip(r)
 }
 
 func main() {
