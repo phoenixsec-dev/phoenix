@@ -34,6 +34,9 @@ type Config struct {
 	// SSHCA is nil when the block is missing, which means SSH certificates are off.
 	SSHCA *SSHCAConfig `json:"ssh_ca,omitempty"`
 
+	// file is the path Load read this from, "" if it was not loaded.
+	file string
+
 	// removed lists the removed settings Load found in the file (removed.go);
 	// Validate refuses to start while any are left.
 	removed []string
@@ -322,6 +325,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	cfg.removed = removed.Find(data, removedSettings)
+	cfg.file = path
 
 	return cfg, nil
 }
@@ -453,8 +457,7 @@ func (c *Config) Validate() error {
 	if err := c.ValidateGrantStorePath(); err != nil {
 		return err
 	}
-
-	return nil
+	return c.validateDataPaths()
 }
 
 // SaveExample writes a default config to disk as a reference.

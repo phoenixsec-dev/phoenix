@@ -89,6 +89,11 @@ that dies halfway can do to it. Nothing to configure; what changed:
 - **A write or delete that failed (full disk) could still happen later.** The
   caller got an error, but the server kept the change in memory, served it and
   saved it with the next write that worked. It is now undone.
+- **Two settings naming one file** (for example `audit.path` and
+  `store.master_key`, or `store.path` and the SSH key) could destroy it. Only
+  the grants and sessions files were checked, and not against the config file,
+  TLS keys or the SSH key. The server now refuses to start, and
+  `--check-config` fails, when a file it writes is also another of its files.
 
 ## v0.24.0 (2026-11-24)
 
