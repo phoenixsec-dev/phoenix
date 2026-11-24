@@ -133,23 +133,21 @@ type Deps struct {
 
 // Handler serves the dashboard web UI.
 type Handler struct {
-	deps            Deps
-	tmpls           map[string]*template.Template
-	cookieKey       []byte // 32 bytes, HMAC signing
-	passwordH       []byte // bcrypt hash of the dashboard password
-	sessionTTL      time.Duration
-	allowMultiLogin bool
-	loginRL         *loginRateLimiter
-	nonceMu         sync.Mutex
-	activeNonce     string // set on login; checked on auth when single-session mode
-	mux             *http.ServeMux
+	deps       Deps
+	tmpls      map[string]*template.Template
+	cookieKey  []byte // 32 bytes, HMAC signing
+	passwordH  []byte // bcrypt hash of the dashboard password
+	sessionTTL time.Duration
+	loginRL    *loginRateLimiter
+	logins     *loginTable // signed-in browsers (logins.go)
+	mux        *http.ServeMux
 }
 
 // cookiePayload is the signed cookie content.
 type cookiePayload struct {
 	Exp   int64  `json:"exp"`
 	CSRF  string `json:"csrf"`
-	Nonce string `json:"nonce"` // binds cookie to a specific login; verified in single-session mode
+	Nonce string `json:"nonce"` // binds cookie to one entry in the login table
 }
 
 // New creates a dashboard handler from config and deps.
@@ -161,12 +159,12 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	}
 
 	h := &Handler{
-		deps:            deps,
-		cookieKey:       key,
-		sessionTTL:      4 * time.Hour,
-		allowMultiLogin: cfg.AllowMultiLogin,
-		loginRL:         newLoginRateLimiter(),
-		mux:             http.NewServeMux(),
+		deps:       deps,
+		cookieKey:  key,
+		sessionTTL: 4 * time.Hour,
+		loginRL:    newLoginRateLimiter(),
+		logins:     newLoginTable(),
+		mux:        http.NewServeMux(),
 	}
 
 	// Parse session TTL
@@ -220,7 +218,6 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	// Routes
 	h.mux.HandleFunc("GET /dashboard/login", h.handleLoginPage)
 	h.mux.HandleFunc("POST /dashboard/login", h.handleLogin)
-	h.mux.HandleFunc("POST /dashboard/force-login", h.handleForceLogin)
 	h.mux.HandleFunc("POST /dashboard/logout", h.requireAuth(h.handleLogout))
 	h.mux.HandleFunc("GET /dashboard/", h.requireAuth(h.handleOverview))
 	h.mux.HandleFunc("GET /dashboard/approvals", h.requireAuth(h.handleApprovals))
@@ -230,6 +227,7 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	h.mux.HandleFunc("POST /dashboard/grants/{id}/revoke", h.requireAuth(h.handleGrantRevoke))
 	h.mux.HandleFunc("GET /dashboard/sessions", h.requireAuth(h.handleSessions))
 	h.mux.HandleFunc("POST /dashboard/sessions/{id}/revoke", h.requireAuth(h.handleRevoke))
+	h.mux.HandleFunc("POST /dashboard/logins/{id}/revoke", h.requireAuth(h.handleLoginRevoke))
 	h.mux.HandleFunc("GET /dashboard/audit", h.requireAuth(h.handleAudit))
 	h.mux.HandleFunc("GET /dashboard/roles", h.requireAuth(h.handleRoles))
 	h.mux.Handle("GET /dashboard/static/", http.StripPrefix("/dashboard/static/", staticHandler))
@@ -246,8 +244,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "login.html", map[string]interface{}{
-		"Error":   r.URL.Query().Get("error"),
-		"Blocked": r.URL.Query().Get("blocked") == "1",
+		"Error": r.URL.Query().Get("error"),
 	})
 }
 
@@ -273,76 +270,18 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Single-session enforcement: reject if another session is active
-	if !h.allowMultiLogin {
-		h.nonceMu.Lock()
-		active := h.activeNonce != ""
-		h.nonceMu.Unlock()
-		if active {
-			if h.deps.Audit != nil {
-				h.deps.Audit.LogDenied("dashboard", "dashboard.login", "login", clientIP, "session_already_active")
-			}
-			http.Redirect(w, r, "/dashboard/login?error=another+session+is+active&blocked=1", http.StatusSeeOther)
-			return
-		}
-	}
-
 	h.loginRL.recordSuccess(clientIP)
 	h.mintDashboardSession(w, r, clientIP, "dashboard.login")
 }
 
-// handleForceLogin authenticates and takes over, clearing any existing session.
-// This is the escape hatch when the active session is orphaned (browser closed, etc.).
-func (h *Handler) handleForceLogin(w http.ResponseWriter, r *http.Request) {
-	clientIP := extractClientIP(r)
-
-	if err := h.loginRL.check(clientIP); err != nil {
-		if h.deps.Audit != nil {
-			h.deps.Audit.LogDenied("dashboard", "dashboard.force_login", "rate_limited", clientIP, err.Error())
-		}
-		http.Redirect(w, r, "/dashboard/login?error="+escapeFlash(err.Error()), http.StatusSeeOther)
-		return
-	}
-
-	credential := r.FormValue("credential")
-	if !h.checkCredential(credential) {
-		h.loginRL.recordFailure(clientIP)
-		if h.deps.Audit != nil {
-			h.deps.Audit.LogDenied("dashboard", "dashboard.force_login", "login", clientIP, "invalid_credentials")
-		}
-		http.Redirect(w, r, "/dashboard/login?error=invalid+credentials&blocked=1", http.StatusSeeOther)
-		return
-	}
-
-	h.loginRL.recordSuccess(clientIP)
-
-	// Clear existing session nonce — the old cookie becomes invalid
-	if h.deps.Audit != nil {
-		h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.force_login", "login", clientIP)
-	}
-
-	h.mintDashboardSession(w, r, clientIP, "dashboard.force_login")
-}
-
-// mintDashboardSession creates a new dashboard cookie and sets the active nonce.
+// mintDashboardSession creates a new dashboard cookie and records the login
+// in the login table, signing out the least recently used one if at the cap.
 func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, clientIP, auditAction string) {
-	// Generate CSRF token and session nonce
-	csrfBytes := make([]byte, 16)
-	rand.Read(csrfBytes)
-	csrf := hex.EncodeToString(csrfBytes)
-
-	nonceBytes := make([]byte, 16)
-	rand.Read(nonceBytes)
-	nonce := hex.EncodeToString(nonceBytes)
-
-	// Set active nonce (invalidates any prior session)
-	h.nonceMu.Lock()
-	h.activeNonce = nonce
-	h.nonceMu.Unlock()
-
+	now := time.Now()
+	nonce := randomHex(16)
 	payload := cookiePayload{
-		Exp:   time.Now().Add(h.sessionTTL).Unix(),
-		CSRF:  csrf,
+		Exp:   now.Add(h.sessionTTL).Unix(),
+		CSRF:  randomHex(16),
 		Nonce: nonce,
 	}
 	cookie, err := h.signCookie(payload)
@@ -361,8 +300,26 @@ func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, c
 		MaxAge:   int(h.sessionTTL.Seconds()),
 	})
 
+	ua := r.UserAgent()
+	if len(ua) > 256 {
+		ua = ua[:256]
+	}
+	evicted := h.logins.add(&dashLogin{
+		ID:        randomHex(8),
+		nonce:     nonce,
+		Device:    describeDevice(ua),
+		UserAgent: ua,
+		IP:        clientIP,
+		Started:   now,
+		LastUsed:  now,
+		Expires:   time.Unix(payload.Exp, 0),
+	}, now)
+
 	if h.deps.Audit != nil {
 		h.deps.Audit.LogAllowed("dashboard@"+clientIP, auditAction, "login", clientIP)
+		if evicted != nil {
+			h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.login_evicted", evicted.ID, evicted.IP)
+		}
 	}
 
 	http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
@@ -379,10 +336,9 @@ func (h *Handler) checkCredential(credential string) bool {
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 
-	// Clear active nonce so a new login can proceed
-	h.nonceMu.Lock()
-	h.activeNonce = ""
-	h.nonceMu.Unlock()
+	if p, err := h.verifyCookie(r); err == nil {
+		h.logins.remove(p.Nonce)
+	}
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     "phoenix_dash",
@@ -427,6 +383,8 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		}
+
+		h.logins.touch(payload.Nonce, extractClientIP(r), time.Now())
 
 		// Inject CSRF into request context via query param for templates
 		r.Header.Set("X-Csrf-Token", payload.CSRF)
@@ -478,25 +436,14 @@ func (h *Handler) verifyCookie(r *http.Request) (*cookiePayload, error) {
 	}
 
 	if time.Now().Unix() > p.Exp {
-		// Clear nonce on expiry so a new login can proceed
-		if !h.allowMultiLogin {
-			h.nonceMu.Lock()
-			if h.activeNonce == p.Nonce {
-				h.activeNonce = ""
-			}
-			h.nonceMu.Unlock()
-		}
+		h.logins.remove(p.Nonce)
 		return nil, fmt.Errorf("cookie expired")
 	}
 
-	// Single-session: verify cookie's nonce matches the active session
-	if !h.allowMultiLogin {
-		h.nonceMu.Lock()
-		active := h.activeNonce
-		h.nonceMu.Unlock()
-		if active != p.Nonce {
-			return nil, fmt.Errorf("session superseded")
-		}
+	// The login must still be in the table: logout, sign-out from the
+	// Sessions page and the login cap all remove it.
+	if !h.logins.valid(p.Nonce, time.Now()) {
+		return nil, fmt.Errorf("signed out")
 	}
 
 	return &p, nil
@@ -599,14 +546,26 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(roleNames)
 
+	currentLogin := ""
+	if p, err := h.verifyCookie(r); err == nil {
+		for _, l := range h.logins.list(time.Now()) {
+			if l.nonce == p.Nonce {
+				currentLogin = l.ID
+			}
+		}
+	}
+
 	h.render(w, "sessions.html", map[string]interface{}{
-		"CSRF":        r.Header.Get("X-Csrf-Token"),
-		"Active":      "sessions",
-		"Sessions":    sessions,
-		"Roles":       roleNames,
-		"RoleFilter":  roleFilter,
-		"AgentFilter": agentFilter,
-		"Flash":       r.URL.Query().Get("flash"),
+		"CSRF":         r.Header.Get("X-Csrf-Token"),
+		"Active":       "sessions",
+		"Logins":       h.logins.list(time.Now()),
+		"MaxLogins":    maxDashboardLogins,
+		"CurrentLogin": currentLogin,
+		"Sessions":     sessions,
+		"Roles":        roleNames,
+		"RoleFilter":   roleFilter,
+		"AgentFilter":  agentFilter,
+		"Flash":        r.URL.Query().Get("flash"),
 	})
 }
 
@@ -628,6 +587,28 @@ func (h *Handler) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/dashboard/sessions?flash=revoked+"+id, http.StatusSeeOther)
+}
+
+// handleLoginRevoke signs out one dashboard login from the Sessions page.
+// Signing out your own login works like Logout.
+func (h *Handler) handleLoginRevoke(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	own, _ := h.verifyCookie(r) // requireAuth already checked it
+	l := h.logins.removeByID(id)
+	if l == nil {
+		http.Redirect(w, r, "/dashboard/sessions?flash=login+already+signed+out", http.StatusSeeOther)
+		return
+	}
+	clientIP := extractClientIP(r)
+	if h.deps.Audit != nil {
+		h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.login_revoke", id, clientIP)
+	}
+	if own != nil && own.Nonce == l.nonce {
+		http.SetCookie(w, &http.Cookie{Name: "phoenix_dash", Value: "", Path: "/dashboard/", HttpOnly: true, MaxAge: -1})
+		http.Redirect(w, r, "/dashboard/login", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/dashboard/sessions?flash=signed+out+"+escapeFlash(l.Device), http.StatusSeeOther)
 }
 
 func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {

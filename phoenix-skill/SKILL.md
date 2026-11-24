@@ -47,15 +47,22 @@ phoenix set <namespace/key> -d "description"
 There is no `-v`/`--value` flag: a value on the command line leaks to shell
 history and the process list.
 
-### List secrets
+Always give `-d`: it is how people and other agents find the secret later.
+
+### Find the secret you need
 
 ```bash
-phoenix list [folder/]
+phoenix list [folder/] [--tag <tag>]   # each path with its description
+phoenix info <namespace/key>           # description, tags, dates, who changed it
 ```
 
-Returns the secret paths you can see in a folder. `services/browser`,
-`services/browser/` and `services/browser/*` all list `services/browser/`;
-other wildcards are refused. There is no `--prefix` option.
+Use these to find a secret by what it is for. Neither shows the value, and
+both need only list access. `phoenix list --names` prints bare paths for
+scripts. MCP: `phoenix_list` returns the same descriptions.
+
+`services/browser`, `services/browser/` and `services/browser/*` all list
+`services/browser/`; other wildcards are refused. There is no `--prefix`
+option.
 
 Every command refuses an option it does not have with
 `no such option` and exit code 2, before contacting the server: that is a

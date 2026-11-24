@@ -145,7 +145,6 @@ Then add it to config:
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
-| `dashboard.allow_multi_login` | `bool` | Allow concurrent dashboard sessions (default `false`) |
 
 `password_hash` is required when the dashboard is enabled (`dashboard.pin`
 was removed; a config that still sets it will not start).
@@ -304,7 +303,8 @@ plaintext.
 The existing HTTP health check only checks HTTP. Monitor HTTPS separately with
 certificate verification and expiry alerts. An optional HTTPS outage should not
 cause a restart loop for working HTTP consumers. Certificates load at startup;
-replacing a certificate requires a restart. In-memory sessions are lost on restart.
+replacing a certificate requires a restart. Role sessions survive restarts (see
+[Session identity](session-identity.md#restarts)).
 
 For Docker, retain the existing port mapping and add a mapping for the selected
 HTTPS port, for example `9443:9443`, plus certificate mounts if needed. The
@@ -410,6 +410,7 @@ Removed in this release (see `RELEASE_NOTES.md` for why each went):
 | config | `onepassword.enabled` | `store.backend: "1password"` (the connector stays) |
 | role | `step_up`, `step_up_ttl`, `elevates_acl`, `allowed_agents` | [access requests](access-requests.md) |
 | config | `dashboard.pin` | `dashboard.password_hash` (`phoenix-server --hash-password`) |
+| config | `dashboard.allow_multi_login` (v0.23.0) | nothing: several dashboard logins are always allowed (up to 5); delete the line |
 | role | `bootstrap_trust` `"mtls"` / `"token"` | `"bearer"` / `"local"` |
 | role | `attestation` list (`"source_ip"`, `"require_sealed"`, `"require_mtls"`, `"cert_fingerprint"`) | `bootstrap_trust: ["local"]` for loopback only; `require_seal_key: true` for sealed |
 | policy | `rules` list with `allowed_ips` (old format) | `{"attestation": {"<path>": {"source_ip": [...]}}}` |

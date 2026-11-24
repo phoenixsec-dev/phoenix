@@ -1,5 +1,68 @@
 # Release Notes
 
+## v0.23.0 (2026-11-24)
+
+### Fixed: a server restart broke every role session
+
+Every restart made a new random session signing key and forgot all session
+records, so every cached role session failed with `401 SESSION_INVALID`
+until someone cleared `~/.phoenix/token-cache.json` by hand. Now:
+
+- The signing key is derived from the master key, and session records are
+  saved to `role-sessions.json` next to the ACL file (no tokens or keys in
+  it). Sessions and revocations survive a restart. Sessions of a role that
+  was removed or changed are still ended at restart, so role edits take
+  effect as before.
+- The CLI and `phoenix mcp-server` replace a session that gets
+  `SESSION_INVALID` or `SESSION_EXPIRED` once and retry the request once.
+- Revoked sessions keep answering `SESSION_REVOKED` until they expire, before
+  and after a restart.
+
+**Upgrading:** nothing to configure. The server needs write access to the
+ACL file's directory (it already writes `grants.json` there). The first
+restart onto this version still ends old sessions (they were signed with the
+old random key); clients on this CLI re-mint by themselves, older CLIs need
+the cache cleared once more.
+
+### `phoenix list` shows descriptions; new `phoenix info`
+
+Most secrets have a description, but nothing showed it: the only route that
+returned one also returned the value. Now:
+
+- `phoenix list` prints each path with its description (and tags) under it,
+  or `(no description)`. `--names` prints bare paths exactly as before, for
+  scripts. `--tag <tag>` lists only secrets with that tag.
+- `phoenix info <path>` shows description, tags, created and updated times,
+  and who created and last changed the secret. Never the value.
+- MCP `phoenix_list` returns `path — description [tags]` lines and takes an
+  optional `tag`.
+- `phoenix set` without a description that leaves the secret with none
+  prints a one-line nudge. It never fails.
+- New route `GET /v1/metadata/...`: needs only `list` permission, audited as
+  `list`, never returns the value (see the API reference). `PUT
+  /v1/secrets/...` now also returns `has_description` to callers who may list
+  the path.
+- The store keeps the original `created_by` on updates and records the last
+  writer in a new `updated_by`. Older versions overwrote `created_by`, so on
+  existing secrets it shows the last writer until they are next updated.
+
+**Upgrading:** update the server first. A new CLI against an old server
+still lists names (with a note) and `phoenix info` says the server is too old.
+
+### Dashboard: several logins at once
+
+Signing in on one device no longer locks every other device out. Up to 5
+browsers can be signed in at once. The Sessions page lists each login with
+its device, IP, when it signed in and when it was last used, and a
+**Sign out** button. A 6th login signs out the one used least recently, so
+whoever has the password is never locked out. Logout now ends the login on
+the server as well. Password rate limiting and `session_ttl` are unchanged.
+
+**Upgrading:** `dashboard.allow_multi_login` and the Force Login button are
+removed. A config that still has `allow_multi_login` (true or false) refuses
+to start; delete the line. New audit actions: `dashboard.login_revoke` and
+`dashboard.login_evicted`; `dashboard.force_login` is gone.
+
 ## v0.22.0 (2026-11-11)
 
 ### Fixed: a typo in a command looks like a typo, not a permission wall

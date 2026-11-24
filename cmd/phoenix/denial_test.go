@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -164,7 +165,7 @@ func TestSessionMintAndRenewUseCommonDenialFormat(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte(body))
 	}, func() {
-		_, _, mintErr := mintSessionViaAPI("deploy", "")
+		_, _, mintErr := mintSessionViaAPI(context.Background(), "deploy", "")
 		_, _, renewErr := renewSessionViaAPI()
 		for name, err := range map[string]error{"mint": mintErr, "renew": renewErr} {
 			if err == nil {

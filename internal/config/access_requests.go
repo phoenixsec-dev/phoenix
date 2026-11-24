@@ -269,20 +269,39 @@ func checkHTTPURL(raw string) error {
 // "/srv/data/x" or a symlinked directory cannot slip past. It only reads
 // the filesystem.
 func (c *Config) ValidateGrantStorePath() error {
-	grants := c.GrantStorePath()
-	// The grants file itself must not be a symlink: its target could be a
+	return c.validateOwnFile(c.GrantStorePath(), "access_requests", "the grants file",
+		"set access_requests.store_path to a regular file path",
+		"set access_requests.store_path to a separate file such as %q", "phoenix-grants.json")
+}
+
+// ValidateSessionStorePath is ValidateGrantStorePath for role-sessions.json
+// (always next to the ACL file): a secrets file, ACL, master key or grants
+// file at that path would be overwritten by the first session mint.
+func (c *Config) ValidateSessionStorePath() error {
+	return c.validateOwnFile(c.SessionStorePath(), "session", "the role sessions file",
+		"remove the symlink; role-sessions.json next to the ACL file is reserved for sessions",
+		"role-sessions.json next to the ACL file is reserved for sessions; rename that file, e.g. to %q", "phoenix-data.json",
+		struct{ field, path string }{"access_requests grants file", c.GrantStorePath()})
+}
+
+// validateOwnFile checks that file (a file the server writes by itself) is
+// not a symlink and not the same file as another Phoenix file or one of its
+// temp files. section and what name it in errors; symlinkHint and
+// collideHint (with %q for a suggested name) say how to fix it. extra adds
+// more files to protect.
+func (c *Config) validateOwnFile(file, section, what, symlinkHint, collideHint, suggested string, extra ...struct{ field, path string }) error {
+	// The file itself must not be a symlink: its target could be a
 	// protected file's temp name, which no comparison of names would catch.
-	if fi, err := os.Lstat(grants); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("access_requests: the grants file %q is a symlink; "+
-			"set access_requests.store_path to a regular file path", grants)
+	if fi, err := os.Lstat(file); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: %s %q is a symlink; %s", section, what, file, symlinkHint)
 	}
-	protected := []struct{ field, path string }{
+	protected := append([]struct{ field, path string }{
 		{"acl.path", c.ACL.Path},
 		{"audit.path", c.Audit.Path},
 		{"store.path", c.Store.Path},
 		{"store.master_key", c.Store.MasterKey},
 		{"policy.path", c.Policy.Path},
-	}
+	}, extra...)
 	for _, pr := range protected {
 		if pr.path == "" {
 			continue
@@ -292,10 +311,9 @@ func (c *Config) ValidateGrantStorePath() error {
 		// temp names ("<name>.tmp", "<name>.tmp-<random>") from the
 		// configured name, so a symlinked file's temp sits next to the link.
 		for _, p := range []string{fullyResolved(pr.path), parentResolved(pr.path)} {
-			if grants == p || strings.HasPrefix(grants, p+".tmp") || strings.HasPrefix(p, grants+".tmp") || sameFile(grants, p) {
-				return fmt.Errorf("access_requests: the grants file %q is the same file as %s %q (or one of its temp files); "+
-					"set access_requests.store_path to a separate file such as %q",
-					grants, pr.field, pr.path, filepath.Join(filepath.Dir(p), "phoenix-grants.json"))
+			if file == p || strings.HasPrefix(file, p+".tmp") || strings.HasPrefix(p, file+".tmp") || sameFile(file, p) {
+				return fmt.Errorf("%s: %s %q is the same file as %s %q (or one of its temp files); "+collideHint,
+					section, what, file, pr.field, pr.path, filepath.Join(filepath.Dir(p), suggested))
 			}
 		}
 	}

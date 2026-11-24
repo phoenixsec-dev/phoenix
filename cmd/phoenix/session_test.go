@@ -260,11 +260,11 @@ func TestCmdListUsesRoleSessionSealKey(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
-		case "/v1/secrets/":
+		case "/v1/metadata/":
 			if got := r.Header.Get("X-Phoenix-Seal-Key"); got != hdrPublic {
 				t.Fatalf("expected X-Phoenix-Seal-Key %q, got %q", hdrPublic, got)
 			}
-			json.NewEncoder(w).Encode(map[string][]string{"paths": []string{"foo", "bar"}})
+			json.NewEncoder(w).Encode(map[string][]map[string]string{"secrets": {{"path": "foo"}, {"path": "bar"}}})
 		default:
 			t.Fatalf("unexpected request path: %s", r.URL.Path)
 		}

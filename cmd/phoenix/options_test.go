@@ -51,7 +51,7 @@ func runMain(t *testing.T, argv ...string) (code int, stdout, stderr string) {
 // The commands main dispatches. Each must be in cmdSpecs, or a typo in it
 // would reach the server.
 var allCommands = []string{
-	"get", "set", "delete", "list", "export", "import", "audit",
+	"get", "set", "delete", "list", "info", "export", "import", "audit",
 	"agent create", "agent list", "agent delete", "resolve", "openclaw-exec-provider",
 	"exec", "verify", "status", "policy show", "policy test", "rotate-master",
 	"emergency get", "sessions list", "sessions info", "sessions revoke",
@@ -155,6 +155,10 @@ func TestListFolderForms(t *testing.T) {
 				t.Errorf("list %s: exit %d %s", form, code, stderr)
 			}
 		}
+		// --names uses the plain list route, with the same folder forms.
+		if code, _, stderr := runMain(t, "list", "services/browser/*", "--names"); code != -1 {
+			t.Errorf("list --names: exit %d %s", code, stderr)
+		}
 		for _, bad := range []string{"services/br*", "services/*/x", "services/browser?", "a/[ab]"} {
 			if code, _, stderr := runMain(t, "list", bad); code != 2 || !strings.Contains(stderr, "list takes a folder") {
 				t.Errorf("list %s: exit %d, stderr %q", bad, code, stderr)
@@ -164,13 +168,9 @@ func TestListFolderForms(t *testing.T) {
 			t.Errorf("list --prefix: exit %d, stderr %q", code, stderr)
 		}
 	})
-	for _, p := range got {
-		if p != "/v1/secrets/services/browser/" {
-			t.Errorf("requested %s", p)
-		}
-	}
-	if len(got) != 3 {
-		t.Fatalf("got %d requests, want 3: %v", len(got), got)
+	want := []string{"/v1/metadata/services/browser/", "/v1/metadata/services/browser/", "/v1/metadata/services/browser/", "/v1/secrets/services/browser/"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("requests %v, want %v", got, want)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestMCPListFolderForms(t *testing.T) {
 			t.Errorf("wildcard: %v %q", isErr, msg)
 		}
 	})
-	if len(got) != 1 || got[0] != "/v1/secrets/services/browser/" {
+	if len(got) != 1 || got[0] != "/v1/metadata/services/browser/" {
 		t.Fatalf("requests: %v", got)
 	}
 }

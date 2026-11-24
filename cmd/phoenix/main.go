@@ -7,7 +7,8 @@
 //	phoenix set <path> --multiline [--description <desc>]        (hidden, ends with Ctrl-D)
 //	phoenix set <path> --value-stdin [--description <desc>] [--tags <t1,t2>]
 //	phoenix delete <path>
-//	phoenix list [folder/]
+//	phoenix list [folder/] [--names] [--tag <tag>]
+//	phoenix info <path>
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
@@ -32,6 +33,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	sha256pkg "crypto/sha256"
 	"crypto/tls"
@@ -148,6 +150,8 @@ func main() {
 		err = cmdDelete(args)
 	case "list":
 		err = cmdList(args)
+	case "info":
+		err = cmdInfo(args)
 	case "export":
 		err = cmdExport(args)
 	case "import":
@@ -284,7 +288,10 @@ Usage:
   phoenix set <path> --multiline              Hidden multi-line paste (PEM keys), end with Ctrl-D
   phoenix set <path> --value-stdin            Read secret value from stdin
   phoenix delete <path>                       Delete a secret
-  phoenix list [folder/]                      List secret paths in a folder (folder, folder/ or folder/*)
+  phoenix list [folder/] [--tag <tag>]        List secrets in a folder with their descriptions
+                                              (folder, folder/ or folder/* all list folder/)
+  phoenix list [folder/] --names              Bare paths only, one per line (for scripts)
+  phoenix info <path>                         Description, tags, dates, authors; never the value
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
@@ -366,25 +373,102 @@ func apiRequest(method, path string, body io.Reader) (*http.Response, error) {
 }
 
 func apiRequestWithHeaders(method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
-	url := serverURL + path
-	req, err := http.NewRequest(method, url, body)
+	return apiRequestCtx(context.Background(), method, path, body, headers)
+}
+
+// apiRequestCtx sends one API request with the current token. If a role
+// session token gets 401 SESSION_INVALID or SESSION_EXPIRED (for example a
+// session from before a server restart), it drops the cached session, mints
+// a new one with PHOENIX_TOKEN and retries the request exactly once. A second
+// failure is returned to the caller as is. SESSION_REVOKED is never retried:
+// the cached session is dropped so the next run mints fresh.
+func apiRequestCtx(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
+	var payload []byte
+	if body != nil {
+		b, err := io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
+		payload = b
+	}
+
+	tok := currentToken()
+	resp, err := sendAPIRequest(ctx, tok, method, path, payload, body != nil, headers)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized || !canRemintSession(tok) {
+		return resp, err
+	}
+
+	var code string
+	code, resp = peekDenialCode(resp)
+	role := os.Getenv("PHOENIX_ROLE")
+	switch code {
+	case "SESSION_INVALID", "SESSION_EXPIRED":
+	case "SESSION_REVOKED":
+		dropCachedSession(role)
+		return resp, nil
+	default:
+		return resp, nil
+	}
+
+	newTok, mintErr := remintSession(ctx, role, tok)
+	if mintErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: role session %s got %s and a new one could not be minted: %v\n", role, code, mintErr)
+		return resp, nil
+	}
+	resp.Body.Close()
+	fmt.Fprintf(os.Stderr, "note: role session %s got %s; minted a new one and retried\n", role, code)
+	return sendAPIRequest(ctx, newTok, method, path, payload, body != nil, headers)
+}
+
+// sendAPIRequest sends exactly one request authenticated with tok. No retry.
+func sendAPIRequest(ctx context.Context, tok, method, path string, payload []byte, hasBody bool, headers map[string]string) (*http.Response, error) {
+	var body io.Reader
+	if hasBody {
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, serverURL+path, body)
 	if err != nil {
 		return nil, err
 	}
-	tokenMu.RLock()
-	tok := token
-	tokenMu.RUnlock()
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	if body != nil {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	// Pass tool/skill attestation claim if set
 	return httpClient.Do(req)
+}
+
+// currentToken returns the token requests are sent with right now.
+func currentToken() string {
+	tokenMu.RLock()
+	defer tokenMu.RUnlock()
+	return token
+}
+
+// canRemintSession reports whether a failed request sent with tok may be
+// retried on a fresh role session: tok must be a session token, and
+// PHOENIX_ROLE plus a non-session PHOENIX_TOKEN must be set to mint with.
+func canRemintSession(tok string) bool {
+	boot := os.Getenv("PHOENIX_TOKEN")
+	return strings.HasPrefix(tok, "phxs_") && os.Getenv("PHOENIX_ROLE") != "" &&
+		boot != "" && !strings.HasPrefix(boot, "phxs_")
+}
+
+// peekDenialCode reads the denial code from a response body and gives back a
+// response whose body can still be read in full by the caller.
+func peekDenialCode(resp *http.Response) (string, *http.Response) {
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	var d struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(data, &d)
+	return d.Code, resp
 }
 
 func cmdGet(args []string) error {
@@ -566,6 +650,16 @@ func cmdSet(args []string) error {
 	}
 
 	fmt.Printf("ok: %s\n", path)
+	// Nudge, never fail: the server reports has_description (older servers,
+	// and callers without list access, get no field, and then we stay quiet).
+	var result struct {
+		HasDescription *bool `json:"has_description"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&result) == nil {
+		if result.HasDescription != nil && !*result.HasDescription {
+			fmt.Fprintf(os.Stderr, "note: %s has no description. Add -d \"what it is for\" next time you set it, so phoenix list and info can show it.\n", path)
+		}
+	}
 	return nil
 }
 
@@ -591,44 +685,105 @@ func cmdDelete(args []string) error {
 	return nil
 }
 
+// cmdList implements `phoenix list [prefix] [--names] [--tag <tag>]`. By
+// default each path is followed by its description; --names prints bare
+// paths, one per line, exactly as before (for scripts). --tag keeps only
+// secrets carrying that tag.
 func cmdList(args []string) error {
+	listUsage := fmt.Errorf("usage: phoenix list [folder/] [--names] [--tag <tag>]")
+	prefix, tag := "", ""
+	namesOnly := false
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--names":
+			namesOnly = true
+		case a == "--tag":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return listUsage
+			}
+			tag = args[i]
+		case strings.HasPrefix(a, "-"):
+			return fmt.Errorf("unknown option %q\n%v", a, listUsage)
+		case prefix == "":
+			prefix = a
+		default:
+			return listUsage
+		}
+	}
+	// "folder", "folder/" and "folder/*" all mean folder/; other wildcards
+	// are a usage error before anything is sent.
+	prefix, err := listFolder(prefix)
+	if err != nil {
+		usageExit("list", cmdSpecs["list"], err.Error())
+		return err
+	}
+
 	if err := requireAuth(); err != nil {
 		return err
 	}
 
-	sealPrivKey, err := loadSealKeyForRequest()
-	if err != nil {
-		return fmt.Errorf("loading seal key: %w", err)
-	}
-
-	prefix := ""
-	if len(args) > 0 {
-		prefix, err = listFolder(args[0])
+	if namesOnly && tag == "" {
+		paths, err := fetchListPaths(prefix)
 		if err != nil {
-			usageExit("list", cmdSpecs["list"], err.Error())
 			return err
 		}
+		for _, p := range paths {
+			fmt.Println(p)
+		}
+		return nil
+	}
+
+	infos, err := fetchSecretInfos(prefix, tag)
+	if err == errNoMetadataRoute && tag == "" {
+		// Older server: still list the names rather than fail.
+		fmt.Fprintln(os.Stderr, "note: "+err.Error()+"; showing names only")
+		namesOnly = true
+		var paths []string
+		if paths, err = fetchListPaths(prefix); err == nil {
+			for _, p := range paths {
+				infos = append(infos, secretInfo{Path: p})
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if namesOnly {
+		for _, si := range infos {
+			fmt.Println(si.Path)
+		}
+		return nil
+	}
+	formatSecretList(os.Stdout, infos)
+	return nil
+}
+
+// fetchListPaths returns the bare paths from the list route (GET
+// /v1/secrets/<prefix>), which every server version has.
+func fetchListPaths(prefix string) ([]string, error) {
+	sealPrivKey, err := loadSealKeyForRequest()
+	if err != nil {
+		return nil, fmt.Errorf("loading seal key: %w", err)
 	}
 
 	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+prefix, nil, sealHeaders(sealPrivKey))
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return handleError(resp)
+		return nil, handleError(resp)
 	}
 
 	var result struct {
 		Paths []string `json:"paths"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	for _, p := range result.Paths {
-		fmt.Println(p)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
 	}
-	return nil
+	return result.Paths, nil
 }
 
 func cmdExport(args []string) error {
@@ -1407,19 +1562,7 @@ func cmdExec(args []string) error {
 	if timeout > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		url := serverURL + "/v1/resolve"
-		req, reqErr := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
-		if reqErr != nil {
-			return fmt.Errorf("building request: %w", reqErr)
-		}
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		for k, v := range hdrs {
-			req.Header.Set(k, v)
-		}
-		resp, err = httpClient.Do(req)
+		resp, err = apiRequestCtx(ctx, "POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	} else {
 		resp, err = apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	}
@@ -2025,14 +2168,14 @@ func ensureSealKey(role string) (*[32]byte, string, error) {
 }
 
 // mintSessionViaAPI calls POST /v1/session/mint and returns the session token.
-func mintSessionViaAPI(role, sealPubKeyB64 string) (string, time.Time, error) {
+func mintSessionViaAPI(ctx context.Context, role, sealPubKeyB64 string) (string, time.Time, error) {
 	body := map[string]string{"role": role}
 	if sealPubKeyB64 != "" {
 		body["seal_public_key"] = sealPubKeyB64
 	}
 	bodyBytes, _ := json.Marshal(body)
 
-	resp, err := apiRequest("POST", "/v1/session/mint", strings.NewReader(string(bodyBytes)))
+	resp, err := sendAPIRequest(ctx, os.Getenv("PHOENIX_TOKEN"), "POST", "/v1/session/mint", bodyBytes, true, nil)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("session mint request: %w", err)
 	}
@@ -2080,14 +2223,16 @@ func autoMintSession() error {
 	}
 
 	// Need bootstrap auth to mint
-	tokenMu.RLock()
-	noToken := token == ""
-	tokenMu.RUnlock()
-	if noToken {
+	if os.Getenv("PHOENIX_TOKEN") == "" {
 		return fmt.Errorf("PHOENIX_ROLE=%s set but no bootstrap auth available (set PHOENIX_TOKEN)", role)
 	}
+	_, err := mintAndCacheSession(context.Background(), role)
+	return err
+}
 
-	// Load or generate seal key
+// mintAndCacheSession mints a role session with PHOENIX_TOKEN (sealed if a
+// seal key is set up), caches it and makes it the current token.
+func mintAndCacheSession(ctx context.Context, role string) (string, error) {
 	_, sealPubB64, err := ensureSealKey(role)
 	if err != nil {
 		// Non-fatal: mint without seal key
@@ -2095,16 +2240,46 @@ func autoMintSession() error {
 		sealPubB64 = ""
 	}
 
-	sessionToken, expiresAt, err := mintSessionViaAPI(role, sealPubB64)
+	sessionToken, expiresAt, err := mintSessionViaAPI(ctx, role, sealPubB64)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	cacheSessionToken(role, sessionToken, expiresAt)
 	tokenMu.Lock()
 	token = sessionToken
 	tokenMu.Unlock()
-	return nil
+	return sessionToken, nil
+}
+
+// remintMu makes concurrent requests (MCP mode) that all hit a dead session
+// share one re-mint instead of each minting its own.
+var remintMu sync.Mutex
+
+// remintSession replaces the dead session token stale with a fresh one and
+// returns it. If another request already replaced it, that token is reused.
+func remintSession(ctx context.Context, role, stale string) (string, error) {
+	remintMu.Lock()
+	defer remintMu.Unlock()
+	if cur := currentToken(); cur != stale {
+		return cur, nil
+	}
+	dropCachedSession(role)
+	return mintAndCacheSession(ctx, role)
+}
+
+// dropCachedSession removes the role's cached session token from
+// ~/.phoenix/token-cache.json so the next run mints a new one.
+func dropCachedSession(role string) {
+	cache, _ := loadTokenCache()
+	key := sessionCacheKey(role)
+	if _, ok := cache[key]; !ok {
+		return
+	}
+	delete(cache, key)
+	if err := saveTokenCache(cache); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not update token cache: %v\n", err)
+	}
 }
 
 // renewSessionViaAPI calls POST /v1/session/renew with the current session token.

@@ -34,6 +34,15 @@ func (b *stubBackend) Get(path string) (*store.Secret, error) {
 	return s, nil
 }
 
+func (b *stubBackend) Metadata(path string) (*store.SecretMetadata, error) {
+	s, ok := b.secrets[path]
+	if !ok {
+		return nil, store.ErrSecretNotFound
+	}
+	meta := s.Metadata
+	return &meta, nil
+}
+
 func (b *stubBackend) List(prefix string) ([]string, error) {
 	if b.listErr != nil {
 		return nil, b.listErr

@@ -35,4 +35,6 @@ var removedSettings = []removed.Field{
 		Instead: "use \"bearer\" or \"local\""},
 	{Path: "dashboard.pin", Why: "it was stored in plain text in config.json, so anyone who could read the file could log in",
 		Instead: "set dashboard.password_hash (generate it with phoenix-server --hash-password)"},
+	{Path: "dashboard.allow_multi_login", Why: "several dashboard logins at once are now always allowed (up to 5), each listed on the Sessions page where it can be signed out",
+		Instead: "delete the line"},
 }
