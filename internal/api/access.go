@@ -176,7 +176,9 @@ func (s *Server) auditAllowedAccess(r *http.Request, info *authInfo, action, pat
 		s.auditAllowedWithSeal(r, info, action, path, ip, sealed)
 		return
 	}
-	s.logAudit(s.audit.LogAllowedSealedWithMetadata(info.Agent, action, path, ip, sealed, grantAuditMetadata(r, g)))
+	s.logAudit(s.writeAudit(r, audit.Entry{
+		Agent: info.Agent, Action: action, Path: path, Status: "allowed", IP: ip, Sealed: sealed, Metadata: grantAuditMetadata(r, g),
+	}))
 	s.grants.RecordUse(g.ID)
 }
 
@@ -892,6 +894,11 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{
 		"agent":     info.Agent,
+		"who":       info.Caller.Who,
+		"host":      info.Caller.Host,
+		"authority": info.Caller.Authority,
+		"kind":      info.Labels.Kind,
+		"attested":  info.Caller.Attested,
 		"source_ip": clientIP(r),
 		"access_requests": map[string]any{
 			"enabled":             enabled,
@@ -1006,10 +1013,15 @@ func (s *Server) grantAuditStatus() map[string]any {
 // actor (approver, agent or "system") is the audit agent, the event name is
 // the action, and the paths are joined into the audit path. Failed-phase
 // lines are logged as denied.
-type grantAuditSink struct{ l *audit.Logger }
+type grantAuditSink struct {
+	l *audit.Logger
+	a *acl.ACL
+}
 
-// NewGrantAuditSink adapts the audit logger for grant.Options.Audit.
-func NewGrantAuditSink(l *audit.Logger) grant.AuditSink { return grantAuditSink{l: l} }
+// NewGrantAuditSink adapts the audit logger for grant.Options.Audit. a gives
+// the actor's labels as they are when the line is written, which for a line
+// retried after a failed write is later than the event. nil = no labels.
+func NewGrantAuditSink(l *audit.Logger, a *acl.ACL) grant.AuditSink { return grantAuditSink{l, a} }
 
 func (g grantAuditSink) Append(e grant.Event) error {
 	md := e.Metadata()
@@ -1020,9 +1032,17 @@ func (g grantAuditSink) Append(e grant.Event) error {
 	if actor == "" {
 		actor = e.Agent
 	}
-	path := strings.Join(e.Paths, ",")
-	if e.Phase == grant.PhaseFailed {
-		return g.l.LogDeniedWithMetadata(actor, e.Name, path, e.ActorIP, "store_write_failed", md)
+	entry := audit.Entry{
+		Agent: actor, Action: e.Name, Path: strings.Join(e.Paths, ","), Status: "allowed", IP: e.ActorIP, Metadata: md,
 	}
-	return g.l.LogAllowedWithMetadata(actor, e.Name, path, e.ActorIP, md)
+	// The store itself and a person in the dashboard are not identities.
+	if g.a != nil && actor != "system" && !strings.HasPrefix(actor, "dashboard@") {
+		if ag, err := g.a.GetAgent(actor); err == nil {
+			entry.Caller = audit.Caller{Who: ag.Who, Authority: ag.Authority}
+		}
+	}
+	if e.Phase == grant.PhaseFailed {
+		entry.Status, entry.Reason = "denied", "store_write_failed"
+	}
+	return g.l.Log(entry)
 }

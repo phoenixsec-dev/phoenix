@@ -77,7 +77,7 @@ func (e *credEnv) start() {
 	}
 	t.Cleanup(func() { al.Close() })
 	e.srv = NewServer(store.NewFileBackend(st), a, al, auditPath)
-	gs, err := grant.Open(grant.Options{Path: filepath.Join(e.dir, "grants.json"), Audit: NewGrantAuditSink(al), Logf: t.Logf})
+	gs, err := grant.Open(grant.Options{Path: filepath.Join(e.dir, "grants.json"), Audit: NewGrantAuditSink(al, a), Logf: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}

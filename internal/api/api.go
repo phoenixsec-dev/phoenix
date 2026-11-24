@@ -277,7 +277,9 @@ func (s *Server) auditEndedSessions(r *http.Request, actor, ip, cause string, en
 			md = map[string]string{}
 		}
 		md["session.agent"], md["cause"] = sess.Agent, cause
-		if err := s.audit.LogSessionAllowedWithMetadata(actor, "session.ended", sess.ID, ip, sess.ID, md); err != nil {
+		if err := s.writeAudit(r, audit.Entry{
+			Agent: actor, Action: "session.ended", Path: sess.ID, Status: "allowed", IP: ip, SessionID: sess.ID, Metadata: md,
+		}); err != nil {
 			log.Printf("WARNING: audit log write failed for session.ended %s (agent %q, by %q, cause %s): %v", sess.ID, sess.Agent, actor, cause, err)
 		}
 	}
@@ -302,7 +304,7 @@ func (s *Server) SetDashboard(h http.Handler) {
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.mux.ServeHTTP(w, withRequestCaller(r))
 }
 
 func (s *Server) routes() {
@@ -326,6 +328,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/sessions/", s.handleSessionRouter)
 	s.accessRoutes()
 	s.metadataRoutes()
+	s.identityRoutes()
 	s.sshRoutes()
 	s.removedRouteRoutes()
 }
@@ -337,6 +340,9 @@ type authInfo struct {
 	IsLocal    bool   // true when client IP is loopback
 	BearerFP   string // grant.BearerFingerprint of the presented token's hash (bearer auth only)
 	SessionFP  string // sessionCredentialFP of that token, for sessions it mints (bearer auth only)
+
+	Labels acl.Labels   // the identity's labels when it authenticated
+	Caller audit.Caller // the same, as its audit lines show them
 
 	// Session identity (set when authenticated via session token)
 	UsedSession       bool
@@ -403,6 +409,12 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 			SessionNamespaces: sess.Namespaces,
 			SessionActions:    sess.Actions,
 		}
+		// No labels if the identity was replaced since Validate.
+		var labels acl.Labels
+		if a, err := s.acl.GetAgent(sess.Agent); err == nil && sessionCredentialFP(a) == sess.CredentialFP {
+			labels = a.Labels
+		}
+		identifyCaller(r, info, labels)
 		return info, nil
 	}
 
@@ -422,7 +434,7 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		return nil, err
 	}
 	s.authRL.recordSuccess(ip)
-	return &authInfo{
+	info := &authInfo{
 		Agent:      agent,
 		UsedBearer: true,
 		IsLocal:    local,
@@ -430,7 +442,9 @@ func (s *Server) authenticateInfo(r *http.Request) (*authInfo, error) {
 		// this exact token (after rotation the old grants match nothing).
 		BearerFP:  grant.BearerFingerprint(crypto.HashToken(tok)),
 		SessionFP: sessionCredentialFP(record),
-	}, nil
+	}
+	identifyCaller(r, info, record.Labels)
+	return info, nil
 }
 
 // attestFull checks the attestation policy for path. Returns nil if no policy
@@ -591,27 +605,27 @@ func handleAuthError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) auditLogAllowed(r *http.Request, agent, action, path, ip string) {
-	s.logAudit(s.audit.LogAllowedWithMetadata(agent, action, path, ip, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip}))
 }
 
 func (s *Server) auditLogAllowedSealed(r *http.Request, agent, action, path, ip string, sealed bool) {
-	s.logAudit(s.audit.LogAllowedSealedWithMetadata(agent, action, path, ip, sealed, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip, Sealed: sealed}))
 }
 
 func (s *Server) auditLogDenied(r *http.Request, agent, action, path, ip, reason string) {
-	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "denied", IP: ip, Reason: reason}))
 }
 
 func (s *Server) auditLogSessionAllowed(r *http.Request, agent, action, path, ip, sessionID string) {
-	s.logAudit(s.audit.LogSessionAllowedWithMetadata(agent, action, path, ip, sessionID, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip, SessionID: sessionID}))
 }
 
 func (s *Server) auditLogSessionAllowedSealed(r *http.Request, agent, action, path, ip, sessionID string, sealed bool) {
-	s.logAudit(s.audit.LogSessionAllowedSealedWithMetadata(agent, action, path, ip, sessionID, sealed, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "allowed", IP: ip, SessionID: sessionID, Sealed: sealed}))
 }
 
 func (s *Server) auditLogSessionDenied(r *http.Request, agent, action, path, ip, reason, sessionID string) {
-	s.logAudit(s.audit.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, sessionID, callerAuditMetadata(r)))
+	s.logAudit(s.writeAudit(r, audit.Entry{Agent: agent, Action: action, Path: path, Status: "denied", IP: ip, Reason: reason, SessionID: sessionID}))
 }
 
 // auditAllowed logs an allowed action, including session ID when a session was used.
@@ -1069,7 +1083,11 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 
 	if agent := r.URL.Query().Get("agent"); agent != "" {
 		opts.Agent = agent
+		opts.FormerAgents = s.acl.FormerNames(agent)
 	}
+	opts.Who = r.URL.Query().Get("who")
+	opts.Host = r.URL.Query().Get("host")
+	opts.Authority = r.URL.Query().Get("authority")
 
 	// No limit, or one above the cap, returns the newest maxAuditQueryLimit
 	// entries: "everything" from a multi-GB log would not fit in memory.
@@ -1102,6 +1120,7 @@ type createAgentRequest struct {
 	Name        string           `json:"name"`
 	Token       string           `json:"token"`
 	Permissions []acl.Permission `json:"permissions"`
+	acl.LabelChange
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
@@ -1134,16 +1153,22 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labels, err := req.LabelChange.Normalized(req.Name)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	force := r.URL.Query().Get("force") == "true"
 
 	if force {
 		// Try update first; if agent doesn't exist, fall through to add
 		err := s.changeAgentCredential(r, agentName, req.Name, "token_replaced", func() error {
-			return s.acl.UpdateAgent(req.Name, req.Token, req.Permissions)
+			return s.acl.UpdateAgentLabeled(req.Name, req.Token, req.Permissions, labels)
 		})
 		if err == nil {
-			s.auditLogAllowed(r, agentName, "update-agent", req.Name, clientIP(r))
-			jsonOK(w, map[string]string{"status": "ok", "agent": req.Name, "action": "updated"})
+			s.auditAgentChange(r, agentName, "update-agent", req.Name, labels)
+			jsonOK(w, map[string]any{"status": "ok", "agent": req.Name, "action": "updated", "identity": s.identityOf(req.Name)})
 			return
 		}
 		if !errors.Is(err, acl.ErrAgentNotFound) {
@@ -1154,7 +1179,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		// Agent doesn't exist — fall through to AddAgent below
 	}
 
-	if err := s.acl.AddAgent(req.Name, req.Token, req.Permissions); err != nil {
+	if err := s.acl.AddAgentLabeled(req.Name, req.Token, req.Permissions, labels); err != nil {
 		if errors.Is(err, acl.ErrAgentExists) {
 			jsonError(w, "agent already exists (use ?force=true to overwrite)", http.StatusConflict)
 			return
@@ -1164,8 +1189,8 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditLogAllowed(r, agentName, "create-agent", req.Name, clientIP(r))
-	jsonOK(w, map[string]string{"status": "ok", "agent": req.Name})
+	s.auditAgentChange(r, agentName, "create-agent", req.Name, labels)
+	jsonOK(w, map[string]any{"status": "ok", "agent": req.Name, "identity": s.identityOf(req.Name)})
 }
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
@@ -1181,7 +1206,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	names := s.acl.ListAgents()
-	jsonOK(w, map[string]interface{}{"agents": names})
+	jsonOK(w, map[string]interface{}{"agents": names, "identities": s.acl.Identities()})
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {

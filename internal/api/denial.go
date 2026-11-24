@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"unicode/utf8"
 
+	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 )
@@ -275,15 +276,11 @@ func (s *Server) auditDeniedDetail(r *http.Request, info *authInfo, action, path
 // auditDeniedMetadata writes a denied audit entry with the given metadata,
 // as a session entry when the caller used a session token.
 func (s *Server) auditDeniedMetadata(info *authInfo, action, path, ip, reason string, metadata map[string]string) {
-	agent := ""
+	e := audit.Entry{Action: action, Path: path, Status: "denied", IP: ip, Reason: reason, Metadata: metadata}
 	if info != nil {
-		agent = info.Agent
+		e.Agent, e.Caller, e.SessionID = info.Agent, info.Caller, info.SessionID
 	}
-	if info != nil && info.UsedSession {
-		s.logAudit(s.audit.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, info.SessionID, metadata))
-		return
-	}
-	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, metadata))
+	s.logAudit(s.audit.Log(e))
 }
 
 // denialAuditMetadata returns the request's caller audit metadata plus
