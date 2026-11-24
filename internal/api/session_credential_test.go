@@ -914,34 +914,88 @@ func TestSlowBodyAfterTokenReplaced(t *testing.T) {
 	}
 }
 
-// A forced update whose save failed: with the token unchanged nothing it asked
-// for is in force; with a new token the old one stays dead and the answer says
-// that a restart may change that.
+// On a disk that takes no writes, what is answered with an error gives nobody
+// anything, not even after the disk works again. A refused replacement ends no
+// session. A replacement that could not be saved ends the old token, with its
+// sessions, and does not put the new one in force; the answer says so.
 func TestForceWithFailedSave(t *testing.T) {
 	e := newCredEnv(t)
 	seedSecret(t, e.srv, "admin-token", "other/b", "other-value")
+	sess := e.mint("old-token")
+	force := func(as, name, tok string) (int, string) {
+		return e.do("POST", "/v1/agents?force=true", as, `{"name":"`+name+`","token":"`+tok+`","permissions":[{"path":"**","actions":["read_value"]}]}`)
+	}
+	for want, refused := range map[int]func() (int, string){
+		403: func() (int, string) { return force("old-token", "worker", "eve-token") },
+		400: func() (int, string) { return force("admin-token", "worker", "") },
+		409: func() (int, string) {
+			return e.do("POST", "/v1/agents", "admin-token", `{"name":"worker","token":"eve-token","permissions":`+workerACL+`}`)
+		},
+	} {
+		if code, body := refused(); code != want {
+			t.Errorf("refused replacement: %d %s, want %d", code, failBody(body), want)
+		}
+		e.wantAlive("after a refused replacement", sess)
+	}
+
 	if err := os.Chmod(e.dir, 0500); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Chmod(e.dir, 0700)
-	force := func(tok string) (int, string) {
-		return e.do("POST", "/v1/agents?force=true", "admin-token", `{"name":"worker","token":"`+tok+`","permissions":[{"path":"**","actions":["read_value"]}]}`)
-	}
-	code, body := force("old-token")
+	code, body := force("admin-token", "worker", "old-token")
 	if code == 200 {
 		t.Skip("running as a user the mode does not stop")
 	}
-	if code != 500 || strings.Contains(body, "replaced") {
+	if code != 500 || strings.Contains(body, "old token") {
 		t.Errorf("same token: %d %s", code, body)
 	}
+	e.wantAlive("same token, not saved", sess)
 	if code, _ := e.do("GET", "/v1/secrets/other/b", "old-token", ""); code != 403 {
 		t.Errorf("wider permissions after a failed save: %d, want 403", code)
 	}
-	if code, body := force("new-token"); code != 500 || !strings.Contains(body, "after a restart the last saved token may work instead") {
+	if code, _ := force("admin-token", "late", "late-token"); code != 500 {
+		t.Errorf("new agent: %d, want 500", code)
+	}
+	if code, _ := e.do("PUT", "/v1/secrets/test/a", "old-token", `{"value":"half-done"}`); code != 500 {
+		t.Errorf("secret write: %d, want 500", code)
+	}
+	if code, _ := force("admin-token", "admin", "other-admin-token"); code != 500 {
+		t.Errorf("own token: %d, want 500", code)
+	}
+	if code, body := force("admin-token", "worker", "new-token"); code != 500 || !strings.Contains(body, "the old token no longer works and the new one is not in force") {
 		t.Errorf("new token: %d %s", code, body)
 	}
-	if code, _ := e.do("GET", "/v1/secrets/test/a", "old-token", ""); code != 401 {
-		t.Errorf("replaced token: %d, want 401", code)
+	if l := e.lines(audit.QueryOptions{Path: "worker", Limit: 1})[0]; l.Action != "update-agent" || l.Status != "denied" || l.Reason != "not_saved" {
+		t.Errorf("audit line = %+v", l)
+	}
+	check := func(when string) {
+		t.Helper()
+		for _, tok := range []string{"old-token", "new-token", "late-token", "other-admin-token"} {
+			if code, _ := e.do("GET", "/v1/secrets/test/a", tok, ""); code != 401 {
+				t.Errorf("%s: %s answered %d, want 401", when, tok, code)
+			}
+		}
+		e.wantDead(when, sess)
+		if _, body := e.do("GET", "/v1/secrets/test/a", "admin-token", ""); !strings.Contains(body, "synthetic-value") {
+			t.Errorf("%s: the secret changed, or the admin's own token stopped", when)
+		}
+	}
+	check("on the full disk")
+	if err := os.Chmod(e.dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := e.do("PUT", "/v1/secrets/test/other", "admin-token", `{"value":"x"}`); code != 200 {
+		t.Fatalf("write on the repaired disk: %d", code)
+	}
+	if code, _ := e.do("POST", "/v1/agents", "admin-token", `{"name":"another","token":"another-token","permissions":[]}`); code != 200 {
+		t.Fatalf("new agent on the repaired disk: %d", code)
+	}
+	check("after the next saves")
+	e.start()
+	check("after a restart")
+	e.create("new-token", true)
+	if code, _ := e.do("GET", "/v1/secrets/test/a", "new-token", ""); code != 200 {
+		t.Errorf("run again: %d, want 200", code)
 	}
 }
 

@@ -6,17 +6,20 @@
 package acl
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/fsutil"
@@ -38,9 +41,9 @@ var (
 	ErrAccessDenied  = errors.New("access denied: insufficient permissions")
 	ErrAgentNotFound = errors.New("agent not found")
 	ErrAgentExists   = errors.New("agent already exists")
-	// ErrReplacedNotSaved means a token was replaced (and the old one no longer
-	// works) but that was not saved for certain, so a restart may undo it.
-	ErrReplacedNotSaved = errors.New("token replaced but not saved for certain")
+	// ErrReplacedNotSaved means replacing a token could not be saved: the old
+	// token no longer works until a restart, and the new one is not in force.
+	ErrReplacedNotSaved = errors.New("old token ended, new one not saved and not in force")
 
 	// ValidActions is the set of recognized action strings.
 	ValidActions = map[Action]bool{
@@ -120,6 +123,7 @@ type ACL struct {
 	// replaced token must not come back after a power cut.
 	writeFile func(path string, data []byte, perm os.FileMode) error
 	unsaved   []AlwaysRule // taken back but not saved yet (always.go)
+	dirty     bool         // the last save failed; RetrySaves tries again
 }
 
 // New creates a new ACL from a config file.
@@ -180,6 +184,7 @@ func (a *ACL) saveLocked() error {
 	}
 
 	a.fillSerialsLocked()
+	a.dirty = true
 	data, err := json.MarshalIndent(a.config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling ACL: %w", err)
@@ -194,9 +199,36 @@ func (a *ACL) saveLocked() error {
 	if err := a.writeFile(a.path, data, 0600); err != nil {
 		return fmt.Errorf("writing ACL file: %w", err)
 	}
-	a.unsaved = nil
+	a.unsaved, a.dirty = nil, false
 
 	return nil
+}
+
+// RetrySaves saves again, every interval until ctx ends, what could not be
+// saved: access taken away on a full disk must not come back at a restart.
+func (a *ACL) RetrySaves(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.retrySave()
+		}
+	}
+}
+
+// retrySave is one try of RetrySaves.
+func (a *ACL) retrySave() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.dirty {
+		return
+	}
+	if err := a.saveLocked(); err != nil {
+		log.Printf("WARNING: access list changes are still not saved, will retry: %v", err)
+	}
 }
 
 // Authenticate verifies a bearer token and returns the agent name.
@@ -270,17 +302,23 @@ func (a *ACL) AddAgentLabeled(name, token string, permissions []Permission, labe
 	return a.saveOrUndo(func() { delete(a.config.Agents, name) })
 }
 
-// saveOrUndo saves a change, and undoes it in memory if the file still holds
-// the old content, so the next save does not carry what the caller was told
-// failed. undo must not bring back a token: one that was replaced or removed
-// must stay dead even if the save failed.
+// saveOrUndo saves a change, and undoes it if that fails: a change answered
+// with an error may take access away but never gives any, now or with a later
+// save. undo must not bring back a token: one that was replaced must stay dead
+// even if the save failed.
 func (a *ACL) saveOrUndo(undo func()) error {
 	if a.path == "" {
 		return nil
 	}
 	err := a.saveLocked()
-	if err != nil && !errors.Is(err, fsutil.ErrDirSyncFailed) {
-		undo()
+	if err == nil {
+		return nil
+	}
+	undo()
+	if errors.Is(err, fsutil.ErrDirSyncFailed) { // the file has the change
+		if uerr := a.saveLocked(); uerr != nil && !errors.Is(uerr, fsutil.ErrDirSyncFailed) {
+			log.Printf("WARNING: %s still holds a change that was refused, will retry: %v", a.path, uerr)
+		}
 	}
 	return err
 }
@@ -301,6 +339,17 @@ func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 
 // UpdateAgentLabeled is UpdateAgent that also changes the labels it is given.
 func (a *ACL) UpdateAgentLabeled(name, token string, permissions []Permission, labels LabelChange) error {
+	return a.updateAgent(name, token, permissions, labels, false)
+}
+
+// UpdateOwnAgent is UpdateAgentLabeled for an agent replacing its own token. If
+// that cannot be saved the old token goes on working: without it nobody might
+// be left who can try again.
+func (a *ACL) UpdateOwnAgent(name, token string, permissions []Permission, labels LabelChange) error {
+	return a.updateAgent(name, token, permissions, labels, true)
+}
+
+func (a *ACL) updateAgent(name, token string, permissions []Permission, labels LabelChange, own bool) error {
 	labels, err := labels.Normalized(name)
 	if err != nil {
 		return err
@@ -327,15 +376,16 @@ func (a *ACL) UpdateAgentLabeled(name, token string, permissions []Permission, l
 		SealPublicKey: existing.SealPublicKey,
 	}
 
+	replaced := hash != existing.TokenHash && !own
 	err = a.saveOrUndo(func() {
-		// A replaced token stays dead even if the save failed. With the same
-		// token there is none to kill, only permissions nobody was told about.
-		if hash == existing.TokenHash {
-			existing.Serial = a.config.Agents[name].Serial // the save may have given it one
-			a.config.Agents[name] = existing
+		undone := existing
+		undone.Serial = a.config.Agents[name].Serial // the save may have given it one
+		if replaced {
+			undone.TokenHash, undone.CredentialID = "", "" // no token matches this
 		}
+		a.config.Agents[name] = undone
 	})
-	if err != nil && hash != existing.TokenHash {
+	if err != nil && replaced {
 		return fmt.Errorf("%w: %w", ErrReplacedNotSaved, err)
 	}
 	return err

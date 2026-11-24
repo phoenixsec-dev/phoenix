@@ -740,75 +740,113 @@ func TestTokenChangeNotDoneUntilDurable(t *testing.T) {
 	}
 }
 
-// A new agent or seal key whose save failed was not added: not now, and not by
-// the next save that works. A kept seal key would not match the private key the
-// agent still uses. If the file was replaced and only the directory sync failed, both keep the new one.
-func TestFailedSaveOfNewAgentOrSealKeyIsUndone(t *testing.T) {
+// diskFaults are the two ways a save can fail: nothing was written, or the file
+// was replaced and only the directory sync failed.
+func diskFaults(write func(string, []byte, os.FileMode) error) map[string]func(string, []byte, os.FileMode) error {
+	return map[string]func(string, []byte, os.FileMode) error{
+		"disk full": func(string, []byte, os.FileMode) error { return syscall.ENOSPC },
+		"dir sync failed": func(p string, d []byte, m os.FileMode) error {
+			return errors.Join(write(p, d, m), fsutil.ErrDirSyncFailed)
+		},
+	}
+}
+
+// A change answered with an error gives nobody any access: not now, not by the
+// next save that works, and not after a restart. A replaced token stays dead
+// all the same; a token that was not replaced, or is the caller's own, works on.
+func TestFailedSaveGivesNothing(t *testing.T) {
 	keys := []string{strings.Repeat("A", 43) + "=", strings.Repeat("B", 42) + "A="}
-	for name, c := range map[string]struct {
-		err  error
-		keep bool
-	}{
-		"disk full":       {syscall.ENOSPC, false},
-		"dir sync failed": {fsutil.ErrDirSyncFailed, true},
-	} {
+	all := []Permission{{Path: "**", Actions: []Action{ActionAdmin}}}
+	for name := range diskFaults(nil) {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "acl.json")
 			a, err := New(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := errors.Join(a.AddAgent("worker", "fake-1", nil), a.SetAgentSealKey("worker", keys[0])); err != nil {
+			if err := errors.Join(a.AddAgent("same", "fake-1", nil), a.SetAgentSealKey("same", keys[0]),
+				a.AddAgent("replaced", "fake-2", nil), a.AddAgent("own", "fake-3", nil)); err != nil {
 				t.Fatal(err)
 			}
 			write := a.writeFile
-			a.writeFile = func(p string, d []byte, m os.FileMode) error {
-				if c.keep {
-					return errors.Join(write(p, d, m), c.err)
+			a.writeFile = diskFaults(write)[name]
+			if a.AddAgent("late", "fake-late", all) == nil || a.SetAgentSealKey("same", keys[1]) == nil ||
+				a.UpdateAgent("same", "fake-1", all) == nil || a.UpdateOwnAgent("own", "fake-own", all, LabelChange{}) == nil {
+				t.Fatal("all should fail")
+			}
+			if err := a.UpdateAgent("replaced", "fake-new", all); !errors.Is(err, ErrReplacedNotSaved) {
+				t.Fatalf("replacing: %v, want ErrReplacedNotSaved", err)
+			}
+			check := func(when string, x *ACL) {
+				t.Helper()
+				for tok, want := range map[string]bool{"fake-1": true, "fake-2": false, "fake-3": true,
+					"fake-late": false, "fake-new": false, "fake-own": false} {
+					if _, err := x.Authenticate(tok); (err == nil) != want {
+						t.Errorf("%s: %s works %v, want %v", when, tok, err == nil, want)
+					}
 				}
-				return c.err
+				for _, agent := range []string{"same", "replaced", "own", "late"} {
+					if x.Authorize(agent, "x/y", ActionWrite) == nil {
+						t.Errorf("%s: %s got wider permissions", when, agent)
+					}
+				}
+				if key, _ := x.GetAgentSealKey("same"); key != keys[0] {
+					t.Errorf("%s: the seal key changed", when)
+				}
 			}
-			if a.AddAgent("late", "fake-2", nil) == nil || a.SetAgentSealKey("worker", keys[1]) == nil {
-				t.Fatal("both should fail")
-			}
+			check("now", a)
 			a.writeFile = write
-			if err := a.AddAgent("other", "fake-3", nil); err != nil {
-				t.Fatal(err)
-			}
+			a.retrySave()
+			check("after the retry", a)
 			again, err := New(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for when, x := range map[string]*ACL{"now": a, "after a restart": again} {
-				_, missing := x.GetAgent("late")
-				key, _ := x.GetAgentSealKey("worker")
-				if (missing == nil) != c.keep || (key == keys[1]) != c.keep {
-					t.Errorf("%s: late kept %v, new key kept %v, want %v", when, missing == nil, key == keys[1], c.keep)
-				}
+			check("after a restart", again)
+			if err := a.UpdateAgent("replaced", "fake-new", all); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Authenticate("fake-new"); err != nil {
+				t.Error("running it again did not put the new token in force")
 			}
 		})
 	}
 }
 
-// With the token unchanged, permissions from a failed save are undone. A
-// replaced token stays dead all the same.
-func TestFailedUpdateKeepsOldPermissionsNotOldToken(t *testing.T) {
-	a, err := New(filepath.Join(t.TempDir(), "acl.json"))
+// Access taken away is gone at once when the save fails, says so, and is saved
+// by the next retry.
+func TestFailedRemovalIsRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "acl.json")
+	a, err := New(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	all := []Permission{{Path: "**", Actions: []Action{ActionAdmin}}}
-	if err := a.AddAgent("worker", "fake-1", nil); err != nil {
+	if err := errors.Join(a.AddAgent("gone", "fake-1", nil), a.AddAgent("reader", "fake-2", nil),
+		a.StageAlways("reader", AlwaysOrigin{RequestID: "req_1", By: "someone"}, []string{"infra/a"}, func(Agent) error { return nil }),
+		a.FinishAlways("reader", "req_1", func(Agent) error { return nil })); err != nil {
 		t.Fatal(err)
 	}
-	a.writeFile = func(string, []byte, os.FileMode) error { return syscall.ENOSPC }
-	if a.UpdateAgent("worker", "fake-1", all) == nil || a.Authorize("worker", "x/y", ActionWrite) == nil {
-		t.Error("the failed update widened the agent's access")
+	write := a.writeFile
+	a.writeFile = diskFaults(write)["disk full"]
+	if _, err := a.RemoveAlways("reader", "infra/a", "req_1"); err == nil || a.RemoveAgent("gone") == nil {
+		t.Fatal("both removals should fail")
 	}
-	if err := a.UpdateAgent("worker", "fake-2", nil); !errors.Is(err, ErrReplacedNotSaved) {
-		t.Errorf("replacing: %v, want ErrReplacedNotSaved", err)
+	check := func(when string, x *ACL) {
+		t.Helper()
+		if _, err := x.Authenticate("fake-1"); err == nil || x.Authorize("reader", "infra/a", ActionReadValue) == nil {
+			t.Errorf("%s: access that was taken away works", when)
+		}
 	}
-	if _, err := a.Authenticate("fake-1"); err == nil {
-		t.Error("the replaced token still works")
+	check("now", a)
+	a.retrySave() // still full
+	a.writeFile = write
+	a.retrySave()
+	again, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("after the retry and a restart", again)
+	if len(a.ListAlways()) != 0 {
+		t.Error("the saved removal is still listed as unsaved")
 	}
 }

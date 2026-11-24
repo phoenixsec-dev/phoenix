@@ -1280,6 +1280,9 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if force {
 		// Try update first; if agent doesn't exist, fall through to add
 		err := s.changeAgentCredential(r, info.Agent, req.Name, "token_replaced", func() error {
+			if req.Name == info.Agent {
+				return s.acl.UpdateOwnAgent(req.Name, req.Token, req.Permissions, labels)
+			}
 			return s.acl.UpdateAgentLabeled(req.Name, req.Token, req.Permissions, labels)
 		})
 		if err == nil {
@@ -1289,16 +1292,11 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, acl.ErrReplacedNotSaved) {
 			log.Printf("error updating agent %q: %v", req.Name, err)
-			if errors.Is(err, fsutil.ErrDirSyncFailed) {
-				s.auditIfUnsynced(r, info.Agent, "update-agent", req.Name, labels, err)
-			} else {
-				s.auditAgentChange(r, info.Agent, "update-agent", req.Name, labels, "not_saved")
-			}
-			jsonError(w, "the token was replaced and the old one no longer works, but that was not saved for certain: after a restart the last saved token may work instead. Fix the disk and run this again", http.StatusInternalServerError)
+			s.auditDenied(r, info, "update-agent", req.Name, clientIP(r), "not_saved")
+			jsonError(w, "this could not be saved: the old token no longer works and the new one is not in force. Free the disk and run this again; a restart before that may bring the old token back", http.StatusInternalServerError)
 			return
 		}
 		if !errors.Is(err, acl.ErrAgentNotFound) {
-			s.auditIfUnsynced(r, info.Agent, "update-agent", req.Name, labels, err)
 			log.Printf("error updating agent %q: %v", req.Name, err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
@@ -1311,7 +1309,6 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "agent already exists (use ?force=true to overwrite)", http.StatusConflict)
 			return
 		}
-		s.auditIfUnsynced(r, info.Agent, "create-agent", req.Name, labels, err)
 		log.Printf("error creating agent %q: %v", req.Name, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return

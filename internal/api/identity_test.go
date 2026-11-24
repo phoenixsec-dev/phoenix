@@ -398,18 +398,12 @@ func TestUnsyncedLabelChangeIsAudited(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(e.dir, 0700)
-	for action, c := range map[string][3]string{
-		"set-identity": {"PATCH", "/v1/agents/worker/identity", `{"who":"robin"}`},
-		"update-agent": {"POST", "/v1/agents?force=true", `{"name":"worker","token":"old-token","who":"sam"}`},
-		"create-agent": {"POST", "/v1/agents", `{"name":"late","token":"late-token","who":"kim"}`},
-	} {
-		if code, _ := e.do(c[0], c[1], "admin-token", c[2]); code != 500 {
-			t.Errorf("%s = %d, want 500", action, code)
-		}
-		es := e.lines(audit.QueryOptions{Agent: "admin", Limit: 1})
-		if es[0].Action != action || es[0].Reason != "saved_not_synced" || es[0].Metadata["identity.who"] == "" {
-			t.Errorf("%s line = %+v", action, es[0])
-		}
+	if code, _ := e.do("PATCH", "/v1/agents/worker/identity", "admin-token", `{"who":"robin"}`); code != 500 {
+		t.Errorf("set-identity = %d, want 500", code)
+	}
+	es := e.lines(audit.QueryOptions{Agent: "admin", Limit: 1})
+	if es[0].Action != "set-identity" || es[0].Reason != "saved_not_synced" || es[0].Metadata["identity.who"] == "" {
+		t.Errorf("line = %+v", es[0])
 	}
 }
 

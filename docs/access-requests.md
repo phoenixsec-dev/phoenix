@@ -309,8 +309,8 @@ Dashboard -> **Requests** -> **Revoke** (a grant) or **Remove** (an Always), or
 `phoenix grants revoke gnt_...` (the owning agent, or an approver). Revoke is
 idempotent. The very next use gets `403 GRANT_REVOKED` with next step
 `ask_user`. If either cannot be saved, the page says `REVOKE_NOT_DURABLE` in
-red: access is denied until the next restart but that is not saved, so fix the
-disk and do it again, or rotate the secret.
+red: access is denied but that is not saved, and a restart may bring it back. Fix
+the disk: the save is retried every 30 seconds, or do it again.
 
 Expiry and revoke are checked on every request (no cache). Replacing an agent's
 bearer token ends its grants: a grant is bound to the exact token that asked.
@@ -324,8 +324,8 @@ Deleting an agent revokes its grants first.
   child process) may have kept it. Rotate the secret if that matters.
 - It does not stop a process that is already running with the value in its
   environment.
-- If a revoke cannot be saved (`REVOKE_NOT_DURABLE`), it holds only until the
-  server restarts.
+- A revoke that cannot be saved (`REVOKE_NOT_DURABLE`) denies at once, but a
+  restart before a retry succeeds may bring the access back.
 
 ## Notifications
 

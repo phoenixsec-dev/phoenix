@@ -310,6 +310,7 @@ func main() {
 	grantCtx, stopGrants := context.WithCancel(context.Background())
 	defer stopGrants()
 	go grantStore.Run(grantCtx, 30*time.Second)
+	go a.RetrySaves(grantCtx, 30*time.Second)
 	logAccessRequests(cfg, a)
 	if cfg.SSHCAEnabled() {
 		ca, created, err := sshca.LoadOrCreate(cfg.SSHCAKeyPath())

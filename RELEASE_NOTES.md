@@ -154,13 +154,22 @@ that dies halfway can do to it. Nothing to configure; what changed:
 - **An audit line cut off by a full disk or a power cut swallowed the next
   one:** that entry was written and reported as written, but no search could
   read it. It now starts on its own line.
-- **A new agent or seal key whose save failed** was likewise kept in memory and
-  saved later, although the caller was told it failed; a kept seal key no longer
-  matched the private key the agent uses. The same went for `--force` with the
-  token unchanged: wider permissions took effect although the save failed. All
-  three are undone now. Replacing a token or deleting an agent still takes
-  effect at once even if the save fails, so the old token stays dead at least
-  until a restart; the answer to a failed `--force` now says so.
+- **An access change that failed to save could still give access.** A new agent,
+  a seal key, or `agent create --force` with wider permissions or a new token was
+  kept in memory, and the next save kept it for good, although the caller was told it
+  failed. Now a change answered with an error may take access away but never gives
+  any, at once or later. If replacing a token can't be saved, the old token stays
+  dead and its sessions end, and the new one isn't in force: free the disk and run
+  it again (a restart before that may bring the old token back). Replacing your own
+  token is undone instead, or nobody could run it again. Access that was taken away
+  but not saved, such as a removed Always, is saved by itself once the disk works.
+- **The server did not start on a full disk** (since v0.23.0), because it rewrote
+  `role-sessions.json` at every start. It now writes only what changed, and starts
+  with a `WARNING` if that fails: ended sessions stay ended, and the save is
+  retried. A missing audit log or SSH signing key that can't be made on a full disk
+  is also only a warning. Reads, the dashboard login and role sessions work on a
+  full disk: minting and renewing a session no longer fails, it goes on from memory
+  until it can be saved (a restart before that only means minting another).
 
 ### One live Requests page: No, Once, 15 minutes or Always
 
