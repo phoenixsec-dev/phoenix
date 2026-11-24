@@ -12,7 +12,8 @@ token bound to a named role, and use that token for all subsequent requests.
 - How the agent must authenticate to mint a session (bootstrap trust)
 
 **Sessions** are server-issued credentials with a fixed lifetime (default 1h).
-They carry the role's scope and are bound to the minting agent's identity.
+They carry the role's scope and are bound to the agent and to the bearer token
+it minted them with (see [Ended with the agent's token](#ended-with-the-agents-token)).
 Sessions can be explicitly revoked, and auto-renew if the role's checks
 still hold. A session never reads past the minting agent's own ACL; for
 temporary extra access, use [access requests](access-requests.md).
@@ -86,14 +87,17 @@ auto-renews before expiry.
 POST /v1/session/mint  {"role": "dev"}
 ```
 
+Only the agent's bearer token can mint, also from loopback: a session token gets
+`403 BOOTSTRAP_FAILED`.
 The server checks role existence, bootstrap trust and the seal key.
 Returns a session token (`phxs_...` prefix) with role scope and expiry.
 
 ### Renewal
 
 Sessions auto-renew when nearing expiry. On renewal, the server rechecks
-bootstrap trust. If anything changed (role config updated),
-renewal fails and the agent must re-mint.
+bootstrap trust and the agent's token. If anything changed (role config
+updated, agent deleted, token replaced), renewal fails and the agent must
+re-mint.
 
 ### Revocation
 
@@ -102,6 +106,38 @@ phoenix sessions revoke ses_abc123def456
 ```
 
 Takes effect immediately. The revoked token is rejected on the next request.
+
+### Ended with the agent's token
+
+A session works only while the bearer token it was minted with is still its
+agent's token. Every use, renewal included, checks this.
+
+- **Deleting an agent or replacing its token** (`phoenix agent delete`,
+  `phoenix agent create --force` with a different token) ends the old token's
+  sessions at once. They stay ended after a restart, and also if the agent is
+  later created again, even with the same token. Each one is audited as
+  `session.ended`.
+- `--force` with the **same** token only changes permissions, so sessions carry
+  on (permissions are checked on every request anyway).
+- A token changed by editing the ACL file takes effect at the next start; the
+  old token's sessions end then (the log says how many). A start with sessions
+  disabled ends none: if you then edit the same old token back in before enabling
+  sessions again, its unexpired sessions work again, as the token does. Delete
+  the agent or replace its token with `phoenix agent` instead.
+- Each token the server issues gets a random `credential_id` in the ACL file, and
+  the session is bound to both. So a token that was taken away and given out
+  again is a new credential: its old sessions stay dead, also if the change
+  happened while sessions were disabled.
+
+An ended session gets `401 SESSION_INVALID`. The CLI and `phoenix mcp-server`
+mint a new one by themselves once `PHOENIX_TOKEN` holds the new token; a
+running MCP server has to be restarted to see it, like any environment change.
+A `phxs_` token used directly in `PHOENIX_TOKEN` cannot recover on its own:
+mint a new one.
+
+If the sessions file cannot be saved after the change, the sessions are still
+dead, also after a restart, because the ACL no longer holds their credential. The
+server logs it and tries again every minute.
 
 ### Expiry
 
@@ -194,10 +230,10 @@ for the full list and client rules):
 |------|---------|
 | `SESSION_EXPIRED` | Session TTL elapsed, re-mint needed |
 | `SESSION_REVOKED` | Session was explicitly revoked |
-| `SESSION_INVALID` | Token is malformed or signature invalid |
+| `SESSION_INVALID` | Token is malformed, its signature is invalid, or the session ended because its agent was deleted or the agent's token was replaced |
 | `SCOPE_EXCEEDED` | Path is outside the role's namespace scope |
 | `ACTION_DENIED` | Action not permitted by the role |
-| `BOOTSTRAP_FAILED` | Auth method not in role's bootstrap_trust |
+| `BOOTSTRAP_FAILED` | Auth method not in role's bootstrap_trust, or minting with a session token |
 | `ROLE_NOT_FOUND` | Requested role does not exist |
 | `SEAL_KEY_REQUIRED` | Role requires a seal key but none was provided |
 | `SEAL_KEY_MISMATCH` | Seal key doesn't match session binding |
@@ -213,7 +249,8 @@ All session lifecycle events are logged to the audit trail:
 | `session.renewed` | allowed | Session renewed |
 | `session.renew` | denied | Renewal failed (for example bootstrap_failed) |
 | `session.revoke` | allowed | Session revoked |
-| `session.auth` | denied | Expired or revoked token used for a request |
+| `session.ended` | allowed | Phoenix ended a session because of its agent's token. The agent field is who caused it (`system` at start or on use); metadata has `session.agent` and `cause`: `agent_deleted`, `token_replaced` or `credential_not_current` |
+| `session.auth` | denied | Expired, revoked or ended session used for a request |
 | `session.list` | allowed | Sessions listed |
 | `session.info` | allowed | Session details viewed |
 
@@ -242,8 +279,9 @@ Sessions survive a server restart:
   label), so it is the same after a restart. There is no extra key file.
 - Session records are saved to `role-sessions.json` in the same directory as
   the ACL file, on every mint, renew, revoke and cleanup (mode 0600). The file
-  holds who, which role, scope and expiry, never a token or key, so a copy of
-  it cannot be used to log in. Deleting it ends every session; clients mint
+  holds who, which role, scope, expiry and a fingerprint of the agent's token
+  (a hash of its stored hash and its ID), never a token or key, so a copy of it
+  cannot be used to log in. Deleting it ends every session; clients mint
   new ones.
 - Revoked sessions stay in the file until they expire, so a revoked token keeps
   getting `SESSION_REVOKED` after a restart.
@@ -251,7 +289,9 @@ Sessions survive a server restart:
   role's settings; sessions of a role that was removed or changed in any way
   are dropped at start (the log says how many), and clients mint new ones under
   the new settings. Sessions of unchanged roles carry on.
-- The path is reserved. The server refuses to start if another Phoenix file
+- Sessions saved by v0.23.0 carry no token fingerprint. They end at the first
+  start on a newer version (the log says how many); clients mint new ones.
+- The path is reserved. With sessions enabled, the server refuses to start if another Phoenix file
   (secrets, master key, audit log, grants file) is configured there, or if a
   file at that path is not a sessions file; it never moves or overwrites it.
   A damaged sessions file can simply be deleted.

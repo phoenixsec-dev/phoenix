@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 const (
@@ -18,6 +21,11 @@ const (
 // With a sessions file (Options.Path) every change is saved, so sessions and
 // revocations survive a restart. Revoked records are kept until they expire
 // so a revoked token keeps getting SESSION_REVOKED, before and after a restart.
+//
+// A session is tied to the bearer token that minted it. The check that the
+// token is still the agent's (BindCredentials) runs under mu, and so does every
+// token change (ChangeCredential), so a mint, renewal or use either comes before
+// the change and is ended by it, or comes after it and is refused.
 type Store struct {
 	mu         sync.RWMutex
 	sessions   map[string]*Session // keyed by session ID
@@ -25,9 +33,14 @@ type Store struct {
 	path       string // sessions file; "" = memory only
 	// roleFingerprints is saved with the sessions; see Options.
 	roleFingerprints map[string]string
-	defaultTTL       time.Duration
-	stopCh           chan struct{}
-	stopped          bool
+	// credentialCurrent is set by BindCredentials; nil refuses every session.
+	credentialCurrent func(agent, credentialFP string) bool
+	unsaved           bool // the last save failed; cleanup retries it
+	// writeFile saves the sessions file; tests replace it to fail.
+	writeFile  func(path string, data []byte, perm os.FileMode) error
+	defaultTTL time.Duration
+	stopCh     chan struct{}
+	stopped    bool
 }
 
 // NewStore creates a memory-only session store with a random signing key and
@@ -67,6 +80,7 @@ func OpenStore(opts Options) (*Store, error) {
 		signingKey:       key,
 		path:             opts.Path,
 		roleFingerprints: opts.RoleFingerprints,
+		writeFile:        fsutil.WriteFileAtomicStrict,
 		defaultTTL:       defaultTTL,
 		stopCh:           make(chan struct{}),
 	}
@@ -81,8 +95,95 @@ func OpenStore(opts Options) (*Store, error) {
 	return s, nil
 }
 
-// Create mints a new session and returns the signed token.
-func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, actions []string, bootstrapMethod, sourceIP string, ttl time.Duration) (string, *Session, error) {
+// BindCredentials sets the check that decides whether a session's credential
+// (agent plus CredentialFP) is still the agent's, and ends every session that
+// fails it: its agent is gone, its token was replaced (for example by editing
+// the ACL file while the server was down), or it has no fingerprint because
+// v0.23.0 saved it. It returns the ended sessions. Until it is called every
+// mint, use and renewal is refused. check runs under the store lock and must
+// not call back into the Store.
+func (s *Store) BindCredentials(check func(agent, credentialFP string) bool) ([]*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credentialCurrent = check
+	ended := s.endLocked(func(sess *Session) bool { return !s.credentialOKLocked(sess) })
+	if len(ended) > 0 {
+		if err := s.saveLocked(); err != nil {
+			return ended, err
+		}
+	}
+	return ended, nil
+}
+
+// ChangeCredential runs change, which deletes agent or replaces its token, with
+// no session minted, used or renewed meanwhile, then ends the agent's sessions
+// that no longer pass the credential check and returns them. They are ended
+// even if change fails part way. If the sessions file cannot be saved they are
+// still dead, also after a restart, because the ACL no longer has their
+// credential; that is logged and cleanup retries the save.
+func (s *Store) ChangeCredential(agent string, change func() error) ([]*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := change()
+	ended := s.endLocked(func(sess *Session) bool {
+		return sess.Agent == agent && !s.credentialOKLocked(sess)
+	})
+	if len(ended) > 0 {
+		if saveErr := s.saveLocked(); saveErr != nil {
+			log.Printf("WARNING: %d sessions of agent %q ended but not saved, will retry: %v", len(ended), agent, saveErr)
+		}
+	}
+	return ended, err
+}
+
+// Check returns nil if the session is still usable: not ended, revoked or
+// expired, and made with its agent's current token. Else the error is the one
+// logging in with it would give.
+func (s *Store) Check(id string) error {
+	_, stale, err := s.lookup(id)
+	if stale {
+		return ErrCredentialChanged
+	}
+	return err
+}
+
+// credentialOKLocked reports whether the token sess was minted with is still
+// its agent's token. A session without a fingerprint never passes. The caller
+// must hold s.mu (read or write).
+func (s *Store) credentialOKLocked(sess *Session) bool {
+	return sess.CredentialFP != "" && s.credentialCurrent != nil && s.credentialCurrent(sess.Agent, sess.CredentialFP)
+}
+
+// endLocked removes the live sessions that match and returns them, so their
+// tokens get SESSION_INVALID and clients mint again. Revoked ones stay: they
+// must keep answering SESSION_REVOKED. The caller must hold s.mu and save.
+func (s *Store) endLocked(match func(*Session) bool) []*Session {
+	var ended []*Session
+	for id, sess := range s.sessions {
+		if !sess.Revoked && match(sess) {
+			delete(s.sessions, id)
+			ended = append(ended, sess)
+		}
+	}
+	return ended
+}
+
+// endStaleLocked ends one session whose credential check failed and returns
+// ErrCredentialChanged. Every route that changes a token already ends the
+// agent's sessions; this is the second guard. The caller must hold s.mu.
+func (s *Store) endStaleLocked(sess *Session) error {
+	delete(s.sessions, sess.ID)
+	if err := s.saveLocked(); err != nil {
+		log.Printf("WARNING: session %s ended but not saved: %v", sess.ID, err)
+	}
+	return ErrCredentialChanged
+}
+
+// Create mints a new session bound to credentialFP, the fingerprint of the
+// bearer token the caller logged in with, and returns the signed token. If
+// that is not the agent's token by the time the session is stored, nothing is
+// minted and the error is ErrCredentialChanged.
+func (s *Store) Create(role, agent, credentialFP string, sealPubKey []byte, namespaces, actions []string, bootstrapMethod, sourceIP string, ttl time.Duration) (string, *Session, error) {
 	if ttl <= 0 {
 		ttl = s.defaultTTL
 	}
@@ -106,6 +207,7 @@ func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, action
 		ID:                 id,
 		Role:               role,
 		Agent:              agent,
+		CredentialFP:       credentialFP,
 		SealKeyFingerprint: fingerprint,
 		Namespaces:         namespaces,
 		Actions:            actions,
@@ -131,6 +233,9 @@ func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, action
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.credentialOKLocked(sess) {
+		return "", nil, ErrCredentialChanged
+	}
 	s.sessions[id] = sess
 	if err := s.saveLocked(); err != nil {
 		// Not saved means it would vanish at restart; refuse the mint
@@ -144,7 +249,8 @@ func (s *Store) Create(role, agent string, sealPubKey []byte, namespaces, action
 
 // Renew extends an existing session's expiry and mints a new signed token.
 // The session ID is preserved so the audit trail remains continuous.
-// Returns ErrSessionNotFound, ErrSessionRevoked, or ErrTokenExpired as appropriate.
+// Returns ErrSessionNotFound, ErrSessionRevoked, ErrTokenExpired or
+// ErrCredentialChanged as appropriate.
 func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, error) {
 	if ttl <= 0 {
 		ttl = s.defaultTTL
@@ -162,6 +268,9 @@ func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, er
 	}
 	if time.Now().After(sess.ExpiresAt) {
 		return "", nil, ErrTokenExpired
+	}
+	if !s.credentialOKLocked(sess) {
+		return "", nil, s.endStaleLocked(sess)
 	}
 
 	now := time.Now().UTC()
@@ -187,41 +296,67 @@ func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, er
 		return "", nil, err
 	}
 
-	return token, sess, nil
+	renewed := *sess // a copy: another renewal may change the record
+	return token, &renewed, nil
 }
 
 // Validate verifies a session token and returns the associated session.
 // Returns ErrSessionRevoked if the session was explicitly revoked,
-// ErrTokenExpired if the TTL elapsed, or ErrSessionNotFound if the
-// session ID in the token doesn't match any active session.
+// ErrTokenExpired if the TTL elapsed, ErrSessionNotFound if the session ID
+// in the token doesn't match any active session, or ErrCredentialChanged if
+// the token it was minted with is no longer its agent's (the session is ended;
+// only the call that ended it gets this, later ones get ErrSessionNotFound).
 func (s *Store) Validate(tokenStr string) (*Session, error) {
 	claims, err := validateToken(tokenStr, s.signingKey)
 	if err != nil {
 		return nil, err
 	}
 
+	sess, stale, err := s.lookup(claims.SessionID)
+	if !stale {
+		return sess, err
+	}
+
+	return nil, s.endStale(sess)
+}
+
+// endStale ends the session a lookup found stale, unless something else got
+// there since. It returns the error for the caller.
+func (s *Store) endStale(sess *Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.sessions[sess.ID] == nil:
+		return ErrSessionNotFound
+	case sess.Revoked: // keep the record, it must say so
+		return ErrSessionRevoked
+	}
+	return s.endStaleLocked(sess)
+}
+
+// lookup finds a usable session by ID. stale means it is live but its
+// credential check failed, so the caller must end it.
+func (s *Store) lookup(id string) (sess *Session, stale bool, err error) {
 	s.mu.RLock()
-	sess, ok := s.sessions[claims.SessionID]
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
 
-	if !ok {
-		return nil, ErrSessionNotFound
+	sess, ok := s.sessions[id]
+	switch {
+	case !ok:
+		return nil, false, ErrSessionNotFound
+	case sess.Revoked:
+		return nil, false, ErrSessionRevoked
+	case time.Now().After(sess.ExpiresAt):
+		return nil, false, ErrTokenExpired
+	case !s.credentialOKLocked(sess):
+		return sess, true, nil
 	}
-
-	if sess.Revoked {
-		return nil, ErrSessionRevoked
-	}
-
-	if time.Now().After(sess.ExpiresAt) {
-		return nil, ErrTokenExpired
-	}
-
-	return sess, nil
+	return sess, false, nil
 }
 
 // Revoke marks a session as revoked. Revocation is idempotent. The session
 // is denied at once even if saving fails; the error then means the revoke
-// would be lost at the next restart.
+// may be lost at a restart or power cut.
 func (s *Store) Revoke(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -232,7 +367,7 @@ func (s *Store) Revoke(sessionID string) error {
 	}
 	sess.Revoked = true
 	if err := s.saveLocked(); err != nil {
-		return fmt.Errorf("session revoked now but not saved, so a restart would undo it: %w", err)
+		return fmt.Errorf("session revoked now, but saving that failed, so a restart may undo it: %w", err)
 	}
 	return nil
 }
@@ -306,7 +441,7 @@ func (s *Store) cleanup() {
 	defer s.mu.Unlock()
 
 	now := time.Now()
-	removed := false
+	removed := s.unsaved // a failed save is retried here
 	for id, sess := range s.sessions {
 		if now.After(sess.ExpiresAt) {
 			delete(s.sessions, id)

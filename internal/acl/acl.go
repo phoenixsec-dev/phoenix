@@ -6,7 +6,9 @@
 package acl
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // Action represents a permitted operation on a secret.
@@ -75,8 +78,13 @@ type Permission struct {
 
 // Agent represents an authenticated entity with permissions.
 type Agent struct {
-	Name          string       `json:"name"`
-	TokenHash     string       `json:"token_hash"`
+	Name      string `json:"name"`
+	TokenHash string `json:"token_hash"`
+	// CredentialID is a random ID set each time the agent is given a token. It
+	// tells apart two issues of the same token, so a session made with a token
+	// that was taken away stays dead if the same token is given out again. Not
+	// secret. Empty for tokens issued by v0.23.0 and older or written by hand.
+	CredentialID  string       `json:"credential_id,omitempty"`
 	Permissions   []Permission `json:"permissions"`
 	SealPublicKey string       `json:"seal_public_key,omitempty"`
 }
@@ -91,11 +99,14 @@ type ACL struct {
 	mu     sync.RWMutex
 	config *ACLConfig
 	path   string
+	// writeFile saves the ACL file; tests replace it to fail. Strict: a
+	// replaced token must not come back after a power cut.
+	writeFile func(path string, data []byte, perm os.FileMode) error
 }
 
 // New creates a new ACL from a config file.
 func New(path string) (*ACL, error) {
-	a := &ACL{path: path}
+	a := &ACL{path: path, writeFile: fsutil.WriteFileAtomicStrict}
 	if err := a.load(); err != nil {
 		return nil, err
 	}
@@ -158,13 +169,8 @@ func (a *ACL) saveLocked() error {
 		return fmt.Errorf("creating ACL directory: %w", err)
 	}
 
-	tmp := a.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("writing temp ACL file: %w", err)
-	}
-	if err := os.Rename(tmp, a.path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("renaming temp ACL file: %w", err)
+	if err := a.writeFile(a.path, data, 0600); err != nil {
+		return fmt.Errorf("writing ACL file: %w", err)
 	}
 
 	return nil
@@ -172,16 +178,23 @@ func (a *ACL) saveLocked() error {
 
 // Authenticate verifies a bearer token and returns the agent name.
 func (a *ACL) Authenticate(token string) (string, error) {
+	name, _, err := a.AuthenticateAgent(token)
+	return name, err
+}
+
+// AuthenticateAgent is Authenticate that also returns the agent record the
+// token matched, as it was at that moment.
+func (a *ACL) AuthenticateAgent(token string) (string, *Agent, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	hash := crypto.HashToken(token)
 	for name, agent := range a.config.Agents {
 		if agent.TokenHash == hash {
-			return name, nil
+			return name, &agent, nil
 		}
 	}
-	return "", ErrUnauthorized
+	return "", nil, ErrUnauthorized
 }
 
 // Authorize checks if an agent is allowed to perform an action on a path.
@@ -214,9 +227,10 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	}
 
 	a.config.Agents[name] = Agent{
-		Name:        name,
-		TokenHash:   crypto.HashToken(token),
-		Permissions: permissions,
+		Name:         name,
+		TokenHash:    crypto.HashToken(token),
+		CredentialID: newCredentialID(),
+		Permissions:  permissions,
 	}
 
 	if a.path != "" {
@@ -225,7 +239,15 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	return nil
 }
 
-// UpdateAgent overwrites an existing agent's token and permissions.
+// newCredentialID returns a random ID for a newly issued token.
+func newCredentialID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b) // never fails on Go 1.24+
+	return hex.EncodeToString(b)
+}
+
+// UpdateAgent overwrites an existing agent's token and permissions. The same
+// token keeps its CredentialID.
 // Returns ErrAgentNotFound if the agent does not exist.
 func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 	a.mu.Lock()
@@ -236,9 +258,14 @@ func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 		return ErrAgentNotFound
 	}
 
+	hash, credentialID := crypto.HashToken(token), existing.CredentialID
+	if hash != existing.TokenHash {
+		credentialID = newCredentialID()
+	}
 	a.config.Agents[name] = Agent{
 		Name:          name,
-		TokenHash:     crypto.HashToken(token),
+		TokenHash:     hash,
+		CredentialID:  credentialID,
 		Permissions:   permissions,
 		SealPublicKey: existing.SealPublicKey,
 	}

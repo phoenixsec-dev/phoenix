@@ -260,7 +260,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("initializing session store: %v", err)
 		}
-		srv.SetSessionStore(sessionStore)
+		if err := srv.SetSessionStore(sessionStore); err != nil {
+			log.Fatalf("initializing session store: %v", err)
+		}
 		srv.SetSessionRoles(cfg.Session.Roles)
 		defer sessionStore.Stop()
 		log.Printf("  Sessions: enabled (roles=%d, ttl=%s, saved in %s, %d loaded)",

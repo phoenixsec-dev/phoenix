@@ -103,13 +103,13 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | Code | HTTP | `next_step` | When |
 |---|---|---|---|
 | `SESSION_EXPIRED` | 401 | `remint_session` | Session TTL elapsed |
-| `SESSION_INVALID` | 401 | `remint_session` | Token malformed or signature invalid |
+| `SESSION_INVALID` | 401 | `remint_session` | Token malformed, signature invalid, or session ended because its agent was deleted or the agent's token was replaced |
 | `SESSION_REVOKED` | 401 | `ask_user` | Session was revoked |
 | `SESSION_REQUIRED` | 400 | `none` | Operation requires a session token |
 | `SEAL_KEY_MISMATCH` | 400/403 | `remint_session` | Seal key does not match the session binding |
 | `SEAL_KEY_REQUIRED` | 400 | `ask_user` | Role requires a seal key at mint |
 | `ROLE_NOT_FOUND` | 403/404 | `ask_user` | Requested role does not exist |
-| `BOOTSTRAP_FAILED` | 403 | `ask_user` | Auth method not in the role's `bootstrap_trust` |
+| `BOOTSTRAP_FAILED` | 403 | `ask_user` | Auth method not in the role's `bootstrap_trust`, or minting with a session token |
 | `ADMIN_AUTH_REQUIRED` | 403 | `ask_user` | Session tokens cannot perform this action |
 
 Approval-side validation codes returned to approvers (for example
