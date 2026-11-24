@@ -65,8 +65,9 @@ If the server already stopped, or will not start (it cannot decrypt secrets):
 3. Otherwise, if `<store>.emergency-key` exists: keep the store file, and
    move `<store>.emergency-key` over `master.key`. Start with the usual
    passphrase.
-4. If neither file exists or neither works: `master.key.prev` is the key
-   from before the last rotation. Put it in place of `master.key` (this
+4. If neither file exists or neither works: the key from before the last
+   rotation is in `master.key.prev.new` if that file is there, otherwise in
+   `master.key.prev`. Try it on the safety copy first. Put it in place of `master.key` (this
    fixes a store that rolled back to the old version after a power cut).
 5. Start the server and read a few secrets to confirm.
 6. Once it works, delete the leftover recovery files and your safety copy.

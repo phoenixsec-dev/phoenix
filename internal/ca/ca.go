@@ -256,13 +256,15 @@ func randomSerial() (*big.Int, error) {
 	return serial, nil
 }
 
-// Save writes a CertBundle to the given files. Cut off in between, the server
-// certificate and key may not match; run --reissue-cert again.
+// Save writes a CertBundle to the given files. The server certificate and key
+// are written in place, so that whoever the owner lets read them (mode, owner,
+// ACL) still can, and nobody else. They can always be made again: if this is
+// cut off, run --reissue-cert again.
 func (b *CertBundle) Save(certPath, keyPath, caPath string) error {
-	if err := fsutil.ReplaceKeepingAccess(certPath, b.CertPEM, 0644); err != nil {
+	if err := os.WriteFile(certPath, b.CertPEM, 0644); err != nil {
 		return fmt.Errorf("writing cert: %w", err)
 	}
-	if err := fsutil.ReplaceKeepingAccess(keyPath, b.KeyPEM, 0600); err != nil {
+	if err := os.WriteFile(keyPath, b.KeyPEM, 0600); err != nil {
 		return fmt.Errorf("writing key: %w", err)
 	}
 	// The CA certificate cannot be made again and --reissue-cert just read it

@@ -39,7 +39,7 @@ var (
 	ErrAgentNotFound = errors.New("agent not found")
 	ErrAgentExists   = errors.New("agent already exists")
 	// ErrReplacedNotSaved means a token was replaced (and the old one no longer
-	// works) but that could not be saved, so a restart would undo it.
+	// works) but that was not saved for certain, so a restart may undo it.
 	ErrReplacedNotSaved = errors.New("token replaced but not saved")
 
 	// ValidActions is the set of recognized action strings.

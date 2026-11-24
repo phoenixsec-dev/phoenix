@@ -1206,7 +1206,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, acl.ErrReplacedNotSaved) {
 			log.Printf("error updating agent %q: %v", req.Name, err)
 			s.auditLogDenied(r, info.Agent, "update-agent", req.Name, clientIP(r), "not_saved")
-			jsonError(w, "the token was replaced and the old one no longer works, but that could not be saved: a restart would bring the old token back. Fix the disk and run this again", http.StatusInternalServerError)
+			jsonError(w, "the token was replaced and the old one no longer works, but that was not saved for certain: after a restart the last saved token may work instead. Fix the disk and run this again", http.StatusInternalServerError)
 			return
 		}
 		if !errors.Is(err, acl.ErrAgentNotFound) {
@@ -1371,18 +1371,10 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	prevPath := s.masterKeyPath + ".prev"
 	staged := prevPath + ".new"
 
-	// Left over from a rotation that could not finish: if it is an older key it
-	// takes its place as .prev before the name is used again.
-	if left, err := os.ReadFile(staged); err == nil {
-		older := !bytes.Equal(left, oldKey)
-		crypto.ZeroBytes(left)
-		if older {
-			if err := os.Rename(staged, prevPath); err != nil {
-				log.Printf("rotation refused: an earlier rotation's old key is still at %s and cannot be moved: %v", staged, err)
-				jsonError(w, "rotation failed", http.StatusInternalServerError)
-				return
-			}
-		}
+	if err := placeLeftoverKey(staged, prevPath, oldKey); err != nil {
+		log.Printf("rotation refused: %s, left by an earlier rotation, may hold an old key and cannot be put in its place: %v", staged, err)
+		jsonError(w, "rotation failed: an earlier rotation left a file next to the master key; see the server log", http.StatusInternalServerError)
+		return
 	}
 	backup := prevPath
 
@@ -1435,6 +1427,32 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		resp["backup"] = backup
 	}
 	jsonOK(w, resp)
+}
+
+// placeLeftoverKey deals with a staged old key that a rotation could not finish
+// with: one that is not the current key takes its place as .prev before the
+// name is used again. Anything that cannot be read and judged is an error,
+// because writing over it could lose the only copy of a key.
+func placeLeftoverKey(staged, prevPath string, current []byte) error {
+	fi, err := os.Lstat(staged)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	left, err := os.ReadFile(staged)
+	if err != nil {
+		return err
+	}
+	defer crypto.ZeroBytes(left)
+	if bytes.Equal(left, current) {
+		return nil
+	}
+	return os.Rename(staged, prevPath)
 }
 
 // resolveRequest is the JSON body for batch reference resolution.

@@ -6,6 +6,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -635,8 +636,10 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 }
 
 // fileOpens reports whether path is a store file that opens completely with
-// the provider's active key and holds every secret in memory. Any read or parse
-// error, and a store with nothing in it, counts as "does not open". RotateMasterKey uses it to decide whether
+// the provider's active key and whose secrets are exactly the ones in memory. A
+// rotation never changes them, only the namespace keys, so a copy that differs
+// is older, damaged or not ours. Any read or parse error, and a store with
+// nothing in it, counts as "does not open". RotateMasterKey uses it to decide whether
 // the pre-rotate backup is still needed.
 func (s *Store) fileOpens(path string) bool {
 	data, err := os.ReadFile(path)
@@ -647,10 +650,10 @@ func (s *Store) fileOpens(path string) bool {
 	if err != nil {
 		return false
 	}
-	for name := range s.data.Secrets {
-		if _, ok := sd.Secrets[name]; !ok {
-			return false
-		}
+	have, err1 := json.Marshal(sd.Secrets)
+	want, err2 := json.Marshal(s.data.Secrets)
+	if err1 != nil || err2 != nil || !bytes.Equal(have, want) {
+		return false
 	}
 	bad, total := s.unreadable(sd)
 	return total > 0 && len(bad) == 0

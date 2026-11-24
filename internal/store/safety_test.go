@@ -288,25 +288,37 @@ func TestRotationIgnoresLinkAtBackupName(t *testing.T) {
 	}
 }
 
-// A backup that opens but misses a secret the store has is not a recovery, and
-// a store with a missing namespace key is not rotated over a backup.
+// A backup that opens but whose secrets are not the store's is not a recovery,
+// and a store with a missing namespace key is not rotated over a backup.
 func TestIncompleteStoresAreNotTrusted(t *testing.T) {
 	storePath, oldKey := crashMidRotation(t)
 	good, _ := os.ReadFile(storePath + ".pre-rotate")
-	for _, drop := range [][]string{{"ns1/key1"}, {"ns1/key1", "ns2/key2"}} {
+	for what, change := range map[string]func(sd *storeData){
+		"one missing": func(sd *storeData) { delete(sd.Secrets, "ns1/key1") },
+		"all missing": func(sd *storeData) { sd.Secrets = map[string]encryptedSecret{} },
+		"one extra":   func(sd *storeData) { sd.Secrets["ns1/deleted"] = sd.Secrets["ns1/key1"] },
+		"one damaged": func(sd *storeData) {
+			sec := sd.Secrets["ns1/key1"]
+			sec.Value.Ciphertext = ""
+			sd.Secrets["ns1/key1"] = sec
+		},
+		"one older": func(sd *storeData) {
+			sec := sd.Secrets["ns1/key1"]
+			sec.Value = sd.Secrets["ns2/key2"].Value
+			sd.Secrets["ns1/key1"] = sec
+		},
+	} {
 		sd, err := parseStore("", good)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, p := range drop {
-			delete(sd.Secrets, p)
-		}
+		change(sd)
 		b, _ := json.Marshal(sd)
 		if err := os.WriteFile(storePath+".pre-rotate", b, 0600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := New(storePath, oldKey); err == nil || strings.Contains(err.Error(), ".pre-rotate") {
-			t.Errorf("without %v: %v, want a refusal that does not recommend it", drop, err)
+			t.Errorf("%s: %v, want a refusal that does not recommend it", what, err)
 		}
 	}
 

@@ -61,12 +61,13 @@ func UsesName(logPath, path string) bool {
 	if filepath.Dir(path) != dir {
 		return false
 	}
-	name := strings.TrimSuffix(filepath.Base(path), ".gz.tmp")
+	name := filepath.Base(path)
 	if _, _, ok := parseArchiveName(stem, ext, name); ok {
 		return true
 	}
-	_, _, ok := parseArchiveName(stem, ext, filepath.Base(path))
-	return ok
+	plain, tmp := strings.CutSuffix(name, ".gz.tmp")
+	_, compressed, ok := parseArchiveName(stem, ext, plain)
+	return tmp && ok && !compressed
 }
 
 // archives lists the archives of the log at path, oldest first. When a

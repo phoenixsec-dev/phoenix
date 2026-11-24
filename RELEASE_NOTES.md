@@ -122,13 +122,14 @@ that dies halfway can do to it. Nothing to configure; what changed:
   lost) replaced `config.json` and the CA and server keys there. It now refuses
   if any file it would write, or `store.json`, is already there, or if another
   `--init` is running there.
-- **`--reissue-cert` and `--init` wrote certificates and keys in place,** so a
-  full disk or a crash left them empty, the CA certificate included. They are
-  now replaced in one step, keeping mode and (as root) owner; a server key with
-  a POSIX ACL is still written in place, so nobody loses access to it.
-  `--reissue-cert` no longer touches the CA certificate, and refuses a config that would make it write over the CA key or
-  any other Phoenix file. The new SSH signing key is written the same way: one
-  cut off half way used to stop the server from starting.
+- **`--reissue-cert` rewrote the CA certificate in place,** so a full disk or a
+  crash could leave it empty, and it cannot be made again. It is now left alone
+  and only ever replaced in one step, like the CA key. (The server certificate
+  and key are still written in place, so that whoever you let read them still
+  can; if that is cut off, run `--reissue-cert` again.) `--reissue-cert` also
+  refuses a config that would make it write over the CA key or any other Phoenix
+  file. The SSH signing key appears whole or not at all: one cut off half way
+  used to stop the server from starting.
 - **Replaced files keep their owner** when Phoenix runs as root, so
   `--protect-key` run with sudo no longer leaves a key the server cannot read.
 - **An audit line cut off by a full disk or a power cut swallowed the next

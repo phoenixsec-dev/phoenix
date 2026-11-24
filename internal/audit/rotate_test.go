@@ -186,7 +186,7 @@ func TestUsesName(t *testing.T) {
 				t.Errorf("%s: %s should be taken", log, p)
 			}
 		}
-		for _, p := range []string{log, arc + ".bak", arc + ".tmp" + ".x", filepath.Join("/other", filepath.Base(arc)), filepath.Join(dir, stem+"-notes"+ext), filepath.Join(dir, stem+"-20261399T996060.000Z"+ext)} {
+		for _, p := range []string{log, arc + ".bak", arc + ".tmp.x", arc + ".gz.gz.tmp", filepath.Join("/other", filepath.Base(arc)), filepath.Join(dir, stem+"-notes"+ext), filepath.Join(dir, stem+"-20261399T996060.000Z"+ext)} {
 			if UsesName(log, p) {
 				t.Errorf("%s: %s should be free", log, p)
 			}

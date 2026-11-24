@@ -180,10 +180,11 @@ func TestLoadCAFromPEM_RejectsNonCA(t *testing.T) {
 	}
 }
 
-// Certificates and keys are replaced in one step, not rewritten in place: that
-// empties the old file first, and on a full disk nothing follows. Reissuing
-// leaves an unchanged CA certificate alone.
-func TestSaveNeverTruncates(t *testing.T) {
+// The CA, which cannot be made again, is replaced in one step and left alone by
+// a reissue. The server certificate and key are written in place: whoever the
+// owner lets read them still can, a directory's default ACL cannot add readers,
+// and a link that leads nowhere is an error, not replaced.
+func TestSaveKeepsCAAndAccess(t *testing.T) {
 	authority, err := GenerateCA("Test")
 	if err != nil {
 		t.Fatal(err)
@@ -197,39 +198,48 @@ func TestSaveNeverTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bundle.Save(in("s.crt"), in("s.key"), in("ca.crt")); err != nil {
-		t.Fatal(err)
-	}
-	inode := func(n string) os.FileInfo {
+	save := func() error { return bundle.Save(in("s.crt"), in("s.key"), in("ca.crt")) }
+	stat := func(n string) os.FileInfo {
 		fi, err := os.Stat(in(n))
 		if err != nil {
 			t.Fatal(err)
 		}
 		return fi
 	}
-	old := map[string]os.FileInfo{}
-	for _, n := range []string{"ca.crt", "ca.key", "s.crt", "s.key"} {
-		old[n] = inode(n)
+	if err := save(); err != nil {
+		t.Fatal(err)
 	}
-	// An owner's chosen mode survives.
 	if err := os.Chmod(in("s.key"), 0640); err != nil {
 		t.Fatal(err)
 	}
-	if err := bundle.Save(in("s.crt"), in("s.key"), in("ca.crt")); err != nil {
+	old := map[string]os.FileInfo{}
+	for _, n := range []string{"ca.crt", "ca.key", "s.crt", "s.key"} {
+		old[n] = stat(n)
+	}
+	if err := save(); err != nil {
 		t.Fatal(err)
 	}
-	if !os.SameFile(old["ca.crt"], inode("ca.crt")) {
-		t.Error("reissuing wrote the CA certificate again")
+	for n, fi := range old {
+		if !os.SameFile(fi, stat(n)) || stat(n).Mode() != fi.Mode() {
+			t.Errorf("reissuing replaced %s or changed its mode", n)
+		}
 	}
 	if err := authority.Save(in("ca.crt"), in("ca.key")); err != nil {
 		t.Fatal(err)
 	}
-	for n, fi := range old {
-		if os.SameFile(fi, inode(n)) {
+	for _, n := range []string{"ca.crt", "ca.key"} {
+		if os.SameFile(old[n], stat(n)) {
 			t.Errorf("%s was rewritten in place", n)
 		}
 	}
-	if m := inode("s.key").Mode().Perm(); m != 0640 {
-		t.Errorf("s.key mode = %o, want 0640 kept", m)
+	loop := in("loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Save(in("s.crt"), loop, in("ca.crt")); err == nil {
+		t.Error("a looped link should be an error")
+	}
+	if fi, err := os.Lstat(loop); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link was replaced: %v", err)
 	}
 }

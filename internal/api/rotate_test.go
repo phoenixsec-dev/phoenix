@@ -129,10 +129,8 @@ func TestRotateIgnoresLinkAtPrev(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	seedSecret(t, srv, "admin-token", "test/a", "synthetic-value")
 	st := srv.fileBackend.Store().Path()
-	for _, name := range []string{".prev", ".prev.new"} {
-		if err := os.Symlink(st, srv.masterKeyPath+name); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Symlink(st, srv.masterKeyPath+".prev"); err != nil {
+		t.Fatal(err)
 	}
 	if code := rotateMaster(srv); code != http.StatusOK {
 		t.Fatalf("rotate = %d", code)
@@ -206,5 +204,45 @@ func TestUnpromotedOldKeyIsNotLost(t *testing.T) {
 	}
 	if got, err := crypto.LoadMasterKey(prev); err != nil || !bytes.Equal(got, second) {
 		t.Errorf(".prev: %v", err)
+	}
+}
+
+// Something at the staging name that cannot be read and judged may be the only
+// copy of a key: the rotation is refused and nothing there changes.
+func TestRotateRefusesUnknownLeftover(t *testing.T) {
+	for name, put := range map[string]func(path string) error{
+		"link":       func(p string) error { return os.Symlink(os.DevNull, p) },
+		"directory":  func(p string) error { return os.Mkdir(p, 0700) },
+		"unreadable": func(p string) error { return os.WriteFile(p, []byte("a key"), 0) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if name == "unreadable" && os.Geteuid() == 0 {
+				t.Skip("root reads everything")
+			}
+			srv, _ := setupTestServer(t)
+			seedSecret(t, srv, "admin-token", "test/a", "synthetic-value")
+			staged := srv.masterKeyPath + ".prev.new"
+			if err := os.WriteFile(srv.masterKeyPath+".prev", []byte("older"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := put(staged); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.Lstat(staged)
+			key, _ := os.ReadFile(srv.masterKeyPath)
+			if code := rotateMaster(srv); code != http.StatusInternalServerError {
+				t.Errorf("rotate = %d, want 500", code)
+			}
+			after, err := os.Lstat(staged)
+			if err != nil || !os.SameFile(before, after) {
+				t.Errorf("the leftover changed: %v", err)
+			}
+			if b, _ := os.ReadFile(srv.masterKeyPath + ".prev"); string(b) != "older" {
+				t.Error(".prev changed")
+			}
+			if b, _ := os.ReadFile(srv.masterKeyPath); !bytes.Equal(b, key) {
+				t.Error("the key changed")
+			}
+		})
 	}
 }

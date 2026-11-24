@@ -845,7 +845,7 @@ func TestSlowBodyAfterTokenReplaced(t *testing.T) {
 
 // A forced update whose save failed: with the token unchanged nothing it asked
 // for is in force; with a new token the old one stays dead and the answer says
-// that a restart would bring it back.
+// that a restart may change that.
 func TestForceWithFailedSave(t *testing.T) {
 	e := newCredEnv(t)
 	seedSecret(t, e.srv, "admin-token", "other/b", "other-value")
@@ -866,7 +866,7 @@ func TestForceWithFailedSave(t *testing.T) {
 	if code, _ := e.do("GET", "/v1/secrets/other/b", "old-token", ""); code != 403 {
 		t.Errorf("wider permissions after a failed save: %d, want 403", code)
 	}
-	if code, body := force("new-token"); code != 500 || !strings.Contains(body, "a restart would bring the old token back") {
+	if code, body := force("new-token"); code != 500 || !strings.Contains(body, "after a restart the last saved token may work instead") {
 		t.Errorf("new token: %d %s", code, body)
 	}
 	if code, _ := e.do("GET", "/v1/secrets/test/a", "old-token", ""); code != 401 {
