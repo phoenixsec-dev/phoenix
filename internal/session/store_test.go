@@ -4,9 +4,21 @@ import (
 	"crypto/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// testFP is the credential fingerprint test sessions are minted with.
+const testFP = "sha256:test"
+
+// bindTestFP makes testFP every agent's current credential.
+func bindTestFP(t *testing.T, s *Store) {
+	t.Helper()
+	if _, err := s.BindCredentials(func(_, fp string) bool { return fp == testFP }); err != nil {
+		t.Fatalf("BindCredentials: %v", err)
+	}
+}
 
 func newTestStore(t *testing.T, ttl time.Duration) *Store {
 	t.Helper()
@@ -15,13 +27,14 @@ func newTestStore(t *testing.T, ttl time.Duration) *Store {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(s.Stop)
+	bindTestFP(t, s)
 	return s
 }
 
 func TestStoreCreateValidate(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	token, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -56,7 +69,7 @@ func TestStoreCreateWithSealKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, sess, err := s.Create("secure", "agent1", sealKey, []string{"prod/*"}, nil, "bearer", "192.168.0.10", 0)
+	_, sess, err := s.Create("secure", "agent1", testFP, sealKey, []string{"prod/*"}, nil, "bearer", "192.168.0.10", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -70,7 +83,7 @@ func TestStoreCreateWithSealKey(t *testing.T) {
 func TestStoreRevoke(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	token, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -102,7 +115,7 @@ func TestStoreRevokeNotFound(t *testing.T) {
 func TestStoreExpiredSession(t *testing.T) {
 	s := newTestStore(t, 1*time.Millisecond)
 
-	token, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 1*time.Millisecond)
+	token, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 1*time.Millisecond)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -118,7 +131,7 @@ func TestStoreExpiredSession(t *testing.T) {
 func TestStoreGet(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -140,7 +153,7 @@ func TestStoreList(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
 	for i := 0; i < 3; i++ {
-		_, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+		_, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 		if err != nil {
 			t.Fatalf("Create %d: %v", i, err)
 		}
@@ -159,8 +172,8 @@ func TestStoreList(t *testing.T) {
 func TestStoreListExcludesRevoked(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess1, _ := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
-	s.Create("dev", "agent2", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess1, _ := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	s.Create("dev", "agent2", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 
 	s.Revoke(sess1.ID)
 
@@ -178,7 +191,7 @@ func TestStoreConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			token, _, err := s.Create("dev", "agent", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+			token, _, err := s.Create("dev", "agent", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 			if err != nil {
 				t.Errorf("Create: %v", err)
 				return
@@ -200,7 +213,7 @@ func TestStoreCleanup(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
 	// Create one that will be "expired" and one active
-	_, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -214,7 +227,7 @@ func TestStoreCleanup(t *testing.T) {
 	s.mu.Unlock()
 
 	// Create an active one
-	_, _, err = s.Create("dev", "agent2", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, _, err = s.Create("dev", "agent2", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -235,7 +248,7 @@ func TestStoreCleanup(t *testing.T) {
 // SESSION_REVOKED (not SESSION_INVALID, which clients re-mint on).
 func TestStoreCleanupKeepsRevokedUntilExpiry(t *testing.T) {
 	s := newTestStore(t, time.Hour)
-	tok, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -252,7 +265,7 @@ func TestStoreDefaultActions(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
 	// nil actions -> defaults to ["list", "read_value"]
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -274,7 +287,7 @@ func TestStoreDefaultActions(t *testing.T) {
 func TestStoreExplicitActions(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("deployer", "agent1", nil, []string{"deploy/*"}, []string{"list", "read_value", "write"}, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("deployer", "agent1", testFP, nil, []string{"deploy/*"}, []string{"list", "read_value", "write"}, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -293,7 +306,7 @@ func TestStoreExplicitActions(t *testing.T) {
 func TestStoreAdminAction(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("admin", "agent1", nil, []string{"*"}, []string{"admin"}, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("admin", "agent1", testFP, nil, []string{"*"}, []string{"admin"}, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -312,7 +325,7 @@ func TestStoreAdminAction(t *testing.T) {
 func TestStoreRenew(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	token, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	token, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -348,7 +361,7 @@ func TestStoreRenew(t *testing.T) {
 func TestStoreRenewExpired(t *testing.T) {
 	s := newTestStore(t, time.Millisecond)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond)
+	_, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -364,7 +377,7 @@ func TestStoreRenewExpired(t *testing.T) {
 func TestStoreRenewRevoked(t *testing.T) {
 	s := newTestStore(t, time.Hour)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -391,7 +404,7 @@ func TestStoreRenewNotFound(t *testing.T) {
 func TestStoreDefaultTTL(t *testing.T) {
 	s := newTestStore(t, 0)
 
-	_, sess, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	_, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -410,8 +423,9 @@ func TestParseClaimsInsecure(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 	defer store.Stop()
+	bindTestFP(t, store)
 
-	token, sess, err := store.Create("dev", "test-agent", nil, []string{"test/*"}, nil, "bearer", "127.0.0.1", 1*time.Second)
+	token, sess, err := store.Create("dev", "test-agent", testFP, nil, []string{"test/*"}, nil, "bearer", "127.0.0.1", 1*time.Second)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -459,5 +473,118 @@ func TestParseClaimsInsecure(t *testing.T) {
 	_, _, ok = store.ParseClaimsInsecure("garbage")
 	if ok {
 		t.Error("expected ParseClaimsInsecure to fail for garbage input")
+	}
+}
+
+// Create, Validate and Renew all check the credential, and an empty
+// fingerprint never passes, whatever the check says.
+func TestSessionCredentialChecked(t *testing.T) {
+	current := testFP
+	s := newTestStore(t, time.Hour)
+	if _, err := s.BindCredentials(func(_, fp string) bool { return fp == current || fp == "" }); err != nil {
+		t.Fatal(err)
+	}
+	mint := func(fp string) (string, *Session, error) {
+		return s.Create("dev", "agent1", fp, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	}
+	for _, fp := range []string{"", "sha256:other"} {
+		if _, _, err := mint(fp); err != ErrCredentialChanged {
+			t.Errorf("Create with fingerprint %q: %v, want ErrCredentialChanged", fp, err)
+		}
+	}
+	tok, _, err := mint(testFP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, renew, err := mint(testFP)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current = "sha256:new"
+	if _, err := s.Validate(tok); err != ErrCredentialChanged {
+		t.Errorf("Validate: %v, want ErrCredentialChanged", err)
+	}
+	if _, _, err := s.Renew(renew.ID, 0); err != ErrCredentialChanged {
+		t.Errorf("Renew: %v, want ErrCredentialChanged", err)
+	}
+	current = testFP // ended for good
+	if _, err := s.Validate(tok); err != ErrSessionNotFound {
+		t.Errorf("Validate after ending: %v, want ErrSessionNotFound", err)
+	}
+	if _, _, err := s.Renew(renew.ID, 0); err != ErrSessionNotFound {
+		t.Errorf("Renew after ending: %v, want ErrSessionNotFound", err)
+	}
+}
+
+// A store that was never told how to check credentials trusts nothing.
+func TestUnboundStoreRefusesSessions(t *testing.T) {
+	s, err := NewStore(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Stop)
+	if _, _, err := s.Create("dev", "agent1", testFP, nil, nil, nil, "bearer", "127.0.0.1", 0); err != ErrCredentialChanged {
+		t.Errorf("Create on an unbound store: %v, want ErrCredentialChanged", err)
+	}
+}
+
+// No mint or use runs between ending an agent's sessions and the token
+// change itself: one that starts then waits, and is refused.
+func TestChangeCredentialHoldsOffMintAndUse(t *testing.T) {
+	var current atomic.Value
+	current.Store(testFP)
+	s := newTestStore(t, time.Hour)
+	if _, err := s.BindCredentials(func(_, fp string) bool { return fp == current.Load() }); err != nil {
+		t.Fatal(err)
+	}
+	mint := func() (string, error) {
+		tok, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+		return tok, err
+	}
+	tok, err := mint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	minted, used := make(chan error, 1), make(chan error, 1)
+	_, err = s.ChangeCredential("agent1", func() error {
+		go func() { _, err := mint(); minted <- err }()
+		go func() { _, err := s.Validate(tok); used <- err }()
+		time.Sleep(50 * time.Millisecond) // long enough for both to get in if they could
+		current.Store("sha256:new")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-minted; err != ErrCredentialChanged {
+		t.Errorf("mint during the change: %v, want ErrCredentialChanged", err)
+	}
+	if err := <-used; err != ErrSessionNotFound {
+		t.Errorf("use during the change: %v, want ErrSessionNotFound", err)
+	}
+}
+
+// A session revoked while a stale use is being cleaned up keeps saying
+// revoked, so clients do not silently replace it.
+func TestRevokeDuringStaleCleanupWins(t *testing.T) {
+	s := newTestStore(t, time.Hour)
+	tok, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.credentialCurrent = func(_, _ string) bool { return false }
+	found, stale, err := s.lookup(sess.ID)
+	if err != nil || !stale {
+		t.Fatalf("lookup: stale %v, err %v", stale, err)
+	}
+	if err := s.Revoke(sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.endStale(found); err != ErrSessionRevoked {
+		t.Errorf("endStale: %v, want ErrSessionRevoked", err)
+	}
+	if _, err := s.Validate(tok); err != ErrSessionRevoked {
+		t.Errorf("Validate after: %v, want ErrSessionRevoked", err)
 	}
 }

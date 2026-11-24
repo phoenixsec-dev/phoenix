@@ -32,6 +32,9 @@ func testHandlerWithAudit(t *testing.T) (*Handler, *session.Store, *bytes.Buffer
 		t.Fatal(err)
 	}
 	t.Cleanup(ss.Stop)
+	if _, err := ss.BindCredentials(func(_, fp string) bool { return fp == "sha256:test" }); err != nil {
+		t.Fatal(err)
+	}
 
 	roles := map[string]config.RoleConfig{
 		"deploy": {
@@ -240,7 +243,7 @@ func TestSessionRevoke(t *testing.T) {
 	csrf := csrfFromCookie(t, h, cookie)
 
 	// Create a session directly
-	_, sess, err := ss.Create("deploy", "agent1", nil, []string{"prod/*"}, []string{"list"}, "bearer", "10.0.0.1", time.Hour)
+	_, sess, err := ss.Create("deploy", "agent1", "sha256:test", nil, []string{"prod/*"}, []string{"list"}, "bearer", "10.0.0.1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

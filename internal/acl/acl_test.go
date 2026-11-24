@@ -1,14 +1,17 @@
 package acl
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 func testACL() *ACL {
@@ -662,5 +665,76 @@ func TestSetAgentSealKeyOverwrite(t *testing.T) {
 	got, _ := a.GetAgentSealKey("test")
 	if got != key2 {
 		t.Errorf("seal key = %q, want %q (should be overwritten)", got, key2)
+	}
+}
+
+// Each newly issued token gets its own credential ID, also when the same token
+// is issued again; changing only permissions keeps it.
+func TestCredentialID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "acl.json")
+	a, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	id := func() string {
+		t.Helper()
+		b, err := New(path) // what a restart would read
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent, err := b.GetAgent("x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return agent.CredentialID
+	}
+	step := func(what string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := id(); got == "" || seen[got] {
+			t.Errorf("%s: credential ID %q is empty or reused", what, got)
+		} else {
+			seen[got] = true
+		}
+	}
+	step("add", a.AddAgent("x", "one", nil))
+	before := id()
+	if err := a.UpdateAgent("x", "one", []Permission{{Path: "a", Actions: []Action{ActionList}}}); err != nil {
+		t.Fatal(err)
+	}
+	if id() != before {
+		t.Error("same token: credential ID changed")
+	}
+	step("new token", a.UpdateAgent("x", "two", nil))
+	step("back to the old token", a.UpdateAgent("x", "one", nil))
+	if err := a.RemoveAgent("x"); err != nil {
+		t.Fatal(err)
+	}
+	step("delete and add again", a.AddAgent("x", "one", nil))
+}
+
+// A save whose directory sync failed may not survive a power cut, so the token
+// change is not reported as done.
+func TestTokenChangeNotDoneUntilDurable(t *testing.T) {
+	a, err := New(filepath.Join(t.TempDir(), "acl.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddAgent("x", "one", nil); err != nil {
+		t.Fatal(err)
+	}
+	if reflect.ValueOf(a.writeFile).Pointer() != reflect.ValueOf(fsutil.WriteFileAtomicStrict).Pointer() {
+		t.Error("the ACL file is not saved with fsutil.WriteFileAtomicStrict")
+	}
+	a.writeFile = func(p string, data []byte, perm os.FileMode) error {
+		return fsutil.WriteFileAtomicStrictOps(p, data, perm, fsutil.AtomicOps{SyncDir: func(string) error { return errors.New("no sync") }})
+	}
+	for what, err := range map[string]error{"update": a.UpdateAgent("x", "two", nil), "remove": a.RemoveAgent("x")} {
+		if !errors.Is(err, fsutil.ErrDirSyncFailed) {
+			t.Errorf("%s: %v, want ErrDirSyncFailed", what, err)
+		}
 	}
 }
