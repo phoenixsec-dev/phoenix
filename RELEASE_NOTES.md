@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine
 
