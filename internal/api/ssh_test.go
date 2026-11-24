@@ -30,7 +30,7 @@ func newSSHEnv(t *testing.T) *grantEnv {
 	}
 	e.srv.SetSSHCA(ca, map[string]config.SSHHost{
 		"build-1": {Address: "192.0.2.20", User: "agent"},
-		"lab-1":   {Address: "192.0.2.21", User: "agent"},
+		"lab1":    {Address: "192.0.2.21", User: "agent"},
 	})
 	e.set(func(s *config.AccessRequestsSettings) { s.DenyPaths = []string{"*"} })
 	return e
@@ -83,7 +83,7 @@ func TestSSHLoginFlow(t *testing.T) {
 	b, _ := json.Marshal(map[string]any{"paths": []string{"ssh/build-1"}, "action": grant.ActionSSHLogin, "reason": "deploy firewall", "ttl": "15m"})
 	req := expect(t, e.do("POST", "/v1/access-requests", vectorTok, string(b), "RemoteAddr: "+ip), http.StatusCreated, "")
 	gid := e.approve(t, req["id"].(string), "")
-	if !e.windowOpen(t, "build-1", gid) || e.windowOpen(t, "lab-1", gid) {
+	if !e.windowOpen(t, "build-1", gid) || e.windowOpen(t, "lab1", gid) {
 		t.Fatal("window must be open on the approved machine only")
 	}
 
@@ -110,7 +110,7 @@ func TestSSHLoginFlow(t *testing.T) {
 	}
 
 	// Approval for one machine is not approval for another.
-	if code, _ := e.sign(t, vectorTok, "lab-1", ip); code != http.StatusForbidden {
+	if code, _ := e.sign(t, vectorTok, "lab1", ip); code != http.StatusForbidden {
 		t.Fatalf("other machine: %d", code)
 	}
 	// Nor does it work from another IP, or for another agent.
@@ -182,7 +182,7 @@ func TestSSHRequestRules(t *testing.T) {
 	}
 	for name, paths := range map[string][]string{
 		"unknown machine":    {"ssh/nope"},
-		"two machines":       {"ssh/build-1", "ssh/lab-1"},
+		"two machines":       {"ssh/build-1", "ssh/lab1"},
 		"login and a secret": {"ssh/build-1", "infra/other"},
 	} {
 		if r := post(paths...); r.code != http.StatusForbidden || r.body["code"] != CodeNotRequestable {
@@ -260,7 +260,7 @@ func TestSSHWindowClosesWhenSwitchedOff(t *testing.T) {
 		t.Fatal("unknown machine")
 	}
 	ca := e.srv.sshCA
-	e.srv.SetSSHCA(ca, map[string]config.SSHHost{"lab-1": {Address: "192.0.2.21", User: "agent"}})
+	e.srv.SetSSHCA(ca, map[string]config.SSHHost{"lab1": {Address: "192.0.2.21", User: "agent"}})
 	if e.windowOpen(t, "build-1", gid) {
 		t.Fatal("machine removed from config")
 	}
@@ -363,7 +363,7 @@ func TestSSHMachinesList(t *testing.T) {
 		t.Fatalf("list = %v", m)
 	}
 	list := m["machines"].([]any)
-	if len(list) != 2 || list[0].(map[string]any)["name"] != "build-1" || list[1].(map[string]any)["name"] != "lab-1" {
+	if len(list) != 2 || list[0].(map[string]any)["name"] != "build-1" || list[1].(map[string]any)["name"] != "lab1" {
 		t.Fatalf("machines = %v", list)
 	}
 	if _, ok := list[0].(map[string]any)["approved_until"]; ok {
