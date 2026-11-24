@@ -421,11 +421,11 @@ func TestSSHLoginCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.h.deps.Policy = pe
-	login := e.h.buildCard(grant.Request{ID: "req_x", Agent: "vector", Action: grant.ActionSSHLogin, Paths: []string{"ssh/build-1"}}, e.cfg)
+	login := e.h.buildCard(grant.Request{ID: "req_x", Agent: "deployer", Action: grant.ActionSSHLogin, Paths: []string{"ssh/build-1"}}, e.cfg)
 	if len(login.Paths) != 1 || !login.Paths[0].SSHLogin || login.SealRequired || len(login.Attestation) != 0 {
 		t.Fatalf("login card = %+v", login)
 	}
-	secret := e.h.buildCard(grant.Request{ID: "req_y", Agent: "vector", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}}, e.cfg)
+	secret := e.h.buildCard(grant.Request{ID: "req_y", Agent: "deployer", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}}, e.cfg)
 	if secret.Paths[0].SSHLogin || len(secret.Attestation) == 0 {
 		t.Fatalf("a secret at the same path must keep its normal card: %+v", secret)
 	}
