@@ -38,6 +38,10 @@ type SecretMetadata struct {
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	RotationDue string   `json:"rotation_due,omitempty"`
+	// Username and URL are the login that goes with the value and the page
+	// it is for (metadata.go). Neither is secret.
+	Username string `json:"username,omitempty"`
+	URL      string `json:"url,omitempty"`
 }
 
 // encryptedSecret is the on-disk representation of a secret.
@@ -207,57 +211,17 @@ func (s *Store) getDEK(ns string) ([]byte, error) {
 	return dek, nil
 }
 
-// Set creates or updates a secret.
+// Set creates or updates a secret. An empty description or nil tags keep
+// what is stored.
 func (s *Store) Set(path, value, createdBy, description string, tags []string) error {
-	if err := ValidatePath(path); err != nil {
-		return err
+	var ch MetadataChange
+	if description != "" {
+		ch.Description = &description
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	ns := namespace(path)
-	dek, err := s.getDEK(ns)
-	if err != nil {
-		return err
+	if tags != nil {
+		ch.Tags = &tags
 	}
-
-	blob, err := crypto.Encrypt(dek, []byte(value))
-	if err != nil {
-		return fmt.Errorf("encrypting secret: %w", err)
-	}
-
-	now := time.Now().UTC()
-	existing, exists := s.data.Secrets[path]
-
-	meta := SecretMetadata{
-		Created:     now,
-		Updated:     now,
-		CreatedBy:   createdBy,
-		UpdatedBy:   createdBy,
-		Description: description,
-		Tags:        tags,
-	}
-
-	if exists {
-		meta.Created = existing.Metadata.Created
-		meta.CreatedBy = existing.Metadata.CreatedBy
-		if description == "" {
-			meta.Description = existing.Metadata.Description
-		}
-		if tags == nil {
-			meta.Tags = existing.Metadata.Tags
-		}
-	}
-
-	s.data.Secrets[path] = encryptedSecret{
-		Path:      path,
-		Value:     *blob,
-		Namespace: ns,
-		Metadata:  meta,
-	}
-
-	return s.save()
+	return s.Write(path, value, createdBy, ch, WriteAny)
 }
 
 // Get retrieves a secret by path.

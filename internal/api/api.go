@@ -903,6 +903,12 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditAllowedAccess(r, info, "read_value", path, ip, sealKey != nil, dec.Grant)
+	// The login and link are for callers who may list the path (GET
+	// /v1/metadata) and are never served together with the value. A copy,
+	// because a backend may hand out its cached secret.
+	noLogin := *secret
+	noLogin.Metadata.Username, noLogin.Metadata.URL = "", ""
+	secret = &noLogin
 	if sealKey != nil {
 		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
 		if err != nil {
@@ -928,6 +934,22 @@ type setSecretRequest struct {
 	Value       string   `json:"value"`
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	// Username and URL: left out keeps what is stored, "" clears it.
+	Username *string `json:"username,omitempty"`
+	URL      *string `json:"url,omitempty"`
+}
+
+// metadataChange is the metadata part of a set request. An empty description
+// or no tags keep what is stored, as they always have.
+func (req setSecretRequest) metadataChange() store.MetadataChange {
+	ch := store.MetadataChange{Username: req.Username, URL: req.URL}
+	if req.Description != "" {
+		ch.Description = &req.Description
+	}
+	if req.Tags != nil {
+		ch.Tags = &req.Tags
+	}
+	return ch
 }
 
 func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
@@ -970,12 +992,18 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ch := req.metadataChange()
+	if err := ch.Validate(); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if s.backend.ReadOnly() {
 		jsonError(w, "backend is read-only", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if err := s.backend.Set(path, req.Value, info.Agent, req.Description, req.Tags); err != nil {
+	if err := s.backend.Write(path, req.Value, info.Agent, ch, store.WriteAny); err != nil {
 		if err == store.ErrInvalidPath {
 			jsonError(w, "invalid secret path", http.StatusBadRequest)
 			return
@@ -990,7 +1018,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 	// without one keeps the old one)? `phoenix set` nudges when it is false.
 	// Only for callers who may list the path, as that is the metadata
 	// permission; never the text.
-	resp := map[string]interface{}{"status": "ok", "path": path}
+	// changed names the metadata fields this write set, so a CLI can tell that
+	// an older server ignored a username or link it sent.
+	resp := map[string]interface{}{"status": "ok", "path": path, "changed": ch.Fields()}
 	if s.baseAccessReason(info, path, "list", acl.ActionList) == "" {
 		if m, err := s.backend.Metadata(path); err == nil {
 			resp["has_description"] = m.Description != ""

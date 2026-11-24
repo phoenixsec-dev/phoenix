@@ -358,7 +358,7 @@ func TestMCPToolList(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"secrets": []map[string]interface{}{
 				{"path": "myapp/key1", "description": "Stripe live key", "tags": []string{"prod"}},
-				{"path": "myapp/key2", "description": ""},
+				{"path": "myapp/key2", "description": "", "username": "me@example.com", "url": "https://example.com"},
 			},
 		})
 	})
@@ -377,7 +377,7 @@ func TestMCPToolList(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
-	want := "myapp/key1 — Stripe live key [prod]\nmyapp/key2 — (no description)"
+	want := "myapp/key1 — Stripe live key [prod]\nmyapp/key2 — (no description) (username: me@example.com) (link: https://example.com)"
 	if result.Content[0].Text != want {
 		t.Errorf("got %q, want %q", result.Content[0].Text, want)
 	}

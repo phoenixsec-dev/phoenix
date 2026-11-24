@@ -177,3 +177,87 @@ func TestMetadataScansBackendOncePerRequest(t *testing.T) {
 		t.Fatalf("missing path: want 404, got %d", code)
 	}
 }
+
+// patchMetadata calls PATCH /v1/metadata/<path> with a raw JSON body.
+func patchMetadata(srv *Server, token, path, body string) (int, string) {
+	r := httptest.NewRequest("PATCH", "/v1/metadata/"+path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	return w.Code, w.Body.String()
+}
+
+// Write permission is enough to describe a secret and nothing less is. The
+// reply and the audit line carry field names only.
+func TestDescribeSecret(t *testing.T) {
+	srv, admin := setupTestServer(t)
+	srv.acl.AddAgent("writeonly", "writeonly-token", []acl.Permission{{Path: "test/*", Actions: []acl.Action{acl.ActionWrite}}})
+	putSecret(t, srv, admin, "test/a", setSecretRequest{Value: "the-value", Description: "old"})
+
+	code, body := patchMetadata(srv, "writeonly-token", "test/a", `{"description":"new text","username":"me@example.com","url":"https://example.com/x"}`)
+	if code != http.StatusOK || strings.Contains(body, "new text") || strings.Contains(body, "me@example.com") || strings.Contains(body, "the-value") {
+		t.Fatalf("describe: %d %s", code, body)
+	}
+	if code, _ := patchMetadata(srv, "reader-token", "test/a", `{"description":"no"}`); code != http.StatusForbidden {
+		t.Fatalf("reader could describe: %d", code)
+	}
+	var si secretInfo
+	_, body = getMetadata(srv, admin, "test/a")
+	json.Unmarshal([]byte(body), &si)
+	if si.Description != "new text" || si.Username != "me@example.com" || si.URL != "https://example.com/x" ||
+		si.CreatedBy != "admin" || si.UpdatedBy != "admin" {
+		t.Fatalf("after describe: %s", body)
+	}
+
+	for body, want := range map[string]int{
+		`{}`:                            http.StatusBadRequest,
+		`{"value":"x"}`:                 http.StatusBadRequest,
+		`{"url":"javascript:alert(1)"}`: http.StatusBadRequest,
+		`nonsense`:                      http.StatusBadRequest,
+	} {
+		if code, got := patchMetadata(srv, admin, "test/a", body); code != want {
+			t.Errorf("%s: %d %s", body, code, got)
+		}
+	}
+	if code, _ := patchMetadata(srv, admin, "test/missing", `{"description":"x"}`); code != http.StatusNotFound {
+		t.Errorf("missing secret: %d", code)
+	}
+
+	entries, raw := queryAPIAuditEntries(t, srv, admin)
+	if e := findAPIAuditEntry(entries, "describe", "test/a", "allowed", ""); e == nil || e.Agent != "writeonly" || e.Metadata["changed"] != "description,username,url" {
+		t.Errorf("describe audit entry = %+v", e)
+	}
+	if strings.Contains(raw, "new text") || strings.Contains(raw, "me@example.com") {
+		t.Error("the audit log holds metadata text")
+	}
+}
+
+// The login is for callers who may list the path: it never travels with the
+// value, and a value write without it keeps it.
+func TestLoginIsNeverMixedWithTheValue(t *testing.T) {
+	srv, admin := setupTestServer(t)
+	user, link := "me@example.com", "https://example.com/x"
+	putSecret(t, srv, admin, "test/a", setSecretRequest{Value: "v1", Username: &user, URL: &link})
+	putSecret(t, srv, admin, "test/a", setSecretRequest{Value: "v2"})
+
+	r := httptest.NewRequest("GET", "/v1/secrets/test/a", nil)
+	r.Header.Set("Authorization", "Bearer "+admin)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	if body := w.Body.String(); !strings.Contains(body, "v2") || strings.Contains(body, user) || strings.Contains(body, link) {
+		t.Fatalf("value read: %s", body)
+	}
+	if _, body := getMetadata(srv, admin, "test/a"); !strings.Contains(body, user) || !strings.Contains(body, link) {
+		t.Fatalf("login lost on a value write: %s", body)
+	}
+
+	bad := "javascript:alert(1)"
+	body, _ := json.Marshal(setSecretRequest{Value: "v3", URL: &bad})
+	r = httptest.NewRequest("PUT", "/v1/secrets/test/a", bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+admin)
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad link accepted: %d", w.Code)
+	}
+}

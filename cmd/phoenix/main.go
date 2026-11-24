@@ -9,6 +9,7 @@
 //	phoenix delete <path>
 //	phoenix list [folder/] [--names] [--tag <tag>]
 //	phoenix info <path>
+//	phoenix describe <path> [-d <desc>] [--tags <t1,t2>] [--username <name>] [--url <link>]
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
@@ -153,6 +154,8 @@ func main() {
 		err = cmdList(args)
 	case "info":
 		err = cmdInfo(args)
+	case "describe":
+		err = cmdDescribe(args)
 	case "export":
 		err = cmdExport(args)
 	case "import":
@@ -285,14 +288,17 @@ func usage() {
 
 Usage:
   phoenix get <path>                          Read a secret
-  phoenix set <path> [-d desc]                Create/update a secret (hidden prompt)
+  phoenix set <path> [-d desc] [--username name] [--url link]
+                                              Create/update a secret (hidden prompt)
   phoenix set <path> --multiline              Hidden multi-line paste (PEM keys), end with Ctrl-D
   phoenix set <path> --value-stdin            Read secret value from stdin
   phoenix delete <path>                       Delete a secret
   phoenix list [folder/] [--tag <tag>]        List secrets in a folder with their descriptions
                                               (folder, folder/ or folder/* all list folder/)
   phoenix list [folder/] --names              Bare paths only, one per line (for scripts)
-  phoenix info <path>                         Description, tags, dates, authors; never the value
+  phoenix info <path>                         Description, tags, username, link, dates; never the value
+  phoenix describe <path> [-d desc] [--tags t1,t2] [--username name] [--url link]
+                                              Change those without reading or writing the value
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
@@ -569,6 +575,7 @@ func cmdSet(args []string) error {
 
 	var path, value, desc string
 	var tags []string
+	var login loginOptions
 	var valueStdin, multiline bool
 
 	i := 0
@@ -593,6 +600,11 @@ func cmdSet(args []string) error {
 			if i < len(args) {
 				tags = strings.Split(args[i], ",")
 			}
+		case "--username", "--url":
+			i++
+			if i < len(args) {
+				login.take(args[i-1], args[i])
+			}
 		}
 		i++
 	}
@@ -612,7 +624,7 @@ func cmdSet(args []string) error {
 		}
 	}
 
-	setUsage := fmt.Errorf("usage: phoenix set <path> [-d description] [--tags t1,t2]   (hidden prompt)\n       phoenix set <path> --multiline [-d description]   (hidden, ends with Ctrl-D)\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]")
+	setUsage := fmt.Errorf("usage: phoenix set <path> [-d description] [--tags t1,t2] [--username name] [--url link]   (hidden prompt)\n       phoenix set <path> --multiline [-d description]   (hidden, ends with Ctrl-D)\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]")
 	if path == "" {
 		return setUsage
 	}
@@ -639,6 +651,7 @@ func cmdSet(args []string) error {
 		"description": desc,
 		"tags":        tags,
 	}
+	login.addTo(body)
 	bodyBytes, _ := json.Marshal(body)
 
 	resp, err := apiRequest("PUT", "/v1/secrets/"+path, strings.NewReader(string(bodyBytes)))
@@ -655,11 +668,15 @@ func cmdSet(args []string) error {
 	// Nudge, never fail: the server reports has_description (older servers,
 	// and callers without list access, get no field, and then we stay quiet).
 	var result struct {
-		HasDescription *bool `json:"has_description"`
+		HasDescription *bool    `json:"has_description"`
+		Changed        []string `json:"changed"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) == nil {
+		if missing := login.notIn(result.Changed); missing != "" {
+			return fmt.Errorf("the value was saved, but this Phoenix server is too old to store the %s; update phoenix-server", missing)
+		}
 		if result.HasDescription != nil && !*result.HasDescription {
-			fmt.Fprintf(os.Stderr, "note: %s has no description. Add -d \"what it is for\" next time you set it, so phoenix list and info can show it.\n", path)
+			fmt.Fprintf(os.Stderr, "note: %s has no description, so nobody can find it by what it is for. Add one: phoenix describe %s -d \"what it is for\"\n", path, path)
 		}
 	}
 	return nil
