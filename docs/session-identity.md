@@ -122,8 +122,8 @@ agent's token. Every use, renewal included, checks this.
 - A token changed by editing the ACL file takes effect at the next start; the
   old token's sessions end then (the log says how many). A start with sessions
   disabled ends none: if you then edit the same old token back in before enabling
-  sessions again, its unexpired sessions work again, as the token does. Use
-  `phoenix agent` commands instead, which always issue a new credential.
+  sessions again, its unexpired sessions work again, as the token does. Delete
+  the agent or replace its token with `phoenix agent` instead.
 - Each token the server issues gets a random `credential_id` in the ACL file, and
   the session is bound to both. So a token that was taken away and given out
   again is a new credential: its old sessions stay dead, also if the change

@@ -356,7 +356,7 @@ func (s *Store) lookup(id string) (sess *Session, stale bool, err error) {
 
 // Revoke marks a session as revoked. Revocation is idempotent. The session
 // is denied at once even if saving fails; the error then means the revoke
-// would be lost at the next restart.
+// may be lost at a restart or power cut.
 func (s *Store) Revoke(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -367,7 +367,7 @@ func (s *Store) Revoke(sessionID string) error {
 	}
 	sess.Revoked = true
 	if err := s.saveLocked(); err != nil {
-		return fmt.Errorf("session revoked now but not saved, so a restart would undo it: %w", err)
+		return fmt.Errorf("session revoked now, but saving that failed, so a restart may undo it: %w", err)
 	}
 	return nil
 }
