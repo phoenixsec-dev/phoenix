@@ -43,13 +43,15 @@ not use bearer tokens or session tokens. Instead:
   attempts (1s base, 60s cap). Rate-limited and failed attempts are
   logged to the audit trail.
 - **CSRF**: Every mutation (approve, deny, revoke, logout) requires a
-  token from the signed cookie. Validated with `hmac.Equal`.
+  token from the signed cookie. Validated with `hmac.Equal`. A POST a browser
+  marks as coming from another site (`Sec-Fetch-Site`, or `Origin` in older
+  browsers) is refused before that.
 - **Recent password**: showing, copying, adding or changing a secret needs the
   password to have been typed in this browser in the last 5 minutes. A login
   counts; after that the page asks again. The window does not grow with use.
   Typing it again moves the login to a new cookie, so a copied old cookie stops
   working. Wrong passwords count in the same rate limit as logins, per address
-  and per login.
+  and per login, and parallel guesses count one by one.
 - **Values**: a value leaves the server only as the answer to a POST that passed
   the cookie, CSRF token, same-origin and recent-password checks and the path's
   policy rule, and only after its audit line was written. It is never in a page's
@@ -218,15 +220,17 @@ with temporary access, and the path's policy rule).
   site: look at the name before you paste. What you copied stays on the
   device's clipboard.
 - If the page says a rule stops it, the path's policy needs sealed delivery or
-  another machine. The dashboard obeys policy rules like everyone else.
-  `source_ip` is checked against the network connection, so behind a reverse
-  proxy that is the proxy's address.
+  another machine. Rules hold here for showing, copying and setting a value,
+  not for finding a secret or editing its details. `source_ip` is checked
+  against the network connection, so behind a reverse proxy that is the
+  proxy's address.
 - **Add secret**: paste, type or generate a value. Names are a folder, a slash
   and a name. Adding never overwrites.
 - **Edit details** changes description, tags, username and link only.
 - **New value** replaces the value after a confirm. The old one is gone.
 
 With the 1Password backend, secrets can be found and shown but not changed.
+Finding them reads the vault's items into the server's memory, as listing does.
 
 ### Approvals (`/dashboard/approvals`)
 
@@ -309,7 +313,7 @@ All dashboard actions are logged to the same audit trail as API actions.
 | `describe` | allowed | `dashboard@<ip>` | Description, tags, username or link changed (metadata `changed`) |
 | `dashboard.logout` | allowed | `dashboard@<ip>` | Explicit logout |
 | `dashboard.auth` | denied | `dashboard` | Expired, invalid, or signed-out cookie |
-| `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action, or a secrets request from another site (`cross_site_request`) |
+| `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action, or a POST from another site (`cross_site_request`) |
 | `session.revoke` | allowed | `dashboard@<ip>` | Session revoked |
 | `access_request.approved` / `.denied` | allowed | `dashboard@<ip>` | Access request decided (plus an `.attempt` line before it) |
 | `access_request.approve` | denied | `dashboard@<ip>` | Approval refused by a re-check (reason = code) |

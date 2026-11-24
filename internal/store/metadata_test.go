@@ -92,6 +92,12 @@ func TestFailedSaveChangesNothing(t *testing.T) {
 	if s.Write("a/new", "v", "me", MetadataChange{}, WriteNew) == nil {
 		t.Error("Write of a new secret reported success")
 	}
+	if s.Write("fresh/new", "v", "me", MetadataChange{}, WriteNew) == nil {
+		t.Error("Write in a new folder reported success")
+	}
+	if _, ok := s.data.Namespaces["fresh"]; ok {
+		t.Error("the key of a folder that was not saved stayed in memory")
+	}
 	if got, err := s.Get("a/b"); err != nil || got.Value != "v1" || got.Metadata.Username != "" {
 		t.Errorf("memory changed: %v", err)
 	}

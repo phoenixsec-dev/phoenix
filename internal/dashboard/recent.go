@@ -1,8 +1,11 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -27,9 +30,21 @@ func (lt *loginTable) find(nonce string) (dashLogin, bool) {
 
 // recent reports whether the password was typed for this login within the
 // window.
-func (lt *loginTable) recent(nonce string, now time.Time) bool {
-	l, ok := lt.find(nonce)
-	return ok && now.Before(l.authAt.Add(recentAuthWindow))
+func (l dashLogin) recent(now time.Time) bool {
+	return now.Before(l.authAt.Add(recentAuthWindow))
+}
+
+// signedIn reports whether the login with this ID is still signed in. Unlike
+// valid it survives the cookie moving to a new nonce.
+func (lt *loginTable) signedIn(id string, now time.Time) bool {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	for _, l := range lt.byNonce {
+		if l.ID == id {
+			return now.Before(l.Expires)
+		}
+	}
+	return false
 }
 
 // reauthenticate records that the password was typed again for a login and
@@ -57,34 +72,44 @@ func (h *Handler) currentLogin(r *http.Request) (dashLogin, bool) {
 	return h.logins.find(p.Nonce)
 }
 
+// loginKey is the request context key of the login requireRecent admitted.
+type loginKey struct{}
+
 // requireRecent lets a request through only within the window after the
 // password was typed. Otherwise it answers 401 with reauth set, and the page
-// asks for the password and tries again.
+// asks for the password and tries again. The login goes along in the request
+// context, so whatever happens to it meanwhile, the audit line names it.
 func (h *Handler) requireRecent(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, err := h.verifyCookie(r)
-		if err != nil || !h.logins.recent(p.Nonce, time.Now()) {
+		l, ok := h.currentLogin(r)
+		if !ok || !l.recent(time.Now()) {
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"error": "Type your password again.", "reauth": true})
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), loginKey{}, l)))
 	}
 }
 
-// requireSameOrigin refuses a request a browser says came from another site.
-// It backs up the CSRF token, and SameSite=Strict, which lets sibling
-// subdomains through.
-func (h *Handler) requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
-			if h.deps.Audit != nil {
-				h.deps.Audit.LogDenied("dashboard", "dashboard.csrf", r.URL.Path, extractClientIP(r), "cross_site_request")
-			}
-			writeError(w, http.StatusForbidden, "This request came from another site.")
-			return
-		}
-		next(w, r)
+// requestLogin is the login requireRecent admitted this request for.
+func requestLogin(r *http.Request) (dashLogin, bool) {
+	l, ok := r.Context().Value(loginKey{}).(dashLogin)
+	return l, ok
+}
+
+// sameOrigin reports whether a POST came from the dashboard's own pages. It
+// backs up the CSRF token, and SameSite=Strict, which lets sibling subdomains
+// through. Browsers too old to say so with Sec-Fetch-Site still send Origin.
+// A client that sends neither is not a browser another site can drive.
+func sameOrigin(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
+		return site == "same-origin"
 	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	return err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host)
 }
 
 // handleReauth: POST /dashboard/reauth with "password". It takes the same
@@ -103,23 +128,17 @@ func (h *Handler) handleReauth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "You are signed out.")
 		return
 	}
-	loginKey := "login:" + login.ID
+	keys := []string{ip, "login:" + login.ID}
 	meta := map[string]string{"dashboard.login": login.ID}
 
-	h.reauthMu.Lock()
-	defer h.reauthMu.Unlock()
-	for _, key := range []string{ip, loginKey} {
-		if err := h.loginRL.check(key); err != nil {
-			if h.deps.Audit != nil {
-				h.deps.Audit.LogDeniedWithMetadata("dashboard@"+ip, "dashboard.reauth", "rate_limited", ip, err.Error(), meta)
-			}
-			writeError(w, http.StatusTooManyRequests, "Too many wrong passwords. Wait a minute and try again.")
-			return
+	if err := h.loginRL.admit(keys...); err != nil {
+		if h.deps.Audit != nil {
+			h.deps.Audit.LogDeniedWithMetadata("dashboard@"+ip, "dashboard.reauth", "rate_limited", ip, err.Error(), meta)
 		}
+		writeError(w, http.StatusTooManyRequests, "Too many wrong passwords. Wait a minute and try again.")
+		return
 	}
 	if !h.checkCredential(r.PostFormValue("password")) {
-		h.loginRL.recordFailure(ip)
-		h.loginRL.recordFailure(loginKey)
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDeniedWithMetadata("dashboard@"+ip, "dashboard.reauth", "login", ip, "invalid_credentials", meta)
 		}
@@ -140,8 +159,7 @@ func (h *Handler) handleReauth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "You are signed out.")
 		return
 	}
-	h.loginRL.recordSuccess(ip)
-	h.loginRL.recordSuccess(loginKey)
+	h.loginRL.recordSuccess(keys...)
 	h.setLoginCookie(w, r, cookie, time.Until(time.Unix(p.Exp, 0)))
 	if h.deps.Audit != nil {
 		h.deps.Audit.LogAllowedWithMetadata("dashboard@"+ip, "dashboard.reauth", "login", ip, meta)

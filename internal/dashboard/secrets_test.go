@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,8 +224,16 @@ func TestValueRefusesForgedRequests(t *testing.T) {
 	for _, site := range []string{"cross-site", "same-site", "none"} {
 		try("Sec-Fetch-Site "+site, e.do("POST", "/dashboard/secrets/value", form, "Sec-Fetch-Site", site))
 	}
-	if w := e.do("POST", "/dashboard/secrets/value", form, "Sec-Fetch-Site", "same-origin"); w.Code != http.StatusOK {
-		t.Errorf("same-origin request refused: %d", w.Code)
+	for _, origin := range []string{"https://evil.example", "https://sibling.example.com", "null", "::"} {
+		try("Origin "+origin, e.do("POST", "/dashboard/secrets/value", form, "Origin", origin))
+		if w := e.do("POST", "/dashboard/logout", form, "Origin", origin); w.Code != http.StatusForbidden {
+			t.Errorf("Origin %s: logout answered %d", origin, w.Code)
+		}
+	}
+	for _, h := range [][]string{{"Sec-Fetch-Site", "same-origin"}, {"Origin", "https://example.com"}} { // httptest's host
+		if w := e.do("POST", "/dashboard/secrets/value", form, h...); w.Code != http.StatusOK {
+			t.Errorf("%v: own request refused: %d", h, w.Code)
+		}
 	}
 	// A GET is not a value route at all (it falls through to the home page).
 	if w := e.do("GET", "/dashboard/secrets/value?"+form.Encode(), nil); strings.Contains(w.Body.String(), fakeValue) {
@@ -382,6 +391,23 @@ func TestRulesAndOffSwitch(t *testing.T) {
 			if strings.Contains(page, `id="show"`) || strings.Contains(page, `id="copy-open"`) || !strings.Contains(page, `id="blocked"`) {
 				t.Error("the page still offers the value")
 			}
+			// The rule guards the value, for writing too; details are not the
+			// value and stay editable.
+			e.audit.Reset()
+			add := e.post("/dashboard/secrets/new", "path", "shop/new", "value", "x")
+			replace := e.post("/dashboard/secrets/replace", "path", "shop/petstore", "value", "x", "confirm", "yes")
+			if tc.rules != "" {
+				got, _ := e.store.Get("shop/petstore")
+				_, err := e.store.Get("shop/new")
+				if add.Code != http.StatusForbidden || replace.Code != http.StatusForbidden || got.Value != fakeValue || err == nil {
+					t.Errorf("writes under a rule: add %d, replace %d", add.Code, replace.Code)
+				}
+				if findAuditEntry(parseAuditEntries(e.audit), "write", "denied") == nil {
+					t.Error("refused write not audited")
+				}
+			} else if add.Code != http.StatusOK || replace.Code != http.StatusOK {
+				t.Errorf("writes with reveal off: add %d, replace %d", add.Code, replace.Code)
+			}
 			if w := e.post("/dashboard/secrets/details", "path", "shop/petstore", "description", "new words"); w.Code != http.StatusOK {
 				t.Errorf("details: %d", w.Code)
 			}
@@ -470,8 +496,8 @@ func TestServiceWorkerStoresOnlyStaticFiles(t *testing.T) {
 			t.Errorf("%s: %d", f[1], w.Code)
 		}
 	}
-	if n := strings.Count(js, ".put("); n != 1 {
-		t.Errorf("%d cache writes, want the one behind the list", n)
+	if puts, guards := strings.Count(js, ".put("), strings.Count(js, "if (storable("); puts != guards || strings.Contains(js, "addAll") {
+		t.Errorf("%d cache writes, %d behind the storable check", puts, guards)
 	}
 	for _, f := range []string{"secrets.js", "dashboard.js", "sw.js"} {
 		data, _ := fs.ReadFile(staticFS, "static/"+f)
@@ -479,6 +505,154 @@ func TestServiceWorkerStoresOnlyStaticFiles(t *testing.T) {
 			if strings.Contains(string(data), storage) {
 				t.Errorf("%s uses %s", f, storage)
 			}
+		}
+	}
+}
+
+// hookBackend runs hooks around a real backend, and can fail or hand out a
+// shared list as the 1Password one does.
+type hookBackend struct {
+	store.SecretBackend
+	onGet          func()
+	list           []string
+	listErr, mdErr error
+}
+
+func (b *hookBackend) Get(path string) (*store.Secret, error) {
+	if b.onGet != nil {
+		b.onGet()
+	}
+	return b.SecretBackend.Get("shop/petstore") // any spelling opens it
+}
+
+func (b *hookBackend) List(prefix string) ([]string, error) {
+	if b.listErr != nil {
+		return nil, b.listErr
+	}
+	if b.list != nil {
+		return b.list, nil
+	}
+	return b.SecretBackend.List(prefix)
+}
+
+func (b *hookBackend) Metadata(path string) (*store.SecretMetadata, error) {
+	if b.mdErr != nil {
+		return nil, b.mdErr
+	}
+	return b.SecretBackend.Metadata("shop/petstore")
+}
+
+// A login that ends while the value is being read gets nothing; one that
+// moves to a new cookie meanwhile does, and the audit line still names it.
+func TestLoginEndsDuringSlowRead(t *testing.T) {
+	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	hook := &hookBackend{SecretBackend: e.h.deps.Backend}
+	e.h.deps.Backend = hook
+	id := e.h.logins.list(time.Now())[0].ID
+
+	hook.onGet = func() {
+		e.h.logins.reauthenticate(payloadFromCookie(t, e.h, e.cookie).Nonce, "moved", time.Now())
+		hook.onGet = nil
+	}
+	if w := e.showValue(); w.Code != http.StatusOK {
+		t.Fatalf("cookie moved during the read: %d", w.Code)
+	}
+	if entry := findAuditEntry(parseAuditEntries(e.audit), "read_value", "allowed"); entry == nil || entry.Metadata["dashboard.login"] != id {
+		t.Errorf("audit entry: %+v", entry)
+	}
+
+	e.cookie = login(t, e.h)
+	e.csrf = csrfFromCookie(t, e.h, e.cookie)
+	e.audit.Reset()
+	hook.onGet = func() {
+		for _, l := range e.h.logins.list(time.Now()) {
+			e.h.logins.removeByID(l.ID)
+		}
+	}
+	if w := e.showValue(); w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), fakeValue) {
+		t.Errorf("signed out during the read: %d", w.Code)
+	}
+	if findAuditEntry(parseAuditEntries(e.audit), "read_value", "allowed") != nil {
+		t.Error("an unserved read was audited as allowed")
+	}
+}
+
+// A backend that also opens a secret under an unlisted spelling must not let
+// that spelling slip past the listed name's rule; and an outage says so.
+func TestUnlistedNamesAndOutages(t *testing.T) {
+	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	hook := &hookBackend{SecretBackend: e.h.deps.Backend}
+	e.h.deps.Backend = hook
+	if w := e.post("/dashboard/secrets/value", "path", "Shop/Petstore", "use", "show"); w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), fakeValue) {
+		t.Errorf("unlisted spelling: %d", w.Code)
+	}
+	for _, p := range []string{"open", "details", "replace"} {
+		hook.listErr, hook.mdErr = errors.New("down"), nil
+		if w := e.do("GET", "/dashboard/secrets/"+p+"?path=shop/petstore", nil); w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s, list down: %d", p, w.Code)
+		}
+		hook.listErr, hook.mdErr = nil, errors.New("down")
+		if w := e.do("GET", "/dashboard/secrets/"+p+"?path=shop/petstore", nil); w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s, details down: %d", p, w.Code)
+		}
+	}
+	if body := e.do("GET", "/dashboard/secrets", nil).Body.String(); !strings.Contains(body, "Some details could not be read") {
+		t.Error("the list hides that details are missing")
+	}
+}
+
+// The list page must not sort the backend's own slice.
+func TestListIsNotSortedInPlace(t *testing.T) {
+	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	shared := []string{"z/z", "a/a"}
+	e.h.deps.Backend = &hookBackend{SecretBackend: e.h.deps.Backend, list: shared}
+	e.do("GET", "/dashboard/secrets", nil)
+	if shared[0] != "z/z" {
+		t.Error("the page reordered the backend's list")
+	}
+}
+
+// A page left open cannot pair a new password with the old site.
+func TestCopyAndOpenChecksTheLink(t *testing.T) {
+	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	shown := regexp.MustCompile(`data-link="([^"]*)"`).FindStringSubmatch(e.do("GET", "/dashboard/secrets/open?path=shop/petstore", nil).Body.String())[1]
+	fields := []string{"path", "shop/petstore", "use", "copy", "link", shown}
+	if w := e.post("/dashboard/secrets/value", fields...); w.Code != http.StatusOK {
+		t.Fatalf("same link: %d %s", w.Code, w.Body)
+	}
+	link := "https://new.example.com/?a=1&b=2|3"
+	e.store.Write("shop/petstore", "fake-new", "me", store.MetadataChange{URL: &link}, store.WriteExisting)
+	if w := e.post("/dashboard/secrets/value", fields...); w.Code != http.StatusConflict || strings.Contains(w.Body.String(), "fake-new") {
+		t.Errorf("changed link: %d", w.Code)
+	}
+}
+
+// Parallel wrong passwords, at login and at the re-ask: only the first few
+// are tried, whatever order they arrive in.
+func TestParallelGuessesAreLimited(t *testing.T) {
+	for _, path := range []string{"/dashboard/login", "/dashboard/reauth"} {
+		e := newSecretsEnv(t, config.DashboardConfig{}, "")
+		form := url.Values{"_csrf": {e.csrf}, "password": {"wrong"}, "credential": {"wrong"}}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < 30; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				e.do("POST", path, form)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		tried := 0
+		for _, entry := range parseAuditEntries(e.audit) {
+			if entry.Reason == "invalid_credentials" {
+				tried++
+			}
+		}
+		if tried != loginMaxFailures {
+			t.Errorf("%s: %d passwords tried, want %d", path, tried, loginMaxFailures)
 		}
 	}
 }

@@ -137,7 +137,7 @@ func (ch MetadataChange) apply(m *SecretMetadata) {
 // Write stores value at path with metadata changes, in one save. CreatedBy
 // and Created of an existing secret are kept. If the save fails nothing
 // changed, on disk or in memory.
-func (s *Store) Write(path, value, by string, ch MetadataChange, mode WriteMode) error {
+func (s *Store) Write(path, value, by string, ch MetadataChange, mode WriteMode) (err error) {
 	if err := ValidatePath(path); err != nil {
 		return err
 	}
@@ -154,10 +154,16 @@ func (s *Store) Write(path, value, by string, ch MetadataChange, mode WriteMode)
 	}
 
 	ns := namespace(path)
+	_, hadNS := s.data.Namespaces[ns]
 	dek, err := s.getDEK(ns)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil && !hadNS {
+			delete(s.data.Namespaces, ns) // a key made for nothing
+		}
+	}()
 	blob, err := crypto.Encrypt(dek, []byte(value))
 	if err != nil {
 		return fmt.Errorf("encrypting secret: %w", err)

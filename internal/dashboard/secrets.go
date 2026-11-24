@@ -22,7 +22,7 @@ import (
 //
 // Pages are built from metadata only. The one place a value leaves the server
 // is handleSecretValue: a POST, answered as no-store JSON, after the login
-// cookie, the CSRF token, a same-origin check, a recently typed password, the
+// cookie, the CSRF token, the same-origin check, a recently typed password, the
 // path's policy rule and a written audit line. Every POST here answers JSON,
 // because the page must be able to ask for the password and try again without
 // sending a typed value back as HTML.
@@ -43,7 +43,7 @@ func (h *Handler) secretRoutes() {
 	page := func(path string, f http.HandlerFunc) { h.mux.HandleFunc("GET "+path, h.requireAuth(f)) }
 	// The body is capped before requireAuth reads the form for the CSRF token.
 	post := func(path string, f http.HandlerFunc) {
-		checked := h.requireSameOrigin(h.requireAuth(f))
+		checked := h.requireAuth(f)
 		h.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) {
 			r.Body = http.MaxBytesReader(w, r.Body, maxSecretForm)
 			checked(w, r)
@@ -88,7 +88,7 @@ func matchesAll(text, q string) bool {
 func (h *Handler) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	var rows []secretRow
-	failed := h.deps.Backend == nil
+	failed, partial := h.deps.Backend == nil, false
 	shown := 0
 	if !failed {
 		paths, err := h.deps.Backend.List("")
@@ -96,10 +96,18 @@ func (h *Handler) handleSecrets(w http.ResponseWriter, r *http.Request) {
 			log.Printf("dashboard: listing secrets: %v", err)
 			failed = true
 		}
+		paths = slices.Clone(paths) // a backend may hand out its own cached list
 		slices.Sort(paths)
 		for _, p := range paths {
 			row := secretRow{Path: p}
-			if m, err := h.deps.Backend.Metadata(p); err == nil {
+			m, err := h.deps.Backend.Metadata(p)
+			if errors.Is(err, store.ErrSecretNotFound) {
+				continue // deleted since List
+			}
+			if err != nil {
+				log.Printf("dashboard: reading details of %q: %v", p, err)
+				partial = true
+			} else {
 				row.Description, row.Username, row.Tags = m.Description, m.Username, m.Tags
 			}
 			row.Search = strings.ToLower(p + " " + row.Description + " " + row.Username + " " + strings.Join(row.Tags, " "))
@@ -117,6 +125,7 @@ func (h *Handler) handleSecrets(w http.ResponseWriter, r *http.Request) {
 		"Rows":     rows,
 		"Shown":    shown,
 		"Failed":   failed,
+		"Partial":  partial,
 		"ReadOnly": h.readOnly(),
 	})
 }
@@ -126,21 +135,22 @@ func (h *Handler) readOnly() bool {
 	return h.deps.Backend == nil || h.deps.Backend.ReadOnly()
 }
 
-// secretMeta returns a secret's metadata, or false if there is no such
-// secret. Existence comes from List: some backends' Metadata does not check.
-func (h *Handler) secretMeta(path string) (*store.SecretMetadata, bool) {
+// secretMeta returns a secret's metadata, or store.ErrSecretNotFound. Another
+// error means the backend could not say. Existence comes from List: some
+// backends' Metadata does not check it, and some would also open a secret
+// under a name that is not listed and so has no policy rule of its own.
+func (h *Handler) secretMeta(path string) (*store.SecretMetadata, error) {
 	if h.deps.Backend == nil || store.ValidatePath(path) != nil {
-		return nil, false
+		return nil, store.ErrSecretNotFound
 	}
 	paths, err := h.deps.Backend.List(path)
-	if err != nil || !slices.Contains(paths, path) {
-		return nil, false
-	}
-	m, err := h.deps.Backend.Metadata(path)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	return m, true
+	if !slices.Contains(paths, path) {
+		return nil, store.ErrSecretNotFound
+	}
+	return h.deps.Backend.Metadata(path)
 }
 
 // secretReader is one agent that may read a secret's value now.
@@ -162,7 +172,7 @@ func (h *Handler) secretReaders(path string) []secretReader {
 			}
 		}
 	}
-	if h.accessEnabled() && h.deps.Access.AccessRequestSettings().Enabled {
+	if h.accessEnabled() && h.deps.Access.AccessRequestSettings().Enabled && !h.deps.Grants.Health().Degraded {
 		now := time.Now()
 		for _, g := range h.deps.Grants.ListGrants("", false) {
 			if g.Action == grant.ActionReadValue && g.State(now) == grant.GrantActive && slices.Contains(g.Paths, path) {
@@ -203,20 +213,20 @@ func directIP(r *http.Request) string {
 }
 
 // policyBlock says in plain words why the path's policy rule stops this
-// request, or "" if it does not. reading is false for writes, which a "sealed
-// delivery only" rule does not concern.
-func (h *Handler) policyBlock(r *http.Request, path string, reading bool) string {
+// request, or "". The dashboard has no seal key, so a rule that requires one
+// stops it, for writing a value as for reading one (as in the API).
+func (h *Handler) policyBlock(r *http.Request, path string) string {
 	if h.deps.Policy == nil {
 		return ""
 	}
 	ip := directIP(r)
-	err := h.deps.Policy.Evaluate(path, &policy.RequestContext{SourceIP: ip, SealKeyPresented: !reading})
+	err := h.deps.Policy.Evaluate(path, &policy.RequestContext{SourceIP: ip})
 	if err == nil {
 		return ""
 	}
 	var denied *policy.DeniedError
 	if errors.As(err, &denied) && denied.SealedRequired {
-		return "A rule says this secret is only handed out sealed to an agent, so it can't be shown here."
+		return "A rule says this secret is only handled sealed, with an agent's key, so its value can't be used here."
 	}
 	return "A rule says this secret can only be used from certain machines, and you are connecting from " + ip + "."
 }
@@ -226,7 +236,7 @@ func (h *Handler) revealBlock(r *http.Request, path string) string {
 	if !h.reveal {
 		return "Showing secrets in the dashboard is switched off on this server."
 	}
-	return h.policyBlock(r, path, true)
+	return h.policyBlock(r, path)
 }
 
 // doneText is the green message after a change; only these codes are shown.
@@ -236,11 +246,17 @@ var doneText = map[string]string{
 	"details":  "Details saved. The value was not touched.",
 }
 
-// notFoundPage answers 404 for a secret that does not exist.
-func (h *Handler) notFoundPage(w http.ResponseWriter, r *http.Request, path string) {
-	w.WriteHeader(http.StatusNotFound)
+// noSecretPage answers a page request for a secret that does not exist, or
+// that the backend could not look up.
+func (h *Handler) noSecretPage(w http.ResponseWriter, r *http.Request, path string, err error) {
+	msg, code := "There is no secret with that name.", http.StatusNotFound
+	if !errors.Is(err, store.ErrSecretNotFound) {
+		log.Printf("dashboard: looking up secret %q: %v", path, err)
+		msg, code = "The secrets can't be read right now. Try again.", http.StatusServiceUnavailable
+	}
+	w.WriteHeader(code)
 	h.render(w, "secret.html", map[string]interface{}{
-		"CSRF": r.Header.Get("X-Csrf-Token"), "Active": "secrets", "Path": path, "Missing": true,
+		"CSRF": r.Header.Get("X-Csrf-Token"), "Active": "secrets", "Path": path, "Problem": msg,
 	})
 }
 
@@ -248,9 +264,9 @@ func (h *Handler) notFoundPage(w http.ResponseWriter, r *http.Request, path stri
 // about one secret except its value.
 func (h *Handler) handleSecretOpen(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
-	m, ok := h.secretMeta(path)
-	if !ok {
-		h.notFoundPage(w, r, path)
+	m, err := h.secretMeta(path)
+	if err != nil {
+		h.noSecretPage(w, r, path, err)
 		return
 	}
 	// A hand-edited store file can hold any link: only http(s) becomes one.
@@ -306,9 +322,9 @@ func (h *Handler) handleSecretNewPage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleSecretEditPage(mode string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Query().Get("path")
-		m, ok := h.secretMeta(path)
-		if !ok {
-			h.notFoundPage(w, r, path)
+		m, err := h.secretMeta(path)
+		if err != nil {
+			h.noSecretPage(w, r, path, err)
 			return
 		}
 		h.renderSecretForm(w, r, mode, path, m)
@@ -332,7 +348,7 @@ func (h *Handler) renderSecretForm(w http.ResponseWriter, r *http.Request, mode,
 // auditMeta is the audit metadata of a dashboard action: which login did it.
 func (h *Handler) auditMeta(r *http.Request, extra ...string) map[string]string {
 	md := map[string]string{}
-	if l, ok := h.currentLogin(r); ok {
+	if l, ok := requestLogin(r); ok {
 		md["dashboard.login"] = l.ID
 	}
 	for i := 0; i+1 < len(extra); i += 2 {
@@ -350,8 +366,8 @@ func (h *Handler) denySecret(w http.ResponseWriter, r *http.Request, action, pat
 	writeError(w, http.StatusForbidden, msg)
 }
 
-// handleSecretValue: POST /dashboard/secrets/value with path and use ("show"
-// or "copy"). The only place the dashboard hands out a value. Audited as
+// handleSecretValue: POST /dashboard/secrets/value with path, use ("show" or
+// "copy") and, for copy-and-open, the link it will open. The only place the dashboard hands out a value. Audited as
 // read_value before the value is sent; no audit line, no value.
 func (h *Handler) handleSecretValue(w http.ResponseWriter, r *http.Request) {
 	path, use := r.PostFormValue("path"), r.PostFormValue("use")
@@ -367,18 +383,33 @@ func (h *Handler) handleSecretValue(w http.ResponseWriter, r *http.Request) {
 		h.denySecret(w, r, "read_value", path, "reveal_off", h.revealBlock(r, path), "dashboard.use", use)
 		return
 	}
-	if msg := h.policyBlock(r, path, true); msg != "" {
+	if msg := h.policyBlock(r, path); msg != "" {
 		h.denySecret(w, r, "read_value", path, "attestation", msg, "dashboard.use", use)
 		return
 	}
-	secret, err := h.deps.Backend.Get(path)
-	if errors.Is(err, store.ErrSecretNotFound) || errors.Is(err, store.ErrInvalidPath) {
+	_, err := h.secretMeta(path)
+	var secret *store.Secret
+	if err == nil {
+		secret, err = h.deps.Backend.Get(path)
+	}
+	if errors.Is(err, store.ErrSecretNotFound) {
 		writeError(w, http.StatusNotFound, "There is no secret with that name.")
 		return
 	}
 	if err != nil {
 		log.Printf("dashboard: reading secret %q: %v", path, err)
 		writeError(w, http.StatusInternalServerError, "The secret could not be read.")
+		return
+	}
+	// "Copy and open" says which link it is about to open. A page left open
+	// must not pair a new password with the old site.
+	if link, ok := r.PostForm["link"]; ok && link[0] != secret.Metadata.URL {
+		writeError(w, http.StatusConflict, "The link of this secret was changed. Reload the page.")
+		return
+	}
+	// Reading can be slow (1Password); the login may have ended meanwhile.
+	if l, ok := requestLogin(r); !ok || !h.logins.signedIn(l.ID, time.Now()) {
+		writeError(w, http.StatusUnauthorized, "You are signed out.")
 		return
 	}
 	ip := extractClientIP(r)
@@ -483,7 +514,7 @@ func (h *Handler) handleSecretAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, sentence(err))
 		return
 	}
-	if msg := h.policyBlock(r, path, false); msg != "" {
+	if msg := h.policyBlock(r, path); msg != "" {
 		h.denySecret(w, r, "write", path, "attestation", msg)
 		return
 	}
@@ -506,7 +537,7 @@ func (h *Handler) handleSecretReplace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Tick the box to confirm that the old value will be gone.")
 		return
 	}
-	if msg := h.policyBlock(r, path, false); msg != "" {
+	if msg := h.policyBlock(r, path); msg != "" {
 		h.denySecret(w, r, "write", path, "attestation", msg)
 		return
 	}

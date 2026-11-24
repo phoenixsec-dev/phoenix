@@ -628,6 +628,9 @@ func cmdSet(args []string) error {
 	if path == "" {
 		return setUsage
 	}
+	if err := plainPath(path); err != nil {
+		return err
+	}
 
 	if multiline && !crypto.IsTerminal() {
 		return fmt.Errorf("--multiline needs a terminal; scripts should use --value-stdin")

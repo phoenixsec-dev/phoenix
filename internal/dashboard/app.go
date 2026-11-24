@@ -8,8 +8,8 @@ import (
 // The installable app (manifest, service worker) and the headers every
 // dashboard response carries.
 
-// contentSecurityPolicy allows only the dashboard's own files and no framing.
-// Scripts must be files under /dashboard/static/; an inline one will not run.
+// contentSecurityPolicy allows only files on the same address, and no framing.
+// An inline script will not run: put it in a file under static/.
 const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; " +
 	"img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; " +
 	"form-action 'self'; base-uri 'none'; frame-ancestors 'none'"

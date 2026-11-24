@@ -125,6 +125,9 @@ func cmdInfo(args []string) error {
 		return fmt.Errorf("usage: phoenix info <path>   (shows description, tags, username, link, dates; never the value)")
 	}
 	path := args[0]
+	if err := plainPath(path); err != nil {
+		return err
+	}
 	if err := requireAuth(); err != nil {
 		return err
 	}

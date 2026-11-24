@@ -24,11 +24,13 @@ How it is protected ([threat model](docs/threat-model.md#threats-specific-to-the
 showing, copying or changing needs the password typed within the last 5
 minutes; every show and copy is audited (`read_value`, with the address and the
 login's ID) before the value is sent; policy rules (`source_ip`,
-`require_sealed`) hold in the dashboard too; values are never in a page's HTML
+`require_sealed`) hold for values in the dashboard too; values are never in a page's HTML
 and never cached; no page can be framed or run foreign script.
 
 Dashboard responses now carry a Content-Security-Policy: scripts must be files
-under `/dashboard/static/`.
+on the dashboard's own address, never inline. Every dashboard POST refuses
+requests from other sites. Wrong passwords sent in parallel now count one by
+one, at login too.
 
 ### A secret can carry its username and link
 
@@ -39,6 +41,8 @@ under `/dashboard/static/`.
   (`PATCH /v1/metadata/{path}`) changes them without reading or writing the
   value. Needs `write` on the path; audited as `describe`; who wrote the value
   and when stays as it was.
+- `phoenix set`, `info` and `describe` refuse a name with `?`, `#` or `%`. It
+  used to reach the server cut short, as another secret's name.
 - A save that fails now leaves the old value in use. Before, the server kept
   serving the new value from memory although it reported an error.
 

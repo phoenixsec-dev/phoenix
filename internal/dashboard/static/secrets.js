@@ -45,23 +45,29 @@ window.PhoenixSecrets = (function() {
     function askPassword(csrf) {
         var dialog = el('reauth'), form = el('reauth-form'), input = el('reauth-password'), error = el('reauth-error');
         return new Promise(function(resolve, reject) {
-            var ok = false;
+            var ok = false, checking = false;
             error.hidden = true;
             input.value = '';
             form.onsubmit = async function(e) {
                 e.preventDefault();
+                if (checking) return;
+                checking = true;
                 try {
                     await send('/dashboard/reauth', { _csrf: csrf, password: input.value });
                     ok = true;
                     dialog.close();
                 } catch (err) {
+                    checking = false;
                     error.textContent = err.message;
                     error.hidden = false;
                     input.value = '';
                     input.focus();
                 }
             };
-            el('reauth-cancel').onclick = function() { dialog.close(); };
+            // Not while the server is checking: it would unlock all the same.
+            el('reauth-cancel').onclick = function() { if (!checking) dialog.close(); };
+            dialog.oncancel = function(e) { if (checking) e.preventDefault(); };
+            window.addEventListener('pagehide', function() { input.value = ''; if (dialog.open) dialog.close(); }, { once: true });
             dialog.onclose = function() {
                 input.value = '';
                 if (ok) resolve(); else reject(new Error(''));
@@ -179,8 +185,10 @@ window.PhoenixSecrets = (function() {
         document.addEventListener('visibilitychange', function() { if (document.hidden) hide(); });
         window.addEventListener('pagehide', hide);
 
-        var fetchValue = function(use) {
-            return send('/dashboard/secrets/value', { _csrf: csrf, path: path, use: use })
+        // extra.link is the link copy-and-open will open; the server refuses
+        // if the secret's link is no longer that one.
+        var fetchValue = function(use, extra) {
+            return send('/dashboard/secrets/value', Object.assign({ _csrf: csrf, path: path, use: use }, extra))
                 .then(function(a) { return a.value; });
         };
         // run does one button's work: it blocks double taps, asks for the
@@ -232,7 +240,7 @@ window.PhoenixSecrets = (function() {
         if (el('copy-open')) {
             el('copy-open').addEventListener('click', function() {
                 run(async function() {
-                    await copyText(fetchValue('copy'));
+                    await copyText(fetchValue('copy', { link: el('open-link').getAttribute('data-link') }));
                     say('Password copied. If the page did not open, tap the link below.');
                     el('open-link').click();
                 });
@@ -258,9 +266,12 @@ window.PhoenixSecrets = (function() {
         var value = el('value-input'), error = el('form-error'), sending = false;
         if (value) {
             var toggle = el('value-toggle');
+            var remask = null;
             var mask = function(on) {
+                clearTimeout(remask);
                 value.classList.toggle('masked', on);
                 toggle.textContent = on ? 'Show' : 'Hide';
+                if (!on) remask = setTimeout(function() { mask(true); }, SHOW_SECONDS * 1000);
             };
             toggle.addEventListener('click', function() { mask(!value.classList.contains('masked')); });
             el('value-generate').addEventListener('click', function() { value.value = generate(); mask(false); });
@@ -278,7 +289,9 @@ window.PhoenixSecrets = (function() {
                 // Send only what was edited, so saving one field never puts
                 // back an old copy of another.
                 var text = f.type === 'text' || f.type === 'textarea';
-                if (text && f.value === f.defaultValue && f.name !== 'path') return;
+                // A one-line box drops line breaks from what it was given.
+                var was = f.type === 'text' ? f.defaultValue.replace(/[\r\n]/g, '') : f.defaultValue;
+                if (text && f.value === was && f.name !== 'path') return;
                 if (text) changed = true;
                 data[f.name] = f.value;
             });

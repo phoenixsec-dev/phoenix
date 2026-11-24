@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"slices"
@@ -215,7 +217,11 @@ func (s *Server) handleDescribeSecret(w http.ResponseWriter, r *http.Request) {
 	var req describeRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	err = dec.Decode(&req)
+	if err == nil && dec.Decode(&struct{}{}) != io.EOF {
+		err = errors.New("trailing content")
+	}
+	if err != nil {
 		jsonError(w, "invalid request body: send description, tags, username or url (the value is changed with PUT /v1/secrets)", http.StatusBadRequest)
 		return
 	}

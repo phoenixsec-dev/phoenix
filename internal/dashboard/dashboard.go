@@ -54,9 +54,32 @@ func newLoginRateLimiter() *loginRateLimiter {
 	return rl
 }
 
-func (rl *loginRateLimiter) check(ip string) error {
+// admit lets one password attempt through for every key (an address, or a
+// login), or says how long to wait. It counts the attempt as failed right
+// away; recordSuccess takes that back. Checking and counting are one step, so
+// parallel guesses cannot all get in before the first failure counts.
+func (rl *loginRateLimiter) admit(keys ...string) error {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	for _, k := range keys {
+		if err := rl.checkLocked(k); err != nil {
+			return err
+		}
+	}
+	for _, k := range keys {
+		e, ok := rl.entries[k]
+		if !ok {
+			e = &loginRateEntry{}
+			rl.entries[k] = e
+		}
+		e.failures++
+		e.blockedAt = time.Now()
+	}
+	return nil
+}
+
+// checkLocked reports whether key must wait. Caller holds rl.mu.
+func (rl *loginRateLimiter) checkLocked(ip string) error {
 	e, ok := rl.entries[ip]
 	if !ok || e.failures < loginMaxFailures {
 		return nil
@@ -75,22 +98,13 @@ func (rl *loginRateLimiter) check(ip string) error {
 	return nil
 }
 
-func (rl *loginRateLimiter) recordFailure(ip string) {
+// recordSuccess clears the count for each key after a right password.
+func (rl *loginRateLimiter) recordSuccess(keys ...string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	e, ok := rl.entries[ip]
-	if !ok {
-		e = &loginRateEntry{}
-		rl.entries[ip] = e
+	for _, k := range keys {
+		delete(rl.entries, k)
 	}
-	e.failures++
-	e.blockedAt = time.Now()
-}
-
-func (rl *loginRateLimiter) recordSuccess(ip string) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	delete(rl.entries, ip)
 }
 
 func (rl *loginRateLimiter) cleanupLoop() {
@@ -141,7 +155,6 @@ type Handler struct {
 	loginRL    *loginRateLimiter
 	logins     *loginTable // signed-in browsers (logins.go)
 	reveal     bool        // secret values may be shown and copied (secrets.go)
-	reauthMu   sync.Mutex  // one password re-ask at a time (recent.go)
 	mux        *http.ServeMux
 }
 
@@ -263,7 +276,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 
 	// Rate limit check
-	if err := h.loginRL.check(clientIP); err != nil {
+	if err := h.loginRL.admit(clientIP); err != nil {
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDenied("dashboard", "dashboard.login", "rate_limited", clientIP, err.Error())
 		}
@@ -273,7 +286,6 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	credential := r.FormValue("credential")
 	if !h.checkCredential(credential) {
-		h.loginRL.recordFailure(clientIP)
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDenied("dashboard", "dashboard.login", "login", clientIP, "invalid_credentials")
 		}
@@ -391,6 +403,13 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// CSRF check on POST
 		if r.Method == "POST" {
+			if !sameOrigin(r) {
+				if h.deps.Audit != nil {
+					h.deps.Audit.LogDenied("dashboard", "dashboard.csrf", r.URL.Path, extractClientIP(r), "cross_site_request")
+				}
+				http.Error(w, "This request came from another site", http.StatusForbidden)
+				return
+			}
 			formCSRF := r.FormValue("_csrf")
 			if !hmac.Equal([]byte(payload.CSRF), []byte(formCSRF)) {
 				if h.deps.Audit != nil {

@@ -11,19 +11,46 @@ var FILES = [
     '/dashboard/static/icon-180.png',
     '/dashboard/static/icon-192.png',
     '/dashboard/static/icon-512.png',
-    '/dashboard/static/manifest.json',
-    '/dashboard/static/offline.html'
+    '/dashboard/static/manifest.json'
 ];
 
+// The page shown when Phoenix can't be reached. It is written here rather than
+// stored, so no HTML from the network is ever kept.
+var OFFLINE = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Phoenix - offline</title>' +
+    '<link rel="stylesheet" href="/dashboard/static/style.css"></head><body class="login-body"><div class="login-card">' +
+    '<img src="/dashboard/static/phoenix-icon.svg" alt="" class="login-icon"><h1 class="login-title">Can\'t reach Phoenix</h1>' +
+    '<p class="hint">Nothing is kept on this device, so it needs a connection to the server.</p>' +
+    '<p><a class="btn btn-primary" href="/dashboard/secrets">Try again</a></p></div></body></html>';
+
+// storable says whether an answer really is the static file at path: not a
+// sign-in page a proxy put there, and not marked as not to be stored.
+var TYPES = { css: 'text/css', js: 'javascript', svg: 'image/svg', png: 'image/png', json: 'json' };
+function storable(path, r) {
+    var type = r.headers.get('Content-Type') || '', cc = r.headers.get('Cache-Control') || '';
+    return r.ok && r.type === 'basic' && !r.redirected && cc.indexOf('no-store') < 0 &&
+        new URL(r.url).pathname === path && type.indexOf(TYPES[path.split('.').pop()]) >= 0;
+}
+
 self.addEventListener('install', function(e) {
-    e.waitUntil(caches.open(CACHE).then(function(c) { return c.addAll(FILES); }).then(function() { return self.skipWaiting(); }));
+    e.waitUntil(caches.open(CACHE).then(function(c) {
+        return Promise.all(FILES.map(function(path) {
+            return fetch(path, { cache: 'no-cache' }).then(function(r) { if (storable(path, r)) return c.put(path, r); });
+        }));
+    }).then(function() { return self.skipWaiting(); }));
 });
 
 self.addEventListener('activate', function(e) {
     e.waitUntil(caches.keys().then(function(names) {
-        return Promise.all(names.filter(function(n) { return n !== CACHE; }).map(function(n) { return caches.delete(n); }));
+        // Other apps on this address keep their caches here too.
+        return Promise.all(names.filter(function(n) { return n.indexOf('phoenix-static-') === 0 && n !== CACHE; }).map(function(n) { return caches.delete(n); }));
     }).then(function() { return self.clients.claim(); }));
 });
+
+// kept is the stored copy of a listed file.
+function kept(path) {
+    return caches.open(CACHE).then(function(c) { return c.match(path); }).then(function(r) { return r || Response.error(); });
+}
 
 self.addEventListener('fetch', function(e) {
     var url = new URL(e.request.url);
@@ -32,16 +59,18 @@ self.addEventListener('fetch', function(e) {
     // Listed static file: from the server, or the kept copy when offline.
     if (!url.search && FILES.indexOf(url.pathname) >= 0) {
         e.respondWith(fetch(e.request).then(function(r) {
-            if (r.ok && r.type === 'basic' && !r.redirected) {
+            if (storable(url.pathname, r)) {
                 var copy = r.clone();
                 e.waitUntil(caches.open(CACHE).then(function(c) { return c.put(url.pathname, copy); }));
             }
             return r;
-        }).catch(function() { return caches.match(url.pathname); }));
+        }).catch(function() { return kept(url.pathname); }));
         return;
     }
     // A page: from the server only. Offline shows a fixed "can't reach" page.
     if (e.request.mode === 'navigate') {
-        e.respondWith(fetch(e.request).catch(function() { return caches.match('/dashboard/static/offline.html'); }));
+        e.respondWith(fetch(e.request).catch(function() {
+            return new Response(OFFLINE, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+        }));
     }
 });

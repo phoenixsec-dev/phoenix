@@ -213,7 +213,9 @@ func TestDescribeSecret(t *testing.T) {
 		`{}`:                            http.StatusBadRequest,
 		`{"value":"x"}`:                 http.StatusBadRequest,
 		`{"url":"javascript:alert(1)"}`: http.StatusBadRequest,
-		`nonsense`:                      http.StatusBadRequest,
+		`{"description":"x"} {"description":"y"}`: http.StatusBadRequest,
+		`{"description":"x"} junk`:                http.StatusBadRequest,
+		`nonsense`:                                http.StatusBadRequest,
 	} {
 		if code, got := patchMetadata(srv, admin, "test/a", body); code != want {
 			t.Errorf("%s: %d %s", body, code, got)

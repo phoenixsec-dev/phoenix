@@ -223,7 +223,7 @@ body {
 .one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 0.8em; }
 .row-user { overflow-wrap: anywhere; }
-.pill-tag { background: rgba(56,139,253,0.15); color: #58a6ff; font-family: inherit; }
+.pill-tag { max-width: 100%; overflow-wrap: anywhere; background: rgba(56,139,253,0.15); color: #58a6ff; font-family: inherit; }
 .back-link { display: inline-block; padding: 8px 0; margin-bottom: 4px; color: var(--text-secondary); text-decoration: none; font-size: 0.9em; }
 .secret-desc { margin-bottom: 12px; overflow-wrap: anywhere; white-space: pre-line; }
 .secret-card { background: var(--bg-card); border-radius: 10px; padding: 16px; margin: 16px 0; max-width: 640px; }
