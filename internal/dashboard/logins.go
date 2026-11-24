@@ -24,6 +24,7 @@ type dashLogin struct {
 	UserAgent string
 	IP        string // address of the most recent request
 	Started   time.Time
+	authAt    time.Time // when the password was last typed (recent.go)
 	LastUsed  time.Time
 	Expires   time.Time // same as the cookie expiry: session_ttl from sign-in
 }

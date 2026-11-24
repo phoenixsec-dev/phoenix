@@ -140,6 +140,8 @@ type Handler struct {
 	sessionTTL time.Duration
 	loginRL    *loginRateLimiter
 	logins     *loginTable // signed-in browsers (logins.go)
+	reveal     bool        // secret values may be shown and copied (secrets.go)
+	reauthMu   sync.Mutex  // one password re-ask at a time (recent.go)
 	mux        *http.ServeMux
 }
 
@@ -164,6 +166,7 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		sessionTTL: 4 * time.Hour,
 		loginRL:    newLoginRateLimiter(),
 		logins:     newLoginTable(),
+		reveal:     cfg.RevealEnabled(),
 		mux:        http.NewServeMux(),
 	}
 
@@ -196,8 +199,12 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		"templates/audit.html",
 		"templates/grants.html",
 		"templates/login.html",
+		"templates/more.html",
 		"templates/overview.html",
 		"templates/roles.html",
+		"templates/secret.html",
+		"templates/secret_edit.html",
+		"templates/secrets.html",
 		"templates/sessions.html",
 	}
 	h.tmpls = make(map[string]*template.Template, len(pageTemplates))
@@ -230,13 +237,17 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	h.mux.HandleFunc("POST /dashboard/logins/{id}/revoke", h.requireAuth(h.handleLoginRevoke))
 	h.mux.HandleFunc("GET /dashboard/audit", h.requireAuth(h.handleAudit))
 	h.mux.HandleFunc("GET /dashboard/roles", h.requireAuth(h.handleRoles))
+	h.mux.HandleFunc("GET /dashboard/more", h.requireAuth(h.handleMore))
 	h.mux.Handle("GET /dashboard/static/", http.StripPrefix("/dashboard/static/", staticHandler))
+	h.appRoutes()
+	h.secretRoutes()
 
 	return h, nil
 }
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w, r)
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -290,6 +301,37 @@ func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 
+	h.setLoginCookie(w, r, cookie, h.sessionTTL)
+
+	ua := r.UserAgent()
+	if len(ua) > 256 {
+		ua = ua[:256]
+	}
+	id := randomHex(8)
+	evicted := h.logins.add(&dashLogin{
+		ID:        id,
+		nonce:     nonce,
+		Device:    describeDevice(ua),
+		UserAgent: ua,
+		IP:        clientIP,
+		Started:   now,
+		authAt:    now,
+		LastUsed:  now,
+		Expires:   time.Unix(payload.Exp, 0),
+	}, now)
+
+	if h.deps.Audit != nil {
+		h.deps.Audit.LogAllowedWithMetadata("dashboard@"+clientIP, auditAction, "login", clientIP, map[string]string{"dashboard.login": id})
+		if evicted != nil {
+			h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.login_evicted", evicted.ID, evicted.IP)
+		}
+	}
+
+	http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
+}
+
+// setLoginCookie sends a signed login cookie that lasts ttl.
+func (h *Handler) setLoginCookie(w http.ResponseWriter, r *http.Request, cookie string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "phoenix_dash",
 		Value:    cookie,
@@ -297,32 +339,8 @@ func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, c
 		HttpOnly: true,
 		Secure:   isTLS(r),
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(h.sessionTTL.Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 	})
-
-	ua := r.UserAgent()
-	if len(ua) > 256 {
-		ua = ua[:256]
-	}
-	evicted := h.logins.add(&dashLogin{
-		ID:        randomHex(8),
-		nonce:     nonce,
-		Device:    describeDevice(ua),
-		UserAgent: ua,
-		IP:        clientIP,
-		Started:   now,
-		LastUsed:  now,
-		Expires:   time.Unix(payload.Exp, 0),
-	}, now)
-
-	if h.deps.Audit != nil {
-		h.deps.Audit.LogAllowed("dashboard@"+clientIP, auditAction, "login", clientIP)
-		if evicted != nil {
-			h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.login_evicted", evicted.ID, evicted.IP)
-		}
-	}
-
-	http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
 }
 
 // checkCredential verifies the dashboard password against its bcrypt hash.
