@@ -697,7 +697,8 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if cfg.RequireSealed && !s.hasSealKey(info.Agent) {
-			reject(CodeSealKeyNotRegistered, "granted values are served sealed, and this agent has no registered seal key", http.StatusBadRequest)
+			reject(CodeSealKeyNotRegistered, fmt.Sprintf("this server hands out approved values only sealed, and agent %s has no seal key yet, so nobody was asked. "+
+				"Once, an admin runs: phoenix keypair generate %s, and the agent gets PHOENIX_SEAL_KEY set to the file it writes", info.Agent, info.Agent), http.StatusBadRequest)
 			return
 		}
 	}
