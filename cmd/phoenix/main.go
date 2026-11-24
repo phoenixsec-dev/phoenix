@@ -13,7 +13,7 @@
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>] [--who W] [--host H] [--authority A]
-//	phoenix agent create <name> --token <token> --acl <path:actions,...> [--force]
+//	phoenix agent create <name> --acl <path:actions,...> [--token-stdin] [--force]
 //	phoenix agent set <name> [--who W] [--authority A] [--kind K] [--formerly old1,old2]
 //	phoenix agent show [name]
 //	phoenix agent list
@@ -324,7 +324,7 @@ Usage:
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
   phoenix audit [-n N] [-a agent] [-s time] [--who W] [--host H] [--authority A]
                                               Query audit log
-  phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]
+  phoenix agent create <name> --acl <path:actions;path:actions> [--token-stdin] [--force]
                                               ACL path globs: ns/* = one level, ns/** = recursive
   phoenix agent set <name> [--who W] [--authority A] [--kind K] [--formerly old1,old2]
                                               Describe an identity; its token and sessions carry on
@@ -1116,7 +1116,7 @@ func cmdAgentCreate(args []string) error {
 	}
 
 	var name, agentToken, aclStr string
-	var force bool
+	var force, tokenStdin, tokenGiven bool
 	labels := map[string]any{}
 	i := 0
 	if i < len(args) && !isOption("agent create", args[i]) {
@@ -1128,8 +1128,10 @@ func cmdAgentCreate(args []string) error {
 		case "-t", "--token":
 			i++
 			if i < len(args) {
-				agentToken = args[i]
+				agentToken, tokenGiven = args[i], true
 			}
+		case "--token-stdin":
+			tokenStdin = true
 		case "--acl":
 			i++
 			if i < len(args) {
@@ -1151,8 +1153,14 @@ func cmdAgentCreate(args []string) error {
 		i++
 	}
 
-	if name == "" || agentToken == "" {
-		return fmt.Errorf("usage: phoenix agent create <name> -t <token> [--acl <path:action,action;path:action>] [--force]")
+	if name == "" {
+		return agentCreateUsage
+	}
+	if tokenGiven && tokenStdin {
+		return errors.New("--token-stdin reads the token from stdin; leave out -t")
+	}
+	if tokenGiven && agentToken == "" {
+		return agentCreateUsage
 	}
 
 	// Parse ACL string: "openclaw/*:list,read_value;vector/*:list"
@@ -1185,6 +1193,15 @@ func cmdAgentCreate(args []string) error {
 				"actions": actions,
 			})
 		}
+	}
+
+	// Last, so nobody types a token only to hear that the ACL is wrong.
+	if !tokenGiven {
+		t, err := readAgentToken(name, tokenStdin)
+		if err != nil {
+			return err
+		}
+		agentToken = t
 	}
 
 	reqBody := map[string]interface{}{

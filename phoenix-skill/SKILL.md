@@ -152,8 +152,11 @@ Dry-run attestation check against the local policy file.
 ### Create an agent
 
 ```bash
-phoenix agent create <name> -t <token> --acl "namespace/*:list,read_value,write;other/*:list"
+phoenix agent create <name> --token-stdin --acl "namespace/*:list,read_value,write;other/*:list" < token-file
 ```
+
+Without `--token-stdin` it asks for the token at a terminal. Never put a token in
+the command line: it lands in shell history and the process list.
 
 Creates a new agent with the specified ACL permissions (admin only).
 Actions: `list` (see names), `read_value` (read values), `write`, `delete`,
@@ -250,7 +253,9 @@ Typical flow for setting up a new secret with proper access control:
 phoenix set myapp/api-key -d "OpenAI API key"
 
 # 2. Create an agent with scoped access
-phoenix agent create deployer -t "$(openssl rand -hex 32)" --acl "myapp/*:list,read_value"
+#    (human runs this; the token file goes to the agent's machine)
+(umask 077; openssl rand -hex 32 > deployer.token)
+phoenix agent create deployer --token-stdin --acl "myapp/*:list,read_value" < deployer.token
 
 # 3. Verify the agent can access the secret
 phoenix policy test --agent deployer --ip 10.0.0.5 myapp/api-key

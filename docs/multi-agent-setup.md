@@ -14,13 +14,14 @@ should be encrypted per-agent even in transit.
 ### 1. Create agents with scoped ACLs
 
 ```bash
-phoenix agent create builder \
-  -t "$(openssl rand -hex 32)" \
-  --acl "build/**:list,read_value"
+# Each token goes to its agent's machine; delete the file here afterwards.
+(umask 077; openssl rand -hex 32 > builder.token; openssl rand -hex 32 > deployer.token)
 
-phoenix agent create deployer \
-  -t "$(openssl rand -hex 32)" \
-  --acl "deploy/**:list,read_value;infra/**:list,read_value"
+phoenix agent create builder --token-stdin \
+  --acl "build/**:list,read_value" < builder.token
+
+phoenix agent create deployer --token-stdin \
+  --acl "deploy/**:list,read_value;infra/**:list,read_value" < deployer.token
 ```
 
 ### 2. Generate sealed key pairs

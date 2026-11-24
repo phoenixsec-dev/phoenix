@@ -11,7 +11,7 @@ printf '%s' "good" | "$PHX_BIN" set app/ok --value-stdin
 printf '%s' "nope" | "$PHX_BIN" set private/nope --value-stdin
 
 echo "==> Verify malformed ACL is rejected"
-if "$PHX_BIN" agent create bad-agent -t bad-token --acl "app/*read"; then
+if printf %s bad-token | "$PHX_BIN" agent create bad-agent --token-stdin --acl "app/*read"; then
   echo "error: malformed ACL was unexpectedly accepted" >&2
   exit 1
 else
@@ -19,7 +19,7 @@ else
 fi
 
 echo "==> Create valid ACL agent (with whitespace and trailing semicolon)"
-"$PHX_BIN" agent create scanner -t scanner-token --acl " app/*:list,read_value ;"
+printf %s scanner-token | "$PHX_BIN" agent create scanner --token-stdin --acl " app/*:list,read_value ;"
 
 echo "==> Allowed read"
 PHOENIX_TOKEN="scanner-token" "$PHX_BIN" get app/ok >/dev/null

@@ -250,15 +250,16 @@ See [Session Identity](session-identity.md) for full details.
 ## Agent management
 
 ```bash
-# Create an agent with scoped ACL (admin only)
-phoenix agent create deployer \
-  -t "$(openssl rand -hex 32)" \
+# Create an agent with scoped ACL (admin only). Asks for the token (hidden,
+# twice) at a terminal; scripts and generated tokens use --token-stdin.
+(umask 077; openssl rand -hex 32 > deployer.token)   # goes to the agent's machine; then delete it
+phoenix agent create deployer --token-stdin < deployer.token \
   --acl "myapp/**:list,read_value;staging/**:list,read_value,write"
 
 # Update an existing agent (re-create with --force). A different token ends
 # the agent's role sessions.
-phoenix agent create deployer \
-  -t "$(openssl rand -hex 32)" \
+(umask 077; openssl rand -hex 32 > deployer.token)
+phoenix agent create deployer --token-stdin < deployer.token \
   --acl "myapp/**:list,read_value,write" --force
 
 # Describe an existing agent (admin only). Its token, permissions and sessions

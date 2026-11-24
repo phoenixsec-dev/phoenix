@@ -18,7 +18,7 @@ start_server
 assert_not_contains "$(cat "$RUN_DIR/server.log")" "nobody can approve" "fresh install has an approver"
 
 printf '%s' synthetic-fresh | phoenix_admin set demo/api-key --value-stdin -d "Synthetic demo key" >/dev/null
-phoenix_admin agent create demo-agent -t synthetic-demo-agent --acl 'demo-none/*:list' >/dev/null
+printf %s synthetic-demo-agent | phoenix_admin agent create demo-agent --token-stdin --acl 'demo-none/*:list' >/dev/null
 phoenix_admin keypair generate demo-agent -o "$RUN_DIR/demo.seal.key" >/dev/null
 agent() { PHOENIX_TOKEN=synthetic-demo-agent PHOENIX_SEAL_KEY="$RUN_DIR/demo.seal.key" "$PHOENIX" "$@"; }
 if agent exec --env KEY=phoenix://demo/api-key -- true >"$RUN_DIR/denied" 2>&1; then die "agent could read before approval"; fi

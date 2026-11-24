@@ -96,6 +96,9 @@ redirected, such as `/app/key` or `app//key`, are now refused. `set` and
 
 ### Smaller things
 
+- `phoenix agent create` asks for the token at a terminal (hidden, twice), or
+  reads it with `--token-stdin`. `-t <token>` still works, but is no longer taught:
+  it puts the token in shell history and the process list.
 - The end-to-end scenarios run in CI on every pull request (into any branch), with two new ones:
   upgrade from the previous release and back on the same files, and a fresh
   install that approves a request.

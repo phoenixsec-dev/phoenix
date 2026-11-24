@@ -123,12 +123,12 @@ host's LAN IP and publish without the `127.0.0.1:` prefix. See
 
 Make an agent that may read nothing, and let it ask. With Docker, run the
 `phoenix` commands through `docker exec -e PHOENIX_TOKEN phoenix phoenix ...`
-(add `-e PHOENIX_SEAL_KEY`), and use paths inside the container.
+(add `-e PHOENIX_SEAL_KEY`, and `-i` for the line with `--token-stdin`), and use paths inside the container.
 
 ```bash
 # as admin: the agent, and a seal key so it only ever gets encrypted values
 AGENT_TOKEN="$(openssl rand -hex 32)"
-phoenix agent create demo-agent -t "$AGENT_TOKEN" --acl 'demo-none/*:list'
+printf %s "$AGENT_TOKEN" | phoenix agent create demo-agent --token-stdin --acl 'demo-none/*:list'
 phoenix keypair generate demo-agent -o /tmp/demo-agent.seal.key
 
 # as the agent

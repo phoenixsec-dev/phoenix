@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -86,5 +88,56 @@ func TestCmdAgentCreateTrailingSemicolon(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "malformed ACL") || strings.Contains(err.Error(), "was removed") {
 		t.Fatalf("trailing semicolon should be allowed: %v", err)
+	}
+}
+
+// The token comes from stdin, from -t or from a prompt asked twice, and what is
+// sent is exactly it. A bad answer sends nothing.
+func TestCmdAgentCreateTokenSources(t *testing.T) {
+	t.Setenv("PHOENIX_TOKEN", "test-token")
+	for name, tc := range map[string]struct {
+		args     []string
+		stdin    string
+		terminal []string // answers typed, nil = no terminal
+		want     string   // "" = refused
+	}{
+		"stdin":           {args: []string{"--token-stdin"}, stdin: "tok-one\n", want: "tok-one"},
+		"stdin, no break": {args: []string{"--token-stdin"}, stdin: "tok-one", want: "tok-one"},
+		"empty stdin":     {args: []string{"--token-stdin"}},
+		"two lines":       {args: []string{"--token-stdin"}, stdin: "tok\ntwo\n"},
+		"stdin and -t":    {args: []string{"--token-stdin", "-t", "tok-two"}, stdin: "tok-one"},
+		"-t":              {args: []string{"-t", "tok-two"}, stdin: "unused", want: "tok-two"},
+		"prompt":          {terminal: []string{" tok-three ", "tok-three"}, want: "tok-three"},
+		"prompt mismatch": {terminal: []string{"tok-three", "tok-four"}},
+		"prompt empty":    {terminal: []string{""}},
+		"nothing given":   {stdin: "tok-one"}, // stdin is read only when asked for
+	} {
+		t.Run(name, func(t *testing.T) {
+			oldPrompt, oldTerm := promptToken, stdinIsTerminal
+			defer func() { promptToken, stdinIsTerminal = oldPrompt, oldTerm }()
+			stdinIsTerminal = func() bool { return tc.terminal != nil }
+			promptToken = func(string) (string, error) {
+				a := tc.terminal[0]
+				tc.terminal = tc.terminal[1:]
+				return a, nil
+			}
+			sent := ""
+			withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				sent = string(b)
+				w.Write([]byte(`{"status":"ok"}`))
+			}, func() {
+				out, err := run(t, tc.stdin, func() error {
+					return cmdAgentCreate(append([]string{"bot", "--acl", "ns/*:list"}, tc.args...))
+				})
+				if tc.want == "" {
+					if err == nil || sent != "" {
+						t.Errorf("not refused (err %v, %d bytes sent)", err, len(sent))
+					}
+				} else if err != nil || !strings.Contains(sent, `"token":"`+tc.want+`"`) || strings.Contains(out, tc.want) {
+					t.Errorf("err %v, wrong token sent or printed", err)
+				}
+			})
+		})
 	}
 }

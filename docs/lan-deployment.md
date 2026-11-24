@@ -122,13 +122,14 @@ export PHOENIX_TOKEN="<admin-token>"
 export PHOENIX_CA_CERT="/data/phoenix/ca.crt"
 
 # Create agents with least-privilege ACLs
-phoenix agent create host-a-builder \
-  -t "$(openssl rand -hex 32)" \
-  --acl "build/**:list,read_value;ci/**:list,read_value"
+# Each token goes to its machine; delete the file here afterwards.
+(umask 077; openssl rand -hex 32 > host-a.token; openssl rand -hex 32 > host-b.token)
 
-phoenix agent create host-b-deployer \
-  -t "$(openssl rand -hex 32)" \
-  --acl "deploy/**:list,read_value;infra/**:list,read_value"
+phoenix agent create host-a-builder --token-stdin \
+  --acl "build/**:list,read_value;ci/**:list,read_value" < host-a.token
+
+phoenix agent create host-b-deployer --token-stdin \
+  --acl "deploy/**:list,read_value;infra/**:list,read_value" < host-b.token
 ```
 
 ## 3. Distribute the CA certificate to client machines
