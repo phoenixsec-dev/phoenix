@@ -183,7 +183,7 @@ func TestLoadCAFromPEM_RejectsNonCA(t *testing.T) {
 // The CA, which cannot be made again, is replaced in one step and left alone by
 // a reissue. The server certificate and key are written in place: whoever the
 // owner lets read them still can, a directory's default ACL cannot add readers,
-// and a link that leads nowhere is an error, not replaced.
+// and a symlink loop is an error, not replaced.
 func TestSaveKeepsCAAndAccess(t *testing.T) {
 	authority, err := GenerateCA("Test")
 	if err != nil {

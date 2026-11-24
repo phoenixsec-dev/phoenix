@@ -140,8 +140,8 @@ that dies halfway can do to it. Nothing to configure; what changed:
   matched the private key the agent uses. The same went for `--force` with the
   token unchanged: wider permissions took effect although the save failed. All
   three are undone now. Replacing a token or deleting an agent still takes
-  effect at once even if the save fails, so the old token stays dead until a
-  restart; the answer to a failed `--force` now says so.
+  effect at once even if the save fails, so the old token stays dead at least
+  until a restart; the answer to a failed `--force` now says so.
 
 ## v0.24.0 (2026-11-24)
 

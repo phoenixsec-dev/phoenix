@@ -60,14 +60,14 @@ If the server already stopped, or will not start (it cannot decrypt secrets):
 1. Stop the server and copy the whole data directory somewhere safe first.
 2. If `<store>.pre-rotate` exists and the server's message names it as the
    recovery: move it over the store file. Keep `master.key` as it is. (If the
-   message does not name it, it is missing secrets or does not open with this
-   key either.)
+   message does not name it, its secrets differ from the store's or it does not
+   open with this key either.)
 3. Otherwise, if `<store>.emergency-key` exists: keep the store file, and
    move `<store>.emergency-key` over `master.key`. Start with the usual
    passphrase.
 4. If neither file exists or neither works: the key from before the last
-   rotation is in `master.key.prev.new` if that file is there, otherwise in
-   `master.key.prev`. Try it on the safety copy first. Put it in place of `master.key` (this
+   rotation is in `master.key.prev`, or in `master.key.prev.new` if a rotation
+   was cut off. Try each that exists on the safety copy first. Put it in place of `master.key` (this
    fixes a store that rolled back to the old version after a power cut).
 5. Start the server and read a few secrets to confirm.
 6. Once it works, delete the leftover recovery files and your safety copy.

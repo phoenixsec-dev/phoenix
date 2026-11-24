@@ -1205,7 +1205,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, acl.ErrReplacedNotSaved) {
 			log.Printf("error updating agent %q: %v", req.Name, err)
-			s.auditLogDenied(r, info.Agent, "update-agent", req.Name, clientIP(r), "not_saved")
+			s.auditLogDenied(r, info.Agent, "update-agent", req.Name, clientIP(r), "save_uncertain")
 			jsonError(w, "the token was replaced and the old one no longer works, but that was not saved for certain: after a restart the last saved token may work instead. Fix the disk and run this again", http.StatusInternalServerError)
 			return
 		}
