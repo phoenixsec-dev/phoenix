@@ -221,15 +221,16 @@ func (s *Server) handleSSHWindow(w http.ResponseWriter, r *http.Request) {
 	if s.grantsOn() && s.sshRequestAllowed([]string{path}) && !s.grants.Health().Degraded {
 		g, ok := s.grants.GetGrant(r.PathValue("grant"))
 		open = ok && g.Action == grant.ActionSSHLogin && slices.Contains(g.Paths, path) && g.State(s.now()) == grant.GrantActive &&
-			s.grantTokenCurrent(g)
+			s.GrantTokenCurrent(g)
 	}
 	jsonOK(w, map[string]any{"open": open})
 }
 
-// grantTokenCurrent reports whether the bearer token g was given to is still
+// GrantTokenCurrent reports whether the bearer token g was given to is still
 // its agent's, and the same issue of it where that was recorded. Signing already
-// needs that token; this is for a login signed before the token was replaced.
-func (s *Server) grantTokenCurrent(g grant.Grant) bool {
+// needs that token; this is for a login signed before the token was replaced, and
+// for the dashboard, which lists who has access.
+func (s *Server) GrantTokenCurrent(g grant.Grant) bool {
 	a, err := s.acl.GetAgent(g.Agent)
 	return err == nil && g.CredentialFP != "" && grant.BearerFingerprint(a.TokenHash) == g.CredentialFP &&
 		(g.IssueFP == "" || g.IssueFP == sessionCredentialFP(a))

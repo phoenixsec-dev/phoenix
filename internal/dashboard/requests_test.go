@@ -314,6 +314,47 @@ func TestRemoveSaysWhatIsLeft(t *testing.T) {
 	}
 }
 
+// A grant ends with the token it was given to, so once that is replaced no page
+// may call it open. A revoke that is not saved yet stays, to be tried again.
+func TestGrantOfReplacedTokenIsNotOpen(t *testing.T) {
+	e := newAccessEnv(t)
+	always := e.request(t, "always", 30*time.Minute, "infra/a", "infra/b")
+	if code := redirectParam(t, e.answer(t, always.ID, "always", nil), "error"); code != "" {
+		t.Fatal(code)
+	}
+	timed := e.request(t, "timed", 30*time.Minute, "infra/a", "infra/missing")
+	if code := redirectParam(t, e.answer(t, timed.ID, "time", nil), "error"); code != "" {
+		t.Fatal(code)
+	}
+	isOpen := func() (onSecret, onRequests bool) {
+		onSecret = strings.Contains(e.get(t, "/dashboard/secrets/open?path=infra/a"), "temporary, ")
+		return onSecret, len(e.h.requestsView("").Active) > 0
+	}
+	if s, r := isOpen(); !s || !r {
+		t.Fatalf("before: on the secret %v, on Requests %v", s, r)
+	}
+	a, err := e.acl.GetAgent("courier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.acl.UpdateAgent("courier", "new-token", a.Permissions); err != nil {
+		t.Fatal(err)
+	}
+	if s, r := isOpen(); s || r {
+		t.Errorf("after the token was replaced: on the secret %v, on Requests %v", s, r)
+	}
+	w := e.post(t, "/dashboard/requests/always/remove", url.Values{"agent": {"courier"}, "path": {"infra/a"}, "request": {always.ID}}, true)
+	if got := redirectParam(t, w, "done"); got != "removed" {
+		t.Errorf("removing Always: %q, want removed", got)
+	}
+	e.fs.fail.Store(true)
+	rq, _ := e.gs.GetRequest(timed.ID)
+	e.post(t, "/dashboard/requests/grants/"+rq.GrantID+"/revoke", nil, true)
+	if v := e.h.requestsView("").Active; len(v) != 1 || !v[0].Revoked {
+		t.Errorf("unsaved revoke: %+v", v)
+	}
+}
+
 func TestExpiredStaysVisible(t *testing.T) {
 	e := newAccessEnv(t)
 	rq := e.request(t, "why", 30*time.Minute, "infra/a")

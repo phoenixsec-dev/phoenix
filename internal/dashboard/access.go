@@ -29,6 +29,9 @@ type AccessApprover interface {
 	// RequestTokenCurrent reports whether the agent still has the token that
 	// made the request.
 	RequestTokenCurrent(rq grant.Request) bool
+	// GrantTokenCurrent reports whether the agent still has the token the
+	// grant was given to; without it the grant opens nothing.
+	GrantTokenCurrent(g grant.Grant) bool
 	// AccessRequestSettings is the access_requests config in force now.
 	AccessRequestSettings() config.AccessRequestsSettings
 }

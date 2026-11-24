@@ -238,6 +238,9 @@ func (h *Handler) requestsView(csrf string) requestsView {
 		if st != grant.GrantActive && !revoked {
 			continue
 		}
+		if !revoked && h.deps.Access != nil && !h.deps.Access.GrantTokenCurrent(g) {
+			continue // replacing the agent's token ended it
+		}
 		v.Active = append(v.Active, activeRow{
 			ID: g.ID, CSRF: csrf, Agent: g.Agent, What: what(g.Action, g.Paths), Uses: usesText(g),
 			ExpiresAt: g.ExpiresAt, LastUsed: g.LastUsedAt, By: g.ApprovedBy, Revoked: revoked,
@@ -594,7 +597,8 @@ func (h *Handler) handleAlwaysRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	// Say so when something else goes on allowing it.
 	openGrant := slices.ContainsFunc(h.deps.Grants.ListGrants(agent, false), func(g grant.Grant) bool {
-		return g.Action == grant.ActionReadValue && slices.Contains(g.Paths, path) && g.UsesLeft(path) != 0
+		return g.Action == grant.ActionReadValue && slices.Contains(g.Paths, path) && g.UsesLeft(path) != 0 &&
+			h.deps.Access.GrantTokenCurrent(g)
 	})
 	switch {
 	case h.deps.ACL != nil && h.deps.ACL.Authorize(agent, path, acl.ActionReadValue) == nil:
