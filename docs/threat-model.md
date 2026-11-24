@@ -181,9 +181,10 @@ The dashboard **must** be deployed behind one of:
 2. **Native HTTPS** — `"https_listener": {"enabled": true}` (using the
    `--init` server certificate); the cookie gets `Secure` via `r.TLS != nil`.
 
-3. **TLS reverse proxy** — proxy terminates TLS, sets `X-Forwarded-Proto: https`,
-   Phoenix detects this and sets `Secure` on the cookie. The server itself
-   binds to loopback.
+3. **TLS reverse proxy** — proxy terminates TLS, sets `X-Forwarded-Proto: https`
+   and `X-Forwarded-For`, and is listed in `dashboard.trusted_proxies`; Phoenix
+   then sets `Secure` on the cookie and records the visitor's own address. Both
+   headers are ignored from anyone not listed. The server itself binds to loopback.
 
 Exposing the dashboard over plain HTTP on a network you do not fully control is
 **not acceptable**. The session cookie would transit in cleartext. The server

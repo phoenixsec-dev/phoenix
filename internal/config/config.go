@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -183,6 +184,36 @@ type DashboardConfig struct {
 	Enabled      bool   `json:"enabled"`
 	PasswordHash string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
 	SessionTTL   string `json:"session_ttl,omitempty"`   // default "4h"
+	// TrustedProxies are the reverse proxies (IPs or CIDRs) whose
+	// X-Forwarded-For and X-Forwarded-Proto the dashboard believes. Unset =
+	// nobody: the address shown is the one the connection comes from.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+}
+
+// TrustedProxyPrefixes parses trusted_proxies. It refuses "everyone" (/0),
+// which would let any visitor choose the address Phoenix records for them.
+func (c DashboardConfig) TrustedProxyPrefixes() ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, s := range c.TrustedProxies {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			var a netip.Addr
+			if a, err = netip.ParseAddr(s); err == nil {
+				a = a.Unmap().WithZone("")
+				p = netip.PrefixFrom(a, a.BitLen())
+			}
+		}
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("dashboard.trusted_proxies: %q is not an IP address or CIDR", s)
+		case p.Bits() == 0:
+			return nil, fmt.Errorf("dashboard.trusted_proxies: %q trusts everyone; list your proxy's own address", s)
+		case p.Addr().Is4In6():
+			return nil, fmt.Errorf("dashboard.trusted_proxies: write %q as an IPv4 CIDR", s)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 // validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.
@@ -368,6 +399,10 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("dashboard.session_ttl: invalid duration %q: %w", c.Dashboard.SessionTTL, err)
 			}
 		}
+	}
+
+	if _, err := c.Dashboard.TrustedProxyPrefixes(); err != nil {
+		return err
 	}
 
 	// Validate session config

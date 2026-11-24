@@ -31,6 +31,24 @@ once the token was replaced or the agent deleted: a kept certificate stops
 working at once and an open session ends within about 30 seconds. Nothing to
 change on the machines.
 
+### Security: the dashboard believed X-Forwarded-For from anyone
+
+Any visitor could send their own `X-Forwarded-For`, use a new one for each
+guess to dodge the login lockout, and choose the address shown beside a login
+or an approval. `X-Forwarded-Proto` was believed the same way. The dashboard now uses the
+address the connection comes from. The API always did.
+
+**Action needed only if your dashboard is behind a reverse proxy:** add the
+proxy's address to the new `dashboard.trusted_proxies` and restart, for example
+`"trusted_proxies": ["127.0.0.1"]` for a proxy on the same host. Until you do,
+the dashboard works and nobody is signed out or refused, but logins and
+approvals show the proxy's address, the cookie has no `Secure` flag, and
+everyone behind the proxy shares one login lockout (a wait of up to 60 seconds
+after repeated wrong passwords). The log names the address to add:
+`Dashboard: ignored X-Forwarded headers from <address>`. A config with the
+setting still loads on older versions, which ignore it. Details:
+[Dashboard](docs/dashboard.md#network-access-tls-reverse-proxy).
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine

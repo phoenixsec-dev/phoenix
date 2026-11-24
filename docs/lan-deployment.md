@@ -263,8 +263,11 @@ phoenix-server --hash-password
 Restart the server. Over HTTPS, the `Secure` cookie flag is set
 automatically. Access the dashboard at `https://192.168.1.10:9443/dashboard/`.
 
-If you are using a reverse proxy instead of `https_listener`, ensure the proxy
-sets `X-Forwarded-Proto: https` so Phoenix enables the `Secure` flag.
+If you are using a reverse proxy instead of `https_listener`, list its address in
+`dashboard.trusted_proxies` and ensure it sets `X-Forwarded-For` and
+`X-Forwarded-Proto: https`, so Phoenix enables the `Secure` flag and records each
+visitor's own address. See
+[Dashboard](dashboard.md#network-access-tls-reverse-proxy).
 
 **Do not** enable the dashboard on a LAN deployment without HTTPS. The session
 cookie would be transmitted in cleartext on the network.

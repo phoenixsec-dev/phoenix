@@ -145,6 +145,7 @@ Then add it to config:
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
+| `dashboard.trusted_proxies` | `[]string` | Reverse proxies (IPs or CIDRs) whose `X-Forwarded-*` headers the dashboard believes (default: none). Set it if the dashboard is behind a reverse proxy; see [Dashboard](dashboard.md#network-access-tls-reverse-proxy) |
 
 `password_hash` is required when the dashboard is enabled (`dashboard.pin`
 was removed; a config that still sets it will not start).
@@ -157,8 +158,8 @@ Login attempts are rate-limited with exponential backoff (5 failures before lock
 up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.
 
 **Transport security:** When a request arrives over HTTPS (`https_listener`)
-or through a TLS reverse proxy (detected via
-`X-Forwarded-Proto: https`),
+or through a TLS reverse proxy listed in `dashboard.trusted_proxies` (detected
+via its `X-Forwarded-Proto: https`),
 the session cookie is set with `Secure` flag automatically. For production use:
 
 - Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`), or

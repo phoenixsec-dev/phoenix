@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -315,8 +316,9 @@ func TestLoginRateLimiting(t *testing.T) {
 
 func TestSecureCookieOnTLS(t *testing.T) {
 	h, _ := testHandler(t)
+	h.trusted = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")} // httptest's peer
 
-	// Login via X-Forwarded-Proto: https
+	// Login via X-Forwarded-Proto: https from a trusted proxy
 	form := url.Values{"credential": {"testpass"}}
 	req := httptest.NewRequest("POST", "/dashboard/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

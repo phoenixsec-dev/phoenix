@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -139,7 +140,9 @@ type Handler struct {
 	passwordH  []byte // bcrypt hash of the dashboard password
 	sessionTTL time.Duration
 	loginRL    *loginRateLimiter
-	logins     *loginTable // signed-in browsers (logins.go)
+	logins     *loginTable    // signed-in browsers (logins.go)
+	trusted    []netip.Prefix // reverse proxies whose headers count (clientip.go)
+	hints      proxyHints
 	mux        *http.ServeMux
 }
 
@@ -166,6 +169,12 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		logins:     newLoginTable(),
 		mux:        http.NewServeMux(),
 	}
+
+	trusted, err := cfg.TrustedProxyPrefixes()
+	if err != nil {
+		return nil, err
+	}
+	h.trusted = trusted
 
 	// Parse session TTL
 	if cfg.SessionTTL != "" {
@@ -237,7 +246,8 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mux.ServeHTTP(w, r)
+	h.hints.check(r, h.trusted)
+	h.mux.ServeHTTP(w, withClient(r, h.trusted))
 }
 
 // --- Auth ---
@@ -734,24 +744,6 @@ func ttlRemain(t time.Time) string {
 	return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
-func extractClientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return strings.SplitN(fwd, ",", 2)[0]
-	}
-	if idx := strings.LastIndex(r.RemoteAddr, ":"); idx != -1 {
-		return r.RemoteAddr[:idx]
-	}
-	return r.RemoteAddr
-}
-
 func escapeFlash(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, " ", "+"), "&", "%26")
-}
-
-// isTLS returns true if the request arrived over TLS (direct or via reverse proxy).
-func isTLS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
