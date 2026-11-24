@@ -14,7 +14,8 @@ phoenix set personal/petstore -d "Pet food account" --username me@example.com --
 phoenix get myapp/db-password
 
 # List secrets with their descriptions (never values).
-# myapp, myapp/ and myapp/* all mean the folder myapp/
+# myapp, myapp/ and myapp/* all mean the folder myapp/. A folder with ? or [ in
+# its name needs the slash at the end: phoenix list 'what?/'
 phoenix list myapp/
 phoenix list --tag prod          # only secrets tagged prod
 phoenix list myapp/ --names      # bare paths, one per line, for scripts
@@ -253,13 +254,14 @@ See [Session Identity](session-identity.md) for full details.
 # Create an agent with scoped ACL (admin only). Asks for the token (hidden,
 # twice) at a terminal; scripts and generated tokens use --token-stdin.
 # (set -C: never write a token into a file that is already there.)
-(umask 077; set -C; openssl rand -hex 32 > deployer.token)   # goes to the agent's machine; then delete it
+# The token file goes to the agent's machine; then delete it here.
+(umask 077; set -C; openssl rand -hex 32 > deployer.token) &&
 phoenix agent create deployer --token-stdin < deployer.token \
   --acl "myapp/**:list,read_value;staging/**:list,read_value,write"
 
 # Update an existing agent (re-create with --force). A different token ends
 # the agent's role sessions.
-(umask 077; set -C; openssl rand -hex 32 > deployer-new.token)
+(umask 077; set -C; openssl rand -hex 32 > deployer-new.token) &&
 phoenix agent create deployer --token-stdin < deployer-new.token \
   --acl "myapp/**:list,read_value,write" --force
 

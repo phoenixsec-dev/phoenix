@@ -94,7 +94,7 @@ func waitLog(t *testing.T, buf *syncBuf, want string) string {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("log never contained %q; got:\n%s", want, buf.String())
+	t.Fatalf("log (%d bytes) never contained %q", len(buf.String()), want)
 	return ""
 }
 
@@ -297,6 +297,6 @@ func TestNotifyTransportFailureDoesNotLogURL(t *testing.T) {
 	e.request(t, vectorTok, "infra/b2/app-key")
 	out := waitLog(t, logs, "notify for")
 	if strings.Contains(out, "private-topic-xyz") || strings.Contains(out, addr) {
-		t.Fatalf("notify failure log shows the URL:\n%s", out)
+		t.Fatal("notify failure log shows the URL")
 	}
 }

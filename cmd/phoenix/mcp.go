@@ -144,7 +144,7 @@ var mcpBaseTools = []mcpTool{
 			"properties": {
 				"prefix": {
 					"type": "string",
-					"description": "Optional folder to list, e.g. 'myapp/' ('myapp' and 'myapp/*' mean the same; other wildcards are refused). Omit to list all accessible secrets."
+					"description": "Optional folder to list, e.g. 'myapp/' ('myapp' and 'myapp/*' mean the same; other wildcards are refused; if ? or [ is part of the folder's name, end it with /). Omit to list all accessible secrets."
 				},
 				"tag": {
 					"type": "string",

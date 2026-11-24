@@ -231,7 +231,7 @@ func (h *Handler) policyBlock(r *http.Request, path string) string {
 	if errors.As(err, &denied) && denied.SealedRequired {
 		return "A rule says this secret is only handled sealed, with an agent's key, so its value can't be used here."
 	}
-	return "A rule says this secret can only be used from certain machines, and you are connecting from " + ip + "."
+	return "A rule says this secret can only be used from certain machines, and this connection comes from " + ip + "."
 }
 
 // revealOffText is the answer to a page that still offers Show or Copy after

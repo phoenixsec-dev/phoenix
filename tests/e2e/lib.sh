@@ -6,7 +6,7 @@ REPO_ROOT="$(git -C "$E2E_DIR" rev-parse --show-toplevel)"
 # Set on purpose: the binaries in it are used as they are. Otherwise every
 # scenario builds, into a folder of this checkout's own, so two checkouts never
 # test each other's binaries. Under the home folder: nobody else can swap them.
-BIN_DIR="${E2E_BIN_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/phoenix-e2e/$(printf %s "$REPO_ROOT" | cksum | cut -d' ' -f1)}"
+BIN_DIR="${E2E_BIN_DIR:-$HOME/.cache/phoenix-e2e/$(printf %s "$REPO_ROOT" | cksum | cut -d' ' -f1)}"
 GO_BIN="${GO_BIN:-$(command -v go 2>/dev/null || true)}"
 PHOENIX="$BIN_DIR/phoenix"
 PHOENIX_SERVER_BIN="$BIN_DIR/phoenix-server"
@@ -33,7 +33,7 @@ scenario_start() { log "Scenario $1: $2"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || skip "$1 is not installed"; }
 assert_eq() { [[ "$1" == "$2" ]] || die "${3:-values differ}: got '$1', want '$2'"; }
 # For tokens and secret values: says which check failed, never what it compared.
-assert_secret() { [[ "$1" == "$2" ]] || die "${3:-wrong secret value} (got ${#1} characters, want ${#2})"; }
+assert_secret() { [[ "$1" == "$2" ]] || die "${3:-wrong secret value}"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || die "${3:-output missing expected text}: $2"; }
 # token_from_init FILE / password_from_init FILE print the admin token and the
 # dashboard password that "phoenix-server --init" printed.
@@ -53,6 +53,7 @@ assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbid
 build_current() {
   [[ -n "$GO_BIN" && -x "$GO_BIN" ]] || die "Go is not available; set GO_BIN to the Go executable"
   mkdir -p "$BIN_DIR"
+  [[ -O "$BIN_DIR" ]] || die "$BIN_DIR belongs to another user; its binaries cannot be trusted"
   if [[ -z "${E2E_BIN_DIR:-}" || ! -x "$PHOENIX" || ! -x "$PHOENIX_SERVER_BIN" || "${E2E_REBUILD:-0}" == 1 ]]; then
     log "Building current Phoenix binaries into $BIN_DIR"
     (cd "$REPO_ROOT" && "$GO_BIN" build -o "$BIN_DIR/" ./cmd/...)

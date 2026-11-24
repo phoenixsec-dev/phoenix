@@ -380,6 +380,11 @@ func resolveConfigPath(flagValue string) string {
 // realConfigPath is the full path of the config file pages tell the owner to
 // edit. Links are followed first: "link/../x" is not always "x".
 func realConfigPath(path string) string {
+	// The working directory may be a link too, so it is put in front as is:
+	// Abs and Join would remove a ".." before the link was followed.
+	if wd, err := os.Getwd(); err == nil && !filepath.IsAbs(path) {
+		path = wd + string(filepath.Separator) + path
+	}
 	if real, err := filepath.EvalSymlinks(path); err == nil {
 		path = real
 	}

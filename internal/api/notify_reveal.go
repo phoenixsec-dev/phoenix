@@ -97,10 +97,10 @@ func (s *Server) sendRevealNotify(ctx context.Context, cfg config.AccessRequests
 	return s.postNotify(ctx, cfg, "Phoenix: secret "+verb, "eyes", link, body)
 }
 
-// quoteOdd quotes a name with invisible or control characters in it, so it can
-// be told from the name without them.
+// quoteOdd quotes a name with invisible characters, quotes or backslashes in it,
+// so no two names look the same.
 func quoteOdd(name string) string {
-	if strings.ContainsFunc(name, func(r rune) bool { return !unicode.IsPrint(r) }) {
+	if strings.ContainsFunc(name, func(r rune) bool { return !unicode.IsPrint(r) || r == '"' || r == '\\' }) {
 		return strconv.Quote(name)
 	}
 	return name

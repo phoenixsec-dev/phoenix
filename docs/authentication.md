@@ -16,7 +16,8 @@ encrypted in transit. See
 Create an agent with scoped permissions:
 
 ```bash
-(umask 077; set -C; openssl rand -hex 32 > deployer.token)   # goes to the agent's machine; then delete it
+# the token file goes to the agent's machine; then delete it here
+(umask 077; set -C; openssl rand -hex 32 > deployer.token) &&
 phoenix agent create deployer --token-stdin < deployer.token \
   --acl "myapp/**:list,read_value;staging/**:list,read_value,write"
 ```

@@ -37,7 +37,7 @@ func TestShowingIsOffUntilTheConfigSaysSo(t *testing.T) {
 	e := newSecretsEnv(t, config.DashboardConfig{}, "")
 	e.h.deps.ConfigPath = "/etc/phoenix/config.json"
 	page := e.openPage()
-	for _, want := range []string{`<pre class="config-line">"reveal": true,</pre>`, "/etc/phoenix/config.json"} {
+	for _, want := range []string{`change <code>"reveal": false</code> to <code>true</code>`, `right after <code>"dashboard": {</code>:</p>`, `<pre class="config-line">"reveal": true,</pre>`, "/etc/phoenix/config.json"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page does not hold %s", want)
 		}

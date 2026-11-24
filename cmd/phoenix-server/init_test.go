@@ -228,6 +228,11 @@ func TestRealConfigPath(t *testing.T) {
 	if got := realConfigPath(dir + "/link/../config.json"); got != real {
 		t.Errorf("got %s, want %s", got, real)
 	}
+	t.Chdir(filepath.Join(dir, "link"))
+	t.Setenv("PWD", filepath.Join(dir, "link")) // as a shell that came in through the link
+	if got := realConfigPath("../config.json"); got != real {
+		t.Errorf("from a linked folder: got %s, want %s", got, real)
+	}
 	if got := realConfigPath("missing.json"); !filepath.IsAbs(got) {
 		t.Errorf("missing file: %s is not a full path", got)
 	}
