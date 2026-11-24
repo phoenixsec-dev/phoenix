@@ -15,9 +15,9 @@ CI (`.github/workflows/ci.yml`, job `e2e`) runs every scenario except 09 and 12,
 which need an outside service. A new scenario file is picked up by itself.
 `--no-skips` counts a skip as a failure.
 
-The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PATH Go executable, `E2E_BIN_DIR` to reuse prebuilt binaries, or `E2E_REBUILD=1` to force a rebuild.
+The core suite needs Bash, Go, curl, Python 3, and jq. Set `GO_BIN` for a non-PATH Go executable, or `E2E_BIN_DIR` to use prebuilt binaries.
 
-> Binaries in `E2E_BIN_DIR` are reused whenever they already exist. After changing server behavior, run with `E2E_REBUILD=1` — otherwise scenarios silently test the previously built binary and a new assertion fails as if the feature were broken.
+> Without `E2E_BIN_DIR` every scenario builds this checkout first (Go's cache makes that quick), into a folder only this checkout uses. Binaries in an `E2E_BIN_DIR` you set are used as they are: after a change, set `E2E_REBUILD=1` too, or scenarios silently test the old ones.
 
 Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run project and free localhost port. Scenario 12 is opt-in: it needs the `op` CLI, `OP_SERVICE_ACCOUNT_TOKEN`, and a read-only synthetic vault selected by `PHOENIX_E2E_OP_VAULT` (default `phoenix-test`). Manual `stack.sh` use can override `COMPOSE_PROJECT_NAME` and the `E2E_*_PORT` variables. Scenario 18 builds Git commit `21a6ca4` (v0.13.5) and the current checkout. Scenario 23 builds the newest published release tag that is not newer than `internal/version` (and is not this very tree); `E2E_PREV_REF=<tag or commit>` picks another, back to v0.23.0. Both need the git history and tags, so a shallow clone is not enough.
 

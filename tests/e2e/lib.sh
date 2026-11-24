@@ -3,7 +3,11 @@ set -euo pipefail
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$E2E_DIR" rev-parse --show-toplevel)"
-E2E_BIN_DIR="${E2E_BIN_DIR:-${TMPDIR:-/tmp}/phoenix-e2e-bin-$(id -u)}"
+# Set on purpose: the binaries in it are used as they are. Otherwise every
+# scenario builds, into a folder of this checkout's own, so two checkouts never
+# test each other's binaries.
+E2E_BIN_GIVEN="${E2E_BIN_DIR:+1}"
+E2E_BIN_DIR="${E2E_BIN_DIR:-${TMPDIR:-/tmp}/phoenix-e2e-bin-$(id -u)-$(printf %s "$REPO_ROOT" | cksum | cut -d' ' -f1)}"
 GO_BIN="${GO_BIN:-$(command -v go 2>/dev/null || true)}"
 PHOENIX="$E2E_BIN_DIR/phoenix"
 PHOENIX_SERVER_BIN="$E2E_BIN_DIR/phoenix-server"
@@ -48,7 +52,7 @@ assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbid
 build_current() {
   [[ -n "$GO_BIN" && -x "$GO_BIN" ]] || die "Go is not available; set GO_BIN to the Go executable"
   mkdir -p "$E2E_BIN_DIR"
-  if [[ ! -x "$PHOENIX" || ! -x "$PHOENIX_SERVER_BIN" || "${E2E_REBUILD:-0}" == 1 ]]; then
+  if [[ -z "$E2E_BIN_GIVEN" || ! -x "$PHOENIX" || ! -x "$PHOENIX_SERVER_BIN" || "${E2E_REBUILD:-0}" == 1 ]]; then
     log "Building current Phoenix binaries into $E2E_BIN_DIR"
     (cd "$REPO_ROOT" && "$GO_BIN" build -o "$E2E_BIN_DIR/" ./cmd/...)
   fi
