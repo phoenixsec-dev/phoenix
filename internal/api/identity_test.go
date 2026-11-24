@@ -66,7 +66,7 @@ func TestSetIdentityKeepsTokenAndSessions(t *testing.T) {
 	}
 
 	// Only an admin's own token may, and nothing outside the four fields.
-	for _, c := range []struct {
+	for i, c := range []struct {
 		as, tok, name, body string // as, not tok, is what a failure prints
 		code                int
 	}{
@@ -81,7 +81,7 @@ func TestSetIdentityKeepsTokenAndSessions(t *testing.T) {
 		{"admin", "admin-token", "worker", `{"who":"x"} junk`, 400},
 	} {
 		if code, _ := e.do("PATCH", "/v1/agents/"+c.name+"/identity", c.tok, c.body); code != c.code {
-			t.Errorf("%s as %s = %d, want %d", c.body, c.as, code, c.code)
+			t.Errorf("case %d as %s = %d, want %d", i, c.as, code, c.code)
 		}
 	}
 	if code, _ := e.do("PATCH", "/v1/agents/worker/identity", "admin-token", "{\"kind\":\"agent\"}\n \n"); code != 200 {
@@ -151,7 +151,6 @@ func TestGrantLinesCarryIdentity(t *testing.T) {
 			}
 			return sink.Append(ev)
 		})
-		o.ActorLabels = func(actor, ip string) (string, string) { return GrantActorLabels(e.srv.acl)(actor, ip) }
 	}
 	e = newGrantEnv(t, opts)
 	label := func(name, body string) {
@@ -232,6 +231,97 @@ func TestGrantLinesCarryIdentity(t *testing.T) {
 		}
 	}
 }
+
+// A grant line has the labels its caller was authenticated with, whatever
+// happens to the identity while the request is handled, and every line of one
+// deletion has the same. A bearer identity called exactly what the dashboard
+// is called keeps its own.
+func TestGrantLinesUseAuthenticatedLabels(t *testing.T) {
+	e := newGrantEnv(t)
+	set := func(name, who string) {
+		if _, err := e.srv.acl.SetLabels(name, acl.LabelChange{Who: &who}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// slow sends a request whose identity is relabeled while the body is read.
+	slow := func(tok, name, method, path, body string) {
+		t.Helper()
+		set(name, "before")
+		read := false
+		req := httptest.NewRequest(method, path, readerFunc(func(p []byte) (int, error) {
+			if read {
+				return 0, io.EOF
+			}
+			read = true
+			set(name, "after")
+			return copy(p, body), nil
+		}))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		e.srv.ServeHTTP(w, req)
+		if w.Code >= 300 || !read {
+			t.Fatalf("%s %s = %d, body read %v", method, path, w.Code, read)
+		}
+	}
+	twin := "dashboard@192.0.2.1" // httptest's client address
+	if err := e.srv.acl.AddAgent(twin, "twin-token", nil); err != nil {
+		t.Fatal(err)
+	}
+	e.set(func(s *config.AccessRequestsSettings) {
+		s.Approvers = []string{"approver", twin}
+		s.RequireSealed = false
+	})
+	slow(vectorTok, "vector", "POST", "/v1/access-requests", `{"paths":["infra/b2/app-key"],"reason":"r","ttl":"30m"}`)
+	id := e.store.ListRequests("vector", grant.StatusPending)[0].ID
+	slow(approverTok, "approver", "POST", "/v1/access-requests/"+id+"/approve", "{}")
+	slow(approverTok, "approver", "POST", "/v1/access-requests/"+e.request(t, vectorTok, "infra/other")+"/deny", "{}")
+
+	set(twin, "desk")
+	asked := e.request(t, vectorTok, "infra/x")
+	expect(t, e.do("POST", "/v1/access-requests/"+asked+"/approve", "twin-token", "{}"), 200, "")
+	asked = e.request(t, vectorTok, "infra/y")
+	if _, err := e.srv.ApproveAccessRequestAs(asked, twin, "192.0.2.1", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	e.request(t, vectorTok, "infra/z") // pending, so deleting writes all three kinds
+	set("admin", "boss")
+	expect(t, e.do("DELETE", "/v1/agents/vector", adminTok, ""), 200, "")
+
+	es, err := audit.Query(e.srv.auditPath, audit.QueryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var twins, deleted []string
+	for _, l := range es {
+		switch {
+		case l.Metadata["request_id"] == id || l.Action == "access_request.denied":
+			if l.Agent != "admin" && l.Who != "before" {
+				t.Errorf("%s by %s: who %q", l.Action, l.Agent, l.Who)
+			}
+		case l.Agent == twin && l.Action == "access_request.approved":
+			twins = append(twins, l.Who)
+		}
+		if l.Agent == "admin" && l.Metadata["event_id"] != "" {
+			deleted = append(deleted, l.Action+" "+l.Who)
+		}
+	}
+	if fmt.Sprint(twins) != "[desk ]" {
+		t.Errorf("bearer then dashboard = %q", twins)
+	}
+	if len(deleted) < 6 {
+		t.Errorf("deletion lines = %q", deleted)
+	}
+	for _, d := range deleted {
+		if !strings.HasSuffix(d, " boss") {
+			t.Errorf("deletion line %q", d)
+		}
+	}
+}
+
+// readerFunc is an io.Reader made of a function.
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 // sinkFunc is a grant.AuditSink made of a function.
 type sinkFunc func(grant.Event) error

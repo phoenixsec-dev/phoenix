@@ -12,6 +12,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/fsutil"
+	"github.com/phoenixsec/phoenix/internal/grant"
 )
 
 // Who, authority and kind on identities, and who/host/authority/attested on
@@ -169,20 +170,9 @@ func (s *Server) auditIfUnsynced(r *http.Request, actor, action, target string, 
 	}
 }
 
-// GrantActorLabels returns the labels lookup for grant.Options. It names who
-// acted in a grant event; the store's own expiries (no IP) and a person in
-// the dashboard are not identities and get none.
-func GrantActorLabels(a *acl.ACL) func(actor, ip string) (who, authority string) {
-	return func(actor, ip string) (string, string) {
-		if ip == "" || actor == "dashboard@"+ip {
-			return "", ""
-		}
-		ag, err := a.GetAgent(actor)
-		if err != nil {
-			return "", ""
-		}
-		return ag.Who, ag.Authority
-	}
+// grantLabels hands a caller's labels to the grant store, for its audit lines.
+func grantLabels(c audit.Caller) grant.Labels {
+	return grant.Labels{Who: c.Who, Authority: c.Authority}
 }
 
 // identityOf returns an identity's name and labels for a response.

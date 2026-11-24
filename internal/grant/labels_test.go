@@ -27,13 +27,12 @@ func TestPendingEventsWithAndWithoutLabels(t *testing.T) {
 			got = append(got, e)
 			return nil
 		}),
-		ActorLabels: func(string, string) (string, string) { return "robin", "desk" },
 	}
 	s, err := Open(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Create(CreateInput{Agent: "a", SourceIP: "1.1.1.1", AuthMethod: AuthBearer, CredentialFP: "sha256:x", Paths: []string{"p/x"}, Action: ActionReadValue, Reason: "why"}); err != nil {
+	if _, _, err := s.Create(CreateInput{Agent: "a", SourceIP: "1.1.1.1", AuthMethod: AuthBearer, CredentialFP: "sha256:x", Paths: []string{"p/x"}, Action: ActionReadValue, Reason: "why", Labels: Labels{Who: "robin", Authority: "desk"}}); err != nil {
 		t.Fatal(err)
 	}
 

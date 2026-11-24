@@ -68,12 +68,12 @@ func TestAgentCreateOptionLikeValues(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&got)
 		fmt.Fprint(w, `{"identity":{"name":"bot"}}`)
 	})
-	for _, v := range []string{"--who", "--authority", "--kind", "--formerly", "--acl", "--force"} {
+	for i, v := range []string{"--who", "--authority", "--kind", "--formerly", "--acl", "--force"} {
 		if code, _, _ := runMain(t, "agent", "create", "bot", "-t", v, "--acl", "a/*:list", "--kind", v); code != -1 {
-			t.Errorf("%s: exit %d", v, code)
+			t.Errorf("value %d: exit %d", i, code)
 		}
 		if got.Token != v || len(got.Permissions) != 1 || got.Permissions[0].Path != "a/*" || got.Who != nil || got.Kind == nil || *got.Kind != v {
-			t.Errorf("a value spelled %s changed the request", v)
+			t.Errorf("value %d changed the request", i)
 		}
 	}
 }
