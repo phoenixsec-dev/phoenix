@@ -21,8 +21,10 @@ and the change may roll back to the old file on power loss.
 
 Each file is safe on its own, but the two are not written as one unit. A
 crash in the moment between saving the store and saving the new key can
-leave a store that the key file cannot open. The `.pre-rotate` backup below
-covers that case.
+leave a store that the key file cannot open. The server then refuses to start
+and says what to do; the `.pre-rotate` backup below covers that case. It is
+never overwritten by a rotation that cannot read the store. (If only some
+namespaces do not open, the server starts and logs a `WARNING` naming them.)
 
 ### If rotation fails
 

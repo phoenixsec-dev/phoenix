@@ -499,7 +499,7 @@ func assertNotOpensWithKey(t *testing.T, path string, key []byte) {
 	t.Helper()
 	st, err := New(path, key)
 	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
+		return // refused at start
 	}
 	if _, err := st.Get("ns1/key1"); err == nil {
 		t.Fatalf("%s unexpectedly decrypts with this key", path)

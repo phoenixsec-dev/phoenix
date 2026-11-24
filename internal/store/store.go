@@ -115,6 +115,14 @@ func (s *Store) load() error {
 		return fmt.Errorf("reading store file: %w", err)
 	}
 
+	if err := s.parse(data); err != nil {
+		return err
+	}
+	return s.checkKeyOpens()
+}
+
+// parse makes data, the contents of a store file, the in-memory store.
+func (s *Store) parse(data []byte) error {
 	var sd storeData
 	if err := json.Unmarshal(data, &sd); err != nil {
 		return fmt.Errorf("parsing store file: %w", err)
@@ -130,6 +138,43 @@ func (s *Store) load() error {
 	s.data = &sd
 	return nil
 }
+
+// checkKeyOpens refuses a store that the master key cannot open at all: the
+// wrong key, or a rotation cut off between saving the store and saving the
+// key. Nothing in such a store can be read anyway, and running on it makes
+// things worse: new namespaces would be written under the other key. If only
+// some namespaces are unreadable the server must still serve the rest, so
+// that is logged instead.
+func (s *Store) checkKeyOpens() error {
+	var bad []string
+	for name, entry := range s.data.Namespaces {
+		dek, err := s.provider.UnwrapKey(&entry.Wrapped)
+		if err != nil {
+			bad = append(bad, name)
+			continue
+		}
+		crypto.ZeroBytes(dek)
+	}
+	switch {
+	case len(bad) == 0:
+		return nil
+	case len(bad) < len(s.data.Namespaces):
+		sort.Strings(bad)
+		log.Printf("WARNING: the master key does not open these namespaces in %s, their secrets cannot be read: %s",
+			s.filePath, strings.Join(bad, ", "))
+		return nil
+	}
+	hint := "check that store.master_key is the key this store was written with"
+	if s.fileOpens(s.filePath + preRotateSuffix) {
+		hint = fmt.Sprintf("a key rotation was cut off, and %[1]s%[2]s opens with the current key: "+
+			"copy the data directory somewhere safe, then move %[1]s%[2]s over %[1]s", s.filePath, preRotateSuffix)
+	}
+	return fmt.Errorf("the master key does not open %s, so no secret in it can be read; nothing was changed. "+
+		"Next: %s (docs/key-management.md, \"If rotation fails\")", s.filePath, hint)
+}
+
+// preRotateSuffix names the backup a rotation makes next to the store file.
+const preRotateSuffix = ".pre-rotate"
 
 // save writes the store to disk crash-safely: fsynced write-tmp + rename +
 // directory fsync (fsutil.WriteFileAtomic). The whole store is one file, so
@@ -391,41 +436,47 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	// wrappers on disk. Copying that file would overwrite the good backup
 	// kept from that failure, and a second failure would then "restore"
 	// a store no key on disk can open.
-	preRotatePath := s.filePath + ".pre-rotate"
+	preRotatePath := s.filePath + preRotateSuffix
 	keepBackup := false // set when the backup is the operator's recovery path
-	if afterSave != nil {
-		if err := s.writeSnapshot(preRotatePath); err != nil {
-			return 0, fmt.Errorf("backing up store before rotation: %w", err)
-		}
-		defer func() {
-			if !keepBackup {
-				os.Remove(preRotatePath)
-			}
-		}()
-	}
 
 	// failEarly handles a failure before this rotation replaced the store
 	// file. An untouched file is not necessarily a readable one: a previous
 	// rotation that failed totally can have left abandoned new-key wrappers
-	// on disk, and then the backup just written is the only copy the key
+	// on disk, and then the backup is the only copy the key
 	// file can open (review F1 R2, 2026-10-25). So the backup is deleted
 	// only when the store file is checked to open with the current key.
 	failEarly := func(err error) (int, error) {
-		if afterSave == nil || s.storeFileOpens() {
+		if afterSave == nil || s.fileOpens(s.filePath) {
 			return 0, err
 		}
 		keepBackup = true
-		recovery := fmt.Sprintf("restore %s over %s and keep the current key file", preRotatePath, s.filePath)
+		recovery := "see docs/key-management.md"
+		if s.fileOpens(preRotatePath) {
+			recovery = fmt.Sprintf("restore %s over %s and keep the current key file", preRotatePath, s.filePath)
+		}
 		logUnreadableStore(recovery)
 		return 0, fmt.Errorf("CRITICAL: %w; the store file on disk does not open with the current key "+
 			"(left by an earlier failed rotation); recovery: %s", err, recovery)
 	}
 
 	// Rotate: unwrap all with old key, generate new key, re-wrap all.
-	// The provider stages the new key (does not swap yet).
+	// The provider stages the new key (does not swap yet). This comes before
+	// the backup: if memory does not open with the current key, a backup of
+	// it is worthless and would replace an earlier one that may be good.
 	newWrapped, err := s.provider.RotateMaster(wrappedDEKs)
 	if err != nil {
 		return failEarly(fmt.Errorf("rotating master key: %w", err))
+	}
+	if afterSave != nil {
+		if err := s.writeSnapshot(preRotatePath); err != nil {
+			s.provider.RollbackRotation()
+			return failEarly(fmt.Errorf("backing up store before rotation: %w", err))
+		}
+		defer func() {
+			if !keepBackup {
+				os.Remove(preRotatePath)
+			}
+		}()
 	}
 
 	// Replace namespace entries with re-wrapped DEKs
@@ -509,12 +560,12 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	return len(nsNames), nil
 }
 
-// storeFileOpens reports whether the store file on disk opens with the
-// provider's active key: it parses and every namespace DEK unwraps. Any
-// read or parse error counts as "does not open". RotateMasterKey uses it
-// to decide whether the pre-rotate backup is still needed.
-func (s *Store) storeFileOpens() bool {
-	data, err := os.ReadFile(s.filePath)
+// fileOpens reports whether the store file at path opens with the provider's
+// active key: it parses and every namespace DEK unwraps. Any read or parse
+// error counts as "does not open". RotateMasterKey uses it to decide whether
+// the pre-rotate backup is still needed.
+func (s *Store) fileOpens(path string) bool {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}

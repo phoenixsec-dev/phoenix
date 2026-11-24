@@ -49,6 +49,19 @@ after repeated wrong passwords). The log names the address to add:
 setting still loads on older versions, which ignore it. Details:
 [Dashboard](docs/dashboard.md#network-access-tls-reverse-proxy).
 
+### Store safety: ways a data file could be lost
+
+Every place the server writes a file was checked for what a failed or cut-off
+write, a full disk, a wrong path, a symlink, a second server or a key rotation
+that dies halfway can do to it. Nothing to configure; what changed:
+- **A key rotation cut off by a crash could end in losing every secret.** The
+  server started on a store its key could not open, and trying `rotate-master`
+  again overwrote `<store>.pre-rotate`, the one good copy. Now the rotation
+  reads everything with the current key before it touches that backup, and the
+  server refuses to start when the key opens nothing in the store, naming the
+  backup if it works. If only some namespaces are unreadable it starts and logs
+  them.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine
