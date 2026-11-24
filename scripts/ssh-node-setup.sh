@@ -94,7 +94,7 @@ AUTHZ
 #!/bin/sh
 # Ends each agent SSH session whose own approval is over, so a revoke reaches a
 # session that is already open. Only SSH sessions: user services the agent account
-# runs (Cerberus's sidecar on xidax) are left alone.
+# runs are left alone.
 #
 # A session's grant comes from the last successful login logged this boot by that
 # session's leader process, read from the fixed position sshd writes it in. A plain
@@ -181,7 +181,7 @@ CONF
   # Root comes last, once the certificate-only policy above is confirmed live. If
   # anything before this fails, the agent user has login at most, never root.
   # Recorded so a session can be replayed with sudoreplay after the fact. A machine
-  # that already gives the agent user sudo (xidax) keeps its own rule.
+  # that already gives the agent user sudo keeps its own rule.
   if ! sudo -n -l -U agent 2>/dev/null | grep -q 'NOPASSWD: ALL'; then
     tmp=$(mktemp)
     cat > "$tmp" <<SUDO

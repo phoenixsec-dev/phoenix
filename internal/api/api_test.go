@@ -3751,7 +3751,7 @@ func TestResolveRefusesRemovedNonceFields(t *testing.T) {
 	}
 }
 
-// tsk_20261108_0033: a "*" in a single-secret read is a usage hint (400),
+// A "*" in a single-secret read is a usage hint (400),
 // decided before ACL and attestation, the same for an identity with no
 // access and for an admin, and whether or not anything is stored there.
 func TestGetSecretWildcardIsUsageError(t *testing.T) {
@@ -3770,8 +3770,8 @@ func TestGetSecretWildcardIsUsageError(t *testing.T) {
 	}
 }
 
-// Review R1 on tsk_20261108_0033: a name with "*" could be written but not
-// read back (reads answer the wildcard hint), so writes refuse it too.
+// A name with "*" could never be read back (reads answer the wildcard hint),
+// so writes refuse it too.
 func TestSetSecretRefusesStar(t *testing.T) {
 	srv, adminToken := setupTestServer(t)
 	req := httptest.NewRequest("PUT", "/v1/secrets/review/a*b", strings.NewReader(`{"value":"v"}`))

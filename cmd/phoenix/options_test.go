@@ -60,7 +60,7 @@ var allCommands = []string{
 	"version", "help", "--version", "-V", "--help", "-h",
 }
 
-// tsk_20261108_0033: an unknown option on any command is a usage error
+// An unknown option on any command is a usage error
 // (exit 2, "no such option", the usage line) and no request is sent, so it
 // can never come back from the server as a fake permission denial.
 func TestEveryCommandRejectsUnknownOptions(t *testing.T) {
@@ -121,7 +121,7 @@ func TestCheckArgsValuesAndDoubleDash(t *testing.T) {
 
 // Removed flags are refused by name with the removal message (exit 1), but
 // only where they are options: not as another option's value, and not after
-// "--" (review R1-03 on tsk_20261109_0002).
+// "--", where the same text is data the caller meant literally.
 func TestRemovedFlagsRefusedOnlyAsOptions(t *testing.T) {
 	for _, argv := range [][]string{
 		{"set", "a/b", "-v", "x"},
@@ -142,7 +142,7 @@ func TestRemovedFlagsRefusedOnlyAsOptions(t *testing.T) {
 	}
 }
 
-// tsk_20261108_0033: the three ways people write a folder all list it; any
+// The three ways people write a folder all list it; any
 // other wildcard is a usage error and sends nothing. Kit's case: --prefix.
 func TestListFolderForms(t *testing.T) {
 	var got []string
@@ -193,7 +193,7 @@ func TestMCPListFolderForms(t *testing.T) {
 	}
 }
 
-// Review R1 on tsk_20261108_0033: after "--" a path named like one of the
+// After "--" a path named like one of the
 // command's own options is refused, never read as that option (set would
 // otherwise turn on --value-stdin and write).
 func TestDoubleDashNeverRevivesAnOption(t *testing.T) {
