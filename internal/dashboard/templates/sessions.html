@@ -6,7 +6,7 @@
 
 <h2 class="section-title">Dashboard logins ({{len .Logins}} of {{.MaxLogins}})</h2>
 <div class="table-wrap">
-<table class="data-table">
+<table class="data-table stack">
     <thead>
         <tr>
             <th>Device</th>
@@ -20,13 +20,13 @@
     <tbody>
     {{range .Logins}}
         <tr>
-            <td title="{{.UserAgent}}">{{.Device}}{{if eq .ID $.CurrentLogin}} <span class="pill pill-action">this device</span>{{end}}</td>
-            <td class="mono">{{.IP}}</td>
-            <td data-time="{{.Started.Unix}}">{{fmtTime .Started}}</td>
-            <td data-time="{{.LastUsed.Unix}}">{{fmtTime .LastUsed}}</td>
-            <td class="ttl-active">{{ttlRemain .Expires}}</td>
+            <td data-label="Device" title="{{.UserAgent}}">{{.Device}}{{if eq .ID $.CurrentLogin}} <span class="pill pill-action">this device</span>{{end}}</td>
+            <td data-label="IP" class="mono">{{.IP}}</td>
+            <td data-label="Signed in" data-time="{{.Started.Unix}}">{{fmtTime .Started}}</td>
+            <td data-label="Last used" data-time="{{.LastUsed.Unix}}">{{fmtTime .LastUsed}}</td>
+            <td data-label="Expires in" class="ttl-active">{{ttlRemain .Expires}}</td>
             <td>
-                <form method="POST" action="/dashboard/logins/{{.ID}}/revoke" style="display:inline">
+                <form method="POST" action="/dashboard/logins/{{.ID}}/revoke">
                     <input type="hidden" name="_csrf" value="{{$.CSRF}}">
                     <button type="submit" class="btn btn-revoke btn-sm" data-confirm="Sign out {{.Device}} ({{.IP}})?">Sign out</button>
                 </form>
@@ -50,7 +50,7 @@
 
 {{if .Sessions}}
 <div class="table-wrap">
-<table class="data-table">
+<table class="data-table stack">
     <thead>
         <tr>
             <th>ID</th>
@@ -66,18 +66,18 @@
     <tbody>
     {{range .Sessions}}
         <tr>
-            <td class="mono">{{truncate .ID 16}}</td>
-            <td>{{.Role}}</td>
-            <td>{{.Agent}}</td>
-            <td class="mono">{{.SourceIP}}</td>
-            <td>{{.BootstrapMethod}}</td>
-            <td data-time="{{.CreatedAt.Unix}}">{{fmtTime .CreatedAt}}</td>
-            <td class="ttl-{{if .Revoked}}expired{{else}}active{{end}}">
+            <td data-label="ID" class="mono">{{truncate .ID 16}}</td>
+            <td data-label="Role">{{.Role}}</td>
+            <td data-label="Agent">{{.Agent}}</td>
+            <td data-label="Source IP" class="mono">{{.SourceIP}}</td>
+            <td data-label="Bootstrap">{{.BootstrapMethod}}</td>
+            <td data-label="Created" data-time="{{.CreatedAt.Unix}}">{{fmtTime .CreatedAt}}</td>
+            <td data-label="Time left" class="ttl-{{if .Revoked}}expired{{else}}active{{end}}">
                 {{if .Revoked}}revoked{{else}}{{ttlRemain .ExpiresAt}}{{end}}
             </td>
             <td>
                 {{if not .Revoked}}
-                <form method="POST" action="/dashboard/sessions/{{.ID}}/revoke" style="display:inline">
+                <form method="POST" action="/dashboard/sessions/{{.ID}}/revoke">
                     <input type="hidden" name="_csrf" value="{{$.CSRF}}">
                     <button type="submit" class="btn btn-revoke btn-sm" data-confirm="Revoke session {{.ID}}?">Revoke</button>
                 </form>

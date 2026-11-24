@@ -29,6 +29,16 @@ func (b *FileBackend) Set(path, value, createdBy, description string, tags []str
 	return b.store.Set(path, value, createdBy, description, tags)
 }
 
+// Write stores a value and metadata changes (Store.Write).
+func (b *FileBackend) Write(path, value, by string, ch MetadataChange, mode WriteMode) error {
+	return b.store.Write(path, value, by, ch, mode)
+}
+
+// Describe changes metadata only (Store.Describe).
+func (b *FileBackend) Describe(path string, ch MetadataChange) error {
+	return b.store.Describe(path, ch)
+}
+
 func (b *FileBackend) Delete(path string) error {
 	return b.store.Delete(path)
 }

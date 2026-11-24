@@ -2,11 +2,15 @@
 {{define "content"}}
 <h1 class="page-title">Overview</h1>
 
+<form class="search-form" method="GET" action="/dashboard/secrets" role="search">
+    <input type="search" name="q" class="input input-search" placeholder="Find a secret" aria-label="Find a secret" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search">
+</form>
+
 <div class="stat-grid">
-    <div class="stat-card">
-        <div class="stat-value">{{.SecretCount}}</div>
+    <a class="stat-card" href="/dashboard/secrets">
+        <div class="stat-value">{{if ge .SecretCount 0}}{{.SecretCount}}{{else}}?{{end}}</div>
         <div class="stat-label">Secrets</div>
-    </div>
+    </a>
     <div class="stat-card">
         <div class="stat-value">{{.AgentCount}}</div>
         <div class="stat-label">Agents</div>
@@ -39,7 +43,7 @@
 {{if .RecentAudit}}
 <h2 class="section-title">Recent Activity</h2>
 <div class="table-wrap">
-<table class="data-table">
+<table class="data-table stack">
     <thead>
         <tr>
             <th>Time</th>
@@ -52,11 +56,11 @@
     <tbody>
     {{range .RecentAudit}}
         <tr>
-            <td class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
-            <td>{{.Agent}}</td>
-            <td class="mono">{{.Action}}</td>
+            <td data-label="Time" class="mono" data-time="{{.Timestamp.Unix}}">{{fmtTime .Timestamp}}</td>
+            <td data-label="Agent">{{.Agent}}</td>
+            <td data-label="Action" class="mono">{{.Action}}</td>
             <td class="mono path-full">{{.Path}}</td>
-            <td><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
+            <td data-label="Status"><span class="status-dot status-{{.Status}}"></span> {{.Status}}</td>
         </tr>
     {{end}}
     </tbody>

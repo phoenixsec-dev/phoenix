@@ -138,7 +138,7 @@ var mcpBaseTools = []mcpTool{
 	},
 	{
 		Name:        "phoenix_list",
-		Description: "List the secrets you can see, each with its description and tags, to find the one you need. Never returns values.",
+		Description: "List the secrets you can see, each with its description, tags, and the username and link (web page) that go with it, to find the one you need. Never returns values.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -533,7 +533,7 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 }
 
 // mcpToolList handles the phoenix_list tool: one line per secret,
-// "path — description [tags]". Against a server without /v1/metadata it
+// "path — description [tags] (username: ...) (link: ...)". Against a server without /v1/metadata it
 // falls back to bare paths.
 func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 	var params struct {
@@ -589,6 +589,12 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		}
 		if len(si.Tags) > 0 {
 			desc += " [" + listPath(strings.Join(si.Tags, ", ")) + "]"
+		}
+		if si.Username != "" {
+			desc += " (username: " + listPath(si.Username) + ")"
+		}
+		if si.URL != "" {
+			desc += " (link: " + listPath(si.URL) + ")"
 		}
 		lines[i] = listPath(si.Path) + " — " + desc
 	}

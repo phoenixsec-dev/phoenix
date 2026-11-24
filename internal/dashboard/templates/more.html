@@ -1,0 +1,14 @@
+{{template "layout" .}}
+{{define "content"}}
+<h1 class="page-title">More</h1>
+<div class="link-list">
+    <a href="/dashboard/grants" class="link-row"><span class="link-name">Grants</span><span class="hint">Temporary access you approved, and a button to end it</span></a>
+    <a href="/dashboard/sessions" class="link-row"><span class="link-name">Sessions</span><span class="hint">Devices signed in here, and agents signed in to Phoenix</span></a>
+    <a href="/dashboard/audit" class="link-row"><span class="link-name">Audit log</span><span class="hint">Who used what, and when</span></a>
+    <a href="/dashboard/roles" class="link-row"><span class="link-name">Roles</span><span class="hint">What each kind of agent session may do</span></a>
+</div>
+<form method="POST" action="/dashboard/logout">
+    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+    <button type="submit" class="btn btn-quiet btn-block">Sign out</button>
+</form>
+{{end}}

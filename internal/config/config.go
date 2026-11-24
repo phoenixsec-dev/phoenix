@@ -183,6 +183,13 @@ type DashboardConfig struct {
 	Enabled      bool   `json:"enabled"`
 	PasswordHash string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
 	SessionTTL   string `json:"session_ttl,omitempty"`   // default "4h"
+	Reveal       *bool  `json:"reveal,omitempty"`        // show and copy secret values; default true
+}
+
+// RevealEnabled reports whether the dashboard may show and copy secret
+// values. On unless "reveal": false.
+func (d DashboardConfig) RevealEnabled() bool {
+	return d.Reveal == nil || *d.Reveal
 }
 
 // validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.

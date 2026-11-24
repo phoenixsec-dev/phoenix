@@ -146,6 +146,7 @@ Then put it in the config and restart:
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
+| `dashboard.reveal` | `bool` | Let the dashboard show and copy secret values (default `true`). `false` keeps finding, adding and editing |
 
 `password_hash` is required when the dashboard is enabled (`dashboard.pin`
 was removed; a config that still sets it will not start).
