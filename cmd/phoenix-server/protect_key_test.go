@@ -30,11 +30,11 @@ func TestProtectKeyDoesNotOverwriteARotatedKey(t *testing.T) {
 	if err := replaceKeyFile(path, []byte("old"), save); err == nil || saved {
 		t.Errorf("changed: err %v, saved %v, want a refusal", err, saved)
 	}
-	release, err := fsutil.Lock(path) // a rotation is saving its key right now
+	lock, err := fsutil.Lock(path) // a rotation is saving its key right now
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release()
+	defer lock.Release()
 	if err := replaceKeyFile(path, []byte("rotated"), save); !errors.Is(err, fsutil.ErrLocked) || saved {
 		t.Errorf("locked: err %v, saved %v, want ErrLocked", err, saved)
 	}

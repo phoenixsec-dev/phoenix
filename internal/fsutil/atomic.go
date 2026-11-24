@@ -25,7 +25,9 @@ import (
 // the two fsyncs, rename can reach disk before the data does, which is how
 // a single-file store gets truncated to zero bytes on power loss.
 //
-// If path is a symlink, the file it points at is replaced and the link stays.
+// If path is a symlink the link itself is replaced, which is right for files
+// Phoenix names itself (backups, temp files). For a path the owner configured,
+// pass RealPath(path), so that their link stays.
 //
 // An error means path was NOT replaced and still holds its old content.
 // Callers (key rotation in particular) roll back on error, so a failure
@@ -103,7 +105,6 @@ func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (ren
 		sd = syncDir
 	}
 
-	path = RealPath(path)
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -118,9 +119,9 @@ func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (ren
 		return false, fmt.Errorf("%s: %w", step, err)
 	}
 
-	// Keep the owner of the file being replaced, so that a command run as root
+	// Keep who may read the file being replaced, so that a command run as root
 	// does not leave one the server cannot read. Best effort: only root may
-	// give files away, and before the mode is set, because chown can clear
+	// give files away. The owner goes before the mode, because chown can clear
 	// mode bits.
 	if uid, gid, ok := owner(path); ok {
 		_ = f.Chown(uid, gid)
@@ -128,6 +129,7 @@ func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (ren
 	if err := f.Chmod(perm); err != nil {
 		return fail("setting temp file mode", err)
 	}
+	copyACL(path, f, perm)
 	if err := write(f, data); err != nil {
 		return fail("writing temp file", err)
 	}

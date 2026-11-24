@@ -173,8 +173,10 @@ the server logs a loud startup warning if you do.
 `phoenix-server` keeps its store, ACL, grants and sessions in memory and
 rewrites each file whole, so two servers on the same files would undo each
 other's writes. At start it locks every file it rewrites (store, ACL, grants
-file, sessions file, and the audit log when rotation is on) through an empty
-`<file>.lock` next to it, and refuses to start while another server holds one.
+file, sessions file, audit log) through an empty `<file>.lock` next to it, and
+refuses to start while another server holds one. Two servers may share an audit
+log if both have a negative `rotate_mb`, and a master key if their stores are
+separate; a shared key cannot be rotated (409) while both run.
 The lock ends with the process, however it ends; a leftover `.lock` file blocks
 nothing. On a filesystem without locks the server starts and logs a `WARNING`.
 

@@ -1680,17 +1680,19 @@ func cmdRotateMaster() error {
 	}
 
 	var result struct {
-		Rotated int    `json:"rotated"`
+		Rotated *int   `json:"rotated"`
 		Backup  string `json:"backup"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Rotated == nil {
+		return fmt.Errorf("the server accepted the rotation but its answer could not be read; check the audit log for rotate-master before trying again")
+	}
 
-	if result.Rotated == 0 {
+	if *result.Rotated == 0 {
 		fmt.Println("Nothing to rotate: the store has no namespaces yet, so the key was kept")
 		return nil
 	}
 	fmt.Printf("Master key rotated successfully\n")
-	fmt.Printf("  Namespaces re-wrapped: %d\n", result.Rotated)
+	fmt.Printf("  Namespaces re-wrapped: %d\n", *result.Rotated)
 	fmt.Printf("  Old key backed up to: %s\n", result.Backup)
 	return nil
 }

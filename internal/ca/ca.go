@@ -258,6 +258,7 @@ func randomSerial() (*big.Int, error) {
 // replaceFile writes a certificate or key in one step (a failed write leaves
 // the old file whole) and keeps the mode its owner gave it.
 func replaceFile(path string, data []byte, perm os.FileMode) error {
+	path = fsutil.RealPath(path)
 	if fi, err := os.Stat(path); err == nil {
 		perm = fi.Mode().Perm()
 	}

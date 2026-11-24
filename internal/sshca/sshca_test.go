@@ -174,3 +174,27 @@ func TestKeyIsMovedIntoPlaceWhole(t *testing.T) {
 		t.Errorf("reload: created %v, err %v", created, err)
 	}
 }
+
+// Two servers making the key at once end up with the same one.
+func TestConcurrentCreateAgrees(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ssh_ca.key")
+	keys := make(chan string, 8)
+	for range cap(keys) {
+		go func() {
+			ca, _, err := LoadOrCreate(path)
+			if err != nil {
+				keys <- err.Error()
+				return
+			}
+			keys <- PublicKey(ca)
+		}()
+	}
+	got := map[string]bool{}
+	for range cap(keys) {
+		got[<-keys] = true
+	}
+	ca, _, err := LoadOrCreate(path)
+	if err != nil || len(got) != 1 || !got[PublicKey(ca)] {
+		t.Errorf("%d different results, %v", len(got), err)
+	}
+}

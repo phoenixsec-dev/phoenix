@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -148,8 +149,9 @@ type Server struct {
 	acl           *acl.ACL
 	audit         *audit.Logger
 	auditPath     string
-	masterKeyPath string         // path to master.key file (needed for KEK rotation)
-	rotateMu      sync.Mutex     // one master key rotation at a time
+	masterKeyPath string     // path to master.key file (needed for KEK rotation)
+	rotateMu      sync.Mutex // one master key rotation at a time
+	keyLock       *fsutil.FileLock
 	policy        *policy.Engine // nil when no attestation policy configured
 	bearerEnabled bool           // whether bearer token auth is allowed
 	startTime     time.Time      // server start time for uptime reporting
@@ -209,6 +211,12 @@ func (s *Server) SetBearerEnabled(enabled bool) {
 // Required for the rotate-master endpoint to persist the new key.
 func (s *Server) SetMasterKeyPath(path string) {
 	s.masterKeyPath = path
+}
+
+// SetMasterKeyLock gives rotation the lock this server shares with any other
+// server using the same master key; nil where files cannot be locked.
+func (s *Server) SetMasterKeyLock(l *fsutil.FileLock) {
+	s.keyLock = l
 }
 
 // SetPolicy configures the attestation policy engine.
@@ -1316,7 +1324,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	// One rotation at a time, and none while --protect-key saves the key file.
 	s.rotateMu.Lock()
 	defer s.rotateMu.Unlock()
-	release, err := fsutil.Lock(s.masterKeyPath)
+	lock, err := fsutil.Lock(s.masterKeyPath)
 	if errors.Is(err, fsutil.ErrLocked) {
 		jsonError(w, "the master key file is being changed by phoenix-server --protect-key; restart the server afterwards, then rotate", http.StatusConflict)
 		return
@@ -1324,7 +1332,19 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("WARNING: cannot lock %s during rotation: %v", s.masterKeyPath, err)
 	} else {
-		defer release()
+		defer lock.Release()
+	}
+	if s.keyLock != nil {
+		if err := s.keyLock.Exclusive(); err != nil {
+			log.Printf("rotation refused: %s: %v", s.masterKeyPath, err)
+			jsonError(w, "another running phoenix-server uses this master key and its store would no longer open; stop it, or give it its own key, then rotate", http.StatusConflict)
+			return
+		}
+		defer func() { _ = s.keyLock.Share() }()
+	}
+	// The wait for another rotation may have been long.
+	if s.writeLoginEnded(w, info) {
+		return
 	}
 	// The rotation replaces the key file with one protected as it was at
 	// start. If it is not that file any more, saving would undo the change.
@@ -1341,6 +1361,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	}
 	defer crypto.ZeroBytes(oldKey)
 	prevPath := s.masterKeyPath + ".prev"
+	staged := prevPath + ".new"
 
 	// Rotate with afterSave callback: the callback writes the new key file
 	// atomically while the store lock is held, preventing any window where
@@ -1350,15 +1371,31 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		if pendingKey == nil {
 			return fmt.Errorf("no pending key after rotation")
 		}
-		// Keep the old key as .prev, only now: a rotation that failed earlier
-		// must not replace the one from before.
-		if err := fsutil.WriteFileAtomic(prevPath, oldKey, 0600); err != nil {
-			return fmt.Errorf("backing up master key to %s: %w", prevPath, err)
+		// The old key is put on disk first, but becomes .prev only once the
+		// new one is saved: a failed rotation must not replace the .prev from
+		// before. The plain error text keeps a directory sync failure here
+		// from being taken for one of the key file, which RotateMasterKey
+		// treats as saved.
+		if err := fsutil.WriteFileAtomicStrict(staged, oldKey, 0600); err != nil {
+			return fmt.Errorf("backing up master key to %s: %v", staged, err)
 		}
+		keyPath := fsutil.RealPath(s.masterKeyPath)
+		var err error
 		if provider.Passphrase() != "" {
-			return crypto.SaveProtectedMasterKey(s.masterKeyPath, pendingKey, provider.Passphrase())
+			err = crypto.SaveProtectedMasterKey(keyPath, pendingKey, provider.Passphrase())
+		} else {
+			err = crypto.SaveMasterKeyAtomic(keyPath, pendingKey)
 		}
-		return crypto.SaveMasterKeyAtomic(s.masterKeyPath, pendingKey)
+		if err != nil && !errors.Is(err, fsutil.ErrDirSyncFailed) {
+			os.Remove(staged)
+			return err
+		}
+		if rerr := os.Rename(staged, prevPath); rerr != nil {
+			log.Printf("WARNING: the old master key stays at %s: %v", staged, rerr)
+		} else if serr := fsutil.SyncDir(filepath.Dir(prevPath)); serr != nil {
+			log.Printf("WARNING: syncing the directory of %s: %v", prevPath, serr)
+		}
+		return err
 	})
 	if err != nil {
 		log.Printf("error rotating master key: %v", err)

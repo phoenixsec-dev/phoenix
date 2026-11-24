@@ -34,7 +34,7 @@ type Config struct {
 	// SSHCA is nil when the block is missing, which means SSH certificates are off.
 	SSHCA *SSHCAConfig `json:"ssh_ca,omitempty"`
 
-	// file is the path Load read this from, "" if it was not loaded.
+	// file is the path Load was given, "" if this was not loaded.
 	file string
 
 	// removed lists the removed settings Load found in the file (removed.go);
@@ -313,6 +313,7 @@ func ExampleConfig() *Config {
 // Load reads a config file from disk. Missing file returns defaults.
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
+	cfg.file = path // also when missing: nothing else may be written there
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -326,7 +327,6 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	cfg.removed = removed.Find(data, removedSettings)
-	cfg.file = path
 
 	return cfg, nil
 }

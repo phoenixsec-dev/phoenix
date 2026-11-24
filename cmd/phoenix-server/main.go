@@ -142,11 +142,11 @@ func main() {
 	}
 
 	// Before anything is opened: opening a data file can already write to it.
-	unlock, err := lockDataFiles(cfg, log.Printf)
+	locks, err := lockDataFiles(cfg, log.Printf)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	defer unlock()
+	defer locks.release()
 
 	// Initialize backend
 	var backend store.SecretBackend
@@ -239,6 +239,7 @@ func main() {
 	srv := api.NewServer(backend, a, al, cfg.Audit.Path)
 	srv.SetBearerEnabled(cfg.Auth.Bearer.Enabled)
 	srv.SetMasterKeyPath(cfg.Store.MasterKey)
+	srv.SetMasterKeyLock(locks.key)
 
 	// Load attestation policy if configured
 	var pe *policy.Engine
@@ -430,6 +431,17 @@ func runInit(dir, passphrase string) error {
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
+	// Two --init at once would both find the directory empty.
+	lock, err := fsutil.Lock(filepath.Join(dir, "init"))
+	switch {
+	case err == nil:
+		defer lock.Release()
+	case errors.Is(err, fsutil.ErrLocked):
+		return fmt.Errorf("another --init is running in %s", dir)
+	default:
+		log.Printf("WARNING: cannot lock %s: %v", dir, err)
+	}
+
 	// Never replace anything, not only the key: a store, CA or config here is
 	// one nobody can make again. Lstat, so a link that leads nowhere counts.
 	for _, name := range []string{"master.key", "store.json", "acl.json", "config.json", "ca.crt", "ca.key", "server.crt", "server.key"} {
@@ -558,6 +570,8 @@ func runProtectKey(keyPath string) error {
 		return fmt.Errorf("loading master key: %w", err)
 	}
 
+	keyPath = fsutil.RealPath(keyPath) // replace the file, not a symlink to it
+
 	// Load current key (with old passphrase if needed)
 	key, err := crypto.LoadMasterKey(keyPath)
 	if err == crypto.ErrPassphraseRequired {
@@ -605,10 +619,10 @@ func runProtectKey(keyPath string) error {
 // passphrase; saving the old key over it would leave a store no key opens. The
 // lock is the one rotate-master holds while it works.
 func replaceKeyFile(keyPath string, before []byte, save func() error) error {
-	release, err := fsutil.Lock(keyPath)
+	lock, err := fsutil.Lock(keyPath)
 	switch {
 	case err == nil:
-		defer release()
+		defer lock.Release()
 	case errors.Is(err, fsutil.ErrLocked):
 		return fmt.Errorf("a key rotation is running, nothing was changed; run this again: %w", err)
 	default:

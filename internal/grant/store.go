@@ -214,11 +214,10 @@ func decodeState(data []byte) (*state, error) {
 	if st.Version != fileVersion {
 		return nil, fmt.Errorf("unsupported grants file version %d", st.Version)
 	}
-	if st.Requests == nil {
-		st.Requests = map[string]*Request{}
-	}
-	if st.Grants == nil {
-		st.Grants = map[string]*Grant{}
+	// Every grants file has both. Another Phoenix file configured here by
+	// mistake may also say version 1, and would be replaced by the next save.
+	if st.Requests == nil || st.Grants == nil {
+		return nil, errors.New("not a grants file: no requests or grants")
 	}
 	for id, r := range st.Requests {
 		if r == nil || r.ID != id || r.Agent == "" || len(r.Paths) == 0 {

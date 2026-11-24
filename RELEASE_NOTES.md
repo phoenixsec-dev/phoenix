@@ -66,7 +66,8 @@ that dies halfway can do to it. Nothing to configure; what changed:
   reads everything with the current key before it touches that backup, and the
   server refuses to start when the key opens nothing in the store, naming the
   backup if it works. If only some namespaces are unreadable it starts and logs
-  them.
+  them. If the new key is saved but the disk could not confirm it would survive
+  a power cut, the backup is kept.
 - **A data file that was a symlink was replaced by a plain file** on its first
   save (store, ACL, master key, audit rotation), so new content landed next to
   the link instead of on the disk the owner pointed it at, for example inside a
@@ -77,17 +78,23 @@ that dies halfway can do to it. Nothing to configure; what changed:
   and even a second start that then failed on the port had already rewritten
   the sessions file. The server now holds a lock on each file it rewrites (an
   empty `<file>.lock` next to it, safe to leave there, gone with the process)
-  and refuses to start while another one holds it. If you run two servers that
-  share only an audit log, give each its own. Where locking does not work the
-  server starts and logs a `WARNING`.
+  and refuses to start while another one holds it. Two servers may share an
+  audit log only if neither rotates it. Two servers with their own stores may
+  share a master key, but then neither can rotate it (409). Where locking does
+  not work the server starts and logs a `WARNING`.
 - **`--protect-key` and `rotate-master` could overwrite each other's key
   file.** Adding a passphrase and then rotating without a restart saved the new
   key with no passphrase again; rotating while `--protect-key` waited for a
   passphrase put the old key back over the new one, leaving a store no key on
   disk opened. Both now check that the file is still the one they read:
   `rotate-master` answers 409 and asks for a restart, `--protect-key` stops.
-- **A failed rotation no longer replaces `master.key.prev`**, which is written
-  in one step. `rotate-master` on an empty store keeps the key and says so.
+- **A failed rotation no longer replaces `master.key.prev`**: the old key waits
+  in `master.key.prev.new` and takes that name once the new key is saved.
+  `rotate-master` on an empty store keeps the key and says so.
+- **A damaged namespace key or protected master key crashed the server** (a
+  wrong-length nonce). It is now an ordinary error for that namespace or file.
+- **A grants file that was really another version 1 Phoenix file** was replaced
+  by the next save. It is now set aside like a damaged one.
 - **`store.path` pointing at another JSON file** (the ACL, the config, a
   passphrase-protected key, or a store of a newer format) loaded as an empty
   store, and the first secret written replaced that file. The server now
@@ -98,27 +105,31 @@ that dies halfway can do to it. Nothing to configure; what changed:
 - **Two settings naming one file** (for example `audit.path` and
   `store.master_key`, or `store.path` and the SSH key) could destroy it. Only
   the grants and sessions files were checked, and not against the config file,
-  TLS keys or the SSH key. The server now refuses to start, and
-  `--check-config` fails, when a file it writes is also another of its files.
+  TLS keys, the SSH key or the names of audit archives. The server now refuses
+  to start, and `--check-config` fails, when a file it writes is also another of
+  its files.
 - **`--init` in a directory without `master.key`** (the key kept elsewhere, or
   lost) replaced `config.json` and the CA and server keys there. It now refuses
-  if any file it would write, or `store.json`, is already there.
+  if any file it would write, or `store.json`, is already there, or if another
+  `--init` is running there.
 - **`--reissue-cert` and `--init` wrote certificates and keys in place,** so a
   full disk or a crash left them empty, the CA certificate included. They are
   now replaced in one step, keeping mode and (as root) owner, and
   `--reissue-cert` refuses a config that would make it write over the CA key or
   any other Phoenix file. The new SSH signing key is written the same way: one
   cut off half way used to stop the server from starting.
-- **Replaced files keep their owner** when Phoenix runs as root, so
+- **Replaced files keep their owner** (as root) and POSIX ACL, so
   `--protect-key` run with sudo no longer leaves a key the server cannot read.
 - **An audit line cut off by a full disk or a power cut swallowed the next
   one:** that entry was written and reported as written, but no search could
   read it. It now starts on its own line.
 - **A new agent or seal key whose save failed** was likewise kept in memory and
-  saved later. With a seal key that locked the agent out of its sealed secrets,
-  because the CLI had already thrown the private key away. Both are undone now.
-  Replacing a token or deleting an agent still takes effect at once even if the
-  save fails, so the old token stays dead until a restart.
+  saved later, although the caller was told it failed; a kept seal key no longer
+  matched the private key the agent uses. The same went for `--force` with the
+  token unchanged: wider permissions took effect although the save failed. All
+  three are undone now. Replacing a token or deleting an agent still takes
+  effect at once even if the save fails, so the old token stays dead until a
+  restart.
 
 ## v0.24.0 (2026-11-24)
 

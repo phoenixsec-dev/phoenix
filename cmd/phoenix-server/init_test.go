@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // --passphrase was removed; --init takes the passphrase from the environment
@@ -41,11 +43,27 @@ func TestInitRefusesToReplaceAnything(t *testing.T) {
 				if err := quietInit(t, dir); err == nil || !strings.Contains(err.Error(), name) {
 					t.Errorf("runInit = %v, want a refusal naming %s", err, name)
 				}
-				if ents, _ := os.ReadDir(dir); len(ents) != 1 {
-					t.Errorf("init left %d files, want only the one that was there", len(ents))
+				if ents, _ := os.ReadDir(dir); len(ents) != 2 {
+					t.Errorf("init left %d files, want only the one that was there and its lock", len(ents))
 				}
 			})
 		}
+	}
+}
+
+// Two at once would both find the directory empty.
+func TestInitRefusesWhileAnotherRuns(t *testing.T) {
+	dir := t.TempDir()
+	lock, err := fsutil.Lock(filepath.Join(dir, "init"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := quietInit(t, dir); err == nil || !strings.Contains(err.Error(), "another --init") {
+		t.Errorf("runInit = %v, want a refusal", err)
+	}
+	lock.Release()
+	if err := quietInit(t, dir); err != nil {
+		t.Errorf("afterwards: %v", err)
 	}
 }
 

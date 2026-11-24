@@ -26,7 +26,9 @@ and says what to do; the `.pre-rotate` backup below covers that case. It is
 never overwritten by a rotation that cannot read the store. (If only some
 namespaces do not open, the server starts and logs a `WARNING` naming them.)
 
-`master.key.prev` is the key from before the last rotation that worked.
+`master.key.prev` is the key from before the last rotation that worked. During a
+rotation the old key waits in `master.key.prev.new`; after a crash at the very
+end it may still be there, and then that file is the newest old key.
 
 ### If rotation fails
 

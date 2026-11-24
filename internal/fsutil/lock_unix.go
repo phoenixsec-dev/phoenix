@@ -8,9 +8,15 @@ import (
 	"syscall"
 )
 
-// flock takes an exclusive lock on f without waiting.
-func flock(f *os.File) error {
-	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+const noFollow = syscall.O_NOFOLLOW
+
+// flock locks f without waiting.
+func flock(f *os.File, exclusive bool) error {
+	how := syscall.LOCK_SH
+	if exclusive {
+		how = syscall.LOCK_EX
+	}
+	err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
 	if errors.Is(err, syscall.EWOULDBLOCK) {
 		return ErrLocked
 	}

@@ -99,6 +99,7 @@ type ACL struct {
 	mu     sync.RWMutex
 	config *ACLConfig
 	path   string
+	linked bool // path was reached through a symlink
 	// writeFile saves the ACL file; tests replace it to fail. Strict: a
 	// replaced token must not come back after a power cut.
 	writeFile func(path string, data []byte, perm os.FileMode) error
@@ -106,7 +107,8 @@ type ACL struct {
 
 // New creates a new ACL from a config file.
 func New(path string) (*ACL, error) {
-	a := &ACL{path: path, writeFile: fsutil.WriteFileAtomicStrict}
+	// The real file, so that saving does not replace a symlink to it.
+	a := &ACL{path: fsutil.RealPath(path), linked: fsutil.RealPath(path) != path, writeFile: fsutil.WriteFileAtomicStrict}
 	if err := a.load(); err != nil {
 		return nil, err
 	}
@@ -164,9 +166,10 @@ func (a *ACL) saveLocked() error {
 		return fmt.Errorf("marshaling ACL: %w", err)
 	}
 
-	dir := filepath.Dir(a.path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("creating ACL directory: %w", err)
+	if !a.linked { // behind a link, a missing directory is a missing volume
+		if err := os.MkdirAll(filepath.Dir(a.path), 0700); err != nil {
+			return fmt.Errorf("creating ACL directory: %w", err)
+		}
 	}
 
 	if err := a.writeFile(a.path, data, 0600); err != nil {
@@ -236,10 +239,10 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	return a.saveOrUndo(func() { delete(a.config.Agents, name) })
 }
 
-// saveOrUndo saves a change that adds something, and undoes it in memory if
-// the file still holds the old content, so the next save does not carry what
-// the caller was told failed. Not for replacing a token or removing an agent:
-// there the old token must stay dead even if the save failed.
+// saveOrUndo saves a change, and undoes it in memory if the file still holds
+// the old content, so the next save does not carry what the caller was told
+// failed. undo must not bring back a token: one that was replaced or removed
+// must stay dead even if the save failed.
 func (a *ACL) saveOrUndo(undo func()) error {
 	if a.path == "" {
 		return nil
@@ -282,10 +285,13 @@ func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 		SealPublicKey: existing.SealPublicKey,
 	}
 
-	if a.path != "" {
-		return a.saveLocked()
-	}
-	return nil
+	return a.saveOrUndo(func() {
+		// A replaced token stays dead even if the save failed. With the same
+		// token there is none to kill, only permissions nobody was told about.
+		if hash == existing.TokenHash {
+			a.config.Agents[name] = existing
+		}
+	})
 }
 
 // RemoveAgent removes an agent from the ACL.

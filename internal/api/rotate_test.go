@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 	"github.com/phoenixsec/phoenix/internal/store"
 )
 
@@ -89,4 +91,83 @@ func TestRotateKeepsPassphraseAndPrev(t *testing.T) {
 		t.Fatalf("second rotate = %d, want 500", code)
 	}
 	prevIsFirst("after a failed rotation")
+	if err := os.Remove(srv.fileBackend.Store().Path() + ".pre-rotate"); err != nil {
+		t.Fatal(err)
+	}
+	// Nor does one that fails at the very last step, saving the new key.
+	second := p.MasterKey()
+	blocked := srv.masterKeyPath
+	srv.masterKeyPath = filepath.Join(t.TempDir(), "master.key")
+	if err := os.Symlink(blocked, srv.masterKeyPath); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(blocked + ".prev"); err != nil || os.WriteFile(srv.masterKeyPath+".prev", b, 0600) != nil {
+		t.Fatal("setup")
+	}
+	if err := os.Chmod(filepath.Dir(blocked), 0500); err != nil {
+		t.Fatal(err)
+	}
+	// Only the key file's directory is blocked; store and .prev are elsewhere.
+	defer os.Chmod(filepath.Dir(blocked), 0700)
+	code := rotateMaster(srv)
+	os.Chmod(filepath.Dir(blocked), 0700)
+	if code == http.StatusOK {
+		t.Skip("running as a user the mode does not stop")
+	}
+	if !bytes.Equal(p.MasterKey(), second) {
+		t.Error("the key changed although it could not be saved")
+	}
+	prevIsFirst("after a failed key save")
+	if ents, _ := filepath.Glob(filepath.Join(filepath.Dir(srv.masterKeyPath), "*.new")); len(ents) != 0 {
+		t.Errorf("left behind: %v", ents)
+	}
+}
+
+// .prev as a link to the store (or anything else) is replaced, not followed.
+func TestRotateIgnoresLinkAtPrev(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	seedSecret(t, srv, "admin-token", "test/a", "synthetic-value")
+	st := srv.fileBackend.Store().Path()
+	for _, name := range []string{".prev", ".prev.new"} {
+		if err := os.Symlink(st, srv.masterKeyPath+name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code := rotateMaster(srv); code != http.StatusOK {
+		t.Fatalf("rotate = %d", code)
+	}
+	key, err := crypto.LoadMasterKey(srv.masterKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.New(st, key); err != nil {
+		t.Errorf("the store: %v", err)
+	}
+}
+
+// A master key another running server uses is not rotated: its store would no
+// longer open.
+func TestRotateRefusedWhileKeyIsShared(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	seedSecret(t, srv, "admin-token", "test/a", "synthetic-value")
+	mine, err := fsutil.LockShared(srv.masterKeyPath + ".users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetMasterKeyLock(mine)
+	other, err := fsutil.LockShared(srv.masterKeyPath + ".users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(srv.masterKeyPath)
+	if code := rotateMaster(srv); code != http.StatusConflict {
+		t.Errorf("shared: %d, want 409", code)
+	}
+	if after, _ := os.ReadFile(srv.masterKeyPath); !bytes.Equal(before, after) {
+		t.Error("the key file was changed")
+	}
+	other.Release()
+	if code := rotateMaster(srv); code != http.StatusOK {
+		t.Errorf("alone: %d, want 200", code)
+	}
 }

@@ -73,6 +73,7 @@ type Store struct {
 	provider crypto.KeyProvider
 	data     *storeData
 	filePath string
+	linked   bool // filePath was reached through a symlink
 }
 
 // NewWithProvider creates a new Store using a KeyProvider for all key operations.
@@ -83,6 +84,7 @@ func NewWithProvider(filePath string, provider crypto.KeyProvider) (*Store, erro
 		// The real file: rotation renames its backup over this path, which
 		// must not replace a symlink.
 		filePath: fsutil.RealPath(filePath),
+		linked:   fsutil.RealPath(filePath) != filePath,
 	}
 
 	if err := s.load(); err != nil {
@@ -117,7 +119,7 @@ func (s *Store) load() error {
 		return fmt.Errorf("reading store file: %w", err)
 	}
 
-	if err := s.parse(data); err != nil {
+	if s.data, err = parseStore(s.filePath, data); err != nil {
 		return err
 	}
 	return s.checkKeyOpens()
@@ -126,27 +128,26 @@ func (s *Store) load() error {
 // storeVersion is the format version of the store file, the only one so far.
 const storeVersion = 1
 
-// parse makes data, the contents of a store file, the in-memory store. Every
-// store ever written has the three keys checked here. Anything else may be
+// parseStore reads data, the contents of the store file at path. Every store ever written has the three keys checked here. Anything else may be
 // another file configured at this path by mistake (the ACL, the config, a
 // protected key); loaded as an empty store, it would be replaced by the first
 // write.
-func (s *Store) parse(data []byte) error {
+func parseStore(path string, data []byte) (*storeData, error) {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(data, &keys); err != nil {
-		return fmt.Errorf("parsing store file: %w", err)
+		return nil, fmt.Errorf("parsing store file: %w", err)
 	}
 	if keys["version"] == nil || keys["secrets"] == nil || keys["namespaces"] == nil {
-		return fmt.Errorf("%s is not a Phoenix store file; it was not changed. Check store.path; "+
-			"if you meant to start with an empty store, move that file away", s.filePath)
+		return nil, fmt.Errorf("%s is not a Phoenix store file; it was not changed. Check store.path; "+
+			"if you meant to start with an empty store, move that file away", path)
 	}
 	var sd storeData
 	if err := json.Unmarshal(data, &sd); err != nil {
-		return fmt.Errorf("parsing store file: %w", err)
+		return nil, fmt.Errorf("parsing store file: %w", err)
 	}
 	if sd.Version != storeVersion {
-		return fmt.Errorf("%s is a version %d store file and this Phoenix reads version %d; it was not changed. "+
-			"Run the Phoenix version that wrote it, or a newer one", s.filePath, sd.Version, storeVersion)
+		return nil, fmt.Errorf("%s is a version %d store file and this Phoenix reads version %d; it was not changed. "+
+			"Run the Phoenix version that wrote it, or a newer one", path, sd.Version, storeVersion)
 	}
 
 	if sd.Secrets == nil {
@@ -156,8 +157,32 @@ func (s *Store) parse(data []byte) error {
 		sd.Namespaces = make(map[string]namespaceDEK)
 	}
 
-	s.data = &sd
-	return nil
+	return &sd, nil
+}
+
+// unreadable lists the namespaces of sd whose key is missing or does not open
+// with the master key, and how many namespaces there are.
+func (s *Store) unreadable(sd *storeData) (bad []string, total int) {
+	names := map[string]bool{}
+	for name := range sd.Namespaces {
+		names[name] = true
+	}
+	for _, sec := range sd.Secrets {
+		names[sec.Namespace] = true
+	}
+	for name := range names {
+		entry, ok := sd.Namespaces[name]
+		if ok {
+			dek, err := s.provider.UnwrapKey(&entry.Wrapped)
+			crypto.ZeroBytes(dek)
+			ok = err == nil
+		}
+		if !ok {
+			bad = append(bad, name)
+		}
+	}
+	sort.Strings(bad)
+	return bad, len(names)
 }
 
 // checkKeyOpens refuses a store that the master key cannot open at all: the
@@ -167,28 +192,20 @@ func (s *Store) parse(data []byte) error {
 // some namespaces are unreadable the server must still serve the rest, so
 // that is logged instead.
 func (s *Store) checkKeyOpens() error {
-	var bad []string
-	for name, entry := range s.data.Namespaces {
-		dek, err := s.provider.UnwrapKey(&entry.Wrapped)
-		if err != nil {
-			bad = append(bad, name)
-			continue
-		}
-		crypto.ZeroBytes(dek)
-	}
+	bad, total := s.unreadable(s.data)
 	switch {
 	case len(bad) == 0:
 		return nil
-	case len(bad) < len(s.data.Namespaces):
-		sort.Strings(bad)
+	case len(bad) < total:
 		log.Printf("WARNING: the master key does not open these namespaces in %s, their secrets cannot be read: %s",
 			s.filePath, strings.Join(bad, ", "))
 		return nil
 	}
 	hint := "check that store.master_key is the key this store was written with"
 	if s.fileOpens(s.filePath + preRotateSuffix) {
-		hint = fmt.Sprintf("a key rotation was cut off, and %[1]s%[2]s opens with the current key: "+
-			"copy the data directory somewhere safe, then move %[1]s%[2]s over %[1]s", s.filePath, preRotateSuffix)
+		hint = fmt.Sprintf("if you did not replace the master key yourself, a key rotation was cut off, and "+
+			"%[1]s%[2]s opens with the current key: copy the data directory somewhere safe, then move %[1]s%[2]s over %[1]s",
+			s.filePath, preRotateSuffix)
 	}
 	return fmt.Errorf("the master key does not open %s, so no secret in it can be read; nothing was changed. "+
 		"Next: %s (docs/key-management.md, \"If rotation fails\")", s.filePath, hint)
@@ -201,9 +218,10 @@ const preRotateSuffix = ".pre-rotate"
 // directory fsync (fsutil.WriteFileAtomic). The whole store is one file, so
 // a torn write here would lose every secret at once.
 func (s *Store) save() error {
-	dir := filepath.Dir(s.filePath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("creating store directory: %w", err)
+	if !s.linked { // behind a link, a missing directory is a missing volume
+		if err := os.MkdirAll(filepath.Dir(s.filePath), 0700); err != nil {
+			return fmt.Errorf("creating store directory: %w", err)
+		}
 	}
 	if err := s.writeSnapshot(s.filePath); err != nil {
 		return fmt.Errorf("saving store file: %w", err)
@@ -433,7 +451,10 @@ func (s *Store) Count() int {
 // is rolled back.
 //
 // afterSave must return an error only when it did NOT persist the new key
-// (the key file still holds the old key) — the rollback relies on that.
+// (the key file still holds the old key) — the rollback relies on that. The
+// one exception is fsutil.ErrDirSyncFailed: the new key is in place but not
+// yet certain to survive a power cut. The rotation then counts as done and the
+// backup is kept.
 //
 // When afterSave is nil (e.g. in unit tests), the provider's rotation is
 // auto-committed after a successful save.
@@ -538,7 +559,16 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	// Run post-save callback (e.g. write key file) while still under lock.
 	// No concurrent reads can see the new DEKs until we release the lock.
 	if afterSave != nil {
-		if err := afterSave(); err != nil {
+		err := afterSave()
+		if errors.Is(err, fsutil.ErrDirSyncFailed) {
+			// The new key is in place, but a power cut could bring the old
+			// key file back next to the new store. The backup opens with it.
+			keepBackup = true
+			log.Printf("WARNING: master key rotated, but syncing the key file's directory failed (%v); "+
+				"%s is kept in case a power cut undoes the new key file", err, preRotatePath)
+			err = nil
+		}
+		if err != nil {
 			// Restore in-memory state
 			for i, name := range nsNames {
 				s.data.Namespaces[name] = oldEntries[i]
@@ -574,7 +604,7 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 			// try the passphrase-encrypted emergency key.
 			keepBackup = true
 			var options []string
-			if _, statErr := os.Stat(preRotatePath); statErr == nil {
+			if s.fileOpens(preRotatePath) {
 				options = append(options, fmt.Sprintf("restore %s over %s and keep the current key file", preRotatePath, s.filePath))
 			}
 			if emergencyPath, emErr := s.emergencyPersistPendingKey(); emErr == nil {
@@ -598,27 +628,21 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	return len(nsNames), nil
 }
 
-// fileOpens reports whether the store file at path opens with the provider's
-// active key: it parses and every namespace DEK unwraps. Any read or parse
-// error counts as "does not open". RotateMasterKey uses it to decide whether
+// fileOpens reports whether path is a store file that opens completely with
+// the provider's active key. Any read or parse error, and a store with nothing
+// in it, counts as "does not open". RotateMasterKey uses it to decide whether
 // the pre-rotate backup is still needed.
 func (s *Store) fileOpens(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
-	var sd storeData
-	if err := json.Unmarshal(data, &sd); err != nil {
+	sd, err := parseStore(path, data)
+	if err != nil {
 		return false
 	}
-	for _, entry := range sd.Namespaces {
-		dek, err := s.provider.UnwrapKey(&entry.Wrapped)
-		if err != nil {
-			return false
-		}
-		crypto.ZeroBytes(dek)
-	}
-	return true
+	bad, total := s.unreadable(sd)
+	return total > 0 && len(bad) == 0
 }
 
 // logUnreadableStore logs the CRITICAL message for a failed rotation that

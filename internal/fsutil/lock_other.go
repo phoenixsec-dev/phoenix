@@ -7,5 +7,7 @@ import (
 	"os"
 )
 
+const noFollow = 0
+
 // flock is not available on this system.
-func flock(*os.File) error { return errors.ErrUnsupported }
+func flock(*os.File, bool) error { return errors.ErrUnsupported }

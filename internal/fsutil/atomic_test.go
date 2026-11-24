@@ -224,7 +224,7 @@ func TestWriteGoesThroughSymlinks(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if err := WriteFileAtomic(link, []byte("new"), 0600); err != nil {
+				if err := WriteFileAtomic(RealPath(link), []byte("new"), 0600); err != nil {
 					t.Fatal(err)
 				}
 				if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
@@ -246,7 +246,7 @@ func TestWriteThroughDanglingSymlinkFails(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "unmounted", "file.json"), link); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteFileAtomic(link, []byte("new"), 0600); err == nil {
+	if err := WriteFileAtomic(RealPath(link), []byte("new"), 0600); err == nil {
 		t.Error("want an error")
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
@@ -283,4 +283,37 @@ func TestReplaceKeepsGroup(t *testing.T) {
 		return
 	}
 	t.Skip("this user is in only one group")
+}
+
+// Without RealPath a link is replaced, not followed: that is what a file
+// Phoenix names itself needs, whatever someone left at that name.
+func TestWriteDoesNotFollowSymlinkByItself(t *testing.T) {
+	dir := t.TempDir()
+	victim, link := filepath.Join(dir, "store.json"), filepath.Join(dir, "master.key.prev")
+	if err := errors.Join(os.WriteFile(victim, []byte("secrets"), 0600), os.Symlink(victim, link)); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(link, []byte("key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "secrets" {
+		t.Errorf("the link's target was overwritten: %q", b)
+	}
+}
+
+// WriteFileNew makes a whole file or nothing, and never replaces one.
+func TestWriteFileNew(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ssh_ca.key")
+	if err := WriteFileNew(path, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileNew(path, []byte("second"), 0600); !errors.Is(err, os.ErrExist) {
+		t.Errorf("second write: %v, want ErrExist", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "first" {
+		t.Errorf("content = %q", b)
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(path)); len(ents) != 1 {
+		t.Errorf("%d files left, want 1", len(ents))
+	}
 }

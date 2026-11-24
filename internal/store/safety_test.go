@@ -2,13 +2,16 @@ package store
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // crashMidRotation returns a store path as a power cut between saving the
@@ -96,11 +99,12 @@ func TestRotationThatCannotUnwrapKeepsEarlierBackup(t *testing.T) {
 	}
 	// Built by hand: New refuses this store (above), older versions did not.
 	provider, _ := crypto.NewFileKeyProvider(oldKey)
-	s := &Store{provider: provider, filePath: storePath}
 	raw, _ := os.ReadFile(storePath)
-	if err := s.parse(raw); err != nil {
+	sd, err := parseStore(storePath, raw)
+	if err != nil {
 		t.Fatal(err)
 	}
+	s := &Store{provider: provider, filePath: storePath, data: sd}
 	if _, err := s.RotateMasterKey(func() error { return nil }); err == nil {
 		t.Fatal("rotation should fail")
 	}
@@ -202,4 +206,83 @@ func TestFailedSaveIsNotSavedLater(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("after the next save", again)
+}
+
+// A file that is not a store with something in it is never offered as a
+// recovery: following that advice would replace the store with it.
+func TestForeignBackupIsNotRecommended(t *testing.T) {
+	_, storePath, _ := rotationFailureStore(t, "")
+	raw, _ := os.ReadFile(storePath)
+	noKeys := regexp.MustCompile(`(?s)"namespaces": \{.*`).ReplaceAllString(string(raw), `"namespaces": {}}`)
+	wrong, _ := crypto.GenerateKey()
+	for name, content := range map[string]string{
+		"empty object": `{}`, "null": `null`, "acl": `{"agents":{}}`,
+		"empty store":    `{"version":1,"secrets":{},"namespaces":{}}`,
+		"keys missing":   noKeys,
+		"same wrong key": string(raw),
+	} {
+		if err := os.WriteFile(storePath+".pre-rotate", []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(storePath, wrong); err == nil || strings.Contains(err.Error(), ".pre-rotate") {
+			t.Errorf("%s: %v, want a refusal that does not recommend it", name, err)
+		}
+	}
+}
+
+// A damaged namespace key is an unreadable namespace, not a crash at start.
+func TestDamagedNamespaceKeyDoesNotPanic(t *testing.T) {
+	s, storePath, key := rotationFailureStore(t, "")
+	for name, nonce := range map[string]string{"short": "AAAA", "empty": "", "long": strings.Repeat("A", 32)} {
+		w := s.data.Namespaces["ns1"].Wrapped
+		w.Nonce = nonce
+		s.data.Namespaces["odd"] = namespaceDEK{Wrapped: w}
+		if err := s.save(); err != nil {
+			t.Fatal(err)
+		}
+		t.Run(name, func(t *testing.T) { assertOpensWithKey(t, storePath, key) })
+	}
+}
+
+// If the new key file is in place but may not survive a power cut, the
+// rotation is done and the backup that opens with the old key is kept.
+func TestRotationKeepsBackupWhenKeyMayNotSurvive(t *testing.T) {
+	s, storePath, oldKey := rotationFailureStore(t, "")
+	p := s.Provider().(*crypto.FileKeyProvider)
+	if _, err := s.RotateMasterKey(func() error { return fmt.Errorf("saving: %w", fsutil.ErrDirSyncFailed) }); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(p.MasterKey(), oldKey) {
+		t.Fatal("the new key was not taken into use")
+	}
+	assertOpensWithKey(t, storePath, p.MasterKey())
+	assertOpensWithKey(t, storePath+".pre-rotate", oldKey) // after the power cut
+}
+
+// A backup name that is a link to the store must not lead a rotation into the
+// store, whether it works or fails.
+func TestRotationIgnoresLinkAtBackupName(t *testing.T) {
+	for _, fails := range []bool{false, true} {
+		s, storePath, oldKey := rotationFailureStore(t, "")
+		if err := os.Symlink(storePath, storePath+".pre-rotate"); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.RotateMasterKey(func() error {
+			if fails {
+				return os.ErrPermission
+			}
+			return nil
+		})
+		if (err != nil) != fails {
+			t.Fatalf("rotate: %v", err)
+		}
+		key := oldKey
+		if !fails {
+			key = s.Provider().(*crypto.FileKeyProvider).MasterKey()
+		}
+		assertOpensWithKey(t, storePath, key)
+		if fi, err := os.Lstat(storePath); err != nil || !fi.Mode().IsRegular() {
+			t.Errorf("fails=%v: the store is not a file any more: %v", fails, err)
+		}
+	}
 }

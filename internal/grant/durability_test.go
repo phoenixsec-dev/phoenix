@@ -333,3 +333,21 @@ func TestOSFSUsesStrictWriter(t *testing.T) {
 		t.Fatalf("err = %v, want ErrDirSyncFailed", err)
 	}
 }
+
+// Another Phoenix file that also says version 1 is set aside whole, never
+// taken for an empty grants file and replaced.
+func TestForeignVersionOneFileIsSetAside(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "grants.json")
+	content := `{"version":1,"secrets":{},"namespaces":{}}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(Options{Path: path, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aside := s.Health().QuarantinedTo
+	if b, err := os.ReadFile(aside); err != nil || string(b) != content {
+		t.Errorf("set aside at %q: %q %v", aside, b, err)
+	}
+}

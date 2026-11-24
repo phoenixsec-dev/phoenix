@@ -55,7 +55,11 @@ func TestDataPathCollisionsAreRefused(t *testing.T) {
 		"key over the rotation backup": func(c *Config) { c.Store.MasterKey = c.Store.Path + ".pre-rotate" },
 		"key over the emergency key":   func(c *Config) { c.Store.MasterKey = c.Store.Path + ".emergency-key" },
 		"ACL over the policy":          func(c *Config) { c.ACL.Path = c.Policy.Path },
-		"ACL over a store temp file":   func(c *Config) { c.ACL.Path = c.Store.Path + ".tmp-1" },
+		"key over the staged old key":  func(c *Config) { c.Store.Path = c.Store.MasterKey + ".prev.new" },
+		"key as an audit archive":      func(c *Config) { c.Store.MasterKey = in("audit-20261108T120000.000Z.log") },
+		"store as a gzipped archive":   func(c *Config) { c.Store.Path = in("audit-20261108T120000.000Z.log.gz") },
+		"ACL as a half-gzipped one":    func(c *Config) { c.ACL.Path = in("audit-20261108T120000.000Z.log.gz.tmp") },
+		"store as quarantined grants":  func(c *Config) { c.Store.Path = in("grants.json.corrupt-1790000000") },
 		"ACL over a lock file":         func(c *Config) { c.ACL.Path = c.Store.Path + ".lock" },
 		"through a linked directory":   func(c *Config) { c.Store.Path = filepath.Join(link, "acl.json") },
 		"grants over the config":       func(c *Config) { c.AccessRequests.StorePath = in("config.json") },
@@ -88,6 +92,34 @@ func TestDataPathHardLinkIsRefused(t *testing.T) {
 	}
 }
 
+// Two links to one file that does not exist yet are one file.
+func TestDataPathDanglingLinksAreRefused(t *testing.T) {
+	dir := t.TempDir()
+	cfg := dataPathsConfig(t, dir)
+	for _, p := range []string{cfg.Store.Path, cfg.Audit.Path} {
+		if err := os.Symlink(filepath.Join(dir, "not-yet"), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "same file") {
+		t.Errorf("Validate = %v, want a same-file error", err)
+	}
+}
+
+// A missing config file still counts: the server must not create it as its
+// own audit log.
+func TestMissingConfigFileIsProtected(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-there")
+	cfg, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Audit.Path = file
+	if err := cfg.validateDataPaths(); err == nil || !strings.Contains(err.Error(), "same file") {
+		t.Errorf("got %v, want a same-file error", err)
+	}
+}
+
 // Sharing that harms nothing keeps working: files only read may be one file,
 // and with the 1Password backend the store and key paths are not used.
 func TestHarmlessPathSharingIsAllowed(t *testing.T) {
@@ -95,6 +127,12 @@ func TestHarmlessPathSharingIsAllowed(t *testing.T) {
 	cfg.HTTPSListener.Key = cfg.HTTPSListener.Cert // one PEM with both
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("combined certificate: %v", err)
+	}
+	// Temp files are made under a free name, so these never meet.
+	cfg = dataPathsConfig(t, t.TempDir())
+	cfg.ACL.Path = cfg.Store.Path + ".tmp-acl"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("shared prefix: %v", err)
 	}
 	cfg = dataPathsConfig(t, t.TempDir())
 	cfg.Store.Backend, cfg.OnePassword.Vault = "1password", "v"

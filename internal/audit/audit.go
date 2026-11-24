@@ -76,20 +76,20 @@ func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 }
 
 // endsInHalfLine reports whether the log's last write was cut off, by a full
-// disk or a power cut. If that cannot be read it says no: a wrong yes only
-// costs an empty line, but this must never stop the server.
+// disk or a power cut. If that cannot be read it says yes: a wrong yes only
+// costs an empty line.
 func endsInHalfLine(path string, size int64) bool {
 	if size == 0 {
 		return false
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return true
 	}
 	defer f.Close()
 	last := make([]byte, 1)
 	_, err = f.ReadAt(last, size-1)
-	return err == nil && last[0] != '\n'
+	return err != nil || last[0] != '\n'
 }
 
 // NewWriterLogger creates an audit logger backed by any io.Writer (useful for tests).
