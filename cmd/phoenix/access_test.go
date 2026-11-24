@@ -56,10 +56,10 @@ func TestApprovalPromptShowsEveryPath(t *testing.T) {
 	var rq accessRequestView
 	b, _ := json.Marshal(pendingRequestJSON("need it \x1b[2J\u202Eevil"))
 	json.Unmarshal(b, &rq)
-	p := approvalPrompt(rq, []string{"infra/a"}, "15m")
+	p := approvalPrompt(rq, []string{"infra/a"}, "15m", 1)
 	for _, want := range []string{
 		testReqID, "vector (bearer from 10.0.0.5)", "Action:  read_value",
-		"+ infra/a", "- infra/b  (already allowed)", "TTL:     15m (requested 30m0s)",
+		"+ infra/a", "- infra/b  (already allowed)", "TTL:     15m (requested 30m0s)", "Uses:    1 of each path",
 		"Agent says (not verified): need it", "Revoking later does not recall",
 	} {
 		if !strings.Contains(p, want) {
@@ -183,7 +183,7 @@ func TestApprovalPromptShowsLongPathsInFull(t *testing.T) {
 	prefix := "infra/" + strings.Repeat("x", 300)
 	a, b := prefix+"/staging", prefix+"/production"
 	rq := accessRequestView{ID: testReqID, Agent: "vector", Action: "read_value", Paths: []string{a, b}}
-	p := approvalPrompt(rq, nil, "15m")
+	p := approvalPrompt(rq, nil, "15m", 0)
 	if !strings.Contains(p, a) || !strings.Contains(p, b) {
 		t.Fatalf("prompt does not show both full paths:\n%s", p)
 	}
