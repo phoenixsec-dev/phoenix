@@ -3,7 +3,7 @@
 [hidden] { display: none !important; }
 
 .rq-waiting { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 16px; align-items: start; }
-.rq-card { background: var(--bg-card, #232328); border: 1px solid var(--border, #333338); border-left: 4px solid var(--accent-solid, #E85D26); border-radius: 8px; padding: 16px; min-width: 0; }
+.rq-card { background: var(--bg-card, #232328); border: 1px solid var(--border, #333338); border-left: 4px solid var(--accent-solid, #E85D26); border-radius: 8px; padding: 16px; min-width: 0; position: relative; }
 .rq-card.rq-focus { outline: 2px solid var(--accent-solid, #E85D26); }
 .rq-question { font-size: 1.1em; line-height: 1.35; overflow-wrap: anywhere; margin-bottom: 6px; }
 .rq-root { color: var(--orange, #d29922); margin-bottom: 6px; }
@@ -47,7 +47,8 @@
 
 .rq-popups { position: fixed; right: 16px; bottom: 16px; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; z-index: 50; display: flex; flex-direction: column; gap: 12px; }
 .rq-popups .rq-card { box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6); }
-.rq-later { background: none; border: none; color: var(--text-secondary, #888); cursor: pointer; min-height: 36px; padding: 4px 0; font-size: 0.85em; float: right; }
+.rq-later { background: none; border: none; color: var(--text-secondary, #888); cursor: pointer; min-width: 44px; min-height: 44px; padding: 8px 14px; font-size: 0.85em; position: absolute; top: 2px; right: 2px; }
+.rq-popups .rq-question { padding-right: 52px; }
 .rq-offline { position: fixed; left: 50%; transform: translateX(-50%); top: 12px; z-index: 60; background: var(--bg-input, #2a2a2e); border: 1px solid var(--orange, #d29922); border-radius: 6px; padding: 8px 14px; font-size: 0.85em; }
 .rq-offline a { color: var(--orange, #d29922); }
 

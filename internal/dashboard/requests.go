@@ -238,8 +238,7 @@ func (h *Handler) requestsView(csrf string) requestsView {
 		if rq.Status == grant.StatusPending {
 			continue
 		}
-		row := pastRow{ID: rq.ID, Agent: rq.Agent, What: what(rq.Action, rq.Paths), Note: cleanDisplayText(rq.Note, maxReasonDisplay)}
-		row.Outcome, row.Badge, row.When = h.outcome(rq, now)
+		row := h.pastRow(rq, now)
 		if rq.Status == grant.StatusExpired {
 			v.Expired = append(v.Expired, row)
 		} else {
@@ -252,6 +251,20 @@ func (h *Handler) requestsView(csrf string) requestsView {
 	}
 	v.Expired, v.History = newest(v.Expired, maxExpiredRows), newest(v.History, maxHistoryRows)
 	return v
+}
+
+// pastRow is one request that is no longer waiting, with the paths that were
+// allowed, or the ones asked for when none were.
+func (h *Handler) pastRow(rq grant.Request, now time.Time) pastRow {
+	paths := rq.Paths
+	if len(rq.GrantedPaths) > 0 {
+		paths = rq.GrantedPaths
+	} else if g, ok := h.deps.Grants.GetGrant(rq.GrantID); ok {
+		paths = g.Paths
+	}
+	row := pastRow{ID: rq.ID, Agent: rq.Agent, What: what(rq.Action, paths), Note: cleanDisplayText(rq.Note, maxReasonDisplay)}
+	row.Outcome, row.Badge, row.When = h.outcome(rq, now)
+	return row
 }
 
 // outcome says how a request that is no longer waiting ended, with a CSS state
@@ -270,18 +283,14 @@ func (h *Handler) outcome(rq grant.Request, now time.Time) (text, badge string, 
 	}
 	by := " by " + rq.DecidedBy
 	if rq.Always {
-		kept := 0
-		if h.deps.ACL != nil {
-			for _, r := range h.deps.ACL.ListAlways() {
-				if r.RequestID == rq.ID && !r.Unsaved {
-					kept++
-				}
-			}
+		listed, allowed := h.alwaysNow(rq)
+		switch {
+		case listed:
+			return "Always," + by, "approved", rq.DecidedAt
+		case allowed:
+			return "Always," + by + "; another rule allows it now", "approved", rq.DecidedAt
 		}
-		if kept == 0 {
-			return "Always, by " + rq.DecidedBy + "; removed since", "revoked", rq.DecidedAt
-		}
-		return "Always," + by, "approved", rq.DecidedAt
+		return "Always," + by + "; removed since", "revoked", rq.DecidedAt
 	}
 	g, ok := h.deps.Grants.GetGrant(rq.GrantID)
 	if !ok {
@@ -305,6 +314,21 @@ func (h *Handler) outcome(rq grant.Request, now time.Time) (text, badge string, 
 		return text + "; revoked by " + g.RevokedBy, "revoked", rq.DecidedAt
 	}
 	return text + "; time ran out", "expired", rq.DecidedAt
+}
+
+// alwaysNow reports whether an "always" answer is still on the agent's access
+// list, and if not, whether the list allows any of its paths anyway.
+func (h *Handler) alwaysNow(rq grant.Request) (listed, allowed bool) {
+	if h.deps.ACL == nil {
+		return false, false
+	}
+	for _, r := range h.deps.ACL.ListAlways() {
+		listed = listed || (r.RequestID == rq.ID && !r.Unsaved)
+	}
+	for _, p := range rq.GrantedPaths {
+		allowed = allowed || h.deps.ACL.Authorize(rq.Agent, p, acl.ActionReadValue) == nil
+	}
+	return listed, allowed
 }
 
 // what names what a request or grant is for.
@@ -369,9 +393,7 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 		data["FocusMissing"] = true
 		if h.accessEnabled() {
 			if rq, ok := h.deps.Grants.GetRequest(focus); ok {
-				row := pastRow{ID: rq.ID, Agent: rq.Agent, What: what(rq.Action, rq.Paths), Note: cleanDisplayText(rq.Note, maxReasonDisplay)}
-				row.Outcome, row.Badge, row.When = h.outcome(rq, time.Now())
-				data["FocusEnded"] = row
+				data["FocusEnded"] = h.pastRow(rq, time.Now())
 			}
 		}
 	}
