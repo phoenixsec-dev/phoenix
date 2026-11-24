@@ -408,7 +408,7 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
 		"CSRF": csrf, "Active": "requests", "Focus": focus,
 		"Error":     accessErrorMessage(r.URL.Query().Get("error")),
-		"Done":      doneText[r.URL.Query().Get("done")],
+		"Done":      requestDoneText[r.URL.Query().Get("done")],
 		"AccessOn":  h.accessEnabled(),
 		"Cards":     h.waitingCards(csrf),
 		"View":      h.requestsView(csrf),
@@ -425,9 +425,9 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "requests.html", data)
 }
 
-// doneText is the fixed message for each ?done= code, so a crafted link cannot
+// requestDoneText is the fixed message for each ?done= code, so a crafted link cannot
 // put words on the page.
-var doneText = map[string]string{
+var requestDoneText = map[string]string{
 	"revoked":       "Revoked. A value already handed over is not taken back.",
 	"removed":       "Removed. The agent can no longer read it.",
 	"removed-open":  "Removed from Always. The agent also has an open grant for it; revoke that under Active now if you want it gone too.",
@@ -467,7 +467,7 @@ func (h *Handler) finish(w http.ResponseWriter, r *http.Request, id, done string
 		backToRequests(w, r, id, done, code)
 		return
 	}
-	reply := answerReply{OK: code == "", Message: doneText[done]}
+	reply := answerReply{OK: code == "", Message: requestDoneText[done]}
 	if code != "" {
 		reply.Message = accessErrorMessage(code)
 	}
@@ -482,10 +482,10 @@ func (h *Handler) finish(w http.ResponseWriter, r *http.Request, id, done string
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, reply)
+	answerJSON(w, http.StatusOK, reply)
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func answerJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
@@ -636,7 +636,7 @@ type feedEnd struct {
 func (h *Handler) handleRequestFeed(w http.ResponseWriter, r *http.Request) {
 	p, err := h.verifyCookie(r)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "signed out"})
+		answerJSON(w, http.StatusUnauthorized, map[string]string{"error": "signed out"})
 		return
 	}
 	now := time.Now()
@@ -667,7 +667,7 @@ func (h *Handler) handleRequestFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	feed.Now = now.UnixMilli()
-	writeJSON(w, http.StatusOK, feed)
+	answerJSON(w, http.StatusOK, feed)
 }
 
 // cardCache keeps rendered cards for a few seconds. Drawing one asks the
