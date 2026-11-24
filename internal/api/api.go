@@ -744,6 +744,23 @@ func (s *Server) loginEnded(info *authInfo) string {
 	return ""
 }
 
+// writeLoginEnded answers 401 and returns true if the caller's login ended
+// while its request ran. Call it before acting on anything looked up by agent
+// name, and after reading a body: a slow body can keep a request waiting long
+// after its token was replaced.
+func (s *Server) writeLoginEnded(w http.ResponseWriter, info *authInfo) bool {
+	reason := s.loginEnded(info)
+	if reason == "" {
+		return false
+	}
+	if reason == reasonTokenReplaced {
+		handleAuthError(w, acl.ErrUnauthorized)
+	} else {
+		handleAuthError(w, &sessionAuthError{code: reason, err: errors.New("the session is no longer valid")})
+	}
+	return true
+}
+
 // authorize is the ACL check for a logged-in caller. Use it, not acl.Authorize,
 // for anything the caller may do: it also refuses a login whose token was
 // replaced after it logged in.
@@ -997,6 +1014,9 @@ func (s *Server) handleSetSecret(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "backend is read-only", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.writeLoginEnded(w, info) {
+		return
+	}
 
 	if err := s.backend.Set(path, req.Value, info.Agent, req.Description, req.Tags); err != nil {
 		if err == store.ErrInvalidPath {
@@ -1154,6 +1174,10 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 
 	if err := acl.ValidatePermissions(req.Permissions); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if s.writeLoginEnded(w, info) {
 		return
 	}
 
@@ -1429,6 +1453,12 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 		// Session scope/action, ACL, then request-use grants (per-ref).
 		dec := s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		if dec.Reason == reasonTokenReplaced {
+			// Not a per-ref problem: the whole request gets the 401 that
+			// every other endpoint answers.
+			s.writeDataDenial(w, r, info, "resolve", path, ip, dec.Reason)
+			return
+		}
 		if dec.Reason != "" {
 			s.auditDenied(r, info, "resolve", path, ip, dec.Reason)
 			code, msg := resolveDenial(dec.Reason)
@@ -1724,6 +1754,9 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.writeLoginEnded(w, info) {
+		return
+	}
 	pubEncoded := crypto.EncodeSealKey(pubKey)
 	if err := s.acl.SetAgentSealKey(req.AgentName, pubEncoded); err != nil {
 		log.Printf("error storing seal key for %q: %v", req.AgentName, err)
@@ -2053,6 +2086,9 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
+	if s.writeLoginEnded(w, info) {
+		return // not "an ordinary agent": the name may be another's now
+	}
 
 	// Query filters
 	roleFilter := r.URL.Query().Get("role")
@@ -2144,6 +2180,9 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request, id st
 		}
 	} else {
 		isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
+		if s.writeLoginEnded(w, info) {
+			return
+		}
 		if info.Agent != sess.Agent && !isAdmin {
 			jsonError(w, "access denied", http.StatusForbidden)
 			return
@@ -2180,6 +2219,9 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request, id 
 		}
 	} else {
 		isAdmin := s.authorize(info, "sessions", acl.ActionAdmin) == nil
+		if s.writeLoginEnded(w, info) {
+			return
+		}
 		if info.Agent != sess.Agent && !isAdmin {
 			jsonError(w, "access denied", http.StatusForbidden)
 			return

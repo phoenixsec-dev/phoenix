@@ -10,8 +10,12 @@ those two steps, the request used the new token's permissions. The window is
 normally microseconds, but a `POST /v1/resolve` that sends its body slowly
 could hold it open for up to 15 seconds. Now every permission check, admin
 and approver checks included, also requires that the token the request logged
-in with is still the agent's. Such a request gets `401 unauthorized` (admin
-endpoints: 403), and the audit reason is `token_replaced`. Writing the same
+in with is still the agent's. So does everything looked up by agent name
+("your" sessions, requests and grants). Requests that send a body are checked
+again after it arrived, so one kept waiting with an old token can no longer
+write a secret, make an agent or approve anything once that token is replaced. Such a
+request gets `401 unauthorized` (403 from a few admin endpoints). On secret
+reads, lists and writes the audit reason is `token_replaced`. Writing the same
 token again with `--force` is not a replacement. Nothing to configure.
 
 ### Security: a revoked session could be quietly replaced after a role change

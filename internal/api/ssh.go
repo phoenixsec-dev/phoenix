@@ -92,6 +92,9 @@ func (s *Server) handleSSHSign(w http.ResponseWriter, r *http.Request) {
 		writeAccessError(w, CodeRequestsDisabled, "access requests are turned off on this server", http.StatusNotImplemented)
 		return
 	}
+	if s.writeLoginEnded(w, info) {
+		return
+	}
 	ip := clientIP(r)
 	path := sshPathPrefix + body.Host
 	m := s.grants.Match(s.grantCaller(info, ip), path, grant.ActionSSHLogin)

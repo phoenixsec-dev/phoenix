@@ -750,10 +750,10 @@ func TestRunningBearerRequestCannotUseReplacementPermissions(t *testing.T) {
 		t.Run("resolve "+how, func(t *testing.T) {
 			e := newCredEnv(t)
 			e.wideRole()
-			_, body := e.doReader("POST", "/v1/resolve", "old-token", &hookBody{
+			code, body := e.doReader("POST", "/v1/resolve", "old-token", &hookBody{
 				Reader: strings.NewReader(`{"refs":["phoenix://other/b"]}`), hook: func() { change(e) }})
-			if strings.Contains(body, "other-value") || !strings.Contains(body, CodeACLDenied) {
-				t.Errorf("resolve = %s, want no value", body)
+			if code != 401 || strings.Contains(body, "other-value") {
+				t.Errorf("resolve = %d %s, want 401 and no value", code, body)
 			}
 		})
 	}
@@ -798,5 +798,44 @@ func TestReplacedTokenLoginLosesEveryPermission(t *testing.T) {
 	}
 	if got := allowed(login("new-token")); !slices.Equal(got, []bool{true, true, true}) {
 		t.Errorf("new login: %v", got)
+	}
+}
+
+// A request that logged in and then takes its time sending its body does
+// nothing once its token is replaced: no new agent, no secret, no approval.
+func TestSlowBodyAfterTokenReplaced(t *testing.T) {
+	admin := []acl.Permission{{Path: "*", Actions: []acl.Action{acl.ActionAdmin}}}
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/v1/agents", `{"name":"backdoor","token":"fake","permissions":[]}`},
+		{"POST", "/v1/agents?force=true", `{"name":"admin","token":"fake","permissions":[]}`},
+		{"PUT", "/v1/secrets/test/b", `{"value":"x"}`},
+		{"POST", "/v1/keypair", `{"agent_name":"admin","seal_public_key":"` + strings.Repeat("A", 43) + `="}`},
+		{"POST", "/v1/access-requests", `{"paths":["test/a"],"reason":"x"}`},
+		{"POST", "/v1/access-requests/req_x/approve", `{}`},
+		{"POST", "/v1/access-requests/req_x/deny", `{}`},
+		{"POST", "/v1/resolve", `{"refs":["phoenix://test/a"]}`},
+	} {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			e := newCredEnv(t)
+			e.srv.SetAccessRequests(config.AccessRequestsSettings{Enabled: true, Approvers: []string{"worker"},
+				GrantableActions: []string{"read_value"}, RequestTTL: time.Minute, DefaultGrantTTL: time.Minute, MaxGrantTTL: time.Hour})
+			if err := e.srv.acl.UpdateAgent("worker", "old-token", admin); err != nil {
+				t.Fatal(err)
+			}
+			code, body := e.doReader(c.method, c.path, "old-token", &hookBody{Reader: strings.NewReader(c.body), hook: func() {
+				if err := e.srv.acl.UpdateAgent("worker", "new-token", admin); err != nil {
+					t.Error(err)
+				}
+			}})
+			if code != 401 {
+				t.Errorf("%d %s, want 401", code, body)
+			}
+			if _, err := e.srv.acl.GetAgent("backdoor"); err == nil {
+				t.Error("an agent was created")
+			}
+			if _, err := e.srv.backend.Get("test/b"); err == nil {
+				t.Error("a secret was written")
+			}
+		})
 	}
 }
