@@ -65,6 +65,9 @@ Query params:
 - `token` (required)
 - `permissions` (array of `{path, actions[]}`; validated server-side)
 
+Deleting an agent, or updating it with a different token, ends its role sessions
+(see [Session identity](session-identity.md#ended-with-the-agents-token)).
+
 ## Key management
 
 | Method | Path | Purpose |
@@ -220,7 +223,7 @@ Denial codes:
 | `SEALED_REQUIRED` | 403 | Path is only served sealed; use `phoenix exec --redact-output` |
 | `SESSION_EXPIRED` | 401 | Session TTL elapsed |
 | `SESSION_REVOKED` | 401 | Session was explicitly revoked |
-| `SESSION_INVALID` | 401 | Token malformed or signature invalid |
+| `SESSION_INVALID` | 401 | Token malformed, signature invalid, or session ended because its agent was deleted or the agent's token was replaced |
 | `SCOPE_EXCEEDED` | 403 | Path outside role's namespace scope |
 | `ACTION_DENIED` | 403 | Action not permitted by role |
 | `BOOTSTRAP_FAILED` | 403 | Auth method not accepted for this role |

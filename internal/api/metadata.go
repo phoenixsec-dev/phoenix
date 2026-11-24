@@ -116,6 +116,11 @@ func (s *Server) handleSecretMetadata(w http.ResponseWriter, r *http.Request) {
 			}
 			out = append(out, newSecretInfo(p, m))
 		}
+		// Not a short list: say so if the session ended meanwhile.
+		if reason := s.sessionEnded(info); reason != "" {
+			s.writeDataDenial(w, r, info, "list", path, ip, reason)
+			return
+		}
 		s.auditAllowed(r, info, "list", path, ip)
 		jsonOK(w, map[string]interface{}{"secrets": out})
 		return

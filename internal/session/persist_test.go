@@ -2,11 +2,15 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // openTestStore opens a store backed by a sessions file in dir, signing with
@@ -24,6 +28,7 @@ func openTestStoreRoles(t *testing.T, path string, key []byte, roles map[string]
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(s.Stop)
+	bindTestFP(t, s)
 	return s
 }
 
@@ -42,7 +47,7 @@ func TestRestartKeepsLiveSession(t *testing.T) {
 	key := testSigningKey(t)
 
 	before := openTestStore(t, path, key)
-	tok, sess, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, sess, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +71,7 @@ func TestRestartKeepsRevokedSessionRevoked(t *testing.T) {
 	key := testSigningKey(t)
 
 	before := openTestStore(t, path, key)
-	tok, sess, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, sess, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +94,7 @@ func TestRestartKeepsRevokedSessionRevoked(t *testing.T) {
 func TestRestartWithNewKeyRejectsOldTokens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	before := openTestStore(t, path, testSigningKey(t))
-	tok, _, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, _, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +109,7 @@ func TestRestartWithNewKeyRejectsOldTokens(t *testing.T) {
 func TestSessionsFileHoldsNoToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	s := openTestStore(t, path, testSigningKey(t))
-	tok, _, err := s.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +134,7 @@ func TestExpiredSessionsNotLoaded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	key := testSigningKey(t)
 	before := openTestStore(t, path, key)
-	if _, _, err := before.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond); err != nil {
+	if _, _, err := before.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 	before.Stop()
@@ -198,7 +203,7 @@ func TestRestartEndsSessionsOfChangedRoles(t *testing.T) {
 
 	before := openTestStoreRoles(t, path, key, roles)
 	mint := func(role string) string {
-		tok, _, err := before.Create(role, "agent1", nil, []string{role + "/*"}, nil, "bearer", "127.0.0.1", 0)
+		tok, _, err := before.Create(role, "agent1", testFP, nil, []string{role + "/*"}, nil, "bearer", "127.0.0.1", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,7 +229,7 @@ func TestRoleChangedBackDoesNotReviveSessions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "role-sessions.json")
 	key := testSigningKey(t)
 	first := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1"})
-	tok, _, err := first.Create("dev", "agent1", nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	tok, _, err := first.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,5 +239,60 @@ func TestRoleChangedBackDoesNotReviveSessions(t *testing.T) {
 	back := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1"})
 	if _, err := back.Validate(tok); err != ErrSessionNotFound {
 		t.Fatalf("got %v, want ErrSessionNotFound", err)
+	}
+}
+
+// Ended sessions that could not be saved are saved by the next cleanup.
+func TestEndedSessionsSavedByCleanupAfterFailedSave(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "role-sessions.json")
+	s := openTestStore(t, path, testSigningKey(t))
+	if _, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, dir+".away"); err != nil {
+		t.Fatal(err)
+	}
+	ended, err := s.ChangeCredential("agent1", func() error { s.credentialCurrent = func(_, _ string) bool { return false }; return nil })
+	if err != nil || len(ended) != 1 || s.ActiveCount() != 0 {
+		t.Fatalf("ChangeCredential: ended %d, %d active, err %v", len(ended), s.ActiveCount(), err)
+	}
+	if err := os.Rename(dir+".away", dir); err != nil {
+		t.Fatal(err)
+	}
+	s.cleanup()
+	if n := openTestStore(t, path, testSigningKey(t)).ActiveCount(); n != 0 {
+		t.Errorf("%d sessions after restart, want 0", n)
+	}
+}
+
+// A save whose directory sync failed may not survive a power cut: a revoke
+// reports it, and cleanup tries again.
+func TestDirSyncFailureCountsAsUnsaved(t *testing.T) {
+	s := openTestStore(t, filepath.Join(t.TempDir(), "role-sessions.json"), testSigningKey(t))
+	if reflect.ValueOf(s.writeFile).Pointer() != reflect.ValueOf(fsutil.WriteFileAtomicStrict).Pointer() {
+		t.Error("sessions are not saved with fsutil.WriteFileAtomicStrict")
+	}
+	_, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.writeFile = func(p string, data []byte, perm os.FileMode) error {
+		return fsutil.WriteFileAtomicStrictOps(p, data, perm, fsutil.AtomicOps{SyncDir: func(string) error { return errors.New("no sync") }})
+	}
+	if err := s.Revoke(sess.ID); !errors.Is(err, fsutil.ErrDirSyncFailed) {
+		t.Fatalf("Revoke: %v, want ErrDirSyncFailed", err)
+	}
+	s.cleanup()
+	if !s.unsaved {
+		t.Error("a failed retry must stay pending")
+	}
+	s.writeFile = fsutil.WriteFileAtomicStrict
+	s.cleanup()
+	if s.unsaved {
+		t.Error("cleanup did not retry the save")
 	}
 }
