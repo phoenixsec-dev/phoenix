@@ -242,6 +242,36 @@ func TestRoleChangedBackDoesNotReviveSessions(t *testing.T) {
 	}
 }
 
+// A revoke outlives a role change or removal: the token keeps saying revoked,
+// so clients ask a person instead of quietly making a new session.
+func TestRevokedSessionOfChangedRoleStaysRevoked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "role-sessions.json")
+	key := testSigningKey(t)
+	s := openTestStoreRoles(t, path, key, map[string]string{"dev": "v1", "gone": "v1"})
+	toks := map[string]string{}
+	for _, role := range []string{"dev", "gone"} {
+		tok, sess, err := s.Create(role, "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Revoke(sess.ID); err != nil {
+			t.Fatal(err)
+		}
+		toks[role] = tok
+	}
+	s.Stop()
+	// Two restarts: the first one also rewrites the file.
+	for i := 1; i <= 2; i++ {
+		s = openTestStoreRoles(t, path, key, map[string]string{"dev": "v2"})
+		for role, tok := range toks {
+			if _, err := s.Validate(tok); err != ErrSessionRevoked {
+				t.Errorf("restart %d, role %s: got %v, want ErrSessionRevoked", i, role, err)
+			}
+		}
+		s.Stop()
+	}
+}
+
 // Ended sessions that could not be saved are saved by the next cleanup.
 func TestEndedSessionsSavedByCleanupAfterFailedSave(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "d")

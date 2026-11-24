@@ -14,6 +14,14 @@ in with is still the agent's. Such a request gets `401 unauthorized` (admin
 endpoints: 403), and the audit reason is `token_replaced`. Writing the same
 token again with `--force` is not a replacement. Nothing to configure.
 
+### Security: a revoked session could be quietly replaced after a role change
+
+At start the server drops sessions whose role was removed or changed. It
+dropped revoked ones too, so a revoked token then answered `SESSION_INVALID`
+("mint a new one") instead of `SESSION_REVOKED` ("ask a human"), and the CLI
+minted a fresh session on its own. Revoked sessions are now kept until they
+expire, whatever happened to their role.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine

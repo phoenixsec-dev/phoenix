@@ -31,7 +31,8 @@ type Options struct {
 	Path string
 	// RoleFingerprints maps each configured role to a hash of its settings
 	// (config.RoleFingerprints). Saved with the sessions; at load, a session
-	// whose role is missing here or whose hash changed is dropped.
+	// whose role is missing here or whose hash changed is dropped, unless it
+	// was revoked.
 	RoleFingerprints map[string]string
 }
 
@@ -56,7 +57,8 @@ type sessionsFile struct {
 }
 
 // loadSessions reads the sessions file and returns the unexpired records
-// whose role still exists with the same settings (fingerprint in roles).
+// whose role still exists with the same settings (fingerprint in roles), plus
+// every unexpired revoked one.
 // A missing file means no sessions. A file that is not a Phoenix sessions
 // file (version 1 with a "sessions" list) is an error and is left untouched:
 // it may be another Phoenix file configured at this path (secrets, a TLS
@@ -85,7 +87,9 @@ func loadSessions(path string, roles map[string]string) (map[string]*Session, er
 		if sess == nil || sess.ID == "" || now.After(sess.ExpiresAt) {
 			continue
 		}
-		if cur, ok := roles[sess.Role]; !ok || f.Roles[sess.Role] != cur {
+		// A revoked record is kept whatever its role became: it must go on
+		// saying revoked, or the client quietly mints a replacement.
+		if cur, ok := roles[sess.Role]; !sess.Revoked && (!ok || f.Roles[sess.Role] != cur) {
 			changed++
 			continue
 		}
