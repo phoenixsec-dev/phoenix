@@ -2,6 +2,7 @@ package fsutil
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -183,5 +184,72 @@ func TestWriteFileAtomicStrict(t *testing.T) {
 				t.Fatalf("temp file left behind: %d entries", len(entries))
 			}
 		})
+	}
+}
+
+// A file reached through a symlink is replaced where it really is and the link
+// stays. Replacing the link would leave the new content off the volume the
+// owner pointed it at, and the old content on it.
+func TestWriteGoesThroughSymlinks(t *testing.T) {
+	for name, target := range map[string]string{
+		"absolute":     "ABS",
+		"relative":     "../vol/real.json",
+		"link to link": "LINK",
+	} {
+		for _, exists := range []bool{true, false} {
+			t.Run(name+fmt.Sprintf(" exists=%v", exists), func(t *testing.T) {
+				dir := t.TempDir()
+				real := filepath.Join(dir, "vol", "real.json")
+				link := filepath.Join(dir, "data", "file.json")
+				for _, d := range []string{filepath.Dir(real), filepath.Dir(link)} {
+					if err := os.Mkdir(d, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				target := target
+				switch target {
+				case "ABS":
+					target = real
+				case "LINK":
+					target = filepath.Join(dir, "vol", "second")
+					if err := os.Symlink("real.json", target); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+				if exists {
+					if err := os.WriteFile(real, []byte("old"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := WriteFileAtomic(link, []byte("new"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+					t.Errorf("the link is gone: %v %v", fi, err)
+				}
+				if b, err := os.ReadFile(real); string(b) != "new" {
+					t.Errorf("target = %q %v", b, err)
+				}
+			})
+		}
+	}
+}
+
+// A link whose target directory is gone (a volume that is not mounted) is a
+// failed write, not a reason to write somewhere else.
+func TestWriteThroughDanglingSymlinkFails(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "file.json")
+	if err := os.Symlink(filepath.Join(dir, "unmounted", "file.json"), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(link, []byte("new"), 0600); err == nil {
+		t.Error("want an error")
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link is gone: %v %v", fi, err)
 	}
 }

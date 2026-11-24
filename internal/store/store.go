@@ -80,7 +80,9 @@ type Store struct {
 func NewWithProvider(filePath string, provider crypto.KeyProvider) (*Store, error) {
 	s := &Store{
 		provider: provider,
-		filePath: filePath,
+		// The real file: rotation renames its backup over this path, which
+		// must not replace a symlink.
+		filePath: fsutil.RealPath(filePath),
 	}
 
 	if err := s.load(); err != nil {

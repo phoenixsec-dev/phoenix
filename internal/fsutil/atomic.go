@@ -25,6 +25,8 @@ import (
 // the two fsyncs, rename can reach disk before the data does, which is how
 // a single-file store gets truncated to zero bytes on power loss.
 //
+// If path is a symlink, the file it points at is replaced and the link stays.
+//
 // An error means path was NOT replaced and still holds its old content.
 // Callers (key rotation in particular) roll back on error, so a failure
 // after the rename must not be reported as one — see the SyncDir note below.
@@ -101,6 +103,7 @@ func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (ren
 		sd = syncDir
 	}
 
+	path = RealPath(path)
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {

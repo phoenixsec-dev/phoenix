@@ -108,3 +108,24 @@ func TestRotationThatCannotUnwrapKeepsEarlierBackup(t *testing.T) {
 		t.Error("the good backup was overwritten")
 	}
 }
+
+// A rotation that has to restore the store puts it back where the store's
+// symlink points, not over the link.
+func TestRotationRestoresThroughSymlink(t *testing.T) {
+	_, realPath, key := rotationFailureStore(t, "")
+	link := filepath.Join(t.TempDir(), "store.json")
+	if err := os.Symlink(realPath, link); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(link, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RotateMasterKey(func() error { return os.ErrPermission }); err == nil {
+		t.Fatal("rotation should fail")
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link is gone: %v %v", fi, err)
+	}
+	assertOpensWithKey(t, realPath, key)
+}

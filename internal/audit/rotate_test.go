@@ -137,3 +137,38 @@ func TestSearchAcrossRotationBoundary(t *testing.T) {
 		t.Fatalf("agent b = %v truncated %v, want %v truncated", paths(res.Entries), res.Truncated, wantB)
 	}
 }
+
+// Rotating a log reached through a symlink keeps the new log and the archive
+// where the link points, and the link in place. Renaming the link would put
+// every later line somewhere else, such as a container's throwaway disk.
+func TestRotateThroughSymlink(t *testing.T) {
+	vol, dir := t.TempDir(), t.TempDir()
+	real, link := filepath.Join(vol, "audit.log"), filepath.Join(dir, "audit.log")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	l, err := NewRotatingLogger(link, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 6 {
+		if err := l.LogAllowed("a", "read_value", "ns/x", "192.0.2.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l.Close()
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link is gone: %v %v", fi, err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("%d files next to the link, want only the link", len(ents))
+	}
+	if arcs, err := archives(real); err != nil || len(arcs) == 0 {
+		t.Errorf("archives on the volume = %v %v", arcs, err)
+	}
+	// Queries given the link find the archives too.
+	res, err := Search(link, QueryOptions{})
+	if err != nil || len(res.Entries) != 6 {
+		t.Errorf("Search = %d entries, %v", len(res.Entries), err)
+	}
+}

@@ -12,6 +12,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // Entry is a single audit log record.
@@ -52,6 +54,7 @@ func NewLogger(path string) (*Logger, error) {
 // NewRotatingLogger is NewLogger that moves the file to a dated archive
 // once it passes maxBytes (0 = never). Archives are never deleted.
 func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
+	path = fsutil.RealPath(path) // rotation must move the file, not a symlink to it
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("opening audit log: %w", err)

@@ -61,6 +61,11 @@ that dies halfway can do to it. Nothing to configure; what changed:
   server refuses to start when the key opens nothing in the store, naming the
   backup if it works. If only some namespaces are unreadable it starts and logs
   them.
+- **A data file that was a symlink was replaced by a plain file** on its first
+  save (store, ACL, master key, audit rotation), so new content landed next to
+  the link instead of on the disk the owner pointed it at, for example inside a
+  container that is later thrown away. Writes now go to the file the link
+  points at and the link stays.
 
 ## v0.24.0 (2026-11-24)
 
