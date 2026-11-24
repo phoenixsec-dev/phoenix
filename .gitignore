@@ -44,7 +44,3 @@ node_modules/
 /tests/e2e/*.out
 /tests/e2e/*.pid
 /tests/e2e/*.tap
-
-# Local agent guidance (private)
-/AGENTS.md
-/CLAUDE.md

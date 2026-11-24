@@ -1,3 +1,8 @@
+---
+name: phoenix
+description: Phoenix secrets manager. Use when you need a secret, API key, token or credential (phoenix exec, phoenix:// references), when Phoenix denies access and you must ask a human for temporary use, or when you need root or an SSH login on another machine (phoenix ssh, approved by a human).
+---
+
 # Phoenix Secrets Manager
 
 Manage secrets securely through the Phoenix secrets management system.
@@ -186,6 +191,26 @@ enable.
 
 When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 `phoenix exec` transparently encrypt/decrypt values using NaCl box.
+
+## Root on another machine
+
+Phoenix can give you a short SSH login to another machine, once a human
+approves it. Use this whenever you need root or a shell somewhere else.
+
+1. `phoenix ssh --list` shows the machines you may ask for, and any approval
+   you already have.
+2. If the machine is listed:
+   `phoenix ssh <machine> --reason "<why>" -- '<command>'`
+   Quote the whole command as one string. Use `sudo -n` inside it for root.
+3. A human approves on their side. That can take minutes; the command waits.
+   Inside an active approval, later commands run at once and `--reason` is
+   optional.
+4. Never ask the user to open a terminal or run sudo for you. If the machine
+   is not listed, or the human denies it, say so and stop.
+
+If it says the machine needs approval although a human already approved it,
+check that this command uses the same `PHOENIX_TOKEN` and runs from the same
+machine as the one that asked. An approval belongs to one agent, token and IP.
 
 ## Safety Guardrails
 

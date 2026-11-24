@@ -69,7 +69,7 @@ func TestStoreCreateWithSealKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, sess, err := s.Create("secure", "agent1", testFP, sealKey, []string{"prod/*"}, nil, "bearer", "192.168.0.10", 0)
+	_, sess, err := s.Create("secure", "agent1", testFP, sealKey, []string{"prod/*"}, nil, "bearer", "192.0.2.10", 0)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

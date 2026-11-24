@@ -184,6 +184,7 @@ See [ssh-certificates.md](ssh-certificates.md).
 |---|---|---|
 | POST | `/v1/ssh/sign` | Sign `{"host","public_key"}` with an active `ssh_login` grant on `ssh/<host>`. Own identity only, never a session |
 | GET | `/v1/ssh/ca` | The CA's public key. No login |
+| GET | `/v1/ssh/machines` | Machines this server can sign logins for: `{"agent","enabled","machines":[{"name","approved_until"?}]}`. `approved_until` appears where the caller's own approval (same agent, token and IP) is active. Never addresses or users. Any signed-in caller, sessions included (they never see an approval). With `ssh_ca` off: `enabled: false`, empty list and a `note`, still 200. Audited as `ssh.list` |
 | GET | `/v1/ssh/window/{host}/{grant}` | `{"open":true/false}`: whether this approval is active for this machine. Anything unknown or switched off is false. No login; machines ask at every login and for each open session |
 
 ## Common error shape

@@ -636,28 +636,32 @@ func TestSSHCAValidation(t *testing.T) {
 	base := func() *Config {
 		return &Config{
 			AccessRequests: &AccessRequestsConfig{Enabled: true},
-			SSHCA:          &SSHCAConfig{Enabled: true, Hosts: map[string]SSHHost{"arch-omen": {Address: "192.168.0.99"}}},
+			SSHCA:          &SSHCAConfig{Enabled: true, Hosts: map[string]SSHHost{"build-1": {Address: "192.0.2.20"}, "build-node": {Address: "192.0.2.21"}}},
 		}
 	}
 	if err := base().validateSSHCA(); err != nil {
 		t.Fatalf("valid config refused: %v", err)
 	}
-	if got := base().SSHCAHosts()["arch-omen"].User; got != DefaultSSHUser {
+	if got := base().SSHCAHosts()["build-1"].User; got != DefaultSSHUser {
 		t.Fatalf("default user = %q", got)
 	}
-	for name, mutate := range map[string]func(*Config){
-		"grants off":       func(c *Config) { c.AccessRequests.Enabled = false },
-		"no grants block":  func(c *Config) { c.AccessRequests = nil },
-		"no hosts":         func(c *Config) { c.SSHCA.Hosts = nil },
-		"bad name":         func(c *Config) { c.SSHCA.Hosts["Bad Name"] = SSHHost{Address: "1.2.3.4"} },
-		"option address":   func(c *Config) { c.SSHCA.Hosts["x"] = SSHHost{Address: "-oProxyCommand=evil"} },
-		"empty address":    func(c *Config) { c.SSHCA.Hosts["x"] = SSHHost{} },
-		"option user name": func(c *Config) { c.SSHCA.Hosts["x"] = SSHHost{Address: "1.2.3.4", User: "-l"} },
+	// Each case must fail for its own reason, so the error text is checked.
+	for name, tc := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"grants off":       {func(c *Config) { c.AccessRequests.Enabled = false }, "access_requests must be enabled"},
+		"no grants block":  {func(c *Config) { c.AccessRequests = nil }, "access_requests must be enabled"},
+		"no hosts":         {func(c *Config) { c.SSHCA.Hosts = nil }, "at least one host"},
+		"bad name":         {func(c *Config) { c.SSHCA.Hosts["Bad Name"] = SSHHost{Address: "192.0.2.22"} }, "invalid host name"},
+		"option address":   {func(c *Config) { c.SSHCA.Hosts["build-node"] = SSHHost{Address: "-oProxyCommand=evil"} }, "invalid address"},
+		"empty address":    {func(c *Config) { c.SSHCA.Hosts["build-node"] = SSHHost{} }, "invalid address"},
+		"option user name": {func(c *Config) { c.SSHCA.Hosts["build-node"] = SSHHost{Address: "192.0.2.22", User: "-l"} }, "invalid user"},
 	} {
 		c := base()
-		mutate(c)
-		if err := c.validateSSHCA(); err == nil {
-			t.Errorf("%s: expected an error", name)
+		tc.mutate(c)
+		if err := c.validateSSHCA(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %v, want one saying %q", name, err, tc.want)
 		}
 	}
 	off := &Config{SSHCA: &SSHCAConfig{Enabled: false}}

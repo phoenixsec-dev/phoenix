@@ -1,5 +1,42 @@
 # Release Notes
 
+## v0.24.0 (2026-11-24)
+
+### Agents can find out they may log in to another machine
+
+An agent can now ask Phoenix which machines it may log in to, and whether it
+already has an approval.
+
+- `GET /v1/ssh/machines` lists the machines this server can sign logins for,
+  to any signed-in caller: names only, never addresses or users. Each shows
+  `approved_until` where the caller's own approval is active. With `ssh_ca`
+  off it answers 200 with an empty list, `enabled: false` and a note. Audited
+  as `ssh.list`.
+- `phoenix ssh --list` prints that list. Plain `phoenix ssh` prints the list
+  and the usage line.
+- `phoenix-skill/SKILL.md` now has frontmatter (`name: phoenix` and a
+  trigger description that covers "root or an SSH login on another machine")
+  and a short "Root on another machine" section. The MCP `phoenix_whoami`
+  description points at `phoenix ssh --list` too.
+
+### A clearer error when `phoenix ssh` has no approval
+
+- An approval belongs to one agent, token and IP, so a login with another token
+  or from another IP is refused even after a human approved it. The error now
+  says to check `PHOENIX_TOKEN` and where the command runs from and, when the
+  server is v0.24.0 or newer, names the agent the CLI ran as. Before, it only
+  said to run again with `--reason`.
+- It says so plainly when the approval has ended.
+- When `PHOENIX_TOKEN` holds the agent's own token, `phoenix ssh --list` uses it
+  even with `PHOENIX_ROLE` set, so it shows the approvals a login would use.
+- The usage line shows `--reason` as optional. Inside an active approval it was
+  never required.
+
+**Upgrading:** update the server first. An older server has no
+`/v1/ssh/machines` and answers 404; `phoenix ssh --list` then says the server
+is too old. Logging in with `phoenix ssh <machine>` still works on servers that
+have SSH logins (v0.20.0 and newer).
+
 ## v0.23.1 (2026-11-24)
 
 ### Security: replacing an agent's token did not end its role sessions
