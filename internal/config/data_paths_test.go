@@ -169,6 +169,21 @@ func TestHarmlessPathSharingIsAllowed(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("lock lookalikes: %v", err)
 	}
+	// Nor a name next to a link, when the lock is next to the real file, or next
+	// to a log that is not a file.
+	for _, target := range []string{"/dev/null", filepath.Join(t.TempDir(), "real.log")} {
+		cfg = dataPathsConfig(t, t.TempDir())
+		if err := os.Symlink(target, cfg.Audit.Path); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Policy.Path = cfg.Audit.Path + ".lock"
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("next to a link to %s: %v", target, err)
+		}
+		if cfg.Policy.Path = target + ".lock"; target != "/dev/null" && cfg.Validate() == nil {
+			t.Error("the real log's lock file was accepted as the policy")
+		}
+	}
 	// Without rotation there are no archives.
 	cfg = dataPathsConfig(t, t.TempDir())
 	cfg.Audit.RotateMB, cfg.ACL.Path = -1, filepath.Join(filepath.Dir(cfg.ACL.Path), "audit-20261108T120000.000Z.log")

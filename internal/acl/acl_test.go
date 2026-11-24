@@ -779,10 +779,13 @@ func TestFailedSaveGivesNothing(t *testing.T) {
 			}
 			check := func(when string, x *ACL) {
 				t.Helper()
-				for tok, want := range map[string]bool{"fake-1": true, "fake-2": false, "fake-3": true,
-					"fake-late": false, "fake-new": false, "fake-own": false} {
-					if _, err := x.Authenticate(tok); (err == nil) != want {
-						t.Errorf("%s: %s works %v, want %v", when, tok, err == nil, want)
+				for of, c := range map[string]struct {
+					tok  string
+					want bool
+				}{"same": {"fake-1", true}, "replaced, old": {"fake-2", false}, "own, old": {"fake-3", true},
+					"late": {"fake-late", false}, "replaced, new": {"fake-new", false}, "own, new": {"fake-own", false}} {
+					if _, err := x.Authenticate(c.tok); (err == nil) != c.want {
+						t.Errorf("%s: token of %s works %v, want %v", when, of, err == nil, c.want)
 					}
 				}
 				for _, agent := range []string{"same", "replaced", "own", "late"} {

@@ -246,6 +246,12 @@ func main() {
 		log.Fatalf("initializing ACL: %v", err)
 	}
 
+	// Again, now that both are read: a volume that went away in between would
+	// have been read as an empty store or access list.
+	if err := refuseMissingData(cfg); err != nil {
+		log.Fatalf("not starting: %v", err)
+	}
+
 	// Initialize audit logger
 	al, err := audit.NewRotatingLogger(cfg.Audit.Path, cfg.AuditRotateBytes())
 	if err != nil {
@@ -566,6 +572,10 @@ func runInit(dir string, opts initOptions) error {
 		return fmt.Errorf("saving ACL: %w", err)
 	}
 	fmt.Printf("Created ACL: %s\n", aclPath)
+	// The store too: a missing one then means it was lost (refuseMissingData).
+	if err := store.CreateEmpty(filepath.Join(dir, "store.json")); err != nil {
+		return fmt.Errorf("creating store: %w", err)
+	}
 	fmt.Printf("\n*** ADMIN TOKEN (save this — it won't be shown again): ***\n%s\n\n", adminToken)
 
 	// Generate internal CA

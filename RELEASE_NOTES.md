@@ -166,10 +166,11 @@ that dies halfway can do to it. Nothing to configure; what changed:
   but not saved, such as a removed Always, is saved by itself once the disk works.
 - **A missing `store.json` or `acl.json` looked like a healthy start** with no
   secrets or no agents, and the next write made an empty file in its place. The server
-  (and `--check-config`) now refuses, names the file and says what to do. A new
-  install still starts: it has no `store.json` until the first secret, and is told
-  apart by the audit log, which then has no line about a secret that was written or
-  handed over.
+  (and `--check-config`) now refuses, names the file and says what to do. `--init`
+  makes both. An older install that never held a secret has no `store.json` and
+  still starts: its audit log has no line about a secret that was written or handed
+  over. If it shares its log with another server, make an empty store first; the
+  message says how.
 - **The server did not start on a full disk** (since v0.23.0), because it rewrote
   `role-sessions.json` at every start. It now writes only what changed, and starts
   with a `WARNING` if that fails: ended sessions stay ended, and the save is
@@ -192,10 +193,10 @@ and a request could expire while you looked at the page.
   Optional browser notification. A choice you are making is never wiped, and
   an expired request stays, marked expired.
 - **Once** and "N uses or M minutes": grants can have a use limit, counted per
-  secret. Counting is exact and survives a restart; only a value that is handed
-  over costs a use, with one exception: if saving the use fails and so does
-  undoing that save, nothing is handed over but the use may count as spent after
-  a restart. `phoenix approve --uses N` for CLI approvers.
+  secret. Counting is exact and survives a restart; only a value the server sends
+  costs a use (also if the connection drops right then), with one exception: if
+  saving the use fails and so does undoing that save, nothing is sent but the use
+  may count as spent after a restart. `phoenix approve --uses N` for CLI approvers.
 - **Always** puts `read_value` on exactly that path on the agent's own access
   list, marked with the request, removable on the page at once. Never a
   wildcard, never for SSH logins, only from the dashboard.
@@ -230,7 +231,7 @@ and they decide nothing about access.
   show [name]` prints them, `phoenix agent create` takes the same options, and
   `phoenix whoami` and MCP `phoenix_whoami` show the caller's own. API:
   `PATCH /v1/agents/{name}/identity`, and `identities` in `GET /v1/agents`.
-  A change is audited as `set-identity`, also when it is refused.
+  A change is audited as `set-identity`, also when the caller may not make it.
 - Audit lines gain `who`, `host`, `authority` and `attested`. No field was
   renamed or removed. They come from the identity's record, never from a
   caller. A line about a refused credential, the dashboard or Phoenix itself

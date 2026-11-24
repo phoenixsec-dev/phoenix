@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/config"
+	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/store"
 )
 
 // A new install has no store yet and starts. Where a store or an access list is
@@ -69,6 +71,62 @@ func TestMissingDataIsRefused(t *testing.T) {
 				t.Errorf("1password: %v", err)
 			}
 		})
+	}
+}
+
+// Archives lie next to the real log, under its name, not next to a link to it.
+func TestLostStoreSeenThroughLinkedLog(t *testing.T) {
+	for _, gzipped := range []bool{false, true} {
+		dir, logs := t.TempDir(), t.TempDir()
+		archive, content := filepath.Join(logs, "phoenix-20260102T030405.000Z.log"), []byte(`{"action":"write","status":"allowed"}`+"\n")
+		if gzipped {
+			var b strings.Builder
+			zw := gzip.NewWriter(&b)
+			zw.Write(content)
+			zw.Close()
+			archive, content = archive+".gz", []byte(b.String())
+		}
+		cfg := config.DefaultConfig()
+		cfg.ACL.Path, cfg.Store.Path, cfg.Audit.Path = filepath.Join(dir, "acl.json"), filepath.Join(dir, "store.json"), filepath.Join(dir, "audit.log")
+		if err := errors.Join(os.WriteFile(cfg.ACL.Path, []byte("{}"), 0600), os.WriteFile(archive, content, 0600),
+			os.WriteFile(filepath.Join(logs, "phoenix.log"), nil, 0600), os.Symlink(filepath.Join(logs, "phoenix.log"), cfg.Audit.Path)); err != nil {
+			t.Fatal(err)
+		}
+		if err := refuseMissingData(cfg); err == nil || !strings.Contains(err.Error(), cfg.Store.Path+" is not there") {
+			t.Errorf("gzipped %v: got %v, want a refusal", gzipped, err)
+		}
+	}
+}
+
+// --init makes the store, so a new install starts whatever its log says, for
+// example one that shares it with a server in use, and a lost one is noticed.
+func TestInitMakesTheStore(t *testing.T) {
+	dir := t.TempDir()
+	if err := runInit(dir, initOptions{DashboardPassword: "synthetic-password"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := store.New(cfg.Store.Path, key); err != nil || st.Count() != 0 {
+		t.Fatalf("the new store: %v", err)
+	}
+	if err := os.WriteFile(cfg.Audit.Path, []byte(`{"action":"write","status":"allowed"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseMissingData(cfg); err != nil {
+		t.Errorf("shared log: %v", err)
+	}
+	if err := os.Remove(cfg.Store.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseMissingData(cfg); err == nil {
+		t.Error("the lost store was not noticed")
 	}
 }
 

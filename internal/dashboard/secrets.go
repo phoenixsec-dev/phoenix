@@ -170,7 +170,7 @@ func (h *Handler) secretReaders(path string) []secretReader {
 		names := h.deps.ACL.ListAgents()
 		sort.Strings(names)
 		for _, n := range names {
-			if h.deps.ACL.Authorize(n, path, acl.ActionReadValue) == nil {
+			if h.canRead(n, path) {
 				out = append(out, secretReader{Agent: n})
 			}
 		}
@@ -185,6 +185,16 @@ func (h *Handler) secretReaders(path string) []secretReader {
 		}
 	}
 	return out
+}
+
+// canRead reports whether agent's own permissions let it read path now. An
+// agent without a token has none it can use.
+func (h *Handler) canRead(agent, path string) bool {
+	if h.deps.ACL == nil {
+		return false
+	}
+	a, err := h.deps.ACL.GetAgent(agent)
+	return err == nil && a.TokenHash != "" && h.deps.ACL.Authorize(agent, path, acl.ActionReadValue) == nil
 }
 
 // secretRules describes the path's policy rule in plain words.

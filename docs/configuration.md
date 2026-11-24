@@ -202,11 +202,13 @@ same as an unmounted volume or a wrong path, and the next write would put an emp
 file in the place of the real one. Mount it, fix the path, or restore a backup; the
 message also says how to start empty on purpose.
 
-`phoenix-server --init` makes the access list, so it is always there. A new install
-has no store until the first secret. The audit log and its archives tell that apart:
-a line about a secret that was written, handed over, changed or deleted means there
-was a store. If you delete audit archives, log to something that is not a file, or
-lose the log together with the store, the server cannot know and starts empty.
+`phoenix-server --init` makes both files. Before v0.25.0 the first secret made the
+store, so an older install without secrets has none. The audit log and its archives
+tell that apart: a line about a secret that was written, handed over, changed or
+deleted means there was a store. Servers that share a log see each other's lines, so
+there an older one without secrets is refused until you make the empty store. If you
+delete audit archives, log to something that is not a file, or lose the log together
+with the store, the server cannot know and starts empty.
 
 ## Audit log rotation
 

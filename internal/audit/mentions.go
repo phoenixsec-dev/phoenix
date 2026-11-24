@@ -11,6 +11,8 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // secretActions are the allowed actions that only happen to a secret that is
@@ -22,6 +24,7 @@ var secretActions = []string{"write", "read_value", "resolve", "dry-resolve", "d
 // No log means no. A log that is not a file, such as /dev/stdout, keeps no lines.
 // It reads everything in the worst case, so it is for a start that found no store.
 func MentionsSecrets(path string) (bool, error) {
+	path = fsutil.RealPath(path) // archives are next to the real file
 	fi, err := os.Stat(path)
 	if err == nil && !fi.Mode().IsRegular() {
 		return false, nil

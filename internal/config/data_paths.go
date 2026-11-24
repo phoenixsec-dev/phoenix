@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -20,6 +21,7 @@ type dataFile struct {
 	locks    []string // suffixes of the empty lock files it holds next to it
 	archives bool     // the server also makes dated archives of it (audit log)
 	resolved []string // where it really is, and its name as written
+	lockBase string   // what lock file names start with: next to the real file
 }
 
 const grantsField = "access_requests grants file"
@@ -47,9 +49,13 @@ func resolved(p string) string {
 // dataFiles lists every file this config makes Phoenix read or write.
 func (c *Config) dataFiles() []dataFile {
 	lock := []string{".lock"}
+	auditLock := lock
+	if fi, err := os.Stat(c.Audit.Path); err == nil && !fi.Mode().IsRegular() {
+		auditLock = nil // /dev/stdout and the like are not locked
+	}
 	files := []dataFile{
 		{field: "acl.path", path: c.ACL.Path, written: true, locks: lock},
-		{field: "audit.path", path: c.Audit.Path, written: true, locks: lock, archives: c.AuditRotateBytes() > 0},
+		{field: "audit.path", path: c.Audit.Path, written: true, locks: auditLock, archives: c.AuditRotateBytes() > 0},
 		{field: grantsField, path: c.GrantStorePath(), written: true, locks: lock},
 		{field: "config file", path: c.file},
 		{field: "policy.path", path: c.Policy.Path},
@@ -74,6 +80,7 @@ func (c *Config) dataFiles() []dataFile {
 		// RealPath too: unlike fullyResolved it follows a link whose target
 		// does not exist yet, as the writers do.
 		files[i].resolved = []string{resolved(f.path), fullyResolved(f.path), resolved(fsutil.RealPath(f.path))}
+		files[i].lockBase = files[i].resolved[2]
 	}
 	return files
 }
@@ -115,20 +122,20 @@ func (a dataFile) hits(b dataFile) bool {
 	if sameFile(a.path, b.path) {
 		return true
 	}
+	for _, l := range a.locks {
+		if slices.Contains(b.resolved, a.lockBase+l) {
+			return true
+		}
+		for _, m := range b.locks { // both would hold one lock file
+			if a.lockBase+l == b.lockBase+m {
+				return true
+			}
+		}
+	}
 	for _, p := range a.resolved {
 		for _, q := range b.resolved {
 			if p == q {
 				return true
-			}
-			for _, l := range a.locks {
-				if q == p+l {
-					return true
-				}
-				for _, m := range b.locks { // both would hold one lock file
-					if p+l == q+m {
-						return true
-					}
-				}
 			}
 			if a.archives && audit.UsesName(p, q) {
 				return true

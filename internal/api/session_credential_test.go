@@ -947,7 +947,7 @@ func TestForceWithFailedSave(t *testing.T) {
 		t.Skip("running as a user the mode does not stop")
 	}
 	if code != 500 || strings.Contains(body, "old token") {
-		t.Errorf("same token: %d %s", code, body)
+		t.Errorf("same token: %d %s", code, failBody(body))
 	}
 	e.wantAlive("same token, not saved", sess)
 	if code, _ := e.do("GET", "/v1/secrets/other/b", "old-token", ""); code != 403 {
@@ -963,16 +963,16 @@ func TestForceWithFailedSave(t *testing.T) {
 		t.Errorf("own token: %d, want 500", code)
 	}
 	if code, body := force("admin-token", "worker", "new-token"); code != 500 || !strings.Contains(body, "the old token no longer works and the new one is not in force") {
-		t.Errorf("new token: %d %s", code, body)
+		t.Errorf("new token: %d %s", code, failBody(body))
 	}
 	if l := e.lines(audit.QueryOptions{Path: "worker", Limit: 1})[0]; l.Action != "update-agent" || l.Status != "denied" || l.Reason != "not_saved" {
 		t.Errorf("audit line = %+v", l)
 	}
 	check := func(when string) {
 		t.Helper()
-		for _, tok := range []string{"old-token", "new-token", "late-token", "other-admin-token"} {
+		for i, tok := range []string{"old-token", "new-token", "late-token", "other-admin-token"} {
 			if code, _ := e.do("GET", "/v1/secrets/test/a", tok, ""); code != 401 {
-				t.Errorf("%s: %s answered %d, want 401", when, tok, code)
+				t.Errorf("%s: token %d answered %d, want 401", when, i, code)
 			}
 		}
 		e.wantDead(when, sess)

@@ -355,6 +355,21 @@ func TestGrantOfReplacedTokenIsNotOpen(t *testing.T) {
 	}
 }
 
+// An agent whose token is gone can read nothing, whatever its rules say.
+func TestAgentWithoutTokenIsNoReader(t *testing.T) {
+	e := newAccessEnv(t)
+	rules := []acl.Permission{{Path: "infra/*", Actions: []acl.Action{acl.ActionReadValue}}}
+	e.acl = acl.NewFromConfig(&acl.ACLConfig{Agents: map[string]acl.Agent{
+		"courier": {Name: "courier", Permissions: rules}, "other": {Name: "other", TokenHash: "x", Permissions: rules}}})
+	e.h.deps.ACL = e.acl
+	if got := e.h.secretReaders("infra/a"); len(got) != 1 || got[0].Agent != "other" {
+		t.Errorf("readers = %+v, want only other", got)
+	}
+	if e.h.canRead("courier", "infra/a") {
+		t.Error("an agent without a token is said to read")
+	}
+}
+
 func TestExpiredStaysVisible(t *testing.T) {
 	e := newAccessEnv(t)
 	rq := e.request(t, "why", 30*time.Minute, "infra/a")

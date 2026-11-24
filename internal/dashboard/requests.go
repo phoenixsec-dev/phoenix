@@ -601,7 +601,7 @@ func (h *Handler) handleAlwaysRemove(w http.ResponseWriter, r *http.Request) {
 			h.deps.Access.GrantTokenCurrent(g)
 	})
 	switch {
-	case h.deps.ACL != nil && h.deps.ACL.Authorize(agent, path, acl.ActionReadValue) == nil:
+	case h.canRead(agent, path):
 		h.finish(w, r, "", "removed-still", "")
 	case openGrant:
 		h.finish(w, r, "", "removed-open", "")

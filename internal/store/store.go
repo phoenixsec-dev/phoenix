@@ -131,6 +131,19 @@ func (s *Store) load() error {
 	return s.checkKeyOpens()
 }
 
+// CreateEmpty writes a store file without secrets, where there is none.
+func CreateEmpty(path string) error {
+	data, err := json.MarshalIndent(&storeData{
+		Version:    storeVersion,
+		Secrets:    map[string]encryptedSecret{},
+		Namespaces: map[string]namespaceDEK{},
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileNew(path, data, 0600)
+}
+
 // storeVersion is the format version of the store file, the only one so far.
 const storeVersion = 1
 
