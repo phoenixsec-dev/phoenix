@@ -581,10 +581,53 @@ func TestRevokeDuringStaleCleanupWins(t *testing.T) {
 	if err := s.Revoke(sess.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.endStale(found); err != ErrSessionRevoked {
+	if err := s.endStale(found.ID); err != ErrSessionRevoked {
 		t.Errorf("endStale: %v, want ErrSessionRevoked", err)
 	}
 	if _, err := s.Validate(tok); err != ErrSessionRevoked {
 		t.Errorf("Validate after: %v, want ErrSessionRevoked", err)
+	}
+}
+
+// What Create, Validate, Get and List return are snapshots, so reading them
+// while the session is renewed or revoked is not a data race.
+func TestReturnedSessionsAreSnapshots(t *testing.T) {
+	s := newTestStore(t, time.Hour)
+	tok, made, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := made.ID
+	held := map[string]*Session{"Create": made, "Get": s.Get(id), "List": s.List()[0]}
+	if held["Validate"], err = s.Validate(tok); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for _, sess := range held {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				_ = sess.ExpiresAt.String()
+				_ = sess.Revoked
+			}
+		}()
+	}
+	for range 20 {
+		if _, _, err := s.Renew(id, 2*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Revoke(id); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	for how, sess := range held {
+		if sess.Revoked || time.Until(sess.ExpiresAt) > time.Hour {
+			t.Errorf("%s returned the live record", how)
+		}
+	}
+	if now := s.Get(id); !now.Revoked || time.Until(now.ExpiresAt) <= time.Hour {
+		t.Error("Get does not show the renewal and revoke")
 	}
 }
