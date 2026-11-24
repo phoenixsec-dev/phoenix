@@ -80,7 +80,8 @@ that dies halfway can do to it. Nothing to configure; what changed:
   empty `<file>.lock` next to it, safe to leave there, gone with the process)
   and refuses to start while another one holds it. Two servers may share an
   audit log only if neither rotates it. Two servers with their own stores may
-  share a master key, but then neither can rotate it (409). Where locking does
+  share a master key, but then neither can rotate it (409) until the other has
+  its own copy. Where locking does
   not work the server starts and logs a `WARNING`.
 - **`--protect-key` and `rotate-master` could overwrite each other's key
   file.** Adding a passphrase and then rotating without a restart saved the new
@@ -114,11 +115,12 @@ that dies halfway can do to it. Nothing to configure; what changed:
   `--init` is running there.
 - **`--reissue-cert` and `--init` wrote certificates and keys in place,** so a
   full disk or a crash left them empty, the CA certificate included. They are
-  now replaced in one step, keeping mode and (as root) owner, and
-  `--reissue-cert` refuses a config that would make it write over the CA key or
+  now replaced in one step, keeping mode and (as root) owner; a server key with
+  a POSIX ACL is still written in place, so nobody loses access to it.
+  `--reissue-cert` no longer touches the CA certificate, and refuses a config that would make it write over the CA key or
   any other Phoenix file. The new SSH signing key is written the same way: one
   cut off half way used to stop the server from starting.
-- **Replaced files keep their owner** (as root) and POSIX ACL, so
+- **Replaced files keep their owner** when Phoenix runs as root, so
   `--protect-key` run with sudo no longer leaves a key the server cannot read.
 - **An audit line cut off by a full disk or a power cut swallowed the next
   one:** that entry was written and reported as written, but no search could

@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -284,5 +285,41 @@ func TestRotationIgnoresLinkAtBackupName(t *testing.T) {
 		if fi, err := os.Lstat(storePath); err != nil || !fi.Mode().IsRegular() {
 			t.Errorf("fails=%v: the store is not a file any more: %v", fails, err)
 		}
+	}
+}
+
+// A backup that opens but misses a secret the store has is not a recovery, and
+// a store with a missing namespace key is not rotated over a backup.
+func TestIncompleteStoresAreNotTrusted(t *testing.T) {
+	storePath, oldKey := crashMidRotation(t)
+	good, _ := os.ReadFile(storePath + ".pre-rotate")
+	for _, drop := range [][]string{{"ns1/key1"}, {"ns1/key1", "ns2/key2"}} {
+		sd, err := parseStore("", good)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range drop {
+			delete(sd.Secrets, p)
+		}
+		b, _ := json.Marshal(sd)
+		if err := os.WriteFile(storePath+".pre-rotate", b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(storePath, oldKey); err == nil || strings.Contains(err.Error(), ".pre-rotate") {
+			t.Errorf("without %v: %v, want a refusal that does not recommend it", drop, err)
+		}
+	}
+
+	s, live, _ := rotationFailureStore(t, "")
+	if err := s.writeSnapshot(live + ".pre-rotate"); err != nil {
+		t.Fatal(err)
+	}
+	whole, _ := os.ReadFile(live + ".pre-rotate")
+	delete(s.data.Namespaces, "ns1")
+	if _, err := s.RotateMasterKey(func() error { return nil }); err == nil || !strings.Contains(err.Error(), "ns1") {
+		t.Errorf("rotate = %v, want a refusal naming ns1", err)
+	}
+	if now, _ := os.ReadFile(live + ".pre-rotate"); !bytes.Equal(now, whole) {
+		t.Error("the complete backup was overwritten")
 	}
 }

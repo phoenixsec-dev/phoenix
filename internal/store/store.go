@@ -475,6 +475,12 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 	if len(nsNames) == 0 {
 		return 0, nil
 	}
+	// A store that is not whole in memory must not be written over a backup
+	// that may be. Nothing was changed, on disk or in memory.
+	if bad, _ := s.unreadable(s.data); len(bad) > 0 {
+		return 0, fmt.Errorf("rotating master key: the current key does not open these namespaces, "+
+			"restore the store from a backup in which they open first: %s", strings.Join(bad, ", "))
+	}
 
 	// Snapshot old namespace entries for in-memory rollback
 	oldEntries := make([]namespaceDEK, len(nsNames))
@@ -629,8 +635,8 @@ func (s *Store) RotateMasterKey(afterSave func() error) (int, error) {
 }
 
 // fileOpens reports whether path is a store file that opens completely with
-// the provider's active key. Any read or parse error, and a store with nothing
-// in it, counts as "does not open". RotateMasterKey uses it to decide whether
+// the provider's active key and holds every secret in memory. Any read or parse
+// error, and a store with nothing in it, counts as "does not open". RotateMasterKey uses it to decide whether
 // the pre-rotate backup is still needed.
 func (s *Store) fileOpens(path string) bool {
 	data, err := os.ReadFile(path)
@@ -640,6 +646,11 @@ func (s *Store) fileOpens(path string) bool {
 	sd, err := parseStore(path, data)
 	if err != nil {
 		return false
+	}
+	for name := range s.data.Secrets {
+		if _, ok := sd.Secrets[name]; !ok {
+			return false
+		}
 	}
 	bad, total := s.unreadable(sd)
 	return total > 0 && len(bad) == 0

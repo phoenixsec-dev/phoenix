@@ -92,6 +92,22 @@ func TestLockFileAccess(t *testing.T) {
 	}
 }
 
+// Anything else left at the lock's name is not waited for, not locked and not
+// given a new owner. It counts as "cannot lock", not as a conflict.
+func TestLockRefusesWhatIsNotALockFile(t *testing.T) {
+	dir := t.TempDir()
+	in := func(n string) string { return filepath.Join(dir, n) }
+	if err := errors.Join(os.WriteFile(in("other"), []byte("x"), 0600), os.WriteFile(in("empty"), nil, 0600),
+		os.Link(in("empty"), in("linked.lock")), os.WriteFile(in("full.lock"), []byte("x"), 0600), makeFIFO(in("fifo.lock"))); err != nil {
+		t.Skip(err)
+	}
+	for _, name := range []string{"linked", "full", "fifo"} {
+		if _, err := Lock(in(name)); err == nil || errors.Is(err, ErrLocked) {
+			t.Errorf("%s: %v, want another error", name, err)
+		}
+	}
+}
+
 // A directory that cannot hold a lock file is not a conflict.
 func TestLockUnavailableIsNotLocked(t *testing.T) {
 	if _, err := Lock(filepath.Join(t.TempDir(), "missing", "store.json")); err == nil || errors.Is(err, ErrLocked) {

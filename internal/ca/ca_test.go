@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -181,8 +180,9 @@ func TestLoadCAFromPEM_RejectsNonCA(t *testing.T) {
 	}
 }
 
-// Certificates and keys are replaced in one step, never rewritten in place:
-// that empties the old file first, and on a full disk nothing follows.
+// Certificates and keys are replaced in one step, not rewritten in place: that
+// empties the old file first, and on a full disk nothing follows. Reissuing
+// leaves an unchanged CA certificate alone.
 func TestSaveNeverTruncates(t *testing.T) {
 	authority, err := GenerateCA("Test")
 	if err != nil {
@@ -215,7 +215,13 @@ func TestSaveNeverTruncates(t *testing.T) {
 	if err := os.Chmod(in("s.key"), 0640); err != nil {
 		t.Fatal(err)
 	}
-	if err := errors.Join(authority.Save(in("ca.crt"), in("ca.key")), bundle.Save(in("s.crt"), in("s.key"), in("ca.crt"))); err != nil {
+	if err := bundle.Save(in("s.crt"), in("s.key"), in("ca.crt")); err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(old["ca.crt"], inode("ca.crt")) {
+		t.Error("reissuing wrote the CA certificate again")
+	}
+	if err := authority.Save(in("ca.crt"), in("ca.key")); err != nil {
 		t.Fatal(err)
 	}
 	for n, fi := range old {

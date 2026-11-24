@@ -10,11 +10,6 @@ import (
 	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
-// keyUsersSuffix names the lock every server holds, shared, on its master key
-// for as long as it runs. Rotation needs it alone. It is not "<key>.lock",
-// which rotate-master and --protect-key hold only while they work.
-const keyUsersSuffix = ".users"
-
 // dataLocks are the locks a running server holds.
 type dataLocks struct {
 	held []*fsutil.FileLock
@@ -38,8 +33,8 @@ func lockDataFiles(cfg *config.Config, logf func(string, ...any)) (*dataLocks, e
 		l, err := lock(path)
 		if errors.Is(err, fsutil.ErrLocked) {
 			d.release()
-			return nil, fmt.Errorf("%s is in use by another running phoenix-server (it holds %s.lock). "+
-				"Two servers on one file undo each other's writes: stop the other one, or give this one its own files", path, path)
+			return nil, fmt.Errorf("%s is in use by another running phoenix-server (it holds a lock file next to it). "+
+				"Two servers on one file undo each other's writes: stop the other one, or give this one its own files", path)
 		}
 		if err != nil {
 			logf("WARNING: cannot lock %s (%v): make sure no second phoenix-server uses it", path, err)
@@ -79,7 +74,7 @@ func lockDataFiles(cfg *config.Config, logf func(string, ...any)) (*dataLocks, e
 	// Two servers with their own stores may share a key, but then neither may
 	// rotate it: the other's store would no longer open.
 	if cfg.Backend() == "file" {
-		l, err := take(fsutil.RealPath(cfg.Store.MasterKey)+keyUsersSuffix, fsutil.LockShared)
+		l, err := take(cfg.Store.MasterKey, fsutil.LockUsers)
 		if err != nil {
 			return nil, err
 		}

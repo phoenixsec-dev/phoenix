@@ -7,7 +7,9 @@ import (
 	"os"
 )
 
-const noFollow = 0
+const openSafely = 0
+
+func plainEmptyFile(*os.File) bool { return true }
 
 // flock is not available on this system.
 func flock(*os.File, bool) error { return errors.ErrUnsupported }

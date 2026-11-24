@@ -58,8 +58,10 @@ what an earlier message listed.
 If the server already stopped, or will not start (it cannot decrypt secrets):
 
 1. Stop the server and copy the whole data directory somewhere safe first.
-2. If `<store>.pre-rotate` exists: move it over the store file. Keep
-   `master.key` as it is.
+2. If `<store>.pre-rotate` exists and the server's message names it as the
+   recovery: move it over the store file. Keep `master.key` as it is. (If the
+   message does not name it, it is missing secrets or does not open with this
+   key either.)
 3. Otherwise, if `<store>.emergency-key` exists: keep the store file, and
    move `<store>.emergency-key` over `master.key`. Start with the usual
    passphrase.

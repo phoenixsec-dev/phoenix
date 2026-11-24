@@ -301,8 +301,15 @@ func TestWriteDoesNotFollowSymlinkByItself(t *testing.T) {
 	}
 }
 
-// WriteFileNew makes a whole file or nothing, and never replaces one.
+// WriteFileNew never replaces a file, with or without hard links.
 func TestWriteFileNew(t *testing.T) {
+	t.Run("links", testWriteFileNew)
+	defer func() { linkFile = os.Link }()
+	linkFile = func(string, string) error { return errors.ErrUnsupported }
+	t.Run("no links", testWriteFileNew)
+}
+
+func testWriteFileNew(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ssh_ca.key")
 	if err := WriteFileNew(path, []byte("first"), 0600); err != nil {
 		t.Fatal(err)

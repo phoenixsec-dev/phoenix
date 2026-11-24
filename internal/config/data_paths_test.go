@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,13 +60,17 @@ func TestDataPathCollisionsAreRefused(t *testing.T) {
 		"key as an audit archive":      func(c *Config) { c.Store.MasterKey = in("audit-20261108T120000.000Z.log") },
 		"store as a gzipped archive":   func(c *Config) { c.Store.Path = in("audit-20261108T120000.000Z.log.gz") },
 		"ACL as a half-gzipped one":    func(c *Config) { c.ACL.Path = in("audit-20261108T120000.000Z.log.gz.tmp") },
-		"store as quarantined grants":  func(c *Config) { c.Store.Path = in("grants.json.corrupt-1790000000") },
-		"ACL over a lock file":         func(c *Config) { c.ACL.Path = c.Store.Path + ".lock" },
-		"through a linked directory":   func(c *Config) { c.Store.Path = filepath.Join(link, "acl.json") },
-		"grants over the config":       func(c *Config) { c.AccessRequests.StorePath = in("config.json") },
-		"grants over the TLS key":      func(c *Config) { c.AccessRequests.StorePath = c.HTTPSListener.Key },
-		"grants over the SSH key":      func(c *Config) { c.AccessRequests.StorePath = in("ssh_ca.key") },
-		"SSH key over the config":      func(c *Config) { c.SSHCA.KeyPath = in("config.json") },
+		"store over the users lock":    func(c *Config) { c.Store.Path = c.Store.MasterKey + ".users" },
+		"key as a .gz log's archive": func(c *Config) {
+			c.Audit.Path, c.Store.MasterKey = in("audit.gz"), in("audit-20261108T120000.000Z.gz")
+		},
+		"store as quarantined grants": func(c *Config) { c.Store.Path = in("grants.json.corrupt-1790000000") },
+		"ACL over a lock file":        func(c *Config) { c.ACL.Path = c.Store.Path + ".lock" },
+		"through a linked directory":  func(c *Config) { c.Store.Path = filepath.Join(link, "acl.json") },
+		"grants over the config":      func(c *Config) { c.AccessRequests.StorePath = in("config.json") },
+		"grants over the TLS key":     func(c *Config) { c.AccessRequests.StorePath = c.HTTPSListener.Key },
+		"grants over the SSH key":     func(c *Config) { c.AccessRequests.StorePath = in("ssh_ca.key") },
+		"SSH key over the config":     func(c *Config) { c.SSHCA.KeyPath = in("config.json") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := dataPathsConfig(t, dir)
@@ -106,6 +111,19 @@ func TestDataPathDanglingLinksAreRefused(t *testing.T) {
 	}
 }
 
+// Nor do directories that do not exist yet hide that two paths are one.
+func TestDataPathMissingParentsAreResolved(t *testing.T) {
+	dir := t.TempDir()
+	cfg := dataPathsConfig(t, dir)
+	if err := errors.Join(os.Mkdir(filepath.Join(dir, "run"), 0700), os.Symlink("run", filepath.Join(dir, "var"))); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Store.Path, cfg.Audit.Path = filepath.Join(dir, "run", "not", "yet", "x"), filepath.Join(dir, "var", "not", "yet", "x")
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "same file") {
+		t.Errorf("Validate = %v, want a same-file error", err)
+	}
+}
+
 // A missing config file still counts: the server must not create it as its
 // own audit log.
 func TestMissingConfigFileIsProtected(t *testing.T) {
@@ -133,6 +151,20 @@ func TestHarmlessPathSharingIsAllowed(t *testing.T) {
 	cfg.ACL.Path = cfg.Store.Path + ".tmp-acl"
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("shared prefix: %v", err)
+	}
+	// Names that only look like ones Phoenix makes.
+	for _, name := range []string{"grants.json.corrupt-copy", "audit-notes.log"} {
+		cfg = dataPathsConfig(t, t.TempDir())
+		cfg.ACL.Path = filepath.Join(filepath.Dir(cfg.ACL.Path), name)
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Without rotation there are no archives.
+	cfg = dataPathsConfig(t, t.TempDir())
+	cfg.Audit.RotateMB, cfg.ACL.Path = -1, filepath.Join(filepath.Dir(cfg.ACL.Path), "audit-20261108T120000.000Z.log")
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("no rotation: %v", err)
 	}
 	cfg = dataPathsConfig(t, t.TempDir())
 	cfg.Store.Backend, cfg.OnePassword.Vault = "1password", "v"

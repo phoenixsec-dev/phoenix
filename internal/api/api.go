@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -1338,7 +1339,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	if s.keyLock != nil {
 		if err := s.keyLock.Exclusive(); err != nil {
 			log.Printf("rotation refused: %s: %v", s.masterKeyPath, err)
-			jsonError(w, "another running phoenix-server uses this master key and its store would no longer open; stop it, or give it its own key, then rotate", http.StatusConflict)
+			jsonError(w, "another running phoenix-server uses this master key, and after a rotation its store would no longer open. Give that server its own copy of the key file first (store.master_key), restart it, then rotate", http.StatusConflict)
 			return
 		}
 		defer func() { _ = s.keyLock.Share() }()
@@ -1363,6 +1364,21 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	defer crypto.ZeroBytes(oldKey)
 	prevPath := s.masterKeyPath + ".prev"
 	staged := prevPath + ".new"
+
+	// Left over from a rotation that could not finish: if it is an older key it
+	// takes its place as .prev before the name is used again.
+	if left, err := os.ReadFile(staged); err == nil {
+		older := !bytes.Equal(left, oldKey)
+		crypto.ZeroBytes(left)
+		if older {
+			if err := os.Rename(staged, prevPath); err != nil {
+				log.Printf("rotation refused: an earlier rotation's old key is still at %s and cannot be moved: %v", staged, err)
+				jsonError(w, "rotation failed", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+	backup := prevPath
 
 	// Rotate with afterSave callback: the callback writes the new key file
 	// atomically while the store lock is held, preventing any window where
@@ -1392,6 +1408,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if rerr := os.Rename(staged, prevPath); rerr != nil {
+			backup = staged
 			log.Printf("WARNING: the old master key stays at %s: %v", staged, rerr)
 		} else if serr := fsutil.SyncDir(filepath.Dir(prevPath)); serr != nil {
 			log.Printf("WARNING: syncing the directory of %s: %v", prevPath, serr)
@@ -1409,7 +1426,7 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{"status": "ok", "rotated": rotated}
 	if rotated > 0 {
-		resp["backup"] = prevPath
+		resp["backup"] = backup
 	}
 	jsonOK(w, resp)
 }

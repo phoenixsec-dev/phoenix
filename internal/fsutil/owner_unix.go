@@ -7,10 +7,11 @@ import (
 	"syscall"
 )
 
-// owner returns the user and group a file belongs to, if it exists.
+// owner returns the user and group a file belongs to, if it exists. Not through
+// a symlink: what it points at may be anyone's.
 func owner(path string) (uid, gid int, ok bool) {
-	fi, err := os.Stat(path)
-	if err != nil {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
 		return 0, 0, false
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
@@ -150,12 +151,12 @@ func TestRotateIgnoresLinkAtPrev(t *testing.T) {
 func TestRotateRefusedWhileKeyIsShared(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	seedSecret(t, srv, "admin-token", "test/a", "synthetic-value")
-	mine, err := fsutil.LockShared(srv.masterKeyPath + ".users")
+	mine, err := fsutil.LockUsers(srv.masterKeyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv.SetMasterKeyLock(mine)
-	other, err := fsutil.LockShared(srv.masterKeyPath + ".users")
+	other, err := fsutil.LockUsers(srv.masterKeyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,5 +170,41 @@ func TestRotateRefusedWhileKeyIsShared(t *testing.T) {
 	other.Release()
 	if code := rotateMaster(srv); code != http.StatusOK {
 		t.Errorf("alone: %d, want 200", code)
+	}
+}
+
+// If the old key cannot take the name .prev, the answer names the file that
+// really holds it, and the next rotation, even a failing one, does not lose it.
+func TestUnpromotedOldKeyIsNotLost(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	seedSecret(t, srv, "admin-token", "test/a", "synthetic-value")
+	first := srv.fileBackend.Provider().(*crypto.FileKeyProvider).MasterKey()
+	prev := srv.masterKeyPath + ".prev"
+	if err := os.MkdirAll(filepath.Join(prev, "in-the-way"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/v1/rotate-master", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), prev+".new") {
+		t.Fatalf("rotate = %d %s, want the staged name", w.Code, w.Body)
+	}
+	if code := rotateMaster(srv); code != http.StatusInternalServerError {
+		t.Errorf("rotate with the old key still unplaced = %d, want 500", code)
+	}
+	if got, err := crypto.LoadMasterKey(prev + ".new"); err != nil || !bytes.Equal(got, first) {
+		t.Errorf("the old key is gone: %v", err)
+	}
+	if err := os.RemoveAll(prev); err != nil {
+		t.Fatal(err)
+	}
+	// Free again: the leftover is placed first, then overtaken as usual.
+	second := srv.fileBackend.Provider().(*crypto.FileKeyProvider).MasterKey()
+	if code := rotateMaster(srv); code != http.StatusOK {
+		t.Fatalf("rotate = %d", code)
+	}
+	if got, err := crypto.LoadMasterKey(prev); err != nil || !bytes.Equal(got, second) {
+		t.Errorf(".prev: %v", err)
 	}
 }

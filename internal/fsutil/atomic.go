@@ -119,7 +119,7 @@ func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (ren
 		return false, fmt.Errorf("%s: %w", step, err)
 	}
 
-	// Keep who may read the file being replaced, so that a command run as root
+	// Keep the owner of the file being replaced, so that a command run as root
 	// does not leave one the server cannot read. Best effort: only root may
 	// give files away. The owner goes before the mode, because chown can clear
 	// mode bits.
@@ -129,7 +129,6 @@ func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (ren
 	if err := f.Chmod(perm); err != nil {
 		return fail("setting temp file mode", err)
 	}
-	copyACL(path, f, perm)
 	if err := write(f, data); err != nil {
 		return fail("writing temp file", err)
 	}

@@ -172,3 +172,24 @@ func TestRotateThroughSymlink(t *testing.T) {
 		t.Errorf("Search = %d entries, %v", len(res.Entries), err)
 	}
 }
+
+// UsesName knows exactly the names rotation works with, whatever the log's
+// extension, because a file with such a name may be compressed and removed.
+func TestUsesName(t *testing.T) {
+	const stamp = "20261108T120000.000Z"
+	for _, log := range []string{"audit.log", "audit.gz", "audit.tmp", "audit.gz.tmp", "audit"} {
+		log = filepath.Join("/data", log)
+		dir, stem, ext := splitLogName(log)
+		arc := filepath.Join(dir, stem+"-"+stamp+ext)
+		for _, p := range []string{arc, arc + ".gz", arc + ".gz.tmp"} {
+			if !UsesName(log, p) {
+				t.Errorf("%s: %s should be taken", log, p)
+			}
+		}
+		for _, p := range []string{log, arc + ".bak", arc + ".tmp" + ".x", filepath.Join("/other", filepath.Base(arc)), filepath.Join(dir, stem+"-notes"+ext), filepath.Join(dir, stem+"-20261399T996060.000Z"+ext)} {
+			if UsesName(log, p) {
+				t.Errorf("%s: %s should be free", log, p)
+			}
+		}
+	}
+}

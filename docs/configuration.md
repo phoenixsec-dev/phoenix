@@ -176,7 +176,9 @@ other's writes. At start it locks every file it rewrites (store, ACL, grants
 file, sessions file, audit log) through an empty `<file>.lock` next to it, and
 refuses to start while another server holds one. Two servers may share an audit
 log if both have a negative `rotate_mb`, and a master key if their stores are
-separate; a shared key cannot be rotated (409) while both run.
+separate. A shared key cannot be rotated (409) while both run: give the other
+server its own copy of the key file first, because after a rotation the old key
+is the only one that opens its store.
 The lock ends with the process, however it ends; a leftover `.lock` file blocks
 nothing. On a filesystem without locks the server starts and logs a `WARNING`.
 
