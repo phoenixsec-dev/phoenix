@@ -207,9 +207,9 @@ func main() {
 	}
 
 	// Initialize ACL
-	a, err := acl.NewExisting(cfg.ACL.Path)
+	a, err := openACL(cfg)
 	if err != nil {
-		log.Fatalf("initializing ACL: %v", err)
+		log.Fatalf("%v", err)
 	}
 
 	// Initialize audit logger
@@ -378,6 +378,21 @@ func openFileStore(cfg *config.Config, storeThere bool, passphrase func() (strin
 		return nil, nil, fmt.Errorf("initializing store: %w", err)
 	}
 	return s, provider, nil
+}
+
+// openACL opens the access list, the last data file to be read, and then checks
+// again for missing data, before anything is written: a store that was not there
+// is empty only if the audit log still says so. The log may have come back since
+// the first check, for example during the wait for a passphrase.
+func openACL(cfg *config.Config) (*acl.ACL, error) {
+	a, err := acl.NewExisting(cfg.ACL.Path)
+	if err != nil {
+		return nil, fmt.Errorf("initializing ACL: %w", err)
+	}
+	if _, err := refuseMissingData(cfg); err != nil {
+		return nil, fmt.Errorf("not starting: %w", err)
+	}
+	return a, nil
 }
 
 // resolveConfigPath picks the config file: --config, then $PHOENIX_CONFIG,

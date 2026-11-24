@@ -211,3 +211,49 @@ func TestDataGoneDuringPassphraseWait(t *testing.T) {
 		})
 	}
 }
+
+// A store that was not there at the first check, with an audit log that had no
+// line about a secret either, is checked again once everything is read: the log
+// may have come back, here while the server waits for the passphrase, and say
+// that there was a store.
+func TestAuditHistoryBackDuringPassphraseWait(t *testing.T) {
+	const pass = "synthetic-passphrase"
+	for history, refused := range map[string]bool{"": false, "audit.log": true, "audit-20260102T030405.000Z.log": true} {
+		t.Run("back: "+history, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := quietInit(t, dir); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(filepath.Join(dir, "config.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := errors.Join(crypto.SaveProtectedMasterKey(cfg.Store.MasterKey, key, pass), os.Remove(cfg.Store.Path)); err != nil {
+				t.Fatal(err)
+			}
+
+			// Startup's steps, in its order.
+			there, err := refuseMissingData(cfg)
+			if err != nil || there {
+				t.Fatalf("first check: %v %v", there, err)
+			}
+			_, _, err = openFileStore(cfg, there, func() (string, error) {
+				if history == "" {
+					return pass, nil
+				}
+				return pass, os.WriteFile(filepath.Join(dir, history), []byte(`{"action":"write","status":"allowed"}`+"\n"), 0600)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = openACL(cfg)
+			if refused != (err != nil && strings.Contains(err.Error(), cfg.Store.Path+" is not there")) || !refused && err != nil {
+				t.Errorf("got %v, want refused %v", err, refused)
+			}
+		})
+	}
+}
