@@ -291,8 +291,11 @@ With `PHOENIX_SEAL_KEY` (or `PHOENIX_ROLE`, which has its own seal key) the
 server answers sealed. `export` sent the key but looked for a plain value, so it
 printed `NAME=` for every secret and exited 0. It now opens sealed answers. If
 one can't be opened, or an answer holds no value, it stops with an error that
-names the secret and a non-zero exit. **A backup made with `export` while a seal
-key was set is empty: make it again.**
+names the secret and a non-zero exit. The same now goes for output that could not
+be written (a full disk), an unknown format, and a single secret's name instead
+of a folder (`export` takes `app/`, with the slash): each gave an empty or cut
+file and exit 0. `-f json` is now always valid JSON, one object per line. **A
+backup made with `export` while a seal key was set is empty: make it again.**
 
 ### Fixed: a name with `?`, `#` or `%` reached another secret
 

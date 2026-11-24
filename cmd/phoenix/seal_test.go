@@ -281,18 +281,22 @@ func TestCmdExportSealed(t *testing.T) {
 func TestCmdExportRefusesMissingValue(t *testing.T) {
 	other, _ := crypto.GenerateSealKeyPair()
 	wrongKey, _ := crypto.SealValue("ns/secret", "", "fake-sealed", &other.PublicKey)
+	mine := useSealKey(t)
+	otherSecret, _ := crypto.SealValue("ns/other", "", "fake-sealed", &mine.PublicKey)
+	mineFile := os.Getenv("PHOENIX_SEAL_KEY")
 	for name, tc := range map[string]struct {
 		key    bool
 		answer map[string]any
 	}{
 		"plain answer to a seal key": {true, map[string]any{"value": "fake-plain"}},
 		"sealed to another key":      {true, map[string]any{"sealed_value": wrongKey}},
+		"another secret's value":     {true, map[string]any{"sealed_value": otherSecret}},
 		"no value, no key":           {false, map[string]any{"path": "ns/secret"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("PHOENIX_SEAL_KEY", "")
 			if tc.key {
-				useSealKey(t)
+				t.Setenv("PHOENIX_SEAL_KEY", mineFile)
 			}
 			withMockServer(t, exportServer(func(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(tc.answer)

@@ -38,7 +38,7 @@ var cmdSpecs = map[string]cmdSpec{
 		opts: map[string]bool{"-d": true, "--description": true, "--tags": true, "--username": true, "--url": true}},
 	"set": {usage: "phoenix set <path> [-d desc] [--tags t1,t2] [--username name] [--url link] [--multiline | --value-stdin]",
 		opts: map[string]bool{"-d": true, "--description": true, "--tags": true, "--username": true, "--url": true, "--multiline": false, "--value-stdin": false}},
-	"export": {usage: "phoenix export <prefix> -f env", opts: map[string]bool{"-f": true, "--format": true}},
+	"export": {usage: "phoenix export <folder/> -f env", opts: map[string]bool{"-f": true, "--format": true}},
 	"import": {usage: "phoenix import <file> -p <prefix> | phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]",
 		opts: map[string]bool{"-p": true, "--prefix": true, "--from": true, "--vault": true, "--item": true, "--dry-run": false, "--skip-existing": false}},
 	"audit": {usage: "phoenix audit [-n N] [-a agent] [-s RFC3339-time] [--who W] [--host H] [--authority A]",

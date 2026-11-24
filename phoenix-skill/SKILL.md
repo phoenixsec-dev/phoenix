@@ -184,7 +184,7 @@ nothing, and no header or argument of yours can set them for your own calls.
 ### Export secrets
 
 ```bash
-phoenix export <prefix> -f env
+phoenix export <folder/> -f env
 ```
 
 Exports secrets under a prefix as `KEY=VALUE` pairs.

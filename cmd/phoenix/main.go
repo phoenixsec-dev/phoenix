@@ -10,7 +10,7 @@
 //	phoenix list [folder/] [--names] [--tag <tag>]
 //	phoenix info <path>
 //	phoenix describe <path> [-d <desc>] [--tags <t1,t2>] [--username <name>] [--url <link>]
-//	phoenix export <prefix> --format env
+//	phoenix export <folder/> --format env
 //	phoenix import <file> --prefix <prefix>
 //	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>] [--who W] [--host H] [--authority A]
 //	phoenix agent create <name> --acl <path:actions,...> [--token-stdin] [--force]
@@ -333,7 +333,7 @@ Usage:
   phoenix info <path>                         Description, tags, username, link, dates; never the value
   phoenix describe <path> [-d desc] [--tags t1,t2] [--username name] [--url link]
                                               Change those without reading or writing the value
-  phoenix export <prefix> -f env              Export as .env format
+  phoenix export <folder/> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
   phoenix audit [-n N] [-a agent] [-s time] [--who W] [--host H] [--authority A]
@@ -874,6 +874,15 @@ func cmdExport(args []string) error {
 		format = "env"
 	}
 
+	// Anything else would export nothing and look like a success. A path without
+	// a slash at the end is one secret: asking for it would read it.
+	if format != "env" && format != "json" {
+		return fmt.Errorf("unknown format %q (supported: env, json)", format)
+	}
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		return fmt.Errorf("export takes a folder, with a slash at the end: %q. For one secret use phoenix get", prefix)
+	}
+
 	// Get list of paths
 	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+escapeName(prefix), nil, sealHeaders(sealPrivKey))
 	if err != nil {
@@ -901,7 +910,7 @@ func cmdExport(args []string) error {
 			resp.Body.Close()
 			return fmt.Errorf("exporting %q: %w", path, err)
 		}
-		value, err := readSecretValue(resp.Body, sealPrivKey)
+		value, err := readSecretValue(resp.Body, path, sealPrivKey)
 		resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("exporting %q: %w", path, err)
@@ -920,18 +929,23 @@ func cmdExport(args []string) error {
 
 		switch format {
 		case "env":
-			fmt.Printf("%s=%s\n", envName, value)
+			_, err = fmt.Printf("%s=%s\n", envName, value)
 		case "json":
-			fmt.Printf("{%q: %q}\n", envName, value)
+			name, _ := json.Marshal(envName) // strings always encode
+			val, _ := json.Marshal(value)
+			_, err = fmt.Printf("{%s: %s}\n", name, val)
+		}
+		if err != nil {
+			return fmt.Errorf("writing %q: %w", path, err)
 		}
 	}
 	return nil
 }
 
-// readSecretValue reads the value from a single-secret answer, opening it with
-// sealKey if the request sent one. An answer without the value that was asked
-// for is an error, never an empty value.
-func readSecretValue(body io.Reader, sealKey *[32]byte) (string, error) {
+// readSecretValue reads the value from the answer for the secret at path, opening
+// it with sealKey if the request sent one. An answer without the value that was
+// asked for is an error, never an empty value.
+func readSecretValue(body io.Reader, path string, sealKey *[32]byte) (string, error) {
 	var secret struct {
 		Value       *string `json:"value"`
 		SealedValue any     `json:"sealed_value"`
@@ -942,6 +956,10 @@ func readSecretValue(body io.Reader, sealKey *[32]byte) (string, error) {
 	if sealKey != nil {
 		if secret.SealedValue == nil {
 			return "", fmt.Errorf("expected sealed_value in response but got none")
+		}
+		// Opening proves the path the envelope says it is for.
+		if env, _ := secret.SealedValue.(map[string]any); env["path"] != path {
+			return "", fmt.Errorf("sealed envelope is for another secret")
 		}
 		return decryptSealedValue(secret.SealedValue, sealKey)
 	}

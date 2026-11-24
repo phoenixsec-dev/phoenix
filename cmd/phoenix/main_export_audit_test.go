@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -65,6 +67,72 @@ func TestCmdExportFailsOnSecretGetNon200(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "HTTP 403") {
 			t.Fatalf("error = %v, want HTTP 403", err)
+		}
+	})
+}
+
+// Export never asks for, or reports success about, something it cannot export:
+// a single secret (whose one-time use the read would spend) or an unknown format.
+func TestCmdExportRefusesBeforeAsking(t *testing.T) {
+	t.Setenv("PHOENIX_SEAL_KEY", "")
+	for _, args := range [][]string{{"app/key"}, {"app"}, {"app/", "-f", "yaml"}} {
+		withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("%q: asked the server", args)
+			w.Write([]byte(`{"value":"fake"}`))
+		}, func() {
+			if err := cmdExport(args); err == nil {
+				t.Errorf("%q: no error", args)
+			}
+		})
+	}
+}
+
+// A backup that could not be written is an error.
+func TestCmdExportReportsWriteErrors(t *testing.T) {
+	t.Setenv("PHOENIX_SEAL_KEY", "")
+	full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer full.Close()
+	for _, format := range []string{"env", "json"} {
+		withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/") {
+				w.Write([]byte(`{"paths":["app/key"]}`))
+				return
+			}
+			w.Write([]byte(`{"value":"fake"}`))
+		}, func() {
+			old := os.Stdout
+			os.Stdout = full
+			err := cmdExport([]string{"app/", "-f", format})
+			os.Stdout = old
+			if err == nil {
+				t.Errorf("%s: no error", format)
+			}
+		})
+	}
+}
+
+// Every line of a JSON export is JSON and holds exactly the name and the value.
+func TestCmdExportJSONIsJSON(t *testing.T) {
+	t.Setenv("PHOENIX_SEAL_KEY", "")
+	path, value := "app/A\a\vB=\"é<", "fake\a\v\n\x00\"\\<é"
+	withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			json.NewEncoder(w).Encode(map[string]any{"paths": []string{path}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"value": value})
+	}, func() {
+		var err error
+		out := captureStdout(t, func() { err = cmdExport([]string{"app/", "-f", "json"}) })
+		var rec map[string]string
+		if err != nil || json.Unmarshal([]byte(out), &rec) != nil || strings.Count(out, "\n") != 1 {
+			t.Fatalf("not one line of JSON (%v)", err)
+		}
+		if len(rec) != 1 || rec["A\a\vB=\"É<"] != value {
+			t.Error("wrong name or value")
 		}
 	})
 }
