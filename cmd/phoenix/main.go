@@ -80,6 +80,7 @@ func init() {
 
 // buildHTTPClient creates an HTTP client with optional TLS configuration.
 // Set PHOENIX_CA_CERT to trust the Phoenix CA for TLS connections.
+// HTTP_PROXY, HTTPS_PROXY and NO_PROXY apply with and without it.
 func buildHTTPClient() *http.Client {
 	caCertPath := os.Getenv("PHOENIX_CA_CERT")
 	if os.Getenv("PHOENIX_CLIENT_CERT") != "" || os.Getenv("PHOENIX_CLIENT_KEY") != "" {
@@ -108,11 +109,11 @@ func buildHTTPClient() *http.Client {
 		MinVersion: tls.VersionTLS12,
 	}
 
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsCfg,
-		},
-	}
+	// Copy the default transport instead of starting from an empty one: an
+	// empty transport ignores the proxy variables and has no dial timeout.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = tlsCfg
+	return &http.Client{Transport: tr}
 }
 
 func main() {

@@ -88,6 +88,7 @@ configuration. For temporary human-approved access to more paths, see
 | `PHOENIX_SERVER` | Server URL (default: `http://127.0.0.1:9090`) |
 | `PHOENIX_TOKEN` | Bearer token |
 | `PHOENIX_CA_CERT` | CA certificate for HTTPS verification (the server's `ca.crt`) |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | Standard proxy settings; used with and without `PHOENIX_CA_CERT` |
 | `PHOENIX_ALLOW_PLAINTEXT` | Hosts (comma-separated) to skip the plaintext `http://` warning for; see [LAN deployment](lan-deployment.md#plaintext-on-a-single-host-opt-out) |
 | `PHOENIX_SEAL_KEY` | Seal private key file path |
 | `PHOENIX_ROLE` | Role name for auto-mint session identity |
