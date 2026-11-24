@@ -163,7 +163,7 @@ func TestMetadataValidate(t *testing.T) {
 	for _, bad := range []string{
 		"javascript:alert(1)", "example.com", "//example.com", "https://", "ftp://example.com", "data:text/html,x",
 		"https://user:pw@example.com", "https://user@example.com", "https://exa mple.com", "https:\\\\example.com",
-		"https://example.com/‮", "https://example.com/\n", "https://" + strings.Repeat("a", 3000),
+		"https://example.com/\u202e", "https://example.com/\n", "https://" + strings.Repeat("a", 3000),
 	} {
 		err := MetadataChange{URL: &bad}.Validate()
 		if err == nil {
@@ -177,7 +177,7 @@ func TestMetadataValidate(t *testing.T) {
 			t.Errorf("refused link %q: %v", good, err)
 		}
 	}
-	for _, bad := range []string{"a\nb", "a​b", "\xff", strings.Repeat("a", 300)} {
+	for _, bad := range []string{"a\nb", "a\u200bb", "\xff", strings.Repeat("a", 300)} {
 		if (MetadataChange{Username: &bad}).Validate() == nil {
 			t.Errorf("accepted username %.20q", bad)
 		}

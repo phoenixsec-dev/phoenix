@@ -19,9 +19,10 @@ This index is a concise map of currently implemented endpoints in `internal/api/
 |---|---|---|
 | GET | `/v1/secrets/{path}` | Read secret by path |
 | GET | `/v1/secrets/` or `/v1/secrets/{prefix}/` | List visible paths under prefix |
-| GET | `/v1/metadata/` or `/v1/metadata/{prefix}/` | Visible secrets with description, tags, times, authors; `?tag=` filters. Never values |
+| GET | `/v1/metadata/` or `/v1/metadata/{prefix}/` | Visible secrets with description, tags, username, link, times, authors; `?tag=` filters. Never values |
 | GET | `/v1/metadata/{path}` | Same for one secret (`phoenix info`). Never the value |
-| PUT | `/v1/secrets/{path}` | Create/update secret |
+| PATCH | `/v1/metadata/{path}` | Change description, tags, username or link of an existing secret (`phoenix describe`). Never the value |
+| PUT | `/v1/secrets/{path}` | Create/update secret; optional `username` and `url` |
 | DELETE | `/v1/secrets/{path}` | Delete secret |
 | POST | `/v1/resolve` | Batch resolve `phoenix://` refs |
 
@@ -30,10 +31,19 @@ and never returns the value. (With the 1Password backend, finding the paths
 reads the vault's items, exactly as the list route does.) Each entry has `path`, `description` (may be
 empty), `tags`, `created`, `updated`, `created_by` and `updated_by` (who wrote
 the current value; on secrets last written before it existed it is the same as
-`created_by`). A server without the route answers a plain-text 404; the CLI
+`created_by`), plus `username` and `url` when the secret has them. Those two are
+never in a value read (`GET /v1/secrets/{path}`). A server without the route answers a plain-text 404; the CLI
 then lists bare paths. `PUT /v1/secrets/{path}` returns `has_description`
 (true or false, never the text) to callers who may list the path, so the CLI
-can nudge when it is false.
+can nudge when it is false, and `changed`, the metadata fields the write set.
+
+`PATCH /v1/metadata/{path}` takes a JSON object with any of `description`,
+`tags` (array), `username` and `url`. A field left out keeps what is stored, an
+empty one clears it; `PUT` treats `username` and `url` the same way. It needs
+`write` on the path (and passes the path's attestation rule), answers `404` for
+a secret that does not exist and `400` for an unknown field, and is audited as
+`describe` with the changed field names. The reply is `{"status", "path",
+"changed"}`: no metadata, because `write` does not include `list`.
 
 `POST /v1/resolve` request fields:
 - `refs` (required): list of reference strings

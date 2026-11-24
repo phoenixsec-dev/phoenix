@@ -53,17 +53,29 @@ There is no `-v`/`--value` flag: a value on the command line leaks to shell
 history and the process list.
 
 Always give `-d`: it is how people and other agents find the secret later.
+For a login, also give `--username <name>` and `--url <page>`, so a person can
+open it from the dashboard. Neither is secret; never put a password in them,
+in `-d` or in a tag.
+
+To add or fix a description, tags, username or link on a secret that exists:
+
+```bash
+phoenix describe <namespace/key> -d "what it is for" --username <name> --url <page>
+```
+
+It needs write on the path and never reads or writes the value. Use it instead
+of setting the value again. `""` clears a field.
 
 ### Find the secret you need
 
 ```bash
 phoenix list [folder/] [--tag <tag>]   # each path with its description
-phoenix info <namespace/key>           # description, tags, dates, who changed it
+phoenix info <namespace/key>           # description, tags, username, link, dates
 ```
 
 Use these to find a secret by what it is for. Neither shows the value, and
 both need only list access. `phoenix list --names` prints bare paths for
-scripts. MCP: `phoenix_list` returns the same descriptions.
+scripts. MCP: `phoenix_list` returns the same descriptions, with usernames and links.
 
 `services/browser`, `services/browser/` and `services/browser/*` all list
 `services/browser/`; other wildcards are refused. There is no `--prefix`

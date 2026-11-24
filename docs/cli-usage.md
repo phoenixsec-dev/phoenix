@@ -7,6 +7,9 @@
 phoenix set myapp/db-password -d "Production database password"
 phoenix set myapp/api-key -d "Stripe API key"
 
+# A login: store the username and the page next to the password
+phoenix set personal/petstore -d "Pet food account" --username me@example.com --url https://shop.example.com/login
+
 # Read a secret
 phoenix get myapp/db-password
 
@@ -18,6 +21,10 @@ phoenix list myapp/ --names      # bare paths, one per line, for scripts
 
 # Everything about one secret except its value
 phoenix info myapp/db-password
+
+# Change its description, tags, username or link; the value is not touched
+phoenix describe myapp/db-password -d "Production database, app user" --tags prod,db
+phoenix describe personal/petstore --username you@example.com --url ""   # "" clears a field
 
 # Delete a secret
 phoenix delete myapp/old-key
@@ -31,6 +38,17 @@ a value even if it starts with `-`, and `--` ends the options, so a path that
 starts with `-` still works: `phoenix get -- -odd/key`. Reading a single
 secret whose path contains `*` answers 400 "wildcards are not secret names; to
 list a folder, end the path with /".
+
+`phoenix describe` needs `write` on the path and an existing secret. It never
+reads or writes the value, so "created by" and "updated" (who wrote the value,
+and when) stay as they were; the change is in the audit log as `describe` with
+the names of the changed fields. `phoenix set` without `--username` or `--url`
+keeps what is stored. A link must be a full `http://` or `https://` address
+with no password in it. `phoenix list`'s output did not change; usernames and
+links are shown by `phoenix info`, MCP `phoenix_list` and the dashboard, to
+callers with `list` on the path. An older server has no `describe` (the CLI
+says so) and ignores a username or link sent with `set`; the CLI then exits 1
+and says the value was saved without it.
 
 ## Reference resolution
 

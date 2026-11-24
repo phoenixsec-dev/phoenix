@@ -130,14 +130,21 @@ API and must be evaluated separately.
 
 ### What the dashboard exposes
 
-The dashboard can: view secret/agent/session counts, view and revoke active sessions,
+The dashboard can: search every secret's name, description, tags, username and link,
+show and copy secret values, add secrets and change them, view agent and session counts,
+view and revoke active sessions,
 approve and deny secret access requests and revoke grants, view the full audit log, and view role
 configuration.
 
-The dashboard **cannot**: read or write secret values, create or modify agents, or
-change server configuration.
+The dashboard **cannot**: delete secrets, create or modify agents, or change server
+configuration.
 
-Approval is the highest-risk action — it grants an agent temporary use of secrets.
+**The dashboard password opens every secret** that no policy rule withholds from it.
+Up to v0.24 it could only approve access. Anyone (or any agent) who knows it, or can
+read it where it is stored, can read the store. Change it if it was shared, keep it
+away from agents, or set `"reveal": false`.
+
+Showing values and approving access are the highest-risk actions.
 
 ### Authentication model
 
@@ -166,6 +173,16 @@ one credential and are distinguished only by source IP in the audit trail
 | Session cookie theft (network) | `Secure` flag set when HTTPS detected; `HttpOnly` prevents JS access; `SameSite=Strict` prevents CSRF via cross-origin requests | Plain HTTP on a shared network exposes the cookie — **do not do this**. The server warns loudly at startup when the dashboard is enabled on a non-loopback plain HTTP bind |
 | Session cookie theft (XSS) | `HttpOnly` flag; no user-supplied content rendered unescaped; embedded static assets (no CDN/external JS) | XSS in Go `html/template` is unlikely but not impossible if templates are modified |
 | CSRF | Token-per-session in signed cookie, validated on all POST actions | Relies on `SameSite=Strict` + token check |
+| Stolen cookie, used for values | Values and changes need the password typed within 5 minutes. Typing it again moves the login to a new cookie, so an older copy is signed out and its next use is audited as `dashboard.auth` denied. Wrong passwords are rate limited per address and per login. Every read is audited with the login's ID | A cookie stolen and used inside the 5 minutes after a password works until they end. It can read all metadata until the login ends |
+| Cross-site request for a value or change | POST only, CSRF token, `SameSite=Strict`, and any request whose `Sec-Fetch-Site` is not `same-origin` is refused, which covers sibling subdomains. No CORS headers, and `Cross-Origin-Resource-Policy: same-origin` | A browser too old to send `Sec-Fetch-Site` relies on the token and cookie |
+| Clickjacking | `frame-ancestors 'none'` and `X-Frame-Options: DENY` on every response; `Cross-Origin-Opener-Policy: same-origin` | |
+| Injected script reads a value | Content-Security-Policy allows only the dashboard's own script files and connections; all stored text is escaped; links are limited to http(s) when saved and again when shown | A script that did run on the page could use an open 5-minute window |
+| Page left open | The value hides after 20 seconds, when the tab is hidden and when the page is left; the window is fixed, so the page goes back to asking | Someone at an unlocked device inside the window can read values |
+| Back button, phone page cache, history | Values are only in POST answers, `no-store`; pages are `no-store`; a page restored from the browser's back/forward cache has had its value and typed fields cleared and reloads itself | |
+| Offline copies | The service worker stores a fixed list of static files and nothing else | |
+| Changed link sends a person to a fake site | Changing a link needs a recent password (or an agent with `write` on the path), the site is named under the button, and the change is audited | An agent with `write` can change the link; look at the name before pasting |
+| Clipboard | Copy never shows the value | The value stays on the device's clipboard, where other apps and clipboard history may see it |
+| Overwritten secret | Adding never overwrites; a new value needs a confirm and a recent password | The old value is not kept |
 | Unauthorized approval | Runs the same approve code as the API, so every API check (request still pending, paths still requestable, sealed-delivery rules) applies | A compromised dashboard session can approve any pending request |
 | Shared credential | All operators share one password; no per-user identity | Forensic distinction limited to source IP (`dashboard@<ip>`) |
 | Config file credential exposure | Password stored as bcrypt hash in config (`password_hash`); plaintext rejected by validation; agent reading config gets only the hash | An agent that can read the config can run an offline guessing attack on the hash; keep the password long |

@@ -1,5 +1,53 @@
 # Release Notes
 
+## Unreleased
+
+### Find and use a secret from your phone
+
+Getting one password used to take a terminal, the exact name, and a guess at
+the username. The dashboard now has a **Secrets** page: search by name,
+description, tag or username, open one, copy the username, show or copy the
+password, or copy it and open the page in one tap. You can add a secret (paste,
+type or generate), give one a new value, and edit its description, tags,
+username and link. The dashboard is laid out for a phone first, with one
+navigation, and can be installed as an app. Nothing is stored offline except
+its static files.
+
+**Read this before upgrading if the dashboard is on: the dashboard password now
+opens secrets.** Until now it could only approve access. Anyone who knows it can
+show every value that no policy rule withholds. If it was shared, or an agent
+can read it, change it first (`phoenix-server --hash-password`). To keep values
+out of the dashboard set `"dashboard": {"reveal": false}`; finding, adding and
+editing still work.
+
+How it is protected ([threat model](docs/threat-model.md#threats-specific-to-the-dashboard)):
+showing, copying or changing needs the password typed within the last 5
+minutes; every show and copy is audited (`read_value`, with the address and the
+login's ID) before the value is sent; policy rules (`source_ip`,
+`require_sealed`) hold in the dashboard too; values are never in a page's HTML
+and never cached; no page can be framed or run foreign script.
+
+Dashboard responses now carry a Content-Security-Policy: scripts must be files
+under `/dashboard/static/`.
+
+### A secret can carry its username and link
+
+- `phoenix set` takes `--username` and `--url`. `phoenix info`, MCP
+  `phoenix_list`, `GET /v1/metadata` and the dashboard show them to callers with
+  `list` on the path. They are never in a value read.
+- `phoenix describe <path> [-d ...] [--tags ...] [--username ...] [--url ...]`
+  (`PATCH /v1/metadata/{path}`) changes them without reading or writing the
+  value. Needs `write` on the path; audited as `describe`; who wrote the value
+  and when stays as it was.
+- A save that fails now leaves the old value in use. Before, the server kept
+  serving the new value from memory although it reported an error.
+
+**Upgrading:** nothing to do. Store files load unchanged and the new fields
+appear only on secrets that have them. Going back: v0.24 opens a file with
+usernames and links and keeps every value, but drops those two fields the next
+time it writes. Update the server before the CLI: an older server cannot store
+them, and the CLI says so.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine

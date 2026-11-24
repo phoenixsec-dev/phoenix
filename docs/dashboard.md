@@ -1,20 +1,29 @@
 # Phoenix — Operator Dashboard
 
-The operator dashboard is a browser-based web UI for managing approvals,
-sessions, audit, and roles. It is designed for human operators — not agents.
+The operator dashboard is a browser-based web UI for finding and using
+secrets, and for managing approvals, sessions, audit, and roles. It is designed
+for human operators — not agents — and for a phone first.
 
 All HTML, CSS, JS, and SVG are embedded in the binary via `go:embed`. There
 are no external dependencies, no CDN loads, and no build step.
 
 ## When to use it
 
+- Finding a login by what it is for, and copying its password, from a phone
 - Approving or denying access requests from a phone or browser instead of CLI
 - Reviewing active sessions and revoking compromised ones
 - Tailing the audit log without SSH access to the server
 - Inspecting role configuration at a glance
 
-The dashboard is optional. Everything it does can also be done via the CLI
+The dashboard is optional, and off until it has a password. Everything it does can also be done via the CLI
 (`phoenix approve`, `phoenix sessions list`, etc.) or the API.
+
+## Install it as an app
+
+Open the dashboard over HTTPS with a certificate the device trusts, then use
+the browser's *Install app* or *Add to Home Screen*. It opens on the secrets
+list. The app keeps only its own files (styles, scripts, icons, a "can't reach
+Phoenix" page) on the device. No page, answer or secret is ever stored offline.
 
 ## Security model
 
@@ -35,6 +44,20 @@ not use bearer tokens or session tokens. Instead:
   logged to the audit trail.
 - **CSRF**: Every mutation (approve, deny, revoke, logout) requires a
   token from the signed cookie. Validated with `hmac.Equal`.
+- **Recent password**: showing, copying, adding or changing a secret needs the
+  password to have been typed in this browser in the last 5 minutes. A login
+  counts; after that the page asks again. The window does not grow with use.
+  Typing it again moves the login to a new cookie, so a copied old cookie stops
+  working. Wrong passwords count in the same rate limit as logins, per address
+  and per login.
+- **Values**: a value leaves the server only as the answer to a POST that passed
+  the cookie, CSRF token, same-origin and recent-password checks and the path's
+  policy rule, and only after its audit line was written. It is never in a page's
+  HTML and never cached. On screen it hides after 20 seconds and when you leave
+  the page or switch apps.
+- **Headers**: every response forbids framing, runs only the dashboard's own
+  script files (Content-Security-Policy) and, except for static files, is
+  `no-store`.
 - **No API proxy**: The dashboard reads stores directly via a `Deps`
   struct. It never calls the `/v1/` API endpoints, so API auth
   (bearer tokens) is not involved.
@@ -43,7 +66,10 @@ not use bearer tokens or session tokens. Instead:
 
 | Action | Risk level | Notes |
 |--------|-----------|-------|
-| View secrets count | Low | Count only, never values |
+| Find secrets | Medium | Every name, description, tag, username and link |
+| Show or copy a secret value | **High** | Recent password, policy rule and audit line needed; `dashboard.reveal: false` turns it off |
+| Add a secret, set a new value | **High** | Recent password; a new value needs a confirm, the old one is gone |
+| Edit description, tags, username, link | Medium | Recent password; the value is not touched |
 | View agent names | Low | Names only, no tokens |
 | View active sessions | Medium | Exposes agent names, roles, IPs |
 | Revoke sessions | Medium | Immediate effect, audited |
@@ -54,7 +80,7 @@ not use bearer tokens or session tokens. Instead:
 | View audit log | Medium | Full access to audit trail |
 | View role config | Low | Read-only |
 
-Approval is the highest-risk action. Access-request approval goes through the API server's shared approval
+Values and approvals are the highest-risk actions. Access-request approval goes through the API server's shared approval
 function (`ApproveAccessRequestAs`), so it applies exactly the API's
 re-checks against the current config. Deny and revoke call the grant store,
 as the API does. This is the one place the dashboard reaches into the API
@@ -62,7 +88,7 @@ server rather than a store, and it is deliberate: one copy of the checks.
 
 ### What the dashboard cannot do
 
-- Read or write secret values
+- Delete secrets
 - Create or modify agents
 - Change server configuration
 - Modify ACLs or policies
@@ -136,7 +162,8 @@ Add the hash to your server config:
   "dashboard": {
     "enabled": true,
     "password_hash": "$2a$10$...",
-    "session_ttl": "4h"
+    "session_ttl": "4h",
+    "reveal": true
   }
 }
 ```
@@ -146,6 +173,7 @@ Add the hash to your server config:
 | `enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `password_hash` | `string` | bcrypt hash of operator password |
 | `session_ttl` | `string` | Browser session lifetime (default `4h`) |
+| `reveal` | `bool` | Show and copy secret values (default `true`) |
 
 `password_hash` is required (generate it with `phoenix-server
 --hash-password`). The old `pin` field was removed: it stored a short
@@ -165,13 +193,40 @@ sees only the hash, which cannot be used to authenticate.
 
 ## Pages
 
+On a desktop every page is in the sidebar. On a phone the bar at the bottom
+has Home, Secrets, Approvals and **More** (`/dashboard/more`), which lists the
+other pages and Sign out.
+
 ### Overview (`/dashboard/`)
 
-Status cards showing secrets count, agent count and active sessions. Server uptime and session-enabled status. Table of
+A search box for secrets, then status cards showing secrets count, agent count and active sessions. Server uptime and session-enabled status. Table of
 the 10 most recent audit entries.
 
 Also an **Access Requests** card with the pending count, and a red banner
 when the grants file or grant audit events are degraded.
+
+### Secrets (`/dashboard/secrets`)
+
+The list filters as you type, over name, description, tags and username; every
+word must match. Open a secret to see its description, tags, username, link,
+who set the value and when, and who may read it (agents by permission, agents
+with temporary access, and the path's policy rule).
+
+- **Show** puts the value on screen for 20 seconds. **Copy** copies it without
+  showing it. **Copy password and open the page** does both steps of a login;
+  the site it opens is named under the button. Nothing ties the password to that
+  site: look at the name before you paste. What you copied stays on the
+  device's clipboard.
+- If the page says a rule stops it, the path's policy needs sealed delivery or
+  another machine. The dashboard obeys policy rules like everyone else.
+  `source_ip` is checked against the network connection, so behind a reverse
+  proxy that is the proxy's address.
+- **Add secret**: paste, type or generate a value. Names are a folder, a slash
+  and a name. Adding never overwrites.
+- **Edit details** changes description, tags, username and link only.
+- **New value** replaces the value after a confirm. The old one is gone.
+
+With the 1Password backend, secrets can be found and shown but not changed.
 
 ### Approvals (`/dashboard/approvals`)
 
@@ -248,13 +303,20 @@ All dashboard actions are logged to the same audit trail as API actions.
 | `dashboard.login` | denied | `dashboard` | Rate-limited login attempt |
 | `dashboard.login_evicted` | allowed | `dashboard@<ip>` | A new login pushed out the least recently used one (path = its ID, IP = its last IP) |
 | `dashboard.login_revoke` | allowed | `dashboard@<ip>` | A login signed out from the Sessions page (path = its ID) |
+| `dashboard.reauth` | allowed / denied | `dashboard@<ip>` | Password typed again for secrets: right, wrong, or rate limited |
+| `read_value` | allowed / denied | `dashboard@<ip>` | A secret shown or copied, or refused (`attestation`, `reveal_off`). Metadata `dashboard.use`: `show` or `copy` |
+| `write` | allowed / denied | `dashboard@<ip>` | A secret added or given a new value, or refused by a policy rule |
+| `describe` | allowed | `dashboard@<ip>` | Description, tags, username or link changed (metadata `changed`) |
 | `dashboard.logout` | allowed | `dashboard@<ip>` | Explicit logout |
 | `dashboard.auth` | denied | `dashboard` | Expired, invalid, or signed-out cookie |
-| `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action |
+| `dashboard.csrf` | denied | `dashboard` | CSRF token mismatch on a POST action, or a secrets request from another site (`cross_site_request`) |
 | `session.revoke` | allowed | `dashboard@<ip>` | Session revoked |
 | `access_request.approved` / `.denied` | allowed | `dashboard@<ip>` | Access request decided (plus an `.attempt` line before it) |
 | `access_request.approve` | denied | `dashboard@<ip>` | Approval refused by a re-check (reason = code) |
 | `grant.revoked` | allowed | `dashboard@<ip>` | Grant revoked |
+
+The secrets actions, `dashboard.login` and `dashboard.reauth` carry metadata
+`dashboard.login`: the ID of the login that did it, the same on every line.
 
 Post-login actions use `dashboard@<client_ip>` for per-operator forensic
 distinction. Pre-login events (failures, rate limiting, expired cookies)
@@ -286,7 +348,8 @@ Use this checklist when enabling the dashboard on an existing Phoenix server.
 
 6. Open browser, verify login page loads at `/dashboard/login`
 
-7. Login, verify all pages render (overview, approvals, sessions, audit, roles)
+7. Login, verify all pages render (overview, secrets, approvals, grants, sessions, audit, roles), and
+   open a secret and press Show
 
 8. Test approval flow end-to-end if access requests are on:
    - Have an agent ask (`phoenix request <path> --reason "test"`)
