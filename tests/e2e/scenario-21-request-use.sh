@@ -152,7 +152,7 @@ assert_contains "$(PHOENIX_TOKEN="$AGENT" "$PHOENIX" request status "$ra")" "ops
 assert_eq "$(dash -X POST --data-urlencode credential=e2e-dash-password "$PHOENIX_SERVER/dashboard/login")" 303 "dashboard login again"
 dash "$PHOENIX_SERVER/dashboard/requests" >/dev/null
 csrf="$(grep -o 'name="_csrf" value="[0-9a-f]*"' "$RUN_DIR/dash.html" | head -1 | sed 's/.*value="//; s/"//')"
-assert_eq "$(dash -X POST --data "_csrf=$csrf&agent=e2e-agent&path=ops/always" "$PHOENIX_SERVER/dashboard/requests/always/remove")" 303 "remove always"
+assert_eq "$(dash -X POST --data "_csrf=$csrf&agent=e2e-agent&path=ops/always&request=$ra" "$PHOENIX_SERVER/dashboard/requests/always/remove")" 303 "remove always"
 if agent_exec --env ALWAYS=phoenix://ops/always -- true >"$RUN_DIR/always-removed" 2>&1; then die "removed always still reads"; fi
 
 # 6. The narrowed-out path stays denied.

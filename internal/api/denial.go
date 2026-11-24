@@ -201,7 +201,7 @@ func (s *Server) writeDataDenial(w http.ResponseWriter, r *http.Request, info *a
 			s.denialNextStep(CodeGrantExpired, path, action), http.StatusForbidden)
 	case reasonUseNotSaved:
 		s.auditDenied(r, info, action, path, ip, reason)
-		writeAccessError(w, CodeRequestsDegraded, "your approval could not be used right now; nothing was delivered and no use was spent", http.StatusServiceUnavailable)
+		writeAccessError(w, CodeRequestsDegraded, "your approval could not be used right now; nothing was delivered", http.StatusServiceUnavailable)
 	case grant.ReasonGrantRevoked:
 		s.auditDenied(r, info, action, path, ip, reason)
 		jsonDeniedStep(w, "access_denied", CodeGrantRevoked,

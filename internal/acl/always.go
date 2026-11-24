@@ -7,17 +7,19 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // AlwaysOrigin marks a rule that came from a human answering an access request
-// with "always". It is what lets the dashboard show the rule and take it back;
-// it does not change what the rule allows.
+// with "always". It is what lets the dashboard show the rule and take it back.
+//
+// A staged rule is written before the answer itself is saved. It has no actions,
+// so no server, this version or an older one, lets anybody read through it. It
+// becomes a real rule once the answer is safely on disk (internal/grant).
 type AlwaysOrigin struct {
 	RequestID string    `json:"request_id"`
 	By        string    `json:"by"`
 	At        time.Time `json:"at"`
+	Staged    bool      `json:"staged,omitempty"`
 }
 
 // AlwaysRule is one path an agent may read because of an "always".
@@ -30,11 +32,10 @@ type AlwaysRule struct {
 	Unsaved bool
 }
 
-// AddAlways lets agent read exactly paths, marked with origin, replacing any
-// rules already there from the same request. check sees the agent's record
-// under the lock, so what it verified cannot change before the rules land. On
-// any error the agent can read nothing more than before.
-func (a *ACL) AddAlways(agent string, origin AlwaysOrigin, paths []string, check func(Agent) error) error {
+// StageAlways writes inactive rules for agent on exactly paths, marked with
+// origin, replacing any staged ones from the same request. check sees the
+// agent's record under the lock. On error nothing usable was left anywhere.
+func (a *ACL) StageAlways(agent string, origin AlwaysOrigin, paths []string, check func(Agent) error) error {
 	if origin.RequestID == "" || len(paths) == 0 {
 		return errors.New("always rule needs a request and at least one path")
 	}
@@ -54,50 +55,126 @@ func (a *ACL) AddAlways(agent string, origin AlwaysOrigin, paths []string, check
 	if err := check(old); err != nil {
 		return err
 	}
+	origin.Staged = true
 	updated := old
-	updated.Permissions, _ = dropRules(old.Permissions, func(p Permission) bool {
-		return p.Always != nil && p.Always.RequestID == origin.RequestID
-	})
+	updated.Permissions, _ = dropRules(old.Permissions, stagedFor(origin.RequestID))
 	for _, p := range paths {
 		o := origin
-		updated.Permissions = append(updated.Permissions, Permission{Path: p, Actions: []Action{ActionReadValue}, Always: &o})
+		updated.Permissions = append(updated.Permissions, Permission{Path: p, Actions: []Action{}, Always: &o})
 	}
 	a.config.Agents[agent] = updated
 	if a.path == "" {
 		return nil
 	}
-	err := a.saveLocked()
-	if err == nil {
-		return nil
+	if err := a.saveLocked(); err != nil {
+		a.config.Agents[agent] = old // what the file may hold is inactive
+		return err
 	}
-	a.config.Agents[agent] = old
-	if errors.Is(err, fsutil.ErrDirSyncFailed) {
-		// The new file is already in place; put the old content back.
-		if rerr := a.saveLocked(); rerr != nil {
-			return fmt.Errorf("%w (and the old file could not be put back: %v)", err, rerr)
-		}
-	}
-	return err
+	return nil
 }
 
-// RemoveAlways takes back every "always" rule for this agent and exact path and
-// returns how many there were. When the save fails the rules are gone from
-// memory, so reads are denied at once, but may return after a restart.
-func (a *ACL) RemoveAlways(agent, path string) (int, error) {
+// FinishAlways turns a request's staged rules into real ones. It counts in
+// memory at once. A failed save is returned only to be logged: the file still
+// has the staged rules, and the next start finishes them the same way.
+func (a *ACL) FinishAlways(agent, requestID string, check func(Agent) error) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ag, ok := a.config.Agents[agent]
 	if !ok {
-		return 0, ErrAgentNotFound
+		return ErrAgentNotFound
 	}
-	kept, n := dropRules(ag.Permissions, func(p Permission) bool { return p.Always != nil && p.Path == path })
-	if n == 0 && !slices.ContainsFunc(a.unsaved, func(r AlwaysRule) bool { return r.Agent == agent && r.Path == path }) {
-		return 0, nil
+	if err := check(ag); err != nil {
+		return err
 	}
-	removed := rulesOf(agent, ag.Permissions, func(p Permission) bool { return p.Path == path })
+	staged, changed := stagedFor(requestID), false
+	ag.Permissions = slices.Clone(ag.Permissions)
+	for i, p := range ag.Permissions {
+		if staged(p) {
+			o := *p.Always
+			o.Staged = false
+			ag.Permissions[i] = Permission{Path: p.Path, Actions: []Action{ActionReadValue}, Always: &o}
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	a.config.Agents[agent] = ag
+	if a.path == "" {
+		return nil
+	}
+	return a.saveLocked()
+}
+
+// DropStaged throws away a request's staged rules, whoever holds them.
+func (a *ACL) DropStaged(requestID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	changed := false
+	for name, ag := range a.config.Agents {
+		kept, n := dropRules(ag.Permissions, stagedFor(requestID))
+		if n > 0 {
+			ag.Permissions = kept
+			a.config.Agents[name] = ag
+			changed = true
+		}
+	}
+	if !changed || a.path == "" {
+		return nil
+	}
+	return a.saveLocked()
+}
+
+// StagedRequests lists the requests that staged rules belong to.
+func (a *ACL) StagedRequests() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	var ids []string
+	for _, ag := range a.config.Agents {
+		for _, p := range ag.Permissions {
+			if p.Always != nil && p.Always.Staged && !slices.Contains(ids, p.Always.RequestID) {
+				ids = append(ids, p.Always.RequestID)
+			}
+		}
+	}
+	return ids
+}
+
+// HasAlways reports whether an "always" lets agent read exactly path.
+func (a *ACL) HasAlways(agent, path string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(rulesOf(agent, a.config.Agents[agent].Permissions, func(p Permission) bool { return p.Path == path })) > 0
+}
+
+// stagedFor matches the staged rules of one request.
+func stagedFor(requestID string) func(Permission) bool {
+	return func(p Permission) bool { return p.Always != nil && p.Always.Staged && p.Always.RequestID == requestID }
+}
+
+// RemoveAlways takes back the rule one request put on agent's list for path and
+// reports whether there was one. When the save fails the rule is gone from
+// memory, so reads are denied at once, but it may return after a restart.
+func (a *ACL) RemoveAlways(agent, path, requestID string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ag, ok := a.config.Agents[agent]
+	if !ok {
+		return false, ErrAgentNotFound
+	}
+	match := func(p Permission) bool {
+		return p.Always != nil && !p.Always.Staged && p.Path == path && p.Always.RequestID == requestID
+	}
+	kept, n := dropRules(ag.Permissions, match)
+	if n == 0 && !slices.ContainsFunc(a.unsaved, func(r AlwaysRule) bool {
+		return r.Agent == agent && r.Path == path && r.RequestID == requestID
+	}) {
+		return false, nil
+	}
+	removed := rulesOf(agent, ag.Permissions, match)
 	ag.Permissions = kept
 	a.config.Agents[agent] = ag
-	return n, a.saveRemoval(removed)
+	return true, a.saveRemoval(removed)
 }
 
 // saveRemoval saves after rules were taken back, remembering them as unsaved
@@ -116,36 +193,15 @@ func (a *ACL) saveRemoval(removed []AlwaysRule) error {
 	return err
 }
 
-// rulesOf lists the "always" rules in perms that match.
+// rulesOf lists the working "always" rules in perms that match.
 func rulesOf(agent string, perms []Permission, match func(Permission) bool) []AlwaysRule {
 	var out []AlwaysRule
 	for _, p := range perms {
-		if p.Always != nil && match(p) {
+		if p.Always != nil && !p.Always.Staged && match(p) {
 			out = append(out, AlwaysRule{Agent: agent, Path: p.Path, AlwaysOrigin: *p.Always})
 		}
 	}
 	return out
-}
-
-// ClearAlways takes back every rule that came from one request, whoever holds
-// it. Same failure rule as RemoveAlways.
-func (a *ACL) ClearAlways(requestID string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	fromRequest := func(p Permission) bool { return p.Always != nil && p.Always.RequestID == requestID }
-	var removed []AlwaysRule
-	for name, ag := range a.config.Agents {
-		kept, n := dropRules(ag.Permissions, fromRequest)
-		if n > 0 {
-			removed = append(removed, rulesOf(name, ag.Permissions, fromRequest)...)
-			ag.Permissions = kept
-			a.config.Agents[name] = ag
-		}
-	}
-	if len(removed) == 0 {
-		return nil
-	}
-	return a.saveRemoval(removed)
 }
 
 // ListAlways lists every "always" rule, by agent and then path, and the ones

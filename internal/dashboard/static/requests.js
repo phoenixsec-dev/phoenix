@@ -86,6 +86,14 @@
         container().appendChild(card);
         wire(card);
     }
+    // refreshToken gives a card the form token of the login now in use, in case
+    // someone signed in again in another tab, and touches nothing else on it.
+    function refreshToken(card, html) {
+        var fresh = toElement(html);
+        fresh = fresh && fresh.querySelector('input[name=_csrf]');
+        var old = card.querySelector('input[name=_csrf]');
+        if (fresh && old && !card.dataset.busy) old.value = fresh.value;
+    }
     function arm(card) {
         var buttons = card.querySelectorAll('button[name=choice]');
         buttons.forEach(function (b) { b.disabled = true; });
@@ -220,19 +228,27 @@
     function canNotify() { return 'Notification' in window && window.isSecureContext; }
     function notifyFor(item) {
         if (known('localStorage', 'seen-' + item.id)) return;
-        remember('localStorage', 'seen-' + item.id);
-        if (!document.hidden || !canNotify() || Notification.permission !== 'granted') return;
-        var card = toElement(item.html);
+        if (!document.hidden) { remember('localStorage', 'seen-' + item.id); return; }
+        if (!canNotify() || Notification.permission !== 'granted') return;
+        var card = toElement(item.html), url = '/dashboard/requests/' + item.id;
+        // No secret names: a notification can show on a locked screen.
+        var title = 'Phoenix: ' + (card ? card.dataset.agent : 'an agent') + ' is asking';
+        var options = { body: 'Open Phoenix to answer.', tag: item.id, icon: '/dashboard/static/phoenix-icon.svg', data: { url: url } };
         try {
-            // No secret names: a notification can show on a locked screen.
-            var n = new Notification('Phoenix: ' + (card ? card.dataset.agent : 'an agent') + ' is asking', {
-                body: 'Open Phoenix to answer.', tag: item.id, icon: '/dashboard/static/phoenix-icon.svg'
-            });
+            var n = new Notification(title, options);
             n.onclick = function () {
                 window.focus();
-                window.location.href = '/dashboard/requests/' + item.id;
+                window.location.href = url;
             };
-        } catch (e) { /* Android only allows this from a service worker */ }
+            remember('localStorage', 'seen-' + item.id);
+        } catch (e) {
+            // Android only allows this from a service worker, if there is one.
+            if (!navigator.serviceWorker) return;
+            navigator.serviceWorker.getRegistration('/dashboard/').then(function (reg) {
+                if (!reg) return;
+                return reg.showNotification(title, options).then(function () { remember('localStorage', 'seen-' + item.id); });
+            }).catch(function () { /* tried again on the next poll that changes */ });
+        }
     }
     function offerNotify() {
         var box = document.querySelector('[data-requests-notify]');
@@ -250,7 +266,8 @@
         var waiting = {};
         feed.waiting.forEach(function (item) {
             waiting[item.id] = true;
-            if (!shown(item.id)) addCard(item);
+            var there = shown(item.id);
+            if (there) refreshToken(there, item.html); else addCard(item);
             notifyFor(item);
         });
         var ended = {};

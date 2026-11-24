@@ -2,6 +2,7 @@ package grant
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"testing"
@@ -9,50 +10,75 @@ import (
 )
 
 // fakeACL is an access list in memory that survives a "restart" (reopen).
+// staged rules allow nothing; live ones are what an agent could read.
 type fakeACL struct {
-	mu    sync.Mutex
-	rules map[string][]string // request -> paths
-	tok   map[string]string   // agent -> credential fingerprint now
-	fail  error               // Add fails with this
-	clear error               // Clear fails with this, rules gone from memory
-	hook  func()              // runs inside Add after the rules landed
+	mu     sync.Mutex
+	staged map[string][]string // request -> paths
+	live   map[string][]string
+	tok    map[string]string // agent -> credential fingerprint now
+	fail   error             // Stage fails with this
+	drop   error             // Drop fails with this and drops nothing
+	finish error             // Finish fails with this
+	hook   func()            // runs inside Stage after the rules landed
 }
 
 func newFakeACL() *fakeACL {
-	return &fakeACL{rules: map[string][]string{}, tok: map[string]string{"vector": "fp-vector"}}
+	return &fakeACL{staged: map[string][]string{}, live: map[string][]string{}, tok: map[string]string{"vector": "fp-vector"}}
 }
 
-func (f *fakeACL) Add(agent, fp, requestID, by string, at time.Time, paths []string) error {
+func (f *fakeACL) check(r Request) error {
+	if f.tok[r.Agent] != r.CredentialFP {
+		return newErr(CodeCredentialChanged, "token changed")
+	}
+	return nil
+}
+
+func (f *fakeACL) Stage(r Request, by string, at time.Time, paths []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail != nil {
 		return f.fail
 	}
-	if f.tok[agent] != fp {
-		return newErr(CodeCredentialChanged, "token changed")
+	if err := f.check(r); err != nil {
+		return err
 	}
-	f.rules[requestID] = slices.Clone(paths)
+	f.staged[r.ID] = slices.Clone(paths)
 	if f.hook != nil {
 		f.hook()
 	}
 	return nil
 }
 
-func (f *fakeACL) Clear(requestID string) error {
+func (f *fakeACL) Finish(r Request) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.rules, requestID)
-	return f.clear
+	if err := f.check(r); err != nil {
+		return err
+	}
+	if f.finish != nil {
+		return f.finish
+	}
+	if paths, ok := f.staged[r.ID]; ok {
+		f.live[r.ID] = paths
+		delete(f.staged, r.ID)
+	}
+	return nil
 }
 
-func (f *fakeACL) RequestIDs() []string {
+func (f *fakeACL) Drop(requestID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []string
-	for id := range f.rules {
-		out = append(out, id)
+	if f.drop != nil {
+		return f.drop
 	}
-	return out
+	delete(f.staged, requestID)
+	return nil
+}
+
+func (f *fakeACL) Staged() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Collect(maps.Keys(f.staged))
 }
 
 func alwaysEnv(t *testing.T) (*env, *fakeACL) {
@@ -75,17 +101,17 @@ func TestApproveAlways(t *testing.T) {
 	if err != nil || got.Status != StatusApproved || !got.Always || !slices.Equal(got.GrantedPaths, []string{"infra/a"}) {
 		t.Fatalf("%+v %v", got, err)
 	}
-	if !slices.Equal(acl.rules[r.ID], []string{"infra/a"}) || len(e.s.ListGrants("", true)) != 0 {
-		t.Fatalf("rules = %v", acl.rules)
+	if !slices.Equal(acl.live[r.ID], []string{"infra/a"}) || len(acl.staged) != 0 || len(e.s.ListGrants("", true)) != 0 {
+		t.Fatalf("live = %v staged = %v", acl.live, acl.staged)
 	}
 	e.reopen()
-	if len(acl.rules) != 1 {
+	if len(acl.live) != 1 {
 		t.Fatal("restart dropped approved access")
 	}
 	// Repeated: same answer, nothing added (even if it was removed since).
-	delete(acl.rules, r.ID)
-	if _, err := e.s.ApproveAlways(in); err != nil || len(acl.rules) != 0 {
-		t.Fatalf("repeat: %v rules %v", err, acl.rules)
+	delete(acl.live, r.ID)
+	if _, err := e.s.ApproveAlways(in); err != nil || len(acl.live)+len(acl.staged) != 0 {
+		t.Fatalf("repeat: %v live %v", err, acl.live)
 	}
 	// Any other answer is too late.
 	in.Paths = nil
@@ -105,7 +131,7 @@ func TestApproveAlwaysRefusals(t *testing.T) {
 		t.Helper()
 		_, err := e.s.ApproveAlways(in)
 		wantCode(t, err, want)
-		if len(acl.rules) != 0 {
+		if len(acl.live)+len(acl.staged) != 0 {
 			t.Fatalf("%s left access behind", want)
 		}
 	}
@@ -144,81 +170,103 @@ func TestApproveAlwaysRefusals(t *testing.T) {
 	try(CodeNotPending, alwaysIn(late.ID))
 }
 
-// grants.json cannot be saved after the access list was: the access goes again.
-func TestApproveAlwaysSaveFailureTakesAccessBack(t *testing.T) {
+// grants.json cannot be saved after the rules were staged: nothing was ever
+// readable, and the request is still there to answer.
+func TestApproveAlwaysSaveFailureGivesNothing(t *testing.T) {
 	for _, step := range []string{"write", "fsync", "rename", "dirsync"} {
-		e, acl := alwaysEnv(t)
-		r := e.create("vector", "infra/a")
-		acl.hook = func() { e.fs.failOnce(step) }
-		_, err := e.s.ApproveAlways(alwaysIn(r.ID))
-		wantCode(t, err, CodeStoreWriteFailed)
-		acl.hook = nil
-		if len(acl.rules) != 0 {
-			t.Fatalf("%s: access stayed after a failed answer", step)
-		}
-		e.reopen()
-		if got, _ := e.s.GetRequest(r.ID); got.Status != StatusPending {
-			t.Fatalf("%s: request %s", step, got.Status)
-		}
-		if _, err := e.s.ApproveAlways(alwaysIn(r.ID)); err != nil {
-			t.Fatalf("%s: answering again: %v", step, err)
+		for _, dropErr := range []error{nil, errors.New("disk full")} {
+			e, acl := alwaysEnv(t)
+			r := e.create("vector", "infra/a")
+			acl.hook = func() {
+				e.fs.failOnce(step)
+				if len(acl.live) != 0 {
+					t.Error("readable before the answer was saved")
+				}
+			}
+			acl.drop = dropErr
+			_, err := e.s.ApproveAlways(alwaysIn(r.ID))
+			wantCode(t, err, CodeStoreWriteFailed)
+			acl.hook = nil
+			if len(acl.live) != 0 {
+				t.Fatalf("%s: access after a failed answer", step)
+			}
+			// A narrower answer, a restart: the leftover never becomes access.
+			once := approveIn(r.ID)
+			once.MaxUses = 1
+			if _, _, err := e.s.Approve(once); err != nil {
+				t.Fatalf("%s: once after a failed always: %v", step, err)
+			}
+			acl.drop = nil
+			e.reopen()
+			if len(acl.live)+len(acl.staged) != 0 {
+				t.Fatalf("%s: live %v staged %v after a restart", step, acl.live, acl.staged)
+			}
 		}
 	}
 }
 
-// The server dies after the access list was saved and before grants.json.
-func TestRestartBetweenAccessListAndGrants(t *testing.T) {
+// Both writes of the grants file fail after the rules were staged, so disk may
+// hold the answer. A restart must not give more than that answer.
+func TestApproveAlwaysDoubleFault(t *testing.T) {
 	e, acl := alwaysEnv(t)
 	r := e.create("vector", "infra/a")
-	gone := e.create("vector", "infra/b")
-	acl.rules[r.ID] = []string{"infra/a"}
-	acl.rules["req_pruned"] = []string{"infra/z"} // answered long ago
-	if _, err := e.s.Deny(DenyInput{RequestID: gone.ID, Denier: "dashboard@x"}); err != nil {
-		t.Fatal(err)
+	acl.hook = func() { e.fs.fail("dirsync") }
+	_, err := e.s.ApproveAlways(alwaysIn(r.ID))
+	wantCode(t, err, CodeStoreWriteFailed)
+	if len(acl.live) != 0 {
+		t.Fatal("access after a failed answer")
 	}
-	acl.rules[gone.ID] = []string{"infra/b"} // came back with an old acl.json
+	e.fs.fail("")
 	e.reopen()
-	if acl.rules[r.ID] != nil || acl.rules[gone.ID] != nil || acl.rules["req_pruned"] == nil {
-		t.Fatalf("rules after restart: %v", acl.rules)
-	}
-	if got, _ := e.s.GetRequest(r.ID); got.Status != StatusPending {
-		t.Fatalf("request %s", got.Status)
-	}
-	// A lost or unreadable grants.json proves nothing, so access stays.
-	acl.rules[r.ID] = []string{"infra/a"}
-	e.path += ".other"
-	e.reopen()
-	if acl.rules[r.ID] == nil {
-		t.Fatal("access removed on no evidence")
+	if len(acl.live)+len(acl.staged) != 0 {
+		t.Fatal("access appeared after the restart")
 	}
 }
 
-// Access left by a half-done "always" goes with every narrower outcome.
-func TestLeftoverAccessGoesWithAnyOtherAnswer(t *testing.T) {
+// The server dies between the steps. Only a saved "always" is finished.
+func TestRestartBetweenSteps(t *testing.T) {
 	e, acl := alwaysEnv(t)
-	left := func(path string) Request {
-		r := e.create("vector", path)
-		acl.rules[r.ID] = []string{path}
-		return r
+	done := e.create("vector", "infra/done")
+	acl.finish = errors.New("died here")
+	if _, err := e.s.ApproveAlways(alwaysIn(done.ID)); err != nil || len(acl.live) != 0 {
+		t.Fatalf("%v live %v", err, acl.live)
 	}
-	r := left("infra/a")
-	if _, err := e.s.Deny(DenyInput{RequestID: r.ID, Denier: "dashboard@x"}); err != nil || len(acl.rules) != 0 {
-		t.Fatalf("deny: %v %v", err, acl.rules)
+	acl.finish = nil
+	pending := e.create("vector", "infra/pending")
+	denied := e.create("vector", "infra/denied")
+	once := e.create("vector", "infra/once")
+	if _, err := e.s.Deny(DenyInput{RequestID: denied.ID, Denier: "dashboard@x"}); err != nil {
+		t.Fatal(err)
 	}
-	r = left("infra/b")
-	if _, _, err := e.s.Approve(approveIn(r.ID)); err != nil || len(acl.rules) != 0 {
-		t.Fatalf("approve: %v %v", err, acl.rules)
+	e.approve(once.ID)
+	for _, id := range []string{pending.ID, denied.ID, once.ID, "req_pruned"} {
+		acl.staged[id] = []string{"infra/x"}
 	}
-	// A narrower yes must not count while the wider access might return.
-	r = left("infra/c")
-	acl.clear = errors.New("disk full")
-	_, _, err := e.s.Approve(approveIn(r.ID))
-	wantCode(t, err, CodeACLWriteFailed)
-	acl.clear = nil
-	acl.rules[r.ID] = []string{"infra/c"}
-	e.clock.Advance(DefaultRequestTTL)
-	e.s.Tick()
-	if len(acl.rules) != 0 {
-		t.Fatalf("expiry left %v", acl.rules)
+	acl.live["req_old"] = []string{"infra/old"} // answered long ago; not staged, not touched
+	e.reopen()
+	if len(acl.staged) != 0 || len(acl.live) != 2 || !slices.Equal(acl.live[done.ID], []string{"infra/done"}) {
+		t.Fatalf("after restart: live %v staged %v", acl.live, acl.staged)
+	}
+	// Removed since: no later restart brings it back.
+	delete(acl.live, done.ID)
+	e.reopen()
+	if len(acl.live) != 1 {
+		t.Fatalf("removed access came back: %v", acl.live)
+	}
+}
+
+// The token changed while the server was down, before the last step.
+func TestRestartFinishChecksTheToken(t *testing.T) {
+	e, acl := alwaysEnv(t)
+	r := e.create("vector", "infra/a")
+	acl.finish = errors.New("died here")
+	if _, err := e.s.ApproveAlways(alwaysIn(r.ID)); err != nil {
+		t.Fatal(err)
+	}
+	acl.finish = nil
+	acl.tok["vector"] = "fp-other"
+	e.reopen()
+	if len(acl.live)+len(acl.staged) != 0 {
+		t.Fatalf("live %v staged %v", acl.live, acl.staged)
 	}
 }

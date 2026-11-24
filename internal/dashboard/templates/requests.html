@@ -32,7 +32,7 @@
 <form method="POST" action="/dashboard/requests/{{.ID}}/answer">
 <input type="hidden" name="_csrf" value="{{.CSRF}}">
 <h3 class="rq-question">{{.Question}}</h3>
-{{if .Machine}}<div class="rq-root">root login on <strong>{{.Machine}}</strong></div>{{end}}
+{{if .Machine}}<div class="rq-root">root login on <strong>{{.Machine}}</strong><div class="rq-sub">Once issues one certificate. It can log in until its time ends ({{.OnceWithin}}) or you revoke it.</div></div>{{end}}
 <div class="rq-who"><span>{{.Agent}} from <span class="mono">{{.SourceIP}}</span></span><span class="rq-left"><time data-until="{{.ExpiresAt.Unix}}" datetime="{{.ExpiresAt.UTC.Format "2006-01-02T15:04:05Z"}}">until {{.ExpiresAt.UTC.Format "15:04"}} UTC</time></span></div>
 <div class="rq-reason"><span class="rq-label">Agent says (not verified)</span>{{.Reason}}</div>
 {{range .Problems}}<div class="rq-problem">{{.}}</div>{{end}}
@@ -49,10 +49,10 @@
 </div>
 {{else}}{{range .Paths}}<input type="hidden" name="path" value="{{.Path}}">{{end}}{{end}}
 <div class="rq-buttons">
-<button type="submit" name="choice" value="no" class="btn rq-no">No</button>
-<button type="submit" name="choice" value="once" class="btn rq-yes">Once</button>
-<button type="submit" name="choice" value="time" class="btn rq-yes">{{.QuickLabel}}</button>
-{{if .AlwaysOK}}<button type="submit" name="choice" value="always" class="btn rq-always">Always</button>{{end}}
+<button type="submit" name="choice" value="no" formnovalidate class="btn rq-no">No</button>
+<button type="submit" name="choice" value="once" formnovalidate class="btn rq-yes">Once</button>
+<button type="submit" name="choice" value="time" formnovalidate class="btn rq-yes">{{.QuickLabel}}</button>
+{{if .AlwaysOK}}<button type="submit" name="choice" value="always" formnovalidate class="btn rq-always">Always</button>{{end}}
 </div>
 <details class="rq-more">
 <summary>More</summary>
@@ -61,7 +61,7 @@
 <button type="submit" name="choice" value="custom" class="btn btn-sm rq-yes">Allow this</button></div>
 <label class="rq-notefield">Note with a No <input type="text" name="note" maxlength="300" class="input input-sm" placeholder="Optional, the agent sees it"></label>
 <ul class="rq-facts">
-<li>Once: {{if .Machine}}one login, open for up to{{else}}one read of each secret, within{{end}} {{.OnceWithin}}.</li>
+<li>Once: {{if .Machine}}one login certificate, good for up to{{else}}one read of each secret, within{{end}} {{.OnceWithin}}.</li>
 {{if .AlwaysOK}}<li>Always: puts read access to exactly {{if gt (len .Paths) 1}}these paths{{else}}this path{{end}} on {{.Agent}}'s access list, from any machine and without the sealed-only rule, until you remove it here.</li>{{end}}
 {{if .Delivery}}<li>{{.Delivery}}</li>{{end}}
 {{range .Attest}}<li><span class="mono path-full">{{.Path}}</span> needs {{.Requirement}}: <strong>{{.Status}}</strong> (never waived)</li>{{end}}
@@ -79,7 +79,7 @@
 <div class="rq-list">
 {{range .Active}}
 <div class="rq-row"><div class="rq-row-main"><strong>{{.Agent}}</strong> <span class="mono path-full">{{.What}}</span>
-<div class="rq-sub">ends <time data-until="{{.ExpiresAt.Unix}}" datetime="{{.ExpiresAt.UTC.Format "2006-01-02T15:04:05Z"}}">at {{.ExpiresAt.UTC.Format "15:04"}} UTC</time> &middot; uses: {{.Uses}}{{if not .LastUsed.IsZero}} &middot; last {{.LastUsed.UTC.Format "15:04"}} UTC{{end}} &middot; by {{.By}}</div></div>
+<div class="rq-sub">{{if .Revoked}}<span class="text-red">revoked but maybe not saved; revoke again</span> &middot; {{end}}ends <time data-until="{{.ExpiresAt.Unix}}" datetime="{{.ExpiresAt.UTC.Format "2006-01-02T15:04:05Z"}}">at {{.ExpiresAt.UTC.Format "15:04"}} UTC</time> &middot; uses: {{.Uses}}{{if not .LastUsed.IsZero}} &middot; last {{.LastUsed.UTC.Format "15:04"}} UTC{{end}} &middot; by {{.By}}</div></div>
 <form method="POST" action="/dashboard/requests/grants/{{.ID}}/revoke"><input type="hidden" name="_csrf" value="{{.CSRF}}"><button type="submit" class="btn btn-sm btn-revoke">Revoke</button></form></div>
 {{end}}
 </div>
@@ -91,7 +91,7 @@
 {{range .Always}}
 <div class="rq-row"><div class="rq-row-main"><strong>{{.Agent}}</strong> <span class="mono path-full">{{.Path}}</span>
 <div class="rq-sub">since {{.At.UTC.Format "2006-01-02"}} &middot; by {{.By}} &middot; <a href="/dashboard/requests/{{.RequestID}}">request</a>{{if .Unsaved}} &middot; <span class="text-red">removed but not saved; remove again</span>{{end}}</div></div>
-<form method="POST" action="/dashboard/requests/always/remove"><input type="hidden" name="_csrf" value="{{.CSRF}}"><input type="hidden" name="agent" value="{{.Agent}}"><input type="hidden" name="path" value="{{.Path}}"><button type="submit" class="btn btn-sm btn-revoke">Remove</button></form></div>
+<form method="POST" action="/dashboard/requests/always/remove"><input type="hidden" name="_csrf" value="{{.CSRF}}"><input type="hidden" name="agent" value="{{.Agent}}"><input type="hidden" name="path" value="{{.Path}}"><input type="hidden" name="request" value="{{.RequestID}}"><button type="submit" class="btn btn-sm btn-revoke">Remove</button></form></div>
 {{end}}
 </div>
 {{else}}<p class="rq-empty">Nothing is on Always.</p>{{end}}

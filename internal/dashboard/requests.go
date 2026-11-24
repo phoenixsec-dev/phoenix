@@ -96,6 +96,7 @@ type activeRow struct {
 	ExpiresAt time.Time
 	LastUsed  time.Time
 	By        string
+	Revoked   bool // revoked, but possibly not saved yet
 }
 
 // alwaysRow is one path on an agent's access list because of an "always".
@@ -166,10 +167,10 @@ func (h *Handler) card(rq grant.Request, csrf string) requestCard {
 	if h.deps.ACL != nil {
 		k, err := h.deps.ACL.GetAgentSealKey(rq.Agent)
 		sealKeyOK = err == nil && k != ""
-		switch a, err := h.deps.ACL.GetAgent(rq.Agent); {
+		switch _, err := h.deps.ACL.GetAgent(rq.Agent); {
 		case err != nil:
 			c.Problems = append(c.Problems, "This agent no longer exists.")
-		case grant.BearerFingerprint(a.TokenHash) != rq.CredentialFP:
+		case !h.deps.Access.RequestTokenCurrent(rq):
 			c.Problems = append(c.Problems, "This agent's token was replaced after it asked. It has to ask again.")
 		}
 	}
@@ -181,7 +182,7 @@ func (h *Handler) card(rq grant.Request, csrf string) requestCard {
 	}
 	switch {
 	case sshLogin:
-		c.Delivery = "Opens a login from " + rq.SourceIP + " only. Revoking it here also ends a login that is still open."
+		c.Delivery = "Works from " + rq.SourceIP + " only. Revoking it here also ends logins that are still open."
 	case cfg.RequireSealed:
 		c.Delivery = "Once and timed answers hand the value over sealed, for phoenix exec."
 	}
@@ -228,29 +229,49 @@ func (h *Handler) requestsView(csrf string) requestsView {
 		return v
 	}
 	now := time.Now()
-	for _, g := range h.deps.Grants.ListGrants("", false) {
-		v.Active = append(v.Active, activeRow{
-			ID: g.ID, CSRF: csrf, Agent: g.Agent, What: what(g.Action, g.Paths), Uses: usesText(g),
-			ExpiresAt: g.ExpiresAt, LastUsed: g.LastUsedAt, By: g.ApprovedBy,
-		})
-	}
-	for _, rq := range h.deps.Grants.ListRequests("", "") {
-		if rq.Status == grant.StatusPending {
+	// While the grants file cannot be saved, a revoke may not be on disk yet.
+	// Keep those here with a Revoke that tries the save again.
+	unsaved := h.deps.Grants.Health().Degraded
+	for _, g := range h.deps.Grants.ListGrants("", unsaved) {
+		st := g.State(now)
+		revoked := st == grant.GrantRevoked && now.Before(g.ExpiresAt)
+		if st != grant.GrantActive && !revoked {
 			continue
 		}
-		row := h.pastRow(rq, now)
-		if rq.Status == grant.StatusExpired {
-			v.Expired = append(v.Expired, row)
-		} else {
-			v.History = append(v.History, row)
+		v.Active = append(v.Active, activeRow{
+			ID: g.ID, CSRF: csrf, Agent: g.Agent, What: what(g.Action, g.Paths), Uses: usesText(g),
+			ExpiresAt: g.ExpiresAt, LastUsed: g.LastUsedAt, By: g.ApprovedBy, Revoked: revoked,
+		})
+	}
+	// Pick the rows to show before working out their texts.
+	var expired, past []grant.Request
+	for _, rq := range h.deps.Grants.ListRequests("", "") {
+		switch rq.Status {
+		case grant.StatusPending:
+		case grant.StatusExpired:
+			expired = append(expired, rq)
+		default:
+			past = append(past, rq)
 		}
 	}
-	newest := func(rows []pastRow, n int) []pastRow {
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].When.After(rows[j].When) })
-		return rows[:min(n, len(rows))]
+	rows := func(rqs []grant.Request, n int) []pastRow {
+		sort.SliceStable(rqs, func(i, j int) bool { return endedAt(rqs[i]).After(endedAt(rqs[j])) })
+		var out []pastRow
+		for _, rq := range rqs[:min(n, len(rqs))] {
+			out = append(out, h.pastRow(rq, now))
+		}
+		return out
 	}
-	v.Expired, v.History = newest(v.Expired, maxExpiredRows), newest(v.History, maxHistoryRows)
+	v.Expired, v.History = rows(expired, maxExpiredRows), rows(past, maxHistoryRows)
 	return v
+}
+
+// endedAt is when a request stopped waiting.
+func endedAt(rq grant.Request) time.Time {
+	if rq.DecidedAt.IsZero() {
+		return rq.ExpiresAt
+	}
+	return rq.DecidedAt
 }
 
 // pastRow is one request that is no longer waiting, with the paths that were
@@ -322,8 +343,12 @@ func (h *Handler) alwaysNow(rq grant.Request) (listed, allowed bool) {
 	if h.deps.ACL == nil {
 		return false, false
 	}
-	for _, r := range h.deps.ACL.ListAlways() {
-		listed = listed || (r.RequestID == rq.ID && !r.Unsaved)
+	a, err := h.deps.ACL.GetAgent(rq.Agent)
+	if err != nil {
+		return false, false
+	}
+	for _, p := range a.Permissions {
+		listed = listed || (p.Always != nil && !p.Always.Staged && p.Always.RequestID == rq.ID)
 	}
 	for _, p := range rq.GrantedPaths {
 		allowed = allowed || h.deps.ACL.Authorize(rq.Agent, p, acl.ActionReadValue) == nil
@@ -350,7 +375,7 @@ func usesText(g grant.Grant) string {
 	}
 	total := g.MaxUses * int64(len(g.Paths))
 	if left == 0 && g.Action == grant.ActionSSHLogin {
-		return "login opened; none left"
+		return "certificate issued; none left"
 	}
 	return fmt.Sprintf("%d of %d left", left, total)
 }
@@ -405,6 +430,7 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 var doneText = map[string]string{
 	"revoked":       "Revoked. A value already handed over is not taken back.",
 	"removed":       "Removed. The agent can no longer read it.",
+	"removed-open":  "Removed from Always, but an open grant still lets the agent read it. Revoke it under Active now.",
 	"removed-still": "Removed, but another rule on this agent's access list still lets it read that secret.",
 }
 
@@ -552,20 +578,29 @@ func (h *Handler) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
 	h.finish(w, r, "", "revoked", "")
 }
 
-// handleAlwaysRemove: POST /dashboard/requests/always/remove. Form: agent, path.
+// handleAlwaysRemove: POST /dashboard/requests/always/remove. Form: agent, path
+// and the request it came from, so an old page cannot remove a newer answer.
 func (h *Handler) handleAlwaysRemove(w http.ResponseWriter, r *http.Request) {
 	if !h.accessEnabled() {
 		h.finish(w, r, "", "", "NOT_CONFIGURED")
 		return
 	}
 	ip := extractClientIP(r)
-	still, err := h.deps.Access.RemoveAlwaysAs(r.PostFormValue("agent"), r.PostFormValue("path"), "dashboard@"+ip, ip)
-	switch {
-	case err != nil:
+	agent, path := r.PostFormValue("agent"), r.PostFormValue("path")
+	if err := h.deps.Access.RemoveAlwaysAs(agent, path, r.PostFormValue("request"), "dashboard@"+ip, ip); err != nil {
 		log.Printf("dashboard: remove always: %v", err)
 		h.finish(w, r, "", "", errCode(err))
-	case still:
+		return
+	}
+	// Say so when something else goes on allowing it.
+	openGrant := slices.ContainsFunc(h.deps.Grants.ListGrants(agent, false), func(g grant.Grant) bool {
+		return g.Action == grant.ActionReadValue && slices.Contains(g.Paths, path) && g.UsesLeft(path) != 0
+	})
+	switch {
+	case h.deps.ACL != nil && h.deps.ACL.Authorize(agent, path, acl.ActionReadValue) == nil:
 		h.finish(w, r, "", "removed-still", "")
+	case openGrant:
+		h.finish(w, r, "", "removed-open", "")
 	default:
 		h.finish(w, r, "", "removed", "")
 	}
@@ -613,12 +648,11 @@ func (h *Handler) handleRequestFeed(w http.ResponseWriter, r *http.Request) {
 			})})
 		}
 		for _, rq := range h.deps.Grants.ListRequests("", "") {
-			if rq.Status == grant.StatusPending {
+			if rq.Status == grant.StatusPending || now.Sub(endedAt(rq)) >= endedWindow {
 				continue
 			}
-			if text, badge, when := h.outcome(rq, now); now.Sub(when) < endedWindow {
-				feed.Ended = append(feed.Ended, feedEnd{rq.ID, text, badge})
-			}
+			text, badge, _ := h.outcome(rq, now)
+			feed.Ended = append(feed.Ended, feedEnd{rq.ID, text, badge})
 		}
 	}
 	if r.URL.Query().Get("page") != "" {

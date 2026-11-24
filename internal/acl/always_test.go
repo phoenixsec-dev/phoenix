@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -32,11 +33,20 @@ func anyAgent(Agent) error { return nil }
 
 func reads(a *ACL, path string) bool { return a.Authorize("vector", path, ActionReadValue) == nil }
 
-func TestAlwaysAddRemoveSurvivesRestart(t *testing.T) {
-	a, p := alwaysACL(t)
-	if err := a.AddAlways("vector", from("req_1"), []string{"infra/a", "infra/b"}, anyAgent); err != nil {
+// add stages and finishes, as an answered "always" does.
+func add(t *testing.T, a *ACL, id string, paths ...string) {
+	t.Helper()
+	if err := a.StageAlways("vector", from(id), paths, anyAgent); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.FinishAlways("vector", id, anyAgent); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAlwaysAddRemoveSurvivesRestart(t *testing.T) {
+	a, p := alwaysACL(t)
+	add(t, a, "req_1", "infra/a", "infra/b")
 	a, err := New(p) // restart
 	if err != nil {
 		t.Fatal(err)
@@ -44,34 +54,70 @@ func TestAlwaysAddRemoveSurvivesRestart(t *testing.T) {
 	if !reads(a, "infra/a") || !reads(a, "infra/b") || reads(a, "infra/a/x") || reads(a, "infra/c") || a.Authorize("vector", "infra/a", ActionWrite) == nil {
 		t.Fatal("not exactly read_value on the two paths")
 	}
-	// The same request again replaces its own rules.
-	if err := a.AddAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); err != nil || reads(a, "infra/b") {
-		t.Fatalf("replace: %v", err)
+	if !a.HasAlways("vector", "infra/a") || a.HasAlways("vector", "dev/x") || a.HasAlways("nobody", "infra/a") {
+		t.Fatal("HasAlways is not exactly the always rules")
 	}
-	if n, err := a.RemoveAlways("vector", "infra/a"); n != 1 || err != nil || reads(a, "infra/a") {
-		t.Fatalf("remove: %d %v", n, err)
+	// A page from an older answer cannot remove this one.
+	if ok, _ := a.RemoveAlways("vector", "infra/a", "req_0"); ok || !reads(a, "infra/a") {
+		t.Fatal("removed by the wrong request")
 	}
-	if n, err := a.RemoveAlways("vector", "dev/**"); n != 0 || err != nil || !reads(a, "dev/x") {
+	if ok, err := a.RemoveAlways("vector", "infra/a", "req_1"); !ok || err != nil || reads(a, "infra/a") {
+		t.Fatalf("remove: %v %v", ok, err)
+	}
+	if ok, _ := a.RemoveAlways("vector", "dev/**", ""); ok || !reads(a, "dev/x") {
 		t.Fatal("remove touched a rule the operator wrote")
 	}
+	// Finishing again (a replay, a restart) brings nothing back.
+	if err := a.FinishAlways("vector", "req_1", anyAgent); err != nil || reads(a, "infra/a") {
+		t.Fatal("a second finish put removed access back")
+	}
 	a, _ = New(p)
-	if reads(a, "infra/a") || len(a.ListAlways()) != 0 {
+	if reads(a, "infra/a") || !reads(a, "infra/b") {
 		t.Fatal("removed access came back")
+	}
+}
+
+// A staged rule allows nothing, in memory or from the file, until it is finished.
+func TestStagedAllowsNothing(t *testing.T) {
+	a, p := alwaysACL(t)
+	if err := a.StageAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		for _, act := range []Action{ActionReadValue, ActionList, ActionWrite, ActionDelete, ActionAdmin} {
+			if a.Authorize("vector", "infra/a", act) == nil {
+				t.Fatalf("staged rule allows %s", act)
+			}
+		}
+		if len(a.ListAlways()) != 0 || a.HasAlways("vector", "infra/a") || !slices.Equal(a.StagedRequests(), []string{"req_1"}) {
+			t.Fatal("staged rule counts as a real one")
+		}
+		a, _ = New(p) // and after a restart
+	}
+	no := errors.New("token changed")
+	if err := a.FinishAlways("vector", "req_1", func(Agent) error { return no }); !errors.Is(err, no) || reads(a, "infra/a") {
+		t.Fatalf("finished for another token: %v", err)
+	}
+	if err := a.DropStaged("req_1"); err != nil || len(a.StagedRequests()) != 0 {
+		t.Fatal("not dropped")
+	}
+	if err := a.FinishAlways("vector", "req_1", anyAgent); err != nil || reads(a, "infra/a") {
+		t.Fatal("a dropped rule was finished")
 	}
 }
 
 func TestAlwaysRefusals(t *testing.T) {
 	a, _ := alwaysACL(t)
 	for _, path := range []string{"", "*", "**", "infra/*", "infra/**", "a*b"} {
-		if a.AddAlways("vector", from("req_1"), []string{path}, anyAgent) == nil {
+		if a.StageAlways("vector", from("req_1"), []string{path}, anyAgent) == nil {
 			t.Errorf("path %q accepted", path)
 		}
 	}
-	if err := a.AddAlways("nobody", from("req_1"), []string{"infra/a"}, anyAgent); !errors.Is(err, ErrAgentNotFound) {
+	if err := a.StageAlways("nobody", from("req_1"), []string{"infra/a"}, anyAgent); !errors.Is(err, ErrAgentNotFound) {
 		t.Errorf("unknown agent: %v", err)
 	}
 	no := errors.New("token changed")
-	if err := a.AddAlways("vector", from("req_1"), []string{"infra/a"}, func(Agent) error { return no }); !errors.Is(err, no) || reads(a, "infra/a") {
+	if err := a.StageAlways("vector", from("req_1"), []string{"infra/a"}, func(Agent) error { return no }); !errors.Is(err, no) {
 		t.Errorf("check ignored: %v", err)
 	}
 	// The mark cannot be set through the agent API.
@@ -84,62 +130,63 @@ func TestAlwaysSaveFailures(t *testing.T) {
 	a, p := alwaysACL(t)
 	disk := errors.New("disk full")
 	good := a.writeFile
-	a.writeFile = func(string, []byte, os.FileMode) error { return disk }
-	if err := a.AddAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); !errors.Is(err, disk) || reads(a, "infra/a") {
-		t.Fatalf("failed add: %v", err)
+	broken := func(string, []byte, os.FileMode) error { return disk }
+	a.writeFile = broken
+	if err := a.StageAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); !errors.Is(err, disk) || len(a.StagedRequests()) != 0 {
+		t.Fatalf("failed stage: %v", err)
 	}
-	// Renamed into place but not confirmed: the old file goes back.
-	once := true
+	// Replaced but not confirmed: whatever is on disk allows nothing.
 	a.writeFile = func(path string, data []byte, perm os.FileMode) error {
-		err := good(path, data, perm)
-		if once {
-			once = false
-			return fmt.Errorf("%w: x", fsutil.ErrDirSyncFailed)
-		}
-		return err
+		good(path, data, perm)
+		return fmt.Errorf("%w: x", fsutil.ErrDirSyncFailed)
 	}
-	if err := a.AddAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); err == nil || reads(a, "infra/a") {
-		t.Fatalf("unconfirmed add: %v", err)
+	if err := a.StageAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); err == nil {
+		t.Fatal("unconfirmed stage reported as saved")
 	}
 	if again, _ := New(p); reads(again, "infra/a") {
-		t.Fatal("an unconfirmed add is on disk")
+		t.Fatal("an unconfirmed stage reads")
 	}
-
+	// A finish that cannot be saved counts now, and the next start finishes it.
 	a.writeFile = good
-	if err := a.AddAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); err != nil {
+	if err := a.StageAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent); err != nil {
 		t.Fatal(err)
 	}
+	a.writeFile = broken
+	if err := a.FinishAlways("vector", "req_1", anyAgent); err == nil || !reads(a, "infra/a") {
+		t.Fatalf("finish: %v", err)
+	}
+	a, _ = New(p)
+	if reads(a, "infra/a") || len(a.StagedRequests()) != 1 {
+		t.Fatal("after a restart it should still be staged")
+	}
+	add(t, a, "req_1", "infra/a")
+
 	// A failed remove denies at once, stays listed, and can be retried.
-	a.writeFile = func(string, []byte, os.FileMode) error { return disk }
-	if _, err := a.RemoveAlways("vector", "infra/a"); err == nil || reads(a, "infra/a") {
+	good = a.writeFile
+	a.writeFile = broken
+	if _, err := a.RemoveAlways("vector", "infra/a", "req_1"); err == nil || reads(a, "infra/a") {
 		t.Fatalf("failed remove: %v", err)
 	}
 	if l := a.ListAlways(); len(l) != 1 || !l[0].Unsaved {
 		t.Fatalf("list = %+v", l)
 	}
 	a.writeFile = good
-	if _, err := a.RemoveAlways("vector", "infra/a"); err != nil || len(a.ListAlways()) != 0 {
+	if ok, err := a.RemoveAlways("vector", "infra/a", "req_1"); !ok || err != nil || len(a.ListAlways()) != 0 {
 		t.Fatalf("retry: %v %+v", err, a.ListAlways())
 	}
 	if again, _ := New(p); reads(again, "infra/a") {
 		t.Fatal("removal not saved by the retry")
-	}
-	if err := a.AddAlways("vector", from("req_2"), []string{"infra/b"}, anyAgent); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.ClearAlways("req_2"); err != nil || reads(a, "infra/b") {
-		t.Fatalf("clear: %v", err)
 	}
 }
 
 // Callers hold permission slices read earlier; changing rules must not touch them.
 func TestAlwaysDoesNotChangeSharedSlices(t *testing.T) {
 	a, _ := alwaysACL(t)
-	a.AddAlways("vector", from("req_1"), []string{"infra/a"}, anyAgent)
+	add(t, a, "req_1", "infra/a")
 	held, _ := a.GetAgent("vector")
-	a.RemoveAlways("vector", "infra/a")
-	a.AddAlways("vector", from("req_2"), []string{"infra/z"}, anyAgent)
-	if len(held.Permissions) != 2 || held.Permissions[1].Path != "infra/a" {
+	a.RemoveAlways("vector", "infra/a", "req_1")
+	add(t, a, "req_2", "infra/z")
+	if len(held.Permissions) != 2 || held.Permissions[1].Path != "infra/a" || len(held.Permissions[1].Actions) != 1 {
 		t.Fatalf("held = %+v", held.Permissions)
 	}
 }

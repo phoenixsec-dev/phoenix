@@ -311,3 +311,109 @@ func TestMisplacedUseLimitIsQuarantined(t *testing.T) {
 		t.Fatal("damaged grant was loaded")
 	}
 }
+
+// Counters that cannot be right never give uses back: the file is moved aside.
+func TestDamagedCountersAreQuarantined(t *testing.T) {
+	for name, damage := range map[string]func(g map[string]any){
+		"negative count":  func(g map[string]any) { g["path_uses"] = map[string]any{"infra/a": -1} },
+		"over the limit":  func(g map[string]any) { g["max_uses"] = 5000 },
+		"lost counts":     func(g map[string]any) { delete(g, "path_uses") },
+		"another path":    func(g map[string]any) { g["path_uses"] = map[string]any{"infra/z": 1} },
+		"raised limit":    func(g map[string]any) { g["path_uses"] = map[string]any{"infra/a": 2}; g["use_count"] = 2 },
+		"no limit at all": func(g map[string]any) { delete(g, "max_uses") },
+		"used up unmarked": func(g map[string]any) {
+			g["path_uses"] = map[string]any{"infra/a": 1, "infra/b": 1}
+			g["use_count"] = 2
+		},
+	} {
+		e := newEnv(t)
+		g := e.limited("vector", 1, "infra/a", "infra/b")
+		if err := e.use("vector", "infra/a"); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := os.ReadFile(e.path)
+		var f map[string]any
+		json.Unmarshal(data, &f)
+		damage(f["limited_grants"].(map[string]any)[g.ID].(map[string]any))
+		bad, _ := json.Marshal(f)
+		os.WriteFile(e.path, bad, 0600)
+		e.reopen()
+		if h := e.s.Health(); !h.Degraded || h.QuarantinedTo == "" {
+			t.Errorf("%s: loaded", name)
+		}
+	}
+}
+
+// After its token is replaced, an agent asking for the same thing gets a new
+// request it can use, and the old one stops waiting.
+func TestAskingAgainWithANewToken(t *testing.T) {
+	e := newEnv(t)
+	old := e.create("vector", "infra/a")
+	other := e.create("vector", "infra/b")
+	in := bearerIn("vector", "infra/a")
+	in.CredentialFP = "fp-new"
+	fresh, created, err := e.s.Create(in)
+	if err != nil || !created || fresh.ID == old.ID {
+		t.Fatalf("created=%v %v", created, err)
+	}
+	for _, id := range []string{old.ID, other.ID} {
+		if r, _ := e.s.GetRequest(id); r.Status != StatusExpired || r.Note == "" {
+			t.Fatalf("stale request: %+v", r)
+		}
+	}
+	e.reopen()
+	e.approve(fresh.ID)
+	c := bearerCaller("vector")
+	if e.s.Match(c, "infra/a", ActionReadValue).Grant != nil {
+		t.Fatal("the old token matches")
+	}
+	c.CredentialFP = "fp-new"
+	if e.s.Match(c, "infra/a", ActionReadValue).Grant == nil {
+		t.Fatal("the new token does not match")
+	}
+}
+
+// The same token given out a second time is another credential.
+func TestReissuedTokenIsAnotherCredential(t *testing.T) {
+	e := newEnv(t)
+	in := bearerIn("vector", "infra/a")
+	in.IssueFP = "issue-1"
+	r, _, err := e.s.Create(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.approve(r.ID)
+	c := bearerCaller("vector")
+	c.IssueFP = "issue-1"
+	if e.s.Match(c, "infra/a", ActionReadValue).Grant == nil {
+		t.Fatal("own issue does not match")
+	}
+	c.IssueFP = "issue-2"
+	if e.s.Match(c, "infra/a", ActionReadValue).Grant != nil {
+		t.Fatal("a reissue of the token uses the old grant")
+	}
+}
+
+// A disk that fails twice in a row can lose a use, never give one back.
+func TestSpendDoubleFaultNeverGivesAUseBack(t *testing.T) {
+	e := newEnv(t)
+	e.limited("vector", 1, "infra/a")
+	e.fs.fail("dirsync")
+	if err := e.use("vector", "infra/a"); CodeOf(err) != CodeStoreWriteFailed {
+		t.Fatal(err)
+	}
+	if e.s.Match(bearerCaller("vector"), "infra/a", ActionReadValue).Grant != nil {
+		t.Fatal("still usable while the store cannot be saved")
+	}
+	e.fs.fail("")
+	e.reopen()
+	ok := 0
+	for range 3 {
+		if e.use("vector", "infra/a") == nil {
+			ok++
+		}
+	}
+	if ok > 1 {
+		t.Fatalf("%d uses of one", ok)
+	}
+}

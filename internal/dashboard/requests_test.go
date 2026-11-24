@@ -121,7 +121,11 @@ func TestAnswerAlwaysAndRemove(t *testing.T) {
 	if !strings.Contains(page, `name="path" value="infra/a"`) || !strings.Contains(page, "Always, by dashboard@192.0.2.9") {
 		t.Fatal("always entry not on the page")
 	}
-	remove := url.Values{"agent": {"vector"}, "path": {"infra/a"}}
+	remove := url.Values{"agent": {"vector"}, "path": {"infra/a"}, "request": {rq.ID}}
+	stale := url.Values{"agent": {"vector"}, "path": {"infra/a"}, "request": {"req_older"}}
+	if code := redirectParam(t, e.post(t, "/dashboard/requests/always/remove", stale, true), "error"); code != "NOT_FOUND" || !e.canRead("infra/a") {
+		t.Fatalf("an old page removed a newer answer: %q", code)
+	}
 	if w := e.post(t, "/dashboard/requests/always/remove", remove, false); w.Code != http.StatusForbidden {
 		t.Fatalf("remove without CSRF: %d", w.Code)
 	}
@@ -238,7 +242,7 @@ func TestSSHLoginCard(t *testing.T) {
 		t.Fatalf("login card = %+v", login)
 	}
 	html := string(e.h.fragment("request-card", login))
-	if !strings.Contains(html, "root login on <strong>build-1</strong>") || strings.Contains(html, `value="always"`) || !strings.Contains(html, `value="once"`) {
+	if !strings.Contains(html, "Once issues one certificate") || !strings.Contains(html, "root login on <strong>build-1</strong>") || strings.Contains(html, `value="always"`) || !strings.Contains(html, `value="once"`) {
 		t.Fatalf("login card html:\n%s", html)
 	}
 	secret := e.h.card(grant.Request{ID: "req_y", Agent: "vector", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}, RequestedTTL: time.Hour}, "")
@@ -280,6 +284,33 @@ func TestRequestFeed(t *testing.T) {
 	e.h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("feed without a login: %d", w.Code)
+	}
+}
+
+// Removing an "always" says so when something else still lets the agent read.
+func TestRemoveSaysWhatIsLeft(t *testing.T) {
+	done := func(prepare func(e *accessEnv)) string {
+		e := newAccessEnv(t)
+		prepare(e)
+		rq := e.request(t, "always", 30*time.Minute, "infra/a", "infra/b")
+		if code := redirectParam(t, e.answer(t, rq.ID, "always", nil), "error"); code != "" {
+			t.Fatal(code)
+		}
+		w := e.post(t, "/dashboard/requests/always/remove", url.Values{"agent": {"vector"}, "path": {"infra/a"}, "request": {rq.ID}}, true)
+		return redirectParam(t, w, "done")
+	}
+	if got := done(func(*accessEnv) {}); got != "removed" {
+		t.Errorf("nothing left: %q", got)
+	}
+	if got := done(func(e *accessEnv) {
+		e.answer(t, e.request(t, "timed", 30*time.Minute, "infra/a").ID, "time", nil)
+	}); got != "removed-open" {
+		t.Errorf("open grant: %q", got)
+	}
+	if got := done(func(e *accessEnv) {
+		e.acl.UpdateAgent("vector", "vector-token", []acl.Permission{{Path: "infra/*", Actions: []acl.Action{acl.ActionReadValue}}})
+	}); got != "removed-still" {
+		t.Errorf("another rule: %q", got)
 	}
 }
 
@@ -335,6 +366,18 @@ func TestRevokeNotDurableShownInRed(t *testing.T) {
 	}
 	if page := e.get(t, "/dashboard/"); !strings.Contains(page, "Access requests degraded") {
 		t.Fatal("overview does not show degraded state")
+	}
+	// The Revoke to try again with is still there, and works once the disk does.
+	action := "/dashboard/requests/grants/" + g.ID + "/revoke"
+	if page := e.get(t, "/dashboard/requests"); !strings.Contains(page, action) || !strings.Contains(page, "revoke again") {
+		t.Fatal("no way to retry the revoke")
+	}
+	e.fs.fail.Store(false)
+	if code := redirectParam(t, e.post(t, action, nil, true), "error"); code != "" {
+		t.Fatal(code)
+	}
+	if strings.Contains(e.get(t, "/dashboard/requests"), action) {
+		t.Fatal("still listed after it was saved")
 	}
 }
 

@@ -260,7 +260,7 @@ func decodeState(data []byte) (*state, error) {
 		}
 	}
 	for id, g := range f.LimitedGrants {
-		if g == nil || g.MaxUses <= 0 || st.Grants[id] != nil {
+		if g == nil || st.Grants[id] != nil || !g.usesConsistent() {
 			return nil, fmt.Errorf("malformed limited grant record %q", id)
 		}
 		st.Grants[id] = g
@@ -496,6 +496,7 @@ type CreateInput struct {
 	SourceIP     string
 	AuthMethod   string // AuthBearer (the only method left)
 	CredentialFP string // BearerFingerprint(hash) of the agent's token
+	IssueFP      string // which issue of that token; tells A from A given out again after B
 }
 
 // Create files a new pending request. It returns created=true for a new
@@ -548,10 +549,16 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 	now := s.now()
 	cur := s.snapshot()
 
-	var agentPending, allPending, recent []*Request
+	var agentPending, allPending, recent, stale []*Request
 	var cooldownUntil time.Time
 	for _, r := range cur.Requests {
 		pending := r.Status == StatusPending && now.Before(r.ExpiresAt)
+		if pending && r.Agent == in.Agent && !r.sameToken(in.CredentialFP, in.IssueFP) {
+			// Made with a token the agent no longer has. It can never be
+			// approved, so it must not answer or crowd out the new one.
+			stale = append(stale, r)
+			pending = false
+		}
 		if pending {
 			allPending = append(allPending, r)
 		}
@@ -598,11 +605,20 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 
 	r := &Request{
 		ID: newID("req_"), Agent: in.Agent, Paths: paths, Action: in.Action, Reason: reason,
-		RequestedTTL: ttl, SourceIP: in.SourceIP, AuthMethod: in.AuthMethod, CredentialFP: in.CredentialFP,
+		RequestedTTL: ttl, SourceIP: in.SourceIP, AuthMethod: in.AuthMethod, CredentialFP: in.CredentialFP, IssueFP: in.IssueFP,
 		Status: StatusPending, CreatedAt: now, ExpiresAt: now.Add(s.opts.RequestTTL),
 	}
 	next := cur.clone()
 	next.Requests[r.ID] = r
+	for _, old := range stale {
+		no := *old
+		no.Status, no.DecidedBy, no.DecidedAt, no.Note = StatusExpired, "system", now, "the agent's token was replaced"
+		next.Requests[no.ID] = &no
+		xe := s.newEvent(EventRequestExpired, PhaseCommitted, no.Agent, "system", "")
+		xe.RequestID, xe.Paths, xe.Action = no.ID, no.Paths, no.Action
+		xe.Detail = map[string]string{"cause": "token_replaced"}
+		next.AuditPending = append(next.AuditPending, xe)
+	}
 	ev := s.newEvent(EventRequestCreated, PhaseCommitted, r.Agent, r.Agent, r.SourceIP)
 	ev.RequestID, ev.Paths, ev.Action = r.ID, paths, r.Action
 	ev.Detail = map[string]string{"requested_ttl": ttl.String(), "auth_method": r.AuthMethod}
@@ -703,13 +719,8 @@ func (s *Store) Approve(in ApproveInput) (Request, Grant, error) {
 
 	g := &Grant{
 		ID: newID("gnt_"), RequestID: r.ID, Agent: r.Agent, Paths: paths, Action: r.Action,
-		SealedOnly: in.SealedOnly, AuthMethod: r.AuthMethod, CredentialFP: r.CredentialFP,
+		SealedOnly: in.SealedOnly, AuthMethod: r.AuthMethod, CredentialFP: r.CredentialFP, IssueFP: r.IssueFP,
 		CreatedAt: now, ExpiresAt: now.Add(ttl), ApprovedBy: in.Approver, MaxUses: in.MaxUses,
-	}
-	// An "always" that failed half way may have left access behind. This
-	// answer is narrower, so that access must be gone before it counts.
-	if err := s.clearAlways(r.ID); err != nil {
-		return Request{}, Grant{}, err
 	}
 	if in.BindSourceIP {
 		g.BoundSourceIP = r.SourceIP
@@ -805,11 +816,6 @@ func (s *Store) Deny(in DenyInput) (Request, error) {
 	}
 	if st := r.clone(now).Status; st != StatusPending {
 		return Request{}, newErr(CodeNotPending, "request is %s", st)
-	}
-	if err := s.clearAlways(r.ID); err != nil {
-		// Gone from memory either way, and a restart removes it again because
-		// the request was not approved. Never let that block a "no".
-		s.logf("WARNING: grant store: %v", err)
 	}
 	nr := *r
 	nr.Status, nr.DecidedBy, nr.DeciderIP, nr.DecidedAt, nr.Note = StatusDenied, in.Denier, in.DenierIP, now, note
@@ -962,6 +968,7 @@ type Caller struct {
 	SourceIP     string
 	AuthMethod   string // AuthBearer
 	CredentialFP string // same format as CreateInput.CredentialFP
+	IssueFP      string // same format as CreateInput.IssueFP
 }
 
 // MatchResult is Match's answer. Grant is a copy of the active grant that
@@ -1058,7 +1065,7 @@ func credentialMatches(g *Grant, c Caller) bool {
 	}
 	switch g.AuthMethod {
 	case AuthBearer:
-		return g.CredentialFP != "" &&
+		return g.CredentialFP != "" && (g.IssueFP == "" || c.IssueFP == g.IssueFP) &&
 			subtle.ConstantTimeCompare([]byte(c.CredentialFP), []byte(g.CredentialFP)) == 1
 	}
 	return false
@@ -1194,9 +1201,6 @@ func (s *Store) Tick() {
 			nr := *r
 			nr.Status = StatusExpired
 			next.Requests[id] = &nr
-			if err := s.clearAlways(id); err != nil {
-				s.logf("WARNING: grant store: %v", err)
-			}
 			ev := s.newEvent(EventRequestExpired, PhaseCommitted, r.Agent, "system", "")
 			ev.RequestID, ev.Paths, ev.Action = r.ID, r.Paths, r.Action
 			next.AuditPending = append(next.AuditPending, ev)

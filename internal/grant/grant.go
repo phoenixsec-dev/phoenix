@@ -97,6 +97,7 @@ type Request struct {
 	SourceIP     string        `json:"source_ip"`
 	AuthMethod   string        `json:"auth_method"`
 	CredentialFP string        `json:"credential_fp,omitempty"`
+	IssueFP      string        `json:"issue_fp,omitempty"` // which issue of that token; empty on older records
 	Status       Status        `json:"status"`
 	CreatedAt    time.Time     `json:"created_at"`
 	ExpiresAt    time.Time     `json:"expires_at"`
@@ -127,6 +128,7 @@ type Grant struct {
 	BoundSourceIP  string    `json:"bound_source_ip,omitempty"`
 	AuthMethod     string    `json:"auth_method"`
 	CredentialFP   string    `json:"credential_fp,omitempty"`
+	IssueFP        string    `json:"issue_fp,omitempty"` // which issue of that token; empty on older records
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	ApprovedBy     string    `json:"approved_by"`
@@ -147,6 +149,28 @@ func (g Grant) UsesLeft(path string) int64 {
 		return -1
 	}
 	return max(g.MaxUses-g.PathUses[path], 0)
+}
+
+// usesConsistent checks the use counters of a limited grant as loaded: a count
+// that is negative, too high, for another path, or does not add up means a
+// damaged file, and trusting it could hand out uses again.
+func (g *Grant) usesConsistent() bool {
+	var total int64
+	for p, n := range g.PathUses {
+		if n < 0 || n > g.MaxUses || !slices.Contains(g.Paths, p) {
+			return false
+		}
+		total += n
+	}
+	return g.MaxUses > 0 && g.MaxUses <= MaxUsesLimit && total == g.UseCount &&
+		(g.Action == ActionSSHLogin || g.usedUp() == !g.UsedUpAt.IsZero())
+}
+
+// sameToken reports whether r was made with the token (and issue of it) that
+// the fingerprints name. Records from before issues were recorded compare the
+// token alone.
+func (r *Request) sameToken(credentialFP, issueFP string) bool {
+	return r.CredentialFP == credentialFP && (r.IssueFP == "" || issueFP == "" || r.IssueFP == issueFP)
 }
 
 // usedUp reports whether no path has a use left.

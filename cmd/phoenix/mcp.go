@@ -852,7 +852,28 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 	if err := json.Unmarshal(respBody, &rq); err != nil {
 		return fmt.Sprintf("Failed to decode response: %v", err), true
 	}
+	if !mcpOwnRequest(rq) {
+		return formatDenial(serverDenial{Code: "NOT_FOUND", Detail: "request not found"}, ""), true
+	}
 	return mcpRequestText(rq), false
+}
+
+// mcpOwnRequest guards the one way a role could see another agent's request:
+// the status tool asks with the agent's own token, and an agent that is an
+// approver may see everybody's. The server names the owner only to approvers.
+func mcpOwnRequest(rq accessRequestView) bool {
+	if ownToken() == "" || rq.Agent == "" {
+		return true
+	}
+	resp, err := ownIdentityRequest("GET", "/v1/whoami", nil, nil)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var me struct {
+		Agent string `json:"agent"`
+	}
+	return resp.StatusCode == 200 && json.NewDecoder(resp.Body).Decode(&me) == nil && me.Agent == rq.Agent
 }
 
 // mcpRequestText renders a request for the model: cleaned server facts plus

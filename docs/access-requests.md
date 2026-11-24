@@ -245,9 +245,10 @@ gives the child the value but no Phoenix credentials. A plain `GET` or
 `require_sealed` is on.
 
 With `PHOENIX_ROLE` set, exec first asks with the role's session. Sessions never
-use grants, so for a path the role may not read, exec looks at what humans
-approved for the agent (open grants and Always) and reads exactly those paths
-with the agent's own token. The agent's other access is never used that way.
+use grants, so for a path the role may not read, exec asks again with the agent's
+own token at `POST /v1/resolve-approved`. There the server allows a read only
+through a grant that matches right now or an exact Always; the agent's other
+access does not count.
 
 ### Uses
 
@@ -265,11 +266,13 @@ each be read one time.
   any number of calls at once and after a restart. If it cannot be saved,
   nothing is delivered (`REQUESTS_DEGRADED`). If the connection drops right
   then, the use is still spent: the server cannot know whether the value
-  arrived.
+  arrived. The same goes for a disk that fails twice in a row (the save, then
+  putting the old file back): nothing is delivered, and the use may count as
+  spent after a restart. It is never given back twice.
 - When several grants cover a path, one without a use limit is used first.
 - After the last use, reads get `GRANT_EXPIRED` with `request_use`.
-- For an SSH login a use is one certificate. The login it opened lasts until
-  the approval's time ends, and Revoke ends it earlier.
+- For an SSH login a use is one certificate, not one connection. It can log in
+  until the approval's time ends, and Revoke ends that earlier.
 
 ### `--redact-output`
 
@@ -416,8 +419,10 @@ older server ignores the mark and keeps the rule as any other; if it then
 changes an agent, the mark is lost. The access stays, but the Requests page can
 no longer list or remove it; edit the agent's rules instead.
 
-If the server dies while saving an Always, the next start takes back any access
-whose request was not answered.
+An Always is written in two steps: an inactive rule first (marked `staged`, with
+no actions, so no server of any version reads through it), and the real one only
+after the answer is saved. If the server dies in between, the next start
+finishes it when the answer was saved and throws it away when it was not.
 
 ## Troubleshooting
 
@@ -476,7 +481,8 @@ Approver side (an identity in `approvers`, not a session):
 | Method + path | Does |
 |---|---|
 | `GET /v1/access-requests[?status=&agent=]` | Every agent's requests, with source IP, auth method and `already_allowed_paths` |
-| `POST /v1/access-requests/{id}/approve` | Optional `{"paths":[subset],"ttl":"15m","uses":1}`: may narrow paths, shorten TTL and limit uses, never widen |
+| `POST /v1/access-requests/{id}/approve` | Optional `{"paths":[subset],"ttl":"15m"}`: may narrow paths and shorten TTL, never widen |
+| `POST /v1/access-requests/{id}/approve-limited` | The same plus `"uses":1` (1 to 1000, required). Its own address so a server too old to count uses answers `404` instead of allowing any number. `/approve` refuses `uses` |
 | `POST /v1/access-requests/{id}/deny` | Optional `{"note":"..."}`; starts a 10-minute cooldown on those paths |
 | `GET /v1/grants?agent=&include=inactive` | Every grant |
 | `POST /v1/grants/{id}/revoke` | Revoke any grant (idempotent) |

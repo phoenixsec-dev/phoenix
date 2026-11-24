@@ -11,29 +11,31 @@ import (
 // grants.json, so the order matters:
 //
 //  1. the audit attempt line; failure changes nothing
-//  2. the access list (each rule says which request it came from)
+//  2. staged rules on the access list, which nobody can read through
 //  3. grants.json: request approved
+//  4. the staged rules become real
 //
-// If 3 fails, 2 is undone. If the server dies between 2 and 3 the access list
-// holds rules from a request nobody answered; Open takes them away again, and
-// so does any other answer to that request. So access stands only when the
-// request says it was approved.
+// So nobody can read before the answer is saved, and a live rule always has a
+// saved answer behind it. If the server dies after 3, or 4 cannot be saved, the
+// next start does 4. If 3 never happened, the next start throws the staged
+// rules away. Nothing ever makes a live rule out of anything but a staged one,
+// so access a human removed cannot come back.
 
 // AlwaysRules is the agents' access list, as far as "always" needs it.
 // internal/api adapts *acl.ACL. Called under the store's lock; it must not
 // call back into the Store.
 type AlwaysRules interface {
-	// Add lets agent read exactly paths, replacing any rule already there
-	// from the same request. It fails with CREDENTIAL_CHANGED unless the
-	// agent's token is still the one credentialFP names, checked together
-	// with the change. On any error the agent can read nothing more than
-	// before.
-	Add(agent, credentialFP, requestID, by string, at time.Time, paths []string) error
-	// Clear removes every rule that came from a request. No rules = nil. On
-	// error the rules are gone from memory but may come back after a restart.
-	Clear(requestID string) error
-	// RequestIDs lists the requests that rules came from.
-	RequestIDs() []string
+	// Stage writes inactive rules for r.Agent on exactly paths. It fails with
+	// CREDENTIAL_CHANGED unless the agent's token is still the one that asked.
+	Stage(r Request, by string, at time.Time, paths []string) error
+	// Finish turns the request's staged rules into real ones, with the same
+	// token check; none staged = nil. An error that is not a *Error means it
+	// took effect but could not be saved.
+	Finish(r Request) error
+	// Drop throws the request's staged rules away.
+	Drop(requestID string) error
+	// Staged lists the requests staged rules belong to.
+	Staged() []string
 }
 
 // AlwaysInput is a human's "always" on a pending request.
@@ -77,7 +79,7 @@ func (s *Store) ApproveAlways(in AlwaysInput) (Request, error) {
 	if err := s.auditAttempt(opApprove, ev); err != nil {
 		return Request{}, err
 	}
-	if err := s.opts.Always.Add(r.Agent, r.CredentialFP, r.ID, in.Approver, now, paths); err != nil {
+	if err := s.opts.Always.Stage(r.clone(now), in.Approver, now, paths); err != nil {
 		s.appendFailed(ev, opApprove, err)
 		var ge *Error
 		if errors.As(err, &ge) {
@@ -88,42 +90,42 @@ func (s *Store) ApproveAlways(in AlwaysInput) (Request, error) {
 	next := s.snapshot().clone()
 	next.Requests[r.ID] = &nr
 	if err := s.commitAudited(next, opApprove, ev); err != nil {
-		if cerr := s.clearAlways(r.ID); cerr != nil {
-			s.logf("ERROR: grant store: %v", cerr)
-		}
+		s.dropStaged(r.ID)
 		return Request{}, err
+	}
+	if err := s.opts.Always.Finish(nr.clone(now)); err != nil {
+		s.logf("ERROR: grant store: request %s was approved, but saving its access failed (the next start saves it): %v", r.ID, err)
 	}
 	return nr.clone(now), nil
 }
 
-// clearAlways removes standing access left by an "always" that failed half
-// way. Caller holds s.mu.
-func (s *Store) clearAlways(requestID string) error {
-	if s.opts.Always == nil {
-		return nil
+// dropStaged throws staged rules away. A failure is only logged: they allow
+// nothing, and the next start drops them.
+func (s *Store) dropStaged(requestID string) {
+	if err := s.opts.Always.Drop(requestID); err != nil {
+		s.logf("WARNING: grant store: dropping staged access of %s: %v", requestID, err)
 	}
-	if err := s.opts.Always.Clear(requestID); err != nil {
-		return &Error{Code: CodeACLWriteFailed, Msg: "could not save the agent's access list", Err: err}
-	}
-	return nil
 }
 
-// reconcileAlways runs once at Open: standing access whose request was never
-// approved came from an answer the server died in the middle of, so it goes.
-// A request the store does not know (pruned after 30 days, or a lost
-// grants.json) proves nothing, and its access stays.
+// reconcileAlways runs once at Open and settles rules the last run left staged:
+// finished when their request was approved with "always", thrown away
+// otherwise (never answered, answered differently, or not known).
 func (s *Store) reconcileAlways() {
 	if s.opts.Always == nil {
 		return
 	}
-	for _, id := range s.opts.Always.RequestIDs() {
+	for _, id := range s.opts.Always.Staged() {
 		r, ok := s.cur.Requests[id]
-		if !ok || r.Status == StatusApproved {
+		if !ok || r.Status != StatusApproved || !r.Always {
+			s.dropStaged(id)
 			continue
 		}
-		s.logf("WARNING: grant store: request %s was never approved but its access was on %q's list; removing it", id, r.Agent)
-		if err := s.clearAlways(id); err != nil {
-			s.logf("ERROR: grant store: %v", err)
+		var ge *Error
+		if err := s.opts.Always.Finish(*r); errors.As(err, &ge) {
+			s.logf("WARNING: grant store: not finishing the access of %s: %v", id, err)
+			s.dropStaged(id)
+		} else if err != nil {
+			s.logf("ERROR: grant store: saving the access of %s: %v", id, err)
 		}
 	}
 }

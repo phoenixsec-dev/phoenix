@@ -24,6 +24,7 @@ This index is a concise map of currently implemented endpoints in `internal/api/
 | PUT | `/v1/secrets/{path}` | Create/update secret |
 | DELETE | `/v1/secrets/{path}` | Delete secret |
 | POST | `/v1/resolve` | Batch resolve `phoenix://` refs |
+| POST | `/v1/resolve-approved` | The same, but only what a human approved for the calling agent (a matching grant or an exact Always); never its other access, never a session |
 
 `/v1/metadata` needs only `list` permission on a path, is audited as `list`,
 and never returns the value. (With the 1Password backend, finding the paths
@@ -37,6 +38,7 @@ can nudge when it is false.
 
 `POST /v1/resolve` request fields:
 - `refs` (required): list of reference strings
+- `all_or_nothing` (optional): if any ref is refused, deliver none and spend no use
 
 A body that still sends `nonce` or `signature` (nonce challenges and signed
 resolve were removed) gets `400` saying so.
@@ -170,7 +172,8 @@ a notification to `access_requests.notify_url` (no endpoint; see
 | POST | `/v1/access-requests` | Ask for temporary `read_value` on exact paths |
 | GET | `/v1/access-requests` | Own requests (approvers: all) |
 | GET | `/v1/access-requests/{id}` | One request with `next_step` |
-| POST | `/v1/access-requests/{id}/approve` | Approve, optionally narrowing paths / TTL / uses (approvers) |
+| POST | `/v1/access-requests/{id}/approve` | Approve, optionally narrowing paths / TTL (approvers) |
+| POST | `/v1/access-requests/{id}/approve-limited` | The same with a use limit (approvers) |
 | POST | `/v1/access-requests/{id}/deny` | Deny with optional note (approvers) |
 | GET | `/v1/grants` | Own grants (approvers: all) |
 | POST | `/v1/grants/{id}/revoke` | Revoke (owner or approver) |

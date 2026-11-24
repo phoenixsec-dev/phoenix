@@ -4,8 +4,6 @@ import (
 	"errors"
 	"maps"
 	"slices"
-
-	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // SpendItem is one path about to be delivered under one grant.
@@ -71,9 +69,9 @@ func (s *Store) Spend(c Caller, action string, items []SpendItem, allOrNone bool
 	if !changed || (allOrNone && refused) {
 		return errs
 	}
-	if _, err := s.saveOrUndo(next); err != nil {
-		s.logf("ERROR: grant store: saving a use failed, value not delivered: %v", err)
-		if errors.Is(err, fsutil.ErrDirSyncFailed) {
+	if undone, err := s.saveOrUndo(next); err != nil {
+		s.logf("ERROR: grant store: saving a use failed, nothing delivered: %v", err)
+		if !undone {
 			s.logf("ERROR: grant store: that use may count as spent after a restart")
 		}
 		return refuse(&Error{Code: CodeStoreWriteFailed, Msg: "the use could not be saved; nothing was delivered", Err: err})

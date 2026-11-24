@@ -316,6 +316,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/agents/", s.handleDeleteAgent)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
+	s.mux.HandleFunc("POST /v1/resolve-approved", s.handleResolve)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
@@ -805,6 +806,14 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 
 	path := secretPath(r)
 	ip := clientIP(r)
+
+	// Go routes HEAD here too, and would run the whole read (spending a
+	// one-time use) only to throw the value away.
+	if r.Method == http.MethodHead && path != "" && !strings.HasSuffix(path, "/") {
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 
 	// A "*" in a single-secret read is someone trying to list a folder.
 	// Say so before scope, ACL and attestation, so it never reads as a
@@ -1349,7 +1358,12 @@ func deliveryGrants(ds []delivery) []*grant.Grant {
 	return out
 }
 
+// handleResolve: POST /v1/resolve and POST /v1/resolve-approved. The second
+// reads only what a human approved for this agent (approvedAccess). It is an
+// address of its own so a server from before it refuses instead of ignoring a
+// flag and using everything the agent may read.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	approvedOnly := r.URL.Path == "/v1/resolve-approved"
 	info, err := s.authenticateInfo(r)
 	if err != nil {
 		handleAuthError(w, err)
@@ -1408,7 +1422,13 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var deliveries []delivery
+	seen := map[string]bool{}
 	for _, refStr := range req.Refs {
+		// The answer has one entry per ref, so a repeat adds nothing.
+		if seen[refStr] {
+			continue
+		}
+		seen[refStr] = true
 		path, err := ref.Parse(refStr)
 		if err != nil {
 			s.auditDenied(r, info, "resolve", refStr, ip, "malformed_ref")
@@ -1417,7 +1437,12 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Session scope/action, ACL, then request-use grants (per-ref).
-		dec := s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		dec := accessDecision{}
+		if approvedOnly {
+			dec = s.approvedAccess(info, path, ip)
+		} else {
+			dec = s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		}
 		if dec.Reason != "" {
 			s.auditDenied(r, info, "resolve", path, ip, dec.Reason)
 			code, msg := resolveDenial(dec.Reason)

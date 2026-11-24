@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -45,7 +46,8 @@ func ownIdentityRequest(method, path string, body []byte, headers map[string]str
 // resolveForExec resolves refs for phoenix exec. Under PHOENIX_ROLE, a secret
 // the role may not read but a human approved for this agent is resolved as the
 // agent: an approval was given to the agent, so it must not depend on whether a
-// role happens to be set. Nothing else is read that way.
+// role happens to be set. The server checks that the approval itself allows
+// each such read; the agent's other access never counts there.
 func resolveForExec(ctx context.Context, refs []string, sealKey *[32]byte) (execResolved, error) {
 	res, err := resolveBatch(ctx, currentRoleSend, refs, sealKey)
 	if err != nil || len(res.errs) == 0 || ownToken() == "" {
@@ -62,12 +64,6 @@ func resolveForExec(ctx context.Context, refs []string, sealKey *[32]byte) (exec
 			return res, nil
 		}
 	}
-	approved := approvedPaths(ctx)
-	for _, r := range refused {
-		if !approved[strings.TrimPrefix(r, "phoenix://")] {
-			return res, nil
-		}
-	}
 	// Grants are sealed to the agent's registered key, not to the role's.
 	own, err := loadSealKey()
 	if err != nil {
@@ -80,15 +76,30 @@ func resolveForExec(ctx context.Context, refs []string, sealKey *[32]byte) (exec
 		}
 	}
 	// Last, because it may spend a use.
-	mine, err := resolveBatch(ctx, ownSend, refused, own)
-	if err != nil || len(mine.errs) > 0 {
+	mine, err := resolveBatch(ctx, approvedSend, refused, own)
+	if errors.Is(err, errNoApprovedResolve) {
+		return res, nil // an older server: the role's answer stands
+	}
+	if err != nil {
 		return mine, err
+	}
+	if len(mine.errs) > 0 {
+		for r, code := range mine.codes {
+			// Nothing approved: what the role was told is the useful answer.
+			if code.Code == "ACL_DENIED" {
+				mine.errs[r], mine.codes[r] = res.errs[r], res.codes[r]
+			}
+		}
+		return mine, nil
 	}
 	for r, v := range mine.values {
 		out.values[r] = v
 	}
 	return out, nil
 }
+
+// errNoApprovedResolve is a server without /v1/resolve-approved.
+var errNoApprovedResolve = errors.New("server cannot resolve approved secrets under a role")
 
 // resolveSender sends one resolve call as some identity.
 type resolveSender func(ctx context.Context, body string, headers map[string]string) (*http.Response, error)
@@ -98,46 +109,15 @@ func currentRoleSend(ctx context.Context, body string, headers map[string]string
 	return apiRequestCtx(ctx, "POST", "/v1/resolve", strings.NewReader(body), headers)
 }
 
-// ownSend uses the agent's own token.
-func ownSend(ctx context.Context, body string, headers map[string]string) (*http.Response, error) {
-	return sendAPIRequest(ctx, ownToken(), "POST", "/v1/resolve", []byte(body), true, headers)
-}
-
-// approvedPaths lists the exact paths humans approved for this agent: open
-// grants to read a value and "always" entries. Empty when that cannot be read.
-func approvedPaths(ctx context.Context) map[string]bool {
-	out := map[string]bool{}
-	resp, err := sendAPIRequest(ctx, ownToken(), "GET", "/v1/whoami", nil, false, nil)
-	if err != nil {
-		return out
+// approvedSend resolves with the agent's own token, and only what a human
+// approved for it.
+func approvedSend(ctx context.Context, body string, headers map[string]string) (*http.Response, error) {
+	resp, err := sendAPIRequest(ctx, ownToken(), "POST", "/v1/resolve-approved", []byte(body), true, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return nil, errNoApprovedResolve
 	}
-	defer resp.Body.Close()
-	var w struct {
-		ACL []struct {
-			Path   string `json:"path"`
-			Always bool   `json:"always"`
-		} `json:"acl"`
-		Grants []struct {
-			Paths  []string `json:"paths"`
-			Action string   `json:"action"`
-		} `json:"grants"`
-	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&w) != nil {
-		return out
-	}
-	for _, r := range w.ACL {
-		if r.Always {
-			out[r.Path] = true
-		}
-	}
-	for _, g := range w.Grants {
-		if g.Action == "read_value" {
-			for _, p := range g.Paths {
-				out[p] = true
-			}
-		}
-	}
-	return out
+	return resp, err
 }
 
 // resolveBatch resolves refs in one call, decrypting sealed values.

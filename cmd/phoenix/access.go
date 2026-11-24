@@ -278,7 +278,7 @@ func requestNextHint(rq accessRequestView) string {
 			}
 			return nextStepHint("ask_user")
 		}
-		if p := hintPath(rq.GrantedPaths[0]); p != "" {
+		if p := hintPath(usablePath(rq)); p != "" {
 			return "phoenix exec --redact-output --env NAME=phoenix://" + p + " -- <command>"
 		}
 	}
@@ -286,6 +286,16 @@ func requestNextHint(rq accessRequestView) string {
 		return "a human said no. Do not ask again; ask the user in chat if it is really needed"
 	}
 	return nextStepHint(rq.NextStep)
+}
+
+// usablePath is a granted path that still has a use left.
+func usablePath(rq accessRequestView) string {
+	for _, p := range rq.GrantedPaths {
+		if left, limited := rq.UsesLeft[p]; !limited || left > 0 {
+			return p
+		}
+	}
+	return rq.GrantedPaths[0]
 }
 
 // waitForDecision polls a request every 5s until it is decided or expires.
@@ -518,8 +528,11 @@ func cmdApproveAccess(args []string) error {
 	if ttl != "" {
 		body["ttl"] = ttl
 	}
+	endpoint := "/approve"
 	if uses > 0 {
-		body["uses"] = uses
+		// Its own address: a server too old to count uses must refuse, not
+		// allow any number of them.
+		body["uses"], endpoint = uses, "/approve-limited"
 	}
 	var res struct {
 		GrantID   string   `json:"grant_id"`
@@ -527,8 +540,12 @@ func cmdApproveAccess(args []string) error {
 		Paths     []string `json:"paths"`
 		ExpiresAt string   `json:"expires_at"`
 	}
-	if _, err := apiJSON("POST", "/v1/access-requests/"+id+"/approve", body, &res); err != nil {
+	resp, err := approveCall("/v1/access-requests/"+id+endpoint, body, &res)
+	if err != nil {
 		return err
+	}
+	if resp == http.StatusNotFound || (uses > 0 && res.MaxUses != uses) {
+		return fmt.Errorf("this server is too old to limit uses; nothing was approved. Approve without --uses, or answer Once on the dashboard after updating it")
 	}
 	limit := ""
 	if uses > 0 {
@@ -536,10 +553,31 @@ func cmdApproveAccess(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "Approved: grant %s for %s until %s%s\n", cleanServerText(res.GrantID),
 		cleanList(res.Paths, ", "), cleanServerText(res.ExpiresAt), limit)
-	if uses > 0 && res.MaxUses != uses {
-		return fmt.Errorf("this server does not count uses, so the grant has NO use limit; revoke it with: phoenix grants revoke %s", cleanServerText(res.GrantID))
-	}
 	return nil
+}
+
+// approveCall posts an approval. A 404 without a denial code is a server that
+// has no such address, reported as the status and no error.
+func approveCall(path string, body any, out any) (int, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := apiRequest("POST", path, bytes.NewReader(raw))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		var code string
+		if code, resp = peekDenialCode(resp); code == "" {
+			return http.StatusNotFound, nil
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, handleError(resp)
+	}
+	return resp.StatusCode, json.NewDecoder(resp.Body).Decode(out)
 }
 
 // approvalPrompt is the text shown before a y/N on an access request. It

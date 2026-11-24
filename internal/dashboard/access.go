@@ -23,9 +23,12 @@ type AccessApprover interface {
 	// ApproveAccessRequestAs approves with the API's re-checks for an
 	// approver the dashboard has already authenticated.
 	ApproveAccessRequestAs(id, approver, ip string, how grant.Approval) (grant.Request, grant.Grant, error)
-	// RemoveAlwaysAs takes back an agent's "always" on one path. stillAllowed
-	// says another rule on the agent's access list goes on allowing it.
-	RemoveAlwaysAs(agent, path, by, ip string) (stillAllowed bool, err error)
+	// RemoveAlwaysAs takes back the access one request's "always" put on an
+	// agent's list for one path.
+	RemoveAlwaysAs(agent, path, requestID, by, ip string) error
+	// RequestTokenCurrent reports whether the agent still has the token that
+	// made the request.
+	RequestTokenCurrent(rq grant.Request) bool
 	// AccessRequestSettings is the access_requests config in force now.
 	AccessRequestSettings() config.AccessRequestsSettings
 }
