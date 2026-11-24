@@ -9,7 +9,8 @@
 #   5. this build starts again: still nothing lost
 # The previous release is built from its published tag: the newest final
 # version tag that is not newer than internal/version and is not this very
-# tree. E2E_PREV_REF=<tag or commit> picks another.
+# tree. Another one, v0.22.0 or newer: pass its tag or commit as the argument,
+# or set E2E_PREV_REF.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 scenario_start 23 upgrade-from-previous-release
@@ -26,7 +27,7 @@ previous_release() {
     echo "$tag"; return
   done
 }
-PREV="${E2E_PREV_REF:-$(previous_release)}"
+PREV="${1:-${E2E_PREV_REF:-$(previous_release)}}"
 [[ -n "$PREV" ]] || skip "no release tag in this clone (a shallow clone has none: git fetch --tags)"
 git -C "$REPO_ROOT" rev-parse -q --verify "$PREV^{commit}" >/dev/null || die "unknown git ref: $PREV"
 log "previous release: $PREV"
@@ -37,9 +38,12 @@ RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/phoenix-e2e-s23.XXXXXX")"; SERVER_PID=""; 
 mkdir "$RUN_DIR/old-src" "$RUN_DIR/old-bin" "$RUN_DIR/state"
 git -C "$REPO_ROOT" archive "$PREV" | tar -x -C "$RUN_DIR/old-src"
 (cd "$RUN_DIR/old-src" && "$GO_BIN" build -o "$RUN_DIR/old-bin/" ./cmd/...)
+# at_least VERSION WANT: VERSION is WANT or newer.
+at_least() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" == "$2" ]]; }
 use_old() { PHOENIX="$RUN_DIR/old-bin/phoenix"; PHOENIX_SERVER_BIN="$RUN_DIR/old-bin/phoenix-server"; }
 use_new() { PHOENIX="$NEW_PHOENIX"; PHOENIX_SERVER_BIN="$NEW_SERVER"; }
 PREV_VERSION="v$("$RUN_DIR/old-bin/phoenix" version | awk '{print $2}')"
+at_least "$PREV_VERSION" v0.22.0 || die "$PREV is $PREV_VERSION; this scenario starts at v0.22.0"
 
 # The data directory belongs to the previous release: init it with its binary.
 use_old
@@ -74,6 +78,9 @@ grant_of() { api_token "$APPROVER" GET "/v1/access-requests/$1" | jq -r .grant_i
 mint() { api_token "$READER" POST /v1/session/mint '{"role":"reader"}' | jq -r .session_token; }
 # http_code TOKEN PATH prints the status of a read, keeping the body in RUN_DIR/body.
 http_code() { curl -sS -o "$RUN_DIR/body" -w '%{http_code}' "$PHOENIX_SERVER$2" -H "Authorization: Bearer $1"; }
+# Asked the way every release answers: /v1/metadata and list --names are newer.
+list_names() { api_admin GET /v1/secrets/ | jq -r '.paths[]'; }
+stored_meta() { api_admin GET /v1/secrets/app/one | jq -Se .metadata; }
 # keep_audit / check_audit WHO: every byte of the audit log that keep_audit saw
 # is still there; later lines may follow.
 keep_audit() { cp "$RUN_DIR/state/audit.log" "$RUN_DIR/audit.kept"; }
@@ -108,8 +115,8 @@ r_pending="$(request vault/pending)"
 assert_secret "$(ask_exec vault/granted)" synthetic-granted "grant works on the previous release"
 old_session="$(mint)"
 assert_eq "$(http_code "$old_session" /v1/secrets/app/one)" 200 "session works on the previous release"
-secrets_before="$(phoenix_admin list --names)"
-meta_before="$(api_admin GET /v1/metadata/app/one | jq -S .)"
+secrets_before="$(list_names)"
+meta_before="$(stored_meta)"
 agents_before="$(phoenix_admin agent list)"
 stop_server
 keep_audit
@@ -124,9 +131,9 @@ check_old_data() {
   assert_secret "$(phoenix_admin get app/multi)" "$multiline" "$who: multi-line secret"
   assert_eq "$(http_code "$ADMIN_TOKEN" /v1/secrets/app/deleted)" 404 "$who: deleted secret stays deleted"
   # Every field the previous release showed is there unchanged; new ones may be added.
-  [[ "$(api_admin GET /v1/metadata/app/one | jq --argjson old "$meta_before" '. + $old == .')" == true ]] || die "$who: description, tags, dates or authors changed"
+  [[ "$(stored_meta | jq --argjson old "$meta_before" '. + $old == .')" == true ]] || die "$who: description, tags, dates or authors changed"
   # Every name from step 1 is still listed; later steps only add some.
-  phoenix_admin list --names >"$RUN_DIR/names"
+  list_names >"$RUN_DIR/names"
   while read -r line; do grep -qxF -- "$line" "$RUN_DIR/names" || die "$who: secret $line is gone"; done <<<"$secrets_before"
   phoenix_admin agent list >"$RUN_DIR/agents"
   while read -r line; do grep -qF -- "$line" "$RUN_DIR/agents" || die "$who: agent line lost: $line"; done <<<"$agents_before"
@@ -144,10 +151,11 @@ check_old_data() {
 # From that release on every session must survive every step here. A release
 # that ends sessions on purpose has to change this line, and say so.
 SESSIONS_SURVIVE=0
-if [[ "$(printf '%s\nv0.23.1\n' "$PREV_VERSION" | sort -V | head -1)" == v0.23.1 ]]; then SESSIONS_SURVIVE=1; fi
+if at_least "$PREV_VERSION" v0.23.1; then SESSIONS_SURVIVE=1; fi
 # check_session TOKEN WHO: the exact session works. Before v0.23.1 it may be
 # refused instead, as a session the client replaces by itself, and that
-# replacement must work.
+# replacement must work. A CLI before v0.23.0 does not replace a refused session
+# until its cache is cleared, so it starts without one.
 check_session() {
   local code home; code="$(http_code "$1" /v1/secrets/app/one)"
   if [[ "$code" != 200 ]]; then
@@ -157,11 +165,13 @@ check_session() {
   fi
   home="$(mktemp -d "$RUN_DIR/home.XXXXXX")"
   mkdir "$home/.phoenix"
-  python3 - "$home/.phoenix/token-cache.json" "$PHOENIX_SERVER" "$1" <<'PY'
+  if [[ "$code" == 200 || "$PHOENIX" == "$NEW_PHOENIX" ]] || at_least "$PREV_VERSION" v0.23.0; then
+    python3 - "$home/.phoenix/token-cache.json" "$PHOENIX_SERVER" "$1" <<'PY'
 import hashlib,json,sys
 key='session:reader@'+hashlib.sha256(sys.argv[2].encode()).hexdigest()[:8]
 json.dump({key:{'token':sys.argv[3],'agent':'session:reader','expires_at':'2999-01-01T00:00:00Z'}},open(sys.argv[1],'w'))
 PY
+  fi
   assert_secret "$(HOME="$home" PHOENIX_TOKEN="$READER" PHOENIX_ROLE=reader "$PHOENIX" get app/one 2>"$RUN_DIR/remint.err")" synthetic-one "$2: role session through the CLI"
 }
 
