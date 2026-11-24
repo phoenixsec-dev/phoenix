@@ -170,7 +170,7 @@ func TestCmdOpenClawExecProviderStdoutShape(t *testing.T) {
 			t.Fatalf("api/openrouter value = %q", got)
 		}
 		if got := resp.Values["phoenix://bot/token"]; got != "bot-token" {
-			t.Fatalf("phoenix://bot/token value = %q", got)
+			t.Fatal("wrong value for phoenix://bot/token")
 		}
 		if len(resp.Errors) != 0 {
 			t.Fatalf("errors = %#v, want none", resp.Errors)

@@ -119,7 +119,7 @@ func TestSessionsFileHoldsNoToken(t *testing.T) {
 	}
 	sig := tok[strings.LastIndexByte(tok, '.')+1:]
 	if bytes.Contains(data, []byte(TokenPrefix)) || bytes.Contains(data, []byte(sig)) {
-		t.Errorf("sessions file contains token material:\n%s", data)
+		t.Error("sessions file contains token material")
 	}
 	fi, err := os.Stat(path)
 	if err != nil {

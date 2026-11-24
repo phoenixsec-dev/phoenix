@@ -139,11 +139,21 @@ func (e *grantEnv) do(method, path, tok, body string, hdr ...string) *httptest.R
 	return w
 }
 
+// failBody is what a failure message may show of a response: its error and
+// code. A response that should have been a refusal can hold a token or value.
+func failBody(body string) string {
+	var m struct{ Error, Code string }
+	if json.Unmarshal([]byte(body), &m) != nil || m.Error+m.Code == "" {
+		return fmt.Sprintf("(%d bytes, no error)", len(body))
+	}
+	return fmt.Sprintf("%q %s", m.Error, m.Code)
+}
+
 func jsonBody(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
-		t.Fatalf("decode %q: %v", w.Body.String(), err)
+		t.Fatalf("decode (%d bytes): %v", w.Body.Len(), err)
 	}
 	return m
 }
@@ -152,11 +162,11 @@ func jsonBody(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 func expect(t *testing.T, w *httptest.ResponseRecorder, status int, code string) map[string]any {
 	t.Helper()
 	if w.Code != status {
-		t.Fatalf("status = %d, want %d; body %s", w.Code, status, w.Body.String())
+		t.Fatalf("status = %d, want %d; body %s", w.Code, status, failBody(w.Body.String()))
 	}
 	m := jsonBody(t, w)
 	if code != "" && m["code"] != code {
-		t.Fatalf("code = %v, want %s; body %s", m["code"], code, w.Body.String())
+		t.Fatalf("code = %v, want %s; body %s", m["code"], code, failBody(w.Body.String()))
 	}
 	return m
 }
@@ -186,7 +196,7 @@ func (e *grantEnv) openSealed(t *testing.T, w *httptest.ResponseRecorder) string
 		SealedValue *crypto.SealedEnvelope `json:"sealed_value"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.SealedValue == nil {
-		t.Fatalf("no sealed_value in %s", w.Body.String())
+		t.Fatalf("no sealed_value in %s", failBody(w.Body.String()))
 	}
 	p, err := crypto.OpenSealedEnvelope(resp.SealedValue, &e.sealKP.PrivateKey)
 	if err != nil {
@@ -234,7 +244,7 @@ func TestRequestUseFullFlow(t *testing.T) {
 	w := e.sealedGet("infra/b2/app-key", vectorTok)
 	expect(t, w, http.StatusOK, "")
 	if got := e.openSealed(t, w); got != "b2-secret-value" {
-		t.Fatalf("value = %q", got)
+		t.Fatalf("wrong value (%d bytes)", len(got))
 	}
 	entries, _ := queryAPIAuditEntries(t, e.srv, adminTok)
 	if a := findAPIAuditEntry(entries, "read_value", "infra/b2/app-key", "allowed", ""); a == nil || a.Metadata["grant_id"] != gid {
@@ -250,7 +260,7 @@ func TestRequestUseFullFlow(t *testing.T) {
 	rw := e.do("POST", "/v1/resolve", vectorTok, `{"refs":["phoenix://infra/b2/app-key","phoenix://infra/other"]}`, "X-Phoenix-Seal-Key: "+e.sealPub)
 	rm := expect(t, rw, http.StatusOK, "")
 	if _, ok := rm["sealed_values"].(map[string]any)["phoenix://infra/b2/app-key"]; !ok {
-		t.Fatalf("resolve did not return the granted value: %v", rm)
+		t.Fatal("resolve did not return the granted value")
 	}
 	if c := rm["error_codes"].(map[string]any)["phoenix://infra/other"].(map[string]any)["code"]; c != CodeACLDenied {
 		t.Fatalf("other path code = %v", c)
@@ -535,7 +545,7 @@ func TestApprovalRechecksCurrentConfig(t *testing.T) {
 	}
 	w := e.do("GET", "/v1/secrets/infra/b2/app-key", vectorTok, "")
 	if expect(t, w, 200, "")["value"] != "b2-secret-value" {
-		t.Fatalf("plaintext grant read = %s", w.Body.String())
+		t.Fatal("plaintext grant read returned another value")
 	}
 
 	// require_sealed turned on later: an agent without a seal key is refused

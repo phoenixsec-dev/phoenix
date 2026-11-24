@@ -124,7 +124,7 @@ func TestReadTokenRedacted(t *testing.T) {
 	}
 	errMsg := err.Error()
 	if contains(errMsg, secretToken) {
-		t.Fatalf("error message should not contain token, got: %s", errMsg)
+		t.Fatal("error message contains the token")
 	}
 	if !contains(errMsg, "[REDACTED]") {
 		t.Fatalf("error message should contain [REDACTED], got: %s", errMsg)

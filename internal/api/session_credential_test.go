@@ -143,14 +143,14 @@ func (e *credEnv) create(tok string, force bool) {
 		path += "?force=true"
 	}
 	if code, body := e.do("POST", path, "admin-token", `{"name":"worker","token":"`+tok+`","permissions":`+workerACL+`}`); code != 200 {
-		e.t.Fatalf("create worker: %d %s", code, body)
+		e.t.Fatalf("create worker: %d %s", code, failBody(body))
 	}
 }
 
 func (e *credEnv) remove() {
 	e.t.Helper()
 	if code, body := e.do("DELETE", "/v1/agents/worker", "admin-token", ""); code != 200 {
-		e.t.Fatalf("delete worker: %d %s", code, body)
+		e.t.Fatalf("delete worker: %d %s", code, failBody(body))
 	}
 }
 
@@ -166,7 +166,7 @@ func (e *credEnv) wantDead(when, sess string) {
 	for _, c := range [][2]string{{"GET", "/v1/secrets/test/a"}, {"GET", "/v1/whoami"}, {"POST", "/v1/session/renew"}} {
 		code, body := e.do(c[0], c[1], sess, "{}")
 		if code != 401 || !strings.Contains(body, `"SESSION_INVALID"`) || !strings.Contains(body, `"remint_session"`) {
-			e.t.Errorf("%s: %s %s = %d %s, want 401 SESSION_INVALID", when, c[0], c[1], code, body)
+			e.t.Errorf("%s: %s %s = %d %s, want 401 SESSION_INVALID", when, c[0], c[1], code, failBody(body))
 		}
 	}
 }
@@ -174,7 +174,7 @@ func (e *credEnv) wantDead(when, sess string) {
 func (e *credEnv) wantAlive(when, sess string) {
 	e.t.Helper()
 	if code, body := e.do("GET", "/v1/secrets/test/a", sess, ""); code != 200 {
-		e.t.Errorf("%s: session read = %d %s, want 200", when, code, body)
+		e.t.Errorf("%s: session read = %d %s, want 200", when, code, failBody(body))
 	}
 }
 
@@ -205,7 +205,7 @@ func TestSessionRecordHoldsFingerprintNotToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(saved, `"credential_fp": "`+sessionCredentialFP(a)+`"`) {
-		t.Errorf("sessions file has no credential fingerprint: %s", saved)
+		t.Error("sessions file has no credential fingerprint")
 	}
 	for _, secret := range []string{"old-token", crypto.HashToken("old-token"), sess} {
 		if strings.Contains(saved, secret) {
@@ -314,7 +314,7 @@ func TestEveryEndpointChecksSessionCredential(t *testing.T) {
 				}
 				code, body := e.do(ep[0], ep[1], sess, ep[2])
 				if code != 401 || !strings.Contains(body, `"SESSION_INVALID"`) {
-					t.Fatalf("%d %s, want 401 SESSION_INVALID", code, body)
+					t.Fatalf("%d %s, want 401 SESSION_INVALID", code, failBody(body))
 				}
 				if strings.Contains(e.savedSessions(), "worker") {
 					t.Error("session not ended on use")
@@ -383,7 +383,7 @@ func TestSessionsWithoutFingerprintEndAtStart(t *testing.T) {
 			}
 			e.wantDead("after upgrade", sess)
 			if code, body := e.do("GET", "/v1/whoami", revoked, ""); code != 401 || !strings.Contains(body, "SESSION_REVOKED") {
-				t.Errorf("revoked session after upgrade: %d %s, want SESSION_REVOKED", code, body)
+				t.Errorf("revoked session after upgrade: %d %s, want SESSION_REVOKED", code, failBody(body))
 			}
 		})
 	}
@@ -397,11 +397,11 @@ func TestSessionCannotMintSession(t *testing.T) {
 	for _, role := range []string{"local", "dev"} {
 		code, body := e.do("POST", "/v1/session/mint", sess, `{"role":"`+role+`"}`)
 		if code != 403 || !strings.Contains(body, "BOOTSTRAP_FAILED") {
-			t.Errorf("mint %s with a session: %d %s, want 403 BOOTSTRAP_FAILED", role, code, body)
+			t.Errorf("mint %s with a session: %d %s, want 403 BOOTSTRAP_FAILED", role, code, failBody(body))
 		}
 	}
 	if code, body := e.do("POST", "/v1/session/mint", "old-token", `{"role":"local"}`); code != 200 {
-		t.Errorf("mint local with the bearer token: %d %s", code, body)
+		t.Errorf("mint local with the bearer token: %d %s", code, failBody(body))
 	}
 }
 
@@ -434,7 +434,7 @@ func TestMintDuringCredentialChange(t *testing.T) {
 			code, body := e.doReader("POST", "/v1/session/mint", "old-token",
 				&hookBody{Reader: strings.NewReader(`{"role":"dev"}`), hook: func() { change(e) }})
 			if code != 401 || !strings.Contains(body, `"unauthorized"`) {
-				t.Errorf("mint = %d %s, want 401", code, body)
+				t.Errorf("mint = %d %s, want 401", code, failBody(body))
 			}
 			if live := e.sessions.List(); len(live) != 0 {
 				t.Errorf("%d live sessions left for the old credential", len(live))
@@ -456,14 +456,14 @@ func TestSealBoundSessionEndedDuringRequest(t *testing.T) {
 		Tok string `json:"session_token"`
 	}
 	if json.Unmarshal([]byte(body), &m); code != 200 {
-		t.Fatalf("mint: %d %s", code, body)
+		t.Fatalf("mint: %d %s", code, failBody(body))
 	}
 	code, body = e.doReader("POST", "/v1/resolve", m.Tok, &hookBody{
 		Reader: strings.NewReader(`{"refs":["phoenix://test/a"]}`),
 		hook:   func() { e.create("new-token", true) },
 	})
 	if code != 401 || strings.Contains(body, "synthetic-value") {
-		t.Errorf("resolve = %d %s, want 401 and no value", code, body)
+		t.Errorf("resolve = %d %s, want 401 and no value", code, failBody(body))
 	}
 }
 
@@ -512,7 +512,7 @@ func TestCredentialChangeRaces(t *testing.T) {
 						old = append(old, tok)
 						mu.Unlock()
 					} else if code != 401 || !strings.Contains(body, "SESSION_INVALID") {
-						t.Errorf("renew during replace: %d %s, want 401 SESSION_INVALID", code, body)
+						t.Errorf("renew during replace: %d %s, want 401 SESSION_INVALID", code, failBody(body))
 					}
 				}
 			}()
@@ -532,7 +532,7 @@ func TestCredentialChangeRaces(t *testing.T) {
 	}
 	for _, tok := range old {
 		if code, body := e.do("GET", "/v1/whoami", tok, ""); code != 401 || !strings.Contains(body, "SESSION_INVALID") {
-			t.Fatalf("old session: %d %s, want 401 SESSION_INVALID", code, body)
+			t.Fatalf("old session: %d %s, want 401 SESSION_INVALID", code, failBody(body))
 		}
 	}
 }
@@ -629,7 +629,7 @@ func (e *credEnv) widen() {
 	code, body := e.do("POST", "/v1/agents?force=true", "admin-token",
 		`{"name":"worker","token":"new-token","permissions":[{"path":"**","actions":["list","read_value"]}]}`)
 	if code != 200 {
-		e.t.Errorf("replace: %d %s", code, body)
+		e.t.Errorf("replace: %d %s", code, failBody(body))
 	}
 }
 
@@ -647,7 +647,7 @@ func TestRunningRequestCannotUseReplacementPermissions(t *testing.T) {
 				e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(func() { ran = true; change(e) }) }}
 				code, body := e.do("GET", path, sess, "")
 				if !ran || code != 401 || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other/b") {
-					t.Errorf("ran %v, %d %s, want 401 SESSION_INVALID", ran, code, body)
+					t.Errorf("ran %v, %d %s, want 401 SESSION_INVALID", ran, code, failBody(body))
 				}
 			})
 		}
@@ -660,7 +660,7 @@ func TestRunningRequestCannotUseReplacementPermissions(t *testing.T) {
 		e.srv.backend = &pausedBackend{e.srv.backend, func() { once.Do(e.widen) }}
 		code, body := e.do("POST", "/v1/resolve", sess, `{"refs":["phoenix://test/a","phoenix://other/b"]}`)
 		if code != 200 || !strings.Contains(body, "synthetic-value") || !strings.Contains(body, "SESSION_INVALID") || strings.Contains(body, "other-value") {
-			t.Errorf("%d %s, want the first value and SESSION_INVALID for the second", code, body)
+			t.Errorf("%d %s, want the first value and SESSION_INVALID for the second", code, failBody(body))
 		}
 	})
 }
@@ -698,7 +698,7 @@ func TestAccessCheckSaysWhySessionEnded(t *testing.T) {
 			w := httptest.NewRecorder()
 			e.srv.writeDataDenial(w, httptest.NewRequest("GET", "/v1/secrets/test/a", nil), info, "read_value", "test/a", "", want)
 			if w.Code != 401 || !strings.Contains(w.Body.String(), want) {
-				t.Errorf("denial = %d %s, want 401 %s", w.Code, w.Body.String(), want)
+				t.Errorf("denial = %d %s, want 401 %s", w.Code, failBody(w.Body.String()), want)
 			}
 		})
 	}
