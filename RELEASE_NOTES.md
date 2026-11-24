@@ -176,9 +176,8 @@ them, and the CLI says so.
 
 ### Agents can find out they may log in to another machine
 
-`phoenix ssh` was already in the CLI help, but an agent could not ask Phoenix
-which machines it may log in to; it had to learn that from hand-written notes in
-its owner's files. One recently told its owner to open a terminal instead.
+An agent can now ask Phoenix which machines it may log in to, and whether it
+already has an approval.
 
 - `GET /v1/ssh/machines` lists the machines this server can sign logins for,
   to any signed-in caller: names only, never addresses or users. Each shows
@@ -192,20 +191,18 @@ its owner's files. One recently told its owner to open a terminal instead.
   and a short "Root on another machine" section. The MCP `phoenix_whoami`
   description points at `phoenix ssh --list` too.
 
-### Fixed: "needs a human's approval" right after a human approved
+### A clearer error when `phoenix ssh` has no approval
 
-Inside an active approval `phoenix ssh <machine> -- '<command>'` already ran
-without `--reason`. The reported failure had another cause: the command ran
-with a different `PHOENIX_TOKEN` (a shell function set the token, and
-`timeout phoenix ...` skipped it), so it was a different agent with no
-approval, and the CLI only said "run again with --reason". The retry happened
-to go through the function and worked, which made `--reason` look required.
-The error now names the agent the CLI ran as, says that an approval belongs to
-one agent, token and IP (so check `PHOENIX_TOKEN` and where it runs from), and
-says so plainly when the approval has ended. `phoenix ssh --list` uses the
-agent's own token even with `PHOENIX_ROLE` set, so it shows the approvals a
-login would use. `--reason` is shown as
-optional in the usage line.
+- An approval belongs to one agent, token and IP, so a login with another token
+  or from another IP is refused even after a human approved it. The error now
+  says to check `PHOENIX_TOKEN` and where the command runs from and, when the
+  server is v0.24.0 or newer, names the agent the CLI ran as. Before, it only
+  said to run again with `--reason`.
+- It says so plainly when the approval has ended.
+- When `PHOENIX_TOKEN` holds the agent's own token, `phoenix ssh --list` uses it
+  even with `PHOENIX_ROLE` set, so it shows the approvals a login would use.
+- The usage line shows `--reason` as optional. Inside an active approval it was
+  never required.
 
 **Upgrading:** update the server first. An older server has no
 `/v1/ssh/machines` and answers 404; `phoenix ssh --list` then says the server

@@ -82,7 +82,7 @@ func TestThrowawayKeyIsPrivateAndOnlyItIsOffered(t *testing.T) {
 }
 
 // machinesJSON is a /v1/ssh/machines answer with one approved machine.
-const machinesJSON = `{"agent":"vector","enabled":true,"machines":[{"name":"build-1","approved_until":"2026-11-11T08:00:00Z"},{"name":"lab1"}]}`
+const machinesJSON = `{"agent":"deployer","enabled":true,"machines":[{"name":"build-1","approved_until":"2026-11-11T08:00:00Z"},{"name":"lab1"}]}`
 
 // "phoenix ssh --list" and plain "phoenix ssh" show the machines and the
 // caller's approvals; plain "phoenix ssh" adds the usage line.
@@ -98,7 +98,7 @@ func TestSSHList(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	for _, want := range []string{"as agent vector", "build-1  approved until 2026-11-11T08:00:00Z", "  lab1\n"} {
+	for _, want := range []string{"as agent deployer", "build-1  approved until 2026-11-11T08:00:00Z", "  lab1\n"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("--list missing %q:\n%s", want, out)
 		}
@@ -157,7 +157,7 @@ func TestSSHNoApprovalNamesTheAgent(t *testing.T) {
 		w.Write([]byte(`{"error":"access_denied","code":"SSH_GRANT_REQUIRED","next_step":"request_use"}`))
 	})
 	_, err := sshCertificate(sshArgs{machine: "lab1"}, "pk")
-	if err == nil || !strings.Contains(err.Error(), "for agent vector") || !strings.Contains(err.Error(), "PHOENIX_TOKEN") ||
+	if err == nil || !strings.Contains(err.Error(), "for agent deployer") || !strings.Contains(err.Error(), "PHOENIX_TOKEN") ||
 		!strings.Contains(err.Error(), "same machine") || !strings.Contains(err.Error(), "--reason") {
 		t.Fatalf("err = %v", err)
 	}

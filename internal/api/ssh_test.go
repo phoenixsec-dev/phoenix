@@ -18,12 +18,22 @@ import (
 	"github.com/phoenixsec/phoenix/internal/sshca"
 )
 
-// newSSHEnv is the grant fixture plus a CA for one machine, with deny_paths set
-// to everything: the setting that keeps secrets out of the request flow while
+// deployerTok is the token of "deployer", the agent the SSH tests log in as.
+const deployerTok = "deployer-token"
+
+// newSSHEnv is the grant fixture plus a CA for two machines and the agent
+// "deployer" (dev/** only, registered seal key), with deny_paths set to
+// everything: the setting that keeps secrets out of the request flow while
 // logins still work.
 func newSSHEnv(t *testing.T) *grantEnv {
 	t.Helper()
 	e := newGrantEnv(t)
+	if err := e.srv.acl.AddAgent("deployer", deployerTok, []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.srv.acl.SetAgentSealKey("deployer", e.sealPub); err != nil {
+		t.Fatal(err)
+	}
 	ca, _, err := sshca.LoadOrCreate(filepath.Join(e.dir, "ssh_ca.key"))
 	if err != nil {
 		t.Fatal(err)
@@ -75,19 +85,19 @@ func TestSSHLoginFlow(t *testing.T) {
 	if e.windowOpen(t, "build-1", "gnt_nope") {
 		t.Fatal("window open for a grant that does not exist")
 	}
-	code, m := e.sign(t, vectorTok, "build-1", ip)
+	code, m := e.sign(t, deployerTok, "build-1", ip)
 	if code != http.StatusForbidden || m["code"] != CodeSSHGrantRequired || m["next_step"] != NextRequestUse {
 		t.Fatalf("before approval: %d %v", code, m)
 	}
 
 	b, _ := json.Marshal(map[string]any{"paths": []string{"ssh/build-1"}, "action": grant.ActionSSHLogin, "reason": "deploy firewall", "ttl": "15m"})
-	req := expect(t, e.do("POST", "/v1/access-requests", vectorTok, string(b), "RemoteAddr: "+ip), http.StatusCreated, "")
+	req := expect(t, e.do("POST", "/v1/access-requests", deployerTok, string(b), "RemoteAddr: "+ip), http.StatusCreated, "")
 	gid := e.approve(t, req["id"].(string), "")
 	if !e.windowOpen(t, "build-1", gid) || e.windowOpen(t, "lab1", gid) {
 		t.Fatal("window must be open on the approved machine only")
 	}
 
-	code, m = e.sign(t, vectorTok, "build-1", ip)
+	code, m = e.sign(t, deployerTok, "build-1", ip)
 	if code != http.StatusOK {
 		t.Fatalf("after approval: %d %v", code, m)
 	}
@@ -102,7 +112,7 @@ func TestSSHLoginFlow(t *testing.T) {
 	if cert.ValidPrincipals[0] != "build-1" || cert.CriticalOptions["source-address"] != ip {
 		t.Fatalf("principals=%v options=%v", cert.ValidPrincipals, cert.CriticalOptions)
 	}
-	if !strings.HasPrefix(cert.KeyId, "grant="+gid+",") || !strings.Contains(cert.KeyId, "agent=vector") {
+	if !strings.HasPrefix(cert.KeyId, "grant="+gid+",") || !strings.Contains(cert.KeyId, "agent=deployer") {
 		t.Fatalf("key id %q must start with the grant and name the agent", cert.KeyId)
 	}
 	if g, ok := e.store.GetGrant(gid); !ok || cert.ValidBefore != uint64(g.ExpiresAt.Unix()) {
@@ -110,11 +120,11 @@ func TestSSHLoginFlow(t *testing.T) {
 	}
 
 	// Approval for one machine is not approval for another.
-	if code, _ := e.sign(t, vectorTok, "lab1", ip); code != http.StatusForbidden {
+	if code, _ := e.sign(t, deployerTok, "lab1", ip); code != http.StatusForbidden {
 		t.Fatalf("other machine: %d", code)
 	}
 	// Nor does it work from another IP, or for another agent.
-	if code, _ := e.sign(t, vectorTok, "build-1", "192.0.2.31"); code != http.StatusForbidden {
+	if code, _ := e.sign(t, deployerTok, "build-1", "192.0.2.31"); code != http.StatusForbidden {
 		t.Fatalf("other ip: %d", code)
 	}
 	if code, _ := e.sign(t, approverTok, "build-1", ip); code != http.StatusForbidden {
@@ -126,7 +136,7 @@ func TestSSHLoginFlow(t *testing.T) {
 	if e.windowOpen(t, "build-1", gid) {
 		t.Fatal("window open after revoke")
 	}
-	code, m = e.sign(t, vectorTok, "build-1", ip)
+	code, m = e.sign(t, deployerTok, "build-1", ip)
 	if code != http.StatusForbidden || m["code"] != CodeGrantRevoked || m["next_step"] != NextAskUser {
 		t.Fatalf("after revoke: %d %v", code, m)
 	}
@@ -136,13 +146,13 @@ func TestSSHGrantExpiryClosesTheWindow(t *testing.T) {
 	e := newSSHEnv(t)
 	const ip = "192.0.2.1"
 	b, _ := json.Marshal(map[string]any{"paths": []string{"ssh/build-1"}, "action": grant.ActionSSHLogin, "reason": "x", "ttl": "5m"})
-	req := expect(t, e.do("POST", "/v1/access-requests", vectorTok, string(b), "RemoteAddr: "+ip), http.StatusCreated, "")
+	req := expect(t, e.do("POST", "/v1/access-requests", deployerTok, string(b), "RemoteAddr: "+ip), http.StatusCreated, "")
 	gid := e.approve(t, req["id"].(string), "")
 	e.clock.Advance(6 * time.Minute)
 	if e.windowOpen(t, "build-1", gid) {
 		t.Fatal("window open after expiry")
 	}
-	code, m := e.sign(t, vectorTok, "build-1", ip)
+	code, m := e.sign(t, deployerTok, "build-1", ip)
 	if code != http.StatusForbidden || m["code"] != CodeGrantExpired {
 		t.Fatalf("after expiry: %d %v", code, m)
 	}
@@ -174,7 +184,7 @@ func TestSSHRequestRules(t *testing.T) {
 		body map[string]any
 	} {
 		b, _ := json.Marshal(map[string]any{"paths": paths, "action": grant.ActionSSHLogin, "reason": "x"})
-		w := e.do("POST", "/v1/access-requests", vectorTok, string(b))
+		w := e.do("POST", "/v1/access-requests", deployerTok, string(b))
 		return &struct {
 			code int
 			body map[string]any
@@ -194,7 +204,7 @@ func TestSSHRequestRules(t *testing.T) {
 		t.Errorf("secret under deny-all: %v", r.body)
 	}
 	// A denied secret read does not advertise request_use.
-	w := e.do("GET", "/v1/secrets/infra/other", vectorTok, "")
+	w := e.do("GET", "/v1/secrets/infra/other", deployerTok, "")
 	if m := jsonBody(t, w); m["next_step"] == NextRequestUse {
 		t.Errorf("secret denial advertised request_use: %v", m)
 	}
@@ -206,8 +216,8 @@ func TestSSHLoginAndSecretGrantsNeverCross(t *testing.T) {
 	e := newSSHEnv(t)
 	seedSecret(t, e.srv, adminTok, "ssh/build-1", "planted")
 	const ip = "192.0.2.1"
-	e.loginGrant(t, vectorTok, "build-1", ip)
-	if w := e.do("GET", "/v1/secrets/ssh/build-1", vectorTok, "", "RemoteAddr: "+ip); w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "planted") {
+	e.loginGrant(t, deployerTok, "build-1", ip)
+	if w := e.do("GET", "/v1/secrets/ssh/build-1", deployerTok, "", "RemoteAddr: "+ip); w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "planted") {
 		t.Fatalf("read through a login grant: %d %s", w.Code, w.Body.String())
 	}
 
@@ -237,7 +247,7 @@ func TestSSHWindowIsPerGrant(t *testing.T) {
 	if err := e.srv.acl.AddAgent("second", "second-token", nil); err != nil {
 		t.Fatal(err)
 	}
-	first := e.loginGrant(t, vectorTok, "build-1", "192.0.2.1")
+	first := e.loginGrant(t, deployerTok, "build-1", "192.0.2.1")
 	second := e.loginGrant(t, "second-token", "build-1", "192.0.2.2")
 	expect(t, e.do("POST", "/v1/grants/"+first+"/revoke", approverTok, ""), http.StatusOK, "")
 	if e.windowOpen(t, "build-1", first) {
@@ -252,7 +262,7 @@ func TestSSHWindowIsPerGrant(t *testing.T) {
 // or the machine's timer would leave open sessions running.
 func TestSSHWindowClosesWhenSwitchedOff(t *testing.T) {
 	e := newSSHEnv(t)
-	gid := e.loginGrant(t, vectorTok, "build-1", "192.0.2.1")
+	gid := e.loginGrant(t, deployerTok, "build-1", "192.0.2.1")
 	if !e.windowOpen(t, "build-1", gid) {
 		t.Fatal("window should be open")
 	}
@@ -294,11 +304,11 @@ func TestSSHPrefixIsOrdinaryWhenOff(t *testing.T) {
 func TestSSHGrantAlwaysBindsSourceIP(t *testing.T) {
 	e := newSSHEnv(t)
 	e.set(func(s *config.AccessRequestsSettings) { s.BindSourceIP = false })
-	gid := e.loginGrant(t, vectorTok, "build-1", "192.0.2.1")
+	gid := e.loginGrant(t, deployerTok, "build-1", "192.0.2.1")
 	if g, _ := e.store.GetGrant(gid); g.BoundSourceIP != "192.0.2.1" {
 		t.Fatalf("bound ip = %q", g.BoundSourceIP)
 	}
-	if code, _ := e.sign(t, vectorTok, "build-1", "192.0.2.9"); code != http.StatusForbidden {
+	if code, _ := e.sign(t, deployerTok, "build-1", "192.0.2.9"); code != http.StatusForbidden {
 		t.Fatalf("signed from another IP: %d", code)
 	}
 }
@@ -307,7 +317,7 @@ func TestSSHGrantAlwaysBindsSourceIP(t *testing.T) {
 func TestSSHDenialHintsForSecretsAreUnchanged(t *testing.T) {
 	e := newSSHEnv(t)
 	seedSecret(t, e.srv, adminTok, "ssh/build-1", "planted")
-	m := jsonBody(t, e.do("GET", "/v1/secrets/ssh/build-1", vectorTok, ""))
+	m := jsonBody(t, e.do("GET", "/v1/secrets/ssh/build-1", deployerTok, ""))
 	if m["next_step"] == NextRequestUse {
 		t.Fatalf("deny_paths * but a secret read still offers a request: %v", m)
 	}
@@ -318,10 +328,10 @@ func TestSSHSignRejectsSessionsAndBadKeys(t *testing.T) {
 	expect(t, e.do("POST", "/v1/ssh/sign", "", `{"host":"build-1"}`), http.StatusUnauthorized, "")
 	const ip = "192.0.2.1"
 	b, _ := json.Marshal(map[string]any{"paths": []string{"ssh/build-1"}, "action": grant.ActionSSHLogin, "reason": "x"})
-	req := expect(t, e.do("POST", "/v1/access-requests", vectorTok, string(b), "RemoteAddr: "+ip), http.StatusCreated, "")
+	req := expect(t, e.do("POST", "/v1/access-requests", deployerTok, string(b), "RemoteAddr: "+ip), http.StatusCreated, "")
 	e.approve(t, req["id"].(string), "")
 	bad, _ := json.Marshal(sshSignBody{Host: "build-1", PublicKey: "not a key"})
-	expect(t, e.do("POST", "/v1/ssh/sign", vectorTok, string(bad), "RemoteAddr: "+ip), http.StatusBadRequest, CodeInvalidRequest)
+	expect(t, e.do("POST", "/v1/ssh/sign", deployerTok, string(bad), "RemoteAddr: "+ip), http.StatusBadRequest, CodeInvalidRequest)
 	if pk := expect(t, e.do("GET", "/v1/ssh/ca", "", ""), http.StatusOK, "")["public_key"].(string); !strings.HasPrefix(pk, "ssh-ed25519 ") {
 		t.Fatalf("ca = %q", pk)
 	}
@@ -358,8 +368,8 @@ func TestSSHMachinesList(t *testing.T) {
 	const ip = "192.0.2.1"
 	expect(t, e.do("GET", "/v1/ssh/machines", "", ""), http.StatusUnauthorized, "")
 
-	m := e.machines(t, vectorTok, ip)
-	if m["enabled"] != true || m["agent"] != "vector" {
+	m := e.machines(t, deployerTok, ip)
+	if m["enabled"] != true || m["agent"] != "deployer" {
 		t.Fatalf("list = %v", m)
 	}
 	list := m["machines"].([]any)
@@ -370,9 +380,9 @@ func TestSSHMachinesList(t *testing.T) {
 		t.Fatal("approval shown before any approval")
 	}
 
-	gid := e.loginGrant(t, vectorTok, "build-1", ip)
+	gid := e.loginGrant(t, deployerTok, "build-1", ip)
 	g, _ := e.store.GetGrant(gid)
-	list = e.machines(t, vectorTok, ip)["machines"].([]any)
+	list = e.machines(t, deployerTok, ip)["machines"].([]any)
 	if list[0].(map[string]any)["approved_until"] != fmtTime(g.ExpiresAt) {
 		t.Fatalf("own approval not shown: %v", list)
 	}
@@ -381,13 +391,13 @@ func TestSSHMachinesList(t *testing.T) {
 	}
 	// Only an approval this caller could use counts: not another agent's, and
 	// not from another IP.
-	for _, c := range []struct{ tok, ip string }{{approverTok, ip}, {vectorTok, "192.0.2.9"}} {
+	for _, c := range []struct{ tok, ip string }{{approverTok, ip}, {deployerTok, "192.0.2.9"}} {
 		if _, ok := e.machines(t, c.tok, c.ip)["machines"].([]any)[0].(map[string]any)["approved_until"]; ok {
 			t.Fatalf("approval shown to %s from %s", c.tok, c.ip)
 		}
 	}
 
-	body := e.do("GET", "/v1/ssh/machines", vectorTok, "", "RemoteAddr: "+ip).Body.String()
+	body := e.do("GET", "/v1/ssh/machines", deployerTok, "", "RemoteAddr: "+ip).Body.String()
 	for _, leak := range []string{"192.0.2.20", "192.0.2.21", `"agent":"agent"`, "address", "user"} {
 		if strings.Contains(body, leak) {
 			t.Fatalf("list leaks %q: %s", leak, body)
@@ -402,7 +412,10 @@ func TestSSHMachinesList(t *testing.T) {
 // With SSH certificates off the list is an empty answer, not an error.
 func TestSSHMachinesListWhenOff(t *testing.T) {
 	e := newGrantEnv(t)
-	m := e.machines(t, vectorTok, "192.0.2.1")
+	if err := e.srv.acl.AddAgent("deployer", deployerTok, nil); err != nil {
+		t.Fatal(err)
+	}
+	m := e.machines(t, deployerTok, "192.0.2.1")
 	if m["enabled"] != false || len(m["machines"].([]any)) != 0 || m["note"] == "" || m["note"] == nil {
 		t.Fatalf("off = %v", m)
 	}

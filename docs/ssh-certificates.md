@@ -106,7 +106,7 @@ ends any open session that came in with a certificate:
 | `phoenix-ssh-window.timer` | Every 30s, ends each `agent` SSH session whose own approval is over |
 
 Check it from the machine: `sshd -T -C user=agent,host=x,addr=127.0.0.1 | grep -i -E 'trustedusercakeys|authorizedprincipalscommand|authorizedkeysfile'`.
-The machine's sshd log names who logged in: `ID grant=gnt_...,agent=vector,host=build-1`.
+The machine's sshd log names who logged in: `ID grant=gnt_...,agent=deployer,host=build-1`.
 Set `KEEP_AUTHORIZED_KEYS=1` on the install to leave existing keys working while a
 machine moves over. Sessions from those keys have no grant, so the timer leaves them
 alone until you run install again without it.

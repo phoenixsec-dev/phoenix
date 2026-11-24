@@ -78,7 +78,7 @@ func TestSignLimitsWhoWhereAndWhen(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	until := now.Add(15 * time.Minute)
 	out, err := Sign(ca, CertRequest{
-		PublicKey: agentKey(t), Principal: "build-1", KeyID: "agent=vector grant=gnt_1",
+		PublicKey: agentKey(t), Principal: "build-1", KeyID: "agent=deployer grant=gnt_1",
 		SourceIP: "192.0.2.30", Now: now, ValidBefore: until,
 	})
 	if err != nil {
