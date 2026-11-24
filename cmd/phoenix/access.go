@@ -544,8 +544,11 @@ func cmdApproveAccess(args []string) error {
 	if err != nil {
 		return err
 	}
-	if resp == http.StatusNotFound || (uses > 0 && res.MaxUses != uses) {
+	if resp == http.StatusNotFound {
 		return fmt.Errorf("this server is too old to limit uses; nothing was approved. Approve without --uses, or answer Once on the dashboard after updating it")
+	}
+	if uses > 0 && res.MaxUses != uses {
+		return fmt.Errorf("the server answered with a grant that has a different use limit; check it with phoenix grants, or revoke it: phoenix grants revoke %s", cleanServerText(res.GrantID))
 	}
 	limit := ""
 	if uses > 0 {

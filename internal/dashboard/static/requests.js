@@ -92,7 +92,7 @@
         var fresh = toElement(html);
         fresh = fresh && fresh.querySelector('input[name=_csrf]');
         var old = card.querySelector('input[name=_csrf]');
-        if (fresh && old && !card.dataset.busy) old.value = fresh.value;
+        if (fresh && old) old.value = fresh.value;
     }
     function arm(card) {
         var buttons = card.querySelectorAll('button[name=choice]');

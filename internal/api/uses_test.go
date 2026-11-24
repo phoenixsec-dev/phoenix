@@ -118,11 +118,13 @@ func TestApproveUsesValidation(t *testing.T) {
 	post := func(op, body string) *httptest.ResponseRecorder {
 		return e.do("POST", "/v1/access-requests/"+id+"/"+op, approverTok, body)
 	}
-	for _, body := range []string{`{"uses":-1}`, `{"uses":1001}`, `{"uses":0}`, `{}`, ``} {
+	for _, body := range []string{`{"uses":-1}`, `{"uses":1001}`, `{"uses":0}`, `{"uses":null}`, `{"uses":"1"}`, `{}`, ``} {
 		expect(t, post("approve-limited", body), http.StatusBadRequest, CodeInvalidRequest)
 	}
 	// Never on the address older servers have, where they would ignore it.
-	expect(t, post("approve", `{"uses":1}`), http.StatusBadRequest, CodeInvalidRequest)
+	for _, body := range []string{`{"uses":1}`, `{"uses":0}`, `{"uses":null}`} {
+		expect(t, post("approve", body), http.StatusBadRequest, CodeInvalidRequest)
+	}
 	if rq, _ := e.store.GetRequest(id); rq.Status != grant.StatusPending {
 		t.Fatalf("request %s", rq.Status)
 	}

@@ -39,6 +39,10 @@ func (s *Store) Spend(c Caller, action string, items []SpendItem, allOrNone bool
 	if !s.exist(c.Agent) {
 		return refuse(newErr(CodeUnknownAgent, "agent no longer exists"))
 	}
+	if c.Current != nil && !c.Current() {
+		// Replaced while this call was reading the secret or waiting here.
+		return refuse(&Error{Code: CodeGrantEnded, Msg: ReasonGrantExpired})
+	}
 	if s.degraded() {
 		return refuse(newErr(CodeRequestsDegraded, "grants are temporarily unavailable"))
 	}

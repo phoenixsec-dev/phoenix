@@ -853,7 +853,7 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 		return fmt.Sprintf("Failed to decode response: %v", err), true
 	}
 	if !mcpOwnRequest(rq) {
-		return formatDenial(serverDenial{Code: "NOT_FOUND", Detail: "request not found"}, ""), true
+		return formatDenial(serverDenial{Code: "NOT_FOUND", Detail: "request not found", NextStep: "none"}, ""), true
 	}
 	return mcpRequestText(rq), false
 }

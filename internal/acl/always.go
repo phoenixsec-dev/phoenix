@@ -144,7 +144,9 @@ func (a *ACL) StagedRequests() []string {
 func (a *ACL) HasAlways(agent, path string) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return len(rulesOf(agent, a.config.Agents[agent].Permissions, func(p Permission) bool { return p.Path == path })) > 0
+	return len(rulesOf(agent, a.config.Agents[agent].Permissions, func(p Permission) bool {
+		return p.Path == path && hasAction(p.Actions, ActionReadValue)
+	})) > 0
 }
 
 // stagedFor matches the staged rules of one request.

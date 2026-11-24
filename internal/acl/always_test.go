@@ -179,6 +179,18 @@ func TestAlwaysSaveFailures(t *testing.T) {
 	}
 }
 
+// The mark alone is not permission: a marked rule someone narrowed by hand
+// counts only for what it still allows.
+func TestHasAlwaysNeedsReadValue(t *testing.T) {
+	for _, actions := range [][]Action{{}, {ActionList}, nil} {
+		o := from("req_1")
+		a := NewFromConfig(&ACLConfig{Agents: map[string]Agent{"vector": {Permissions: []Permission{{Path: "infra/a", Actions: actions, Always: &o}}}}})
+		if a.HasAlways("vector", "infra/a") {
+			t.Errorf("actions %v count as read access", actions)
+		}
+	}
+}
+
 // Callers hold permission slices read earlier; changing rules must not touch them.
 func TestAlwaysDoesNotChangeSharedSlices(t *testing.T) {
 	a, _ := alwaysACL(t)

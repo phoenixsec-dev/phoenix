@@ -216,6 +216,7 @@ func TestUsedLoginStaysActiveButSignsNoMore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.reopen() // an unused login grant loads
 	if err := e.s.Spend(bearerCaller("vector"), ActionSSHLogin, []SpendItem{{g.ID, "ssh/build-1"}}, false)[0]; err != nil {
 		t.Fatal(err)
 	}
@@ -315,11 +316,15 @@ func TestMisplacedUseLimitIsQuarantined(t *testing.T) {
 // Counters that cannot be right never give uses back: the file is moved aside.
 func TestDamagedCountersAreQuarantined(t *testing.T) {
 	for name, damage := range map[string]func(g map[string]any){
-		"negative count":  func(g map[string]any) { g["path_uses"] = map[string]any{"infra/a": -1} },
-		"over the limit":  func(g map[string]any) { g["max_uses"] = 5000 },
-		"lost counts":     func(g map[string]any) { delete(g, "path_uses") },
-		"another path":    func(g map[string]any) { g["path_uses"] = map[string]any{"infra/z": 1} },
-		"raised limit":    func(g map[string]any) { g["path_uses"] = map[string]any{"infra/a": 2}; g["use_count"] = 2 },
+		"negative count": func(g map[string]any) { g["path_uses"] = map[string]any{"infra/a": -1} },
+		"over the limit": func(g map[string]any) { g["max_uses"] = 5000 },
+		"lost counts":    func(g map[string]any) { delete(g, "path_uses") },
+		"another path":   func(g map[string]any) { g["path_uses"] = map[string]any{"infra/z": 1} },
+		"raised limit":   func(g map[string]any) { g["path_uses"] = map[string]any{"infra/a": 2}; g["use_count"] = 2 },
+		"all counts lost": func(g map[string]any) {
+			delete(g, "path_uses")
+			delete(g, "use_count")
+		},
 		"no limit at all": func(g map[string]any) { delete(g, "max_uses") },
 		"used up unmarked": func(g map[string]any) {
 			g["path_uses"] = map[string]any{"infra/a": 1, "infra/b": 1}
@@ -391,6 +396,28 @@ func TestReissuedTokenIsAnotherCredential(t *testing.T) {
 	c.IssueFP = "issue-2"
 	if e.s.Match(c, "infra/a", ActionReadValue).Grant != nil {
 		t.Fatal("a reissue of the token uses the old grant")
+	}
+}
+
+// The token is replaced while the spend waits for the store: the check runs
+// inside, so it is seen, and nothing is counted.
+func TestTokenReplacedWhileSpendWaits(t *testing.T) {
+	e := newEnv(t)
+	g := e.limited("vector", 1, "infra/a")
+	var current atomic.Bool
+	current.Store(true)
+	c := bearerCaller("vector")
+	c.Current = current.Load
+	e.s.mu.Lock()
+	done := make(chan error)
+	go func() { done <- e.s.Spend(c, ActionReadValue, []SpendItem{{g.ID, "infra/a"}}, false)[0] }()
+	current.Store(false)
+	e.s.mu.Unlock()
+	if err := <-done; err == nil {
+		t.Fatal("a replaced token spent a use")
+	}
+	if got, _ := e.s.GetGrant(g.ID); got.UseCount != 0 {
+		t.Fatal("use counted")
 	}
 }
 

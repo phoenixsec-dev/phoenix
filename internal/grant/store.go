@@ -969,6 +969,9 @@ type Caller struct {
 	AuthMethod   string // AuthBearer
 	CredentialFP string // same format as CreateInput.CredentialFP
 	IssueFP      string // same format as CreateInput.IssueFP
+	// Current reports whether that token is still the agent's. Spend asks it
+	// under its lock, right before a use is counted. nil = not asked.
+	Current func() bool
 }
 
 // MatchResult is Match's answer. Grant is a copy of the active grant that

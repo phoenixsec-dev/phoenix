@@ -430,7 +430,7 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 var doneText = map[string]string{
 	"revoked":       "Revoked. A value already handed over is not taken back.",
 	"removed":       "Removed. The agent can no longer read it.",
-	"removed-open":  "Removed from Always, but an open grant still lets the agent read it. Revoke it under Active now.",
+	"removed-open":  "Removed from Always. The agent also has an open grant for it; revoke that under Active now if you want it gone too.",
 	"removed-still": "Removed, but another rule on this agent's access list still lets it read that secret.",
 }
 

@@ -142,6 +142,31 @@ func TestMCPStatusUnderARoleShowsOnlyOwnRequests(t *testing.T) {
 	}
 }
 
+// A foreign request and one that does not exist read exactly the same.
+func TestMCPStatusForeignLooksMissing(t *testing.T) {
+	ask := func(foreign bool) string {
+		var text string
+		withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/v1/whoami":
+				w.Write([]byte(`{"agent":"me"}`))
+			case foreign:
+				json.NewEncoder(w).Encode(pendingRequestJSON("why"))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"error":"request_failed","code":"NOT_FOUND","detail":"request not found","next_step":"none"}`))
+			}
+		}, func() {
+			setupCachedSession(t, "r1")
+			text, _ = mcpToolRequestStatus(json.RawMessage(`{"request_id":"`+testReqID+`"}`), nil)
+		})
+		return text
+	}
+	if f, m := ask(true), ask(false); f != m {
+		t.Fatalf("foreign %q, missing %q", f, m)
+	}
+}
+
 func TestNextHintSkipsSpentPath(t *testing.T) {
 	rq := accessRequestView{Status: "approved", NextStep: "use_exec", GrantedPaths: []string{"a/one", "b/two"},
 		MaxUses: 1, UsesLeft: map[string]int64{"a/one": 0, "b/two": 1}}

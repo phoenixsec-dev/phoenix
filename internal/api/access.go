@@ -230,15 +230,9 @@ func (s *Server) spend(info *authInfo, ip, action string, items []grant.SpendIte
 	if len(items) == 0 {
 		return nil
 	}
-	// The call may have taken a while since it logged in (a slow backend).
-	if !s.sessionCredentialCurrent(info.Agent, info.SessionFP) {
-		errs := make([]error, len(items))
-		for i := range errs {
-			errs[i] = &grant.Error{Code: grant.CodeGrantEnded, Msg: grant.ReasonGrantExpired}
-		}
-		return errs
-	}
-	return s.grants.Spend(s.grantCaller(info, ip), action, items, allOrNone)
+	c := s.grantCaller(info, ip)
+	c.Current = func() bool { return s.sessionCredentialCurrent(info.Agent, info.SessionFP) }
+	return s.grants.Spend(c, action, items, allOrNone)
 }
 
 // auditAllowedAccess logs an allowed read. Grant-backed reads carry metadata
@@ -445,6 +439,9 @@ func requestNextStep(rq grant.Request, g *grant.Grant, now time.Time) (step, msg
 	case grant.StatusDenied:
 		return NextAskUser, "A human said no. Do not ask again; ask the user in chat if it is really needed."
 	case grant.StatusExpired:
+		if rq.Note != "" { // ended by Phoenix, which says why
+			return NextAskUser, "This request ended: " + rq.Note + "."
+		}
 		return NextAskUser, "Nobody decided in time. Ask the user before requesting again."
 	}
 	if g == nil {
@@ -826,7 +823,9 @@ func (s *Server) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
 type approveBody struct {
 	Paths []string `json:"paths"` // nil = every requested path; [] = EMPTY_GRANT
 	TTL   string   `json:"ttl"`
-	Uses  int64    `json:"uses"` // uses allowed per path; only on approve-limited
+	// Uses allowed per path; only on approve-limited. Raw, so that one given
+	// as 0 or null is noticed and refused instead of meaning "any number".
+	Uses json.RawMessage `json:"uses"`
 }
 
 // approverAuth authenticates and requires an approver. Checked before the
@@ -869,11 +868,13 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if limited := strings.HasSuffix(r.URL.Path, "/approve-limited"); limited != (body.Uses != 0) {
+	var uses int64
+	limited, given := strings.HasSuffix(r.URL.Path, "/approve-limited"), len(body.Uses) > 0
+	if limited != given || (given && (json.Unmarshal(body.Uses, &uses) != nil || uses < 1)) {
 		writeAccessError(w, CodeInvalidRequest, "a use limit goes to .../approve-limited with uses of at least 1, and only there", http.StatusBadRequest)
 		return
 	}
-	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, grant.Approval{Paths: body.Paths, TTL: ttl, Uses: body.Uses}, func(paths []string, code string) {
+	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, grant.Approval{Paths: body.Paths, TTL: ttl, Uses: uses}, func(paths []string, code string) {
 		s.auditRequestRejected(r, info, "access_request.approve", paths, ip, code)
 	})
 	if err != nil {

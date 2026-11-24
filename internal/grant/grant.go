@@ -162,7 +162,7 @@ func (g *Grant) usesConsistent() bool {
 		}
 		total += n
 	}
-	return g.MaxUses > 0 && g.MaxUses <= MaxUsesLimit && total == g.UseCount &&
+	return g.MaxUses > 0 && g.MaxUses <= MaxUsesLimit && total == g.UseCount && (total == 0) == g.LastUsedAt.IsZero() &&
 		(g.Action == ActionSSHLogin || g.usedUp() == !g.UsedUpAt.IsZero())
 }
 
