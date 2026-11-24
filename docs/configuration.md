@@ -188,6 +188,12 @@ is the only one that opens its store.
 The lock ends with the process, however it ends; a leftover `.lock` file blocks
 nothing. On a filesystem without locks the server starts and logs a `WARNING`.
 
+**Upgrading and going back:** only v0.25.0 and newer lock. An older server neither
+makes nor checks a lock, so the two can run on the same files without an error and
+undo each other's writes. The same goes for an older server's `rotate-master` or
+`--protect-key`. Stop the old server before you start the new one on its files; to
+roll back, stop the new one before you start the old one.
+
 ## Audit log rotation
 
 When `audit.log` passes `audit.rotate_mb` (default 50), Phoenix renames it to a

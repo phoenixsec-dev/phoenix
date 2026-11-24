@@ -416,6 +416,10 @@ requests, so a restart does not reset them.
 
 ## The grants file and older servers
 
+Never run an older server and this one on the same files at once, also not for the
+moment of an upgrade or rollback: see
+[One server per set of files](configuration.md#one-server-per-set-of-files).
+
 `grants.json` keeps grants with a use limit in their own `limited_grants` map.
 A server older than use limits does not know that map: it opens the file, runs
 normally, never honours one of those grants, and drops them when it next saves.

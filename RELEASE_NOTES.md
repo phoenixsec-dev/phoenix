@@ -9,8 +9,10 @@ crashes, full disks and mistakes. Also five security fixes.
 **Before upgrading:** run the new `phoenix-server --check-config` on your config,
 since it now refuses settings that name one file twice. If the dashboard is behind
 a reverse proxy, set `dashboard.trusted_proxies`. The server needs to write small
-`.lock` files next to its data files and the master key. Update the server first,
-then every CLI. Showing secret values in the dashboard is off until you turn it on.
+`.lock` files next to its data files and the master key. **Stop the old server
+before you start the new one on its files,** and the new one before you go back to
+an older one: servers before v0.25.0 don't see these locks, so nothing stops both
+from running and undoing each other's writes. Update the server first, then every CLI. Showing secret values in the dashboard is off until you turn it on.
 
 ### Security: a request already running could use a replacement token's permissions
 
@@ -105,7 +107,9 @@ that dies halfway can do to it. Nothing to configure; what changed:
   audit log only if neither rotates it. Two servers with their own stores may
   share a master key, but then neither can rotate it (409) until the other has
   its own copy. Where locking does
-  not work the server starts and logs a `WARNING`.
+  not work the server starts and logs a `WARNING`. This protects only servers
+  that lock, v0.25.0 and newer: an older one neither makes nor checks a lock, so
+  stop it before an upgrade, and stop the new one before a rollback.
 - **`--protect-key` and `rotate-master` could overwrite each other's key
   file.** Adding a passphrase and then rotating without a restart saved the new
   key with no passphrase again; rotating while `--protect-key` waited for a
