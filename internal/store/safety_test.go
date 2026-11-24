@@ -129,3 +129,37 @@ func TestRotationRestoresThroughSymlink(t *testing.T) {
 	}
 	assertOpensWithKey(t, realPath, key)
 }
+
+// store.path pointing at some other JSON file (the ACL, the config, a
+// protected master key) must not load as an empty store: the first write
+// would replace that file.
+func TestForeignFileIsRefusedAsStore(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	for name, content := range map[string]string{
+		"acl":           `{"agents":{"admin":{"name":"admin","token_hash":"sha256:x","permissions":[]}}}`,
+		"config":        `{"server":{"listen":"127.0.0.1:9090"},"store":{"path":"/data/store.json"}}`,
+		"protected key": `{"phoenix_protected_key":1,"kdf":"argon2id","salt":"x"}`,
+		"grants":        `{"version":1,"requests":{},"grants":{}}`,
+		"sessions":      `{"version":1,"roles":{},"sessions":[]}`,
+		"empty object":  `{}`,
+		"null":          `null`,
+		"empty file":    ``,
+		"list":          `[]`,
+		"newer format":  `{"version":2,"secrets":{},"namespaces":{}}`,
+		"cut off":       `{"version":1,"secrets":{"ns/a":{`,
+		"two documents": `{"version":1,"secrets":{},"namespaces":{}}{"ts":"2026-01-01T00:00:00Z"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "store.json")
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := New(path, key); err == nil {
+				t.Error("want a refusal")
+			}
+			if after, _ := os.ReadFile(path); string(after) != content {
+				t.Error("the file was changed")
+			}
+		})
+	}
+}

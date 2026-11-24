@@ -82,6 +82,10 @@ that dies halfway can do to it. Nothing to configure; what changed:
   `rotate-master` answers 409 and asks for a restart, `--protect-key` stops.
 - **A failed rotation no longer replaces `master.key.prev`**, which is written
   in one step. `rotate-master` on an empty store keeps the key and says so.
+- **`store.path` pointing at another JSON file** (the ACL, the config, a
+  passphrase-protected key, or a store of a newer format) loaded as an empty
+  store, and the first secret written replaced that file. The server now
+  refuses to start on anything that is not a version 1 store file.
 
 ## v0.24.0 (2026-11-24)
 

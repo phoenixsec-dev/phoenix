@@ -107,7 +107,7 @@ func (s *Store) load() error {
 	data, err := os.ReadFile(s.filePath)
 	if errors.Is(err, os.ErrNotExist) {
 		s.data = &storeData{
-			Version:    1,
+			Version:    storeVersion,
 			Secrets:    make(map[string]encryptedSecret),
 			Namespaces: make(map[string]namespaceDEK),
 		}
@@ -123,11 +123,30 @@ func (s *Store) load() error {
 	return s.checkKeyOpens()
 }
 
-// parse makes data, the contents of a store file, the in-memory store.
+// storeVersion is the format version of the store file, the only one so far.
+const storeVersion = 1
+
+// parse makes data, the contents of a store file, the in-memory store. Every
+// store ever written has the three keys checked here. Anything else may be
+// another file configured at this path by mistake (the ACL, the config, a
+// protected key); loaded as an empty store, it would be replaced by the first
+// write.
 func (s *Store) parse(data []byte) error {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return fmt.Errorf("parsing store file: %w", err)
+	}
+	if keys["version"] == nil || keys["secrets"] == nil || keys["namespaces"] == nil {
+		return fmt.Errorf("%s is not a Phoenix store file; it was not changed. Check store.path; "+
+			"if you meant to start with an empty store, move that file away", s.filePath)
+	}
 	var sd storeData
 	if err := json.Unmarshal(data, &sd); err != nil {
 		return fmt.Errorf("parsing store file: %w", err)
+	}
+	if sd.Version != storeVersion {
+		return fmt.Errorf("%s is a version %d store file and this Phoenix reads version %d; it was not changed. "+
+			"Run the Phoenix version that wrote it, or a newer one", s.filePath, sd.Version, storeVersion)
 	}
 
 	if sd.Secrets == nil {
