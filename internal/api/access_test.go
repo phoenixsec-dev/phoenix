@@ -182,7 +182,11 @@ func (e *grantEnv) request(t *testing.T, tok string, paths ...string) string {
 // approve approves id as "approver" and returns the grant id.
 func (e *grantEnv) approve(t *testing.T, id, body string) string {
 	t.Helper()
-	m := expect(t, e.do("POST", "/v1/access-requests/"+id+"/approve", approverTok, body), http.StatusOK, "")
+	op := "/approve"
+	if strings.Contains(body, "uses") {
+		op = "/approve-limited"
+	}
+	m := expect(t, e.do("POST", "/v1/access-requests/"+id+op, approverTok, body), http.StatusOK, "")
 	return m["grant_id"].(string)
 }
 
@@ -550,16 +554,13 @@ func TestApprovalRechecksCurrentConfig(t *testing.T) {
 
 	// require_sealed turned on later: an agent without a seal key is refused
 	// at approval, so a human never approves something unusable.
-	id2 := e.request(t, vectorTok, "infra/other2")
-	e.set(func(s *config.AccessRequestsSettings) { s.RequireSealed = true })
-	// Re-create vector's ACL entry without a seal key (same token).
-	if err := e.srv.acl.UpdateAgent("vector", vectorTok, nil); err != nil {
-		t.Fatal(err)
-	}
+	// Re-create vector without a seal key before it asks.
 	if err := e.srv.acl.RemoveAgent("vector"); err != nil {
 		t.Fatal(err)
 	}
 	e.addVector(t, vectorTok)
+	id2 := e.request(t, vectorTok, "infra/other2")
+	e.set(func(s *config.AccessRequestsSettings) { s.RequireSealed = true })
 	expect(t, e.do("POST", "/v1/access-requests/"+id2+"/approve", approverTok, ""), 400, CodeSealKeyNotRegistered)
 }
 

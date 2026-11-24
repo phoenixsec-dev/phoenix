@@ -51,8 +51,8 @@ dashboard_login() {
   local url="$1"; shift
   local code
   curl -sS "$@" -c "$WORK/jar" -o /dev/null --data-urlencode "credential=$DASH_PASSWORD" "$url/dashboard/login"
-  code="$(curl -sS --no-location "$@" -b "$WORK/jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")"
-  [[ "$code" == 200 ]] || fail "dashboard login failed (approvals page answered $code)"
+  code="$(curl -sS --no-location "$@" -b "$WORK/jar" -o /dev/null -w '%{http_code}' "$url/dashboard/requests")"
+  [[ "$code" == 200 ]] || fail "dashboard login failed (requests page answered $code)"
 }
 
 # read_init_output sets PHOENIX_TOKEN and DASH_PASSWORD from $WORK/init.out.

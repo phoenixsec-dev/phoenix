@@ -358,7 +358,7 @@ Usage:
   phoenix request status <req_id>              Show a request's state and what to do next
   phoenix whoami                               Show identity, ACL rules, grants, pending requests
   phoenix pending                              List access requests waiting for a human (approver)
-  phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]
+  phoenix approve <req_id> [--ttl 15m] [--uses N] [--path p ...] [--yes]
                                               Approve an access request (approver; may narrow)
   phoenix deny <req_id> [--note "..."]         Deny an access request
   phoenix grants [--all] [--agent <name>]      List grants (own; approvers see all)
@@ -1646,72 +1646,30 @@ func cmdExec(args []string) error {
 		}
 	}
 
-	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
-	hdrs := sealHeaders(sealPrivKey)
-	var resp *http.Response
-	var err error
+	ctx := context.Background()
 	if timeout > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-		resp, err = apiRequestCtx(ctx, "POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
-	} else {
-		resp, err = apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	}
+	// Look for the command first: a typo in it must not cost a one-time use.
+	binary, err := exec.LookPath(cmdArgs[0])
 	if err != nil {
-		return fmt.Errorf("resolve request failed: %w", err)
+		return fmt.Errorf("command not found: %s", cmdArgs[0])
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return handleError(resp)
+	resolved, err := resolveForExec(ctx, refs, sealPrivKey)
+	if err != nil {
+		return err
 	}
-
-	// Decode response — handle sealed or plaintext
-	resolvedValues := make(map[string]string)
-	var resolveErrors map[string]string
-	var resolveErrorCodes map[string]refDenial
-
-	if sealPrivKey != nil {
-		var result struct {
-			SealedValues map[string]interface{} `json:"sealed_values"`
-			Errors       map[string]string      `json:"errors"`
-			ErrorCodes   map[string]refDenial   `json:"error_codes"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return fmt.Errorf("decoding resolve response: %w", err)
-		}
-		resolveErrors = result.Errors
-		resolveErrorCodes = result.ErrorCodes
-		for ref, raw := range result.SealedValues {
-			if envMap, ok := raw.(map[string]interface{}); ok {
-				if envRef, _ := envMap["ref"].(string); envRef != ref {
-					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
-				}
-			}
-			val, err := decryptSealedValue(raw, sealPrivKey)
-			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
-			}
-			resolvedValues[ref] = val
-		}
-	} else {
-		var result struct {
-			Values     map[string]string    `json:"values"`
-			Errors     map[string]string    `json:"errors"`
-			ErrorCodes map[string]refDenial `json:"error_codes"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return fmt.Errorf("decoding resolve response: %w", err)
-		}
-		resolvedValues = result.Values
-		resolveErrors = result.Errors
-		resolveErrorCodes = result.ErrorCodes
-	}
+	resolvedValues, resolveErrors, resolveErrorCodes := resolved.values, resolved.errs, resolved.codes
 
 	// Check for resolution errors
 	if len(resolveErrors) > 0 {
 		for ref, errMsg := range resolveErrors {
 			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", displayRef(ref), formatRefError(ref, errMsg, resolveErrorCodes))
+			if resolveErrorCodes[ref].Code == "SEALED_REQUIRED" && os.Getenv("PHOENIX_SEAL_KEY") == "" {
+				fmt.Fprintln(os.Stderr, "  set PHOENIX_SEAL_KEY to this agent's seal key file, then run the same command again")
+			}
 		}
 		return fmt.Errorf("failed to resolve %d reference(s)", len(resolveErrors))
 	}
@@ -1729,10 +1687,6 @@ func cmdExec(args []string) error {
 		values = append(values, redactValue{Name: m.envVar, Value: val})
 	}
 
-	binary, err := exec.LookPath(cmdArgs[0])
-	if err != nil {
-		return fmt.Errorf("command not found: %s", cmdArgs[0])
-	}
 	if redactOutput {
 		// Stay as the parent and filter the child's output (redact.go).
 		for _, v := range values {

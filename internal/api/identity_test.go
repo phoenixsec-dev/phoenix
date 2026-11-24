@@ -195,7 +195,7 @@ func TestGrantLinesCarryIdentity(t *testing.T) {
 	byName := e.request(t, "system-token", "infra/other")
 	expect(t, e.do("POST", "/v1/access-requests/"+byName+"/approve", "dashboard@desk-token", "{}"), 200, "")
 	late := e.request(t, vectorTok, "infra/other")
-	if _, err := e.srv.ApproveAccessRequestAs(late, "dashboard@10.0.0.9", "10.0.0.9", nil, 0); err != nil {
+	if _, _, err := e.srv.ApproveAccessRequestAs(late, "dashboard@10.0.0.9", "10.0.0.9", grant.Approval{}); err != nil {
 		t.Fatal(err)
 	}
 	e.clock.Advance(24 * time.Hour)
@@ -280,7 +280,7 @@ func TestGrantLinesUseAuthenticatedLabels(t *testing.T) {
 	asked := e.request(t, vectorTok, "infra/x")
 	expect(t, e.do("POST", "/v1/access-requests/"+asked+"/approve", "twin-token", "{}"), 200, "")
 	asked = e.request(t, vectorTok, "infra/y")
-	if _, err := e.srv.ApproveAccessRequestAs(asked, twin, "192.0.2.1", nil, 0); err != nil {
+	if _, _, err := e.srv.ApproveAccessRequestAs(asked, twin, "192.0.2.1", grant.Approval{}); err != nil {
 		t.Fatal(err)
 	}
 	e.request(t, vectorTok, "infra/z") // pending, so deleting writes all three kinds

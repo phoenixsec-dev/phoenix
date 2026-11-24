@@ -26,7 +26,7 @@ import (
 // Tags and Click headers) and works as a plain webhook too.
 //
 // What is sent: agent name, action, number of paths, request id and, when
-// notify_dashboard_url is set, a link to /dashboard/approvals#<req_id>.
+// notify_dashboard_url is set, a link to /dashboard/requests/<req_id>.
 // Paths only when notify_include_paths is true. The agent's reason is never
 // sent, and there are no approve links or tokens. notify_token_ref is
 // resolved from the store at send time and sent as "Authorization: Bearer";
@@ -119,14 +119,14 @@ func (s *Server) resolveNotifyToken(tokenRef string) (string, error) {
 	return token, nil
 }
 
-// notifyDashboardLink is <notify_dashboard_url>/dashboard/approvals#<id>,
+// notifyDashboardLink is <notify_dashboard_url>/dashboard/requests/<id>,
 // or "" when no external dashboard URL is configured. The link is never
 // built from a request's Host header, which the caller controls.
 func notifyDashboardLink(base, id string) string {
 	if base == "" {
 		return ""
 	}
-	return strings.TrimRight(base, "/") + "/dashboard/approvals#" + id
+	return strings.TrimRight(base, "/") + "/dashboard/requests/" + id
 }
 
 // notifyMessage is the plain-text body. It never contains the reason.
@@ -146,7 +146,7 @@ func notifyMessage(cfg config.AccessRequestsSettings, rq grant.Request, link str
 			fmt.Fprintf(&b, "- %s\n", p)
 		}
 	}
-	fmt.Fprintf(&b, "Request %s: approve or deny it in the Phoenix dashboard.\n", rq.ID)
+	fmt.Fprintf(&b, "Request %s: answer it in the Phoenix dashboard.\n", rq.ID)
 	if link != "" {
 		b.WriteString(link + "\n")
 	}

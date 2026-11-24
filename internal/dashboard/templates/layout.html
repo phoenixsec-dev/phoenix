@@ -12,6 +12,7 @@
 <head>
     {{template "head" .}}
     <title>Phoenix</title>
+    <link rel="stylesheet" href="/dashboard/static/requests.css">
 </head>
 <body>
     {{/* One navigation. On a phone it is the bottom bar; the nav-wide links
@@ -27,12 +28,9 @@
         <a href="/dashboard/secrets" class="nav-link{{if eq .Active "secrets"}} active{{end}}"{{if eq .Active "secrets"}} aria-current="page"{{end}}>
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg> Secrets
         </a>
-        <a href="/dashboard/approvals" class="nav-link{{if eq .Active "approvals"}} active{{end}}"{{if eq .Active "approvals"}} aria-current="page"{{end}}>
-            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13l5 5L20 6"/></svg> Approvals
-            {{if and .PendingCount (gt .PendingCount 0)}}<span class="badge">{{.PendingCount}}</span>{{end}}
-        </a>
-        <a href="/dashboard/grants" class="nav-link nav-wide{{if eq .Active "grants"}} active{{end}}"{{if eq .Active "grants"}} aria-current="page"{{end}}>
-            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg> Grants
+        <a href="/dashboard/requests" class="nav-link{{if eq .Active "requests"}} active{{end}}"{{if eq .Active "requests"}} aria-current="page"{{end}}>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13l5 5L20 6"/></svg> Requests
+            <span class="badge" data-requests-badge{{if not .PendingCount}} hidden{{end}}>{{.PendingCount}}</span>
         </a>
         <a href="/dashboard/sessions" class="nav-link nav-wide{{if eq .Active "sessions"}} active{{end}}"{{if eq .Active "sessions"}} aria-current="page"{{end}}>
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-5 4-7 8-7s7 2 8 7"/></svg> Sessions
@@ -43,7 +41,7 @@
         <a href="/dashboard/roles" class="nav-link nav-wide{{if eq .Active "roles"}} active{{end}}"{{if eq .Active "roles"}} aria-current="page"{{end}}>
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-4 8-8 9-4-1-8-4-8-9V6z"/></svg> Roles
         </a>
-        <a href="/dashboard/more" class="nav-link nav-narrow{{if or (eq .Active "more") (eq .Active "grants") (eq .Active "sessions") (eq .Active "audit") (eq .Active "roles")}} active{{end}}">
+        <a href="/dashboard/more" class="nav-link nav-narrow{{if or (eq .Active "more") (eq .Active "sessions") (eq .Active "audit") (eq .Active "roles")}} active{{end}}">
             <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg> More
         </a>
         <div class="sidebar-footer">
@@ -57,6 +55,7 @@
         {{template "content" .}}
     </main>
     <script src="/dashboard/static/dashboard.js"></script>
+    <script src="/dashboard/static/requests.js"></script>
     {{block "scripts" .}}{{end}}
 </body>
 </html>{{end}}

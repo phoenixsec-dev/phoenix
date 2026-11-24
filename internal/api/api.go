@@ -329,6 +329,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/agents/", s.handleDeleteAgent)
 	s.mux.HandleFunc("POST /v1/rotate-master", s.handleRotateMaster)
 	s.mux.HandleFunc("POST /v1/resolve", s.handleResolve)
+	s.mux.HandleFunc("POST /v1/resolve-approved", s.handleResolve)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/keypair", s.handleGenerateKeyPair)
 	s.mux.HandleFunc("GET /v1/agents/", s.handleAgentSubresource)
@@ -831,6 +832,14 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 	path := secretPath(r)
 	ip := clientIP(r)
 
+	// Go routes HEAD here too, and would run the whole read (spending a
+	// one-time use) only to throw the value away.
+	if r.Method == http.MethodHead && path != "" && !strings.HasSuffix(path, "/") {
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
 	// A "*" in a single-secret read is someone trying to list a folder.
 	// Say so before scope, ACL and attestation, so it never reads as a
 	// permission problem; it is decided from the path alone, so it reveals
@@ -927,21 +936,28 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAllowedAccess(r, info, "read_value", path, ip, sealKey != nil, dec.Grant)
 	// The login and link are for callers who may list the path (GET
 	// /v1/metadata) and are never served together with the value. A copy,
 	// because a backend may hand out its cached secret.
 	noLogin := *secret
 	noLogin.Metadata.Username, noLogin.Metadata.URL = "", ""
 	secret = &noLogin
+	// Seal first: the grant's use is spent only once the answer is ready.
+	var env *crypto.SealedEnvelope
 	if sealKey != nil {
-		env, err := crypto.SealValue(path, "", secret.Value, sealKey)
-		if err != nil {
+		if env, err = crypto.SealValue(path, "", secret.Value, sealKey); err != nil {
 			log.Printf("error sealing secret %q: %v", path, err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Cache-Control", "no-store")
+	}
+	if reason := s.useGrants(info, ip, "read_value", []string{path}, []*grant.Grant{dec.Grant}, false)[0]; reason != "" {
+		s.writeDataDenial(w, r, info, "read_value", path, ip, reason)
+		return
+	}
+	s.auditAllowedAccess(r, info, "read_value", path, ip, sealKey != nil, dec.Grant)
+	w.Header().Set("Cache-Control", "no-store")
+	if env != nil {
 		jsonOK(w, map[string]interface{}{
 			"path":         path,
 			"metadata":     secret.Metadata,
@@ -949,8 +965,6 @@ func (s *Server) handleGetSecret(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	w.Header().Set("Cache-Control", "no-store")
 	jsonOK(w, secret)
 }
 
@@ -1387,12 +1401,43 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 // Nonce and Signature are only read to refuse them: nonce challenges and
 // signed resolve were removed, and a client still sending them should hear so.
 type resolveRequest struct {
-	Refs      []string `json:"refs"`
-	Nonce     string   `json:"nonce,omitempty"`
-	Signature string   `json:"signature,omitempty"`
+	Refs []string `json:"refs"`
+	// AllOrNothing: if any ref is refused, deliver none and spend no use.
+	// phoenix exec sends it, since it runs nothing unless every ref resolved.
+	AllOrNothing bool   `json:"all_or_nothing,omitempty"`
+	Nonce        string `json:"nonce,omitempty"`
+	Signature    string `json:"signature,omitempty"`
 }
 
+// delivery is one ref of a resolve that passed every check and is ready to send.
+type delivery struct {
+	ref, path, value string
+	sealed           *crypto.SealedEnvelope // set when the caller asked for sealed values
+	grant            *grant.Grant           // set when only a grant allows it
+}
+
+func deliveryPaths(ds []delivery) []string {
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.path
+	}
+	return out
+}
+
+func deliveryGrants(ds []delivery) []*grant.Grant {
+	out := make([]*grant.Grant, len(ds))
+	for i, d := range ds {
+		out[i] = d.grant
+	}
+	return out
+}
+
+// handleResolve: POST /v1/resolve and POST /v1/resolve-approved. The second
+// reads only what a human approved for this agent (approvedAccess). It is an
+// address of its own so a server from before it refuses instead of ignoring a
+// flag and using everything the agent may read.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	approvedOnly := r.URL.Path == "/v1/resolve-approved"
 	info, err := s.authenticateInfo(r)
 	if err != nil {
 		handleAuthError(w, err)
@@ -1450,7 +1495,14 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var deliveries []delivery
+	seen := map[string]bool{}
 	for _, refStr := range req.Refs {
+		// The answer has one entry per ref, so a repeat adds nothing.
+		if seen[refStr] {
+			continue
+		}
+		seen[refStr] = true
 		path, err := ref.Parse(refStr)
 		if err != nil {
 			s.auditDenied(r, info, "resolve", refStr, ip, "malformed_ref")
@@ -1459,7 +1511,12 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Session scope/action, ACL, then request-use grants (per-ref).
-		dec := s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		dec := accessDecision{}
+		if approvedOnly {
+			dec = s.approvedAccess(info, path, ip)
+		} else {
+			dec = s.dataAccess(info, path, "read_value", acl.ActionReadValue, ip)
+		}
 		if dec.Reason != "" {
 			s.auditDenied(r, info, "resolve", path, ip, dec.Reason)
 			code, msg := resolveDenial(dec.Reason)
@@ -1516,18 +1573,38 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		s.auditAllowedAccess(r, info, "resolve", path, ip, sealKey != nil, dec.Grant)
-
+		d := delivery{ref: refStr, path: path, value: secret.Value, grant: dec.Grant}
 		if sealKey != nil {
-			env, err := crypto.SealValue(path, refStr, secret.Value, sealKey)
-			if err != nil {
+			if d.sealed, err = crypto.SealValue(path, refStr, secret.Value, sealKey); err != nil {
 				log.Printf("error sealing resolved secret %q: %v", path, err)
 				deny(refStr, CodeInternalError, "internal error")
 				continue
 			}
-			sealedValues[refStr] = env
-		} else {
-			values[refStr] = secret.Value
+		}
+		deliveries = append(deliveries, d)
+	}
+
+	// Everything that may be delivered is ready. Spend grant uses last, so a
+	// use goes only with a value that is really handed over.
+	if !(req.AllOrNothing && len(errors) > 0) {
+		reasons := s.useGrants(info, ip, "read_value", deliveryPaths(deliveries), deliveryGrants(deliveries), req.AllOrNothing)
+		for i, d := range deliveries {
+			if reasons[i] != "" {
+				s.auditDenied(r, info, "resolve", d.path, ip, reasons[i])
+				code, msg := resolveDenial(reasons[i])
+				denyStep(d.ref, code, msg, s.denialNextStep(code, d.path, "read_value"))
+			}
+		}
+		for _, d := range deliveries {
+			if errors[d.ref] != "" || (req.AllOrNothing && len(errors) > 0) {
+				continue
+			}
+			s.auditAllowedAccess(r, info, "resolve", d.path, ip, sealKey != nil, d.grant)
+			if d.sealed != nil {
+				sealedValues[d.ref] = d.sealed
+			} else {
+				values[d.ref] = d.value
+			}
 		}
 	}
 

@@ -217,9 +217,10 @@ Data tool denials (`phoenix_get`, `phoenix_resolve`, `phoenix_list`) show the
 code and next step.
 
 The request-use tools (`phoenix_request_use`, `phoenix_request_status`,
-`phoenix_whoami`) are listed too, but requests are refused for session tokens
-(`SESSION_CANNOT_REQUEST`): run an MCP server on the agent's own bootstrap
-identity for them. See [Access requests](access-requests.md).
+`phoenix_whoami`) are listed too. Requests belong to the agent, not to a role,
+so the first two use the agent's own `PHOENIX_TOKEN`. With only a `phxs_` token
+they are refused (`SESSION_CANNOT_REQUEST`). See
+[Access requests](access-requests.md).
 
 ## Denial codes
 

@@ -277,32 +277,26 @@ with temporary access, and the path's policy rule).
 With the 1Password backend, secrets can be found and shown but not changed.
 Finding them reads the vault's items into the server's memory, as listing does.
 
-### Approvals (`/dashboard/approvals`)
+### Requests (`/dashboard/requests`)
 
-**Secret access requests** come first: one card per pending request with
-every fact an approver needs (paths in full with badges, source IP and auth
-method, TTL picker limited to legal values, delivery mode, attestation
-requirements, the agent's reason labelled "not verified", the agent's last
-24 hours). Details in [Access requests](access-requests.md#in-the-dashboard).
+Everything about access requests on one live page: what is waiting (answer
+with **No**, **Once**, **15 minutes** or **Always**), what is open now with
+**Revoke**, what is on Always with **Remove**, what expired unanswered, and
+history. Details in [Access requests](access-requests.md#in-the-dashboard).
 
-When `access_requests` is not configured, the page says access requests
-are turned off. (Step-up session approvals were removed; their cards are
-gone.)
+New requests show up within about two seconds on every open dashboard page: in
+the list here, as a popup elsewhere. The script polls
+`/dashboard/requests/feed`; nothing needs changing in a reverse proxy. Polling
+does not count as using the dashboard, so an open tab does not keep its login
+from being the least recently used one.
 
-A new access request can also ping your phone (for example through ntfy).
-The notification links to this page with the request's `#req_...` anchor;
-you still log in here to decide. Set `access_requests.notify_url` and
+A notification (for example through ntfy) links to
+`/dashboard/requests/<req_id>`. If you are not logged in, the login page brings
+you back to that request. Set `access_requests.notify_url` and
 `notify_dashboard_url` (see [Access requests](access-requests.md#notifications)).
 
-Approve and Deny buttons with JavaScript confirmation dialogs. Both
-submit POST forms with CSRF tokens.
-
-### Grants (`/dashboard/grants`)
-
-Active request-use grants (agent, paths, action, expires in, uses, last
-used, approved by) with a Revoke button, and a Recent view of expired and
-revoked grants. A revoke that could not be saved shows `REVOKE_NOT_DURABLE`
-in red and stays on screen.
+`/dashboard/approvals` and `/dashboard/grants`, the two pages this replaced,
+redirect here.
 
 ### Sessions (`/dashboard/sessions`)
 

@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +48,10 @@ type accessRequestView struct {
 	GrantExpiresAt      string   `json:"grant_expires_at"`
 	AlreadyAllowedPaths []string `json:"already_allowed_paths"`
 	Note                string   `json:"note"`
+	// How it was allowed: standing access, or a grant with a use limit.
+	Always   bool             `json:"always"`
+	MaxUses  int64            `json:"max_uses"`
+	UsesLeft map[string]int64 `json:"uses_left"`
 }
 
 // grantView is the subset of a grant's JSON the CLI prints.
@@ -56,6 +64,9 @@ type grantView struct {
 	ExpiresAt  string   `json:"expires_at"`
 	UseCount   int64    `json:"use_count"`
 	LastUsedAt string   `json:"last_used_at"`
+
+	MaxUses  int64            `json:"max_uses"`
+	UsesLeft map[string]int64 `json:"uses_left"`
 }
 
 // requireBootstrapAuth is requireAuth for request-use commands. They must
@@ -187,12 +198,75 @@ func fprintRequest(w io.Writer, rq accessRequestView) {
 	fmt.Fprintf(w, "Status:  %s\n", cleanServerText(rq.Status))
 	fmt.Fprintf(w, "Paths:   %s\n", cleanList(rq.Paths, ", "))
 	if len(rq.GrantedPaths) > 0 {
-		fmt.Fprintf(w, "Granted: %s until %s\n", cleanList(rq.GrantedPaths, ", "), cleanServerText(rq.GrantExpiresAt))
+		fmt.Fprintf(w, "Granted: %s, %s\n", cleanList(rq.GrantedPaths, ", "), grantedLimit(rq))
 	}
 	if rq.Note != "" {
 		fmt.Fprintf(w, "Note:    %s\n", cleanServerText(rq.Note))
 	}
 	fmt.Fprintf(w, "Next:    %s\n", requestNextHint(rq))
+}
+
+// grantedLimit says in a few words how far a yes goes: "always", "until 14:32
+// UTC", or "one use left, until 14:32 UTC".
+func grantedLimit(rq accessRequestView) string {
+	if rq.Always {
+		return "always"
+	}
+	until := "until " + clockTime(rq.GrantExpiresAt)
+	if uses := usesLeftText(rq.MaxUses, rq.UsesLeft); uses != "" {
+		return uses + ", " + until
+	}
+	return until
+}
+
+// usesLeftText is "one use left", "2 uses left", "no uses left", or "" when
+// there is no limit. Paths with different numbers left are listed.
+func usesLeftText(maxUses int64, left map[string]int64) string {
+	if maxUses == 0 {
+		return ""
+	}
+	say := func(n int64) string {
+		switch {
+		case n <= 0:
+			return "no uses left"
+		case n == 1:
+			return "one use left"
+		}
+		return fmt.Sprintf("%d uses left", n)
+	}
+	paths := slices.Sorted(maps.Keys(left))
+	if len(paths) == 0 {
+		return say(maxUses)
+	}
+	same := true
+	for _, p := range paths {
+		same = same && left[p] == left[paths[0]]
+	}
+	switch {
+	case same && len(paths) == 1:
+		return say(left[paths[0]])
+	case same:
+		return say(left[paths[0]]) + " for each secret"
+	}
+	var each []string
+	for _, p := range paths {
+		each = append(each, cleanPath(p)+": "+say(left[p]))
+	}
+	return strings.Join(each, "; ")
+}
+
+// clockTime shows a server time as a local clock time, with the date when it
+// is not today. Text that is not a time is shown cleaned.
+func clockTime(s string) string {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return cleanServerText(s)
+	}
+	t = t.Local()
+	if t.Format(time.DateOnly) == time.Now().Format(time.DateOnly) {
+		return t.Format("15:04 MST")
+	}
+	return t.Format("2006-01-02 15:04 MST")
 }
 
 // requestNextHint is the client-authored "what now" for a request. For an
@@ -205,11 +279,24 @@ func requestNextHint(rq accessRequestView) string {
 			}
 			return nextStepHint("ask_user")
 		}
-		if p := hintPath(rq.GrantedPaths[0]); p != "" {
+		if p := hintPath(usablePath(rq)); p != "" {
 			return "phoenix exec --redact-output --env NAME=phoenix://" + p + " -- <command>"
 		}
 	}
+	if rq.Status == "denied" {
+		return "a human said no. Do not ask again; ask the user in chat if it is really needed"
+	}
 	return nextStepHint(rq.NextStep)
+}
+
+// usablePath is a granted path that still has a use left.
+func usablePath(rq accessRequestView) string {
+	for _, p := range rq.GrantedPaths {
+		if left, limited := rq.UsesLeft[p]; !limited || left > 0 {
+			return p
+		}
+	}
+	return rq.GrantedPaths[0]
 }
 
 // waitForDecision polls a request every 5s until it is decided or expires.
@@ -275,6 +362,7 @@ func cmdWhoami(args []string) error {
 		ACL        []struct {
 			Path    string   `json:"path"`
 			Actions []string `json:"actions"`
+			Always  bool     `json:"always"`
 		} `json:"acl"`
 		Session *struct {
 			Role       string   `json:"role"`
@@ -286,6 +374,9 @@ func cmdWhoami(args []string) error {
 			Paths     []string `json:"paths"`
 			Action    string   `json:"action"`
 			ExpiresAt string   `json:"expires_at"`
+
+			MaxUses  int64            `json:"max_uses"`
+			UsesLeft map[string]int64 `json:"uses_left"`
 		} `json:"grants"`
 		Pending []struct {
 			ID        string   `json:"id"`
@@ -316,11 +407,19 @@ func cmdWhoami(args []string) error {
 		fmt.Println("           Grants are used through the agent's own identity, not a session.")
 	}
 	for _, r := range w.ACL {
-		fmt.Printf("ACL:       %s  %s\n", cleanPath(r.Path), cleanList(r.Actions, ","))
+		from := ""
+		if r.Always {
+			from = "  (always, from an access request)"
+		}
+		fmt.Printf("ACL:       %s  %s%s\n", cleanPath(r.Path), cleanList(r.Actions, ","), from)
 	}
 	for _, g := range w.Grants {
-		fmt.Printf("Grant:     %s  %s  %s until %s\n", cleanServerText(g.ID), cleanList(g.Paths, ", "),
-			cleanServerText(g.Action), cleanServerText(g.ExpiresAt))
+		uses := ""
+		if u := usesLeftText(g.MaxUses, g.UsesLeft); u != "" {
+			uses = ", " + u
+		}
+		fmt.Printf("Grant:     %s  %s  %s until %s%s\n", cleanServerText(g.ID), cleanList(g.Paths, ", "),
+			cleanServerText(g.Action), cleanServerText(g.ExpiresAt), uses)
 	}
 	for _, p := range w.Pending {
 		fmt.Printf("Pending:   %s  %s (expires %s)\n", cleanServerText(p.ID), cleanList(p.Paths, ", "), cleanServerText(p.ExpiresAt))
@@ -364,7 +463,7 @@ func oneLine(err error) string {
 // approvals (apr_...) were removed; those IDs get the removal message.
 func cmdApprove(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]")
+		return fmt.Errorf("usage: phoenix approve <req_id> [--ttl 15m] [--uses N] [--path p ...] [--yes]")
 	}
 	if strings.HasPrefix(args[0], "apr_") {
 		exitRemoved("phoenix approve apr_...", removedCommands["approve apr_"])
@@ -374,7 +473,7 @@ func cmdApprove(args []string) error {
 
 // cmdApproveAccess approves an access request after showing every path,
 // the action, TTL and the agent's (unverified) reason. --path narrows the
-// grant, --ttl shortens it. --yes skips the y/N prompt; without it the
+// grant, --ttl shortens it, --uses limits it to N uses. --yes skips the y/N prompt; without it the
 // answer is read from /dev/tty, or stdin when there is no terminal.
 func cmdApproveAccess(args []string) error {
 	id := args[0]
@@ -383,6 +482,7 @@ func cmdApproveAccess(args []string) error {
 	}
 	var paths []string
 	var ttl string
+	var uses int64
 	yes := false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
@@ -398,6 +498,16 @@ func cmdApproveAccess(args []string) error {
 			}
 			i++
 			ttl = args[i]
+		case "--uses":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--uses needs a number like 1")
+			}
+			i++
+			n, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || n < 1 {
+				return fmt.Errorf("--uses must be a whole number of at least 1")
+			}
+			uses = n
 		case "--yes", "-y":
 			yes = true
 		default:
@@ -414,7 +524,7 @@ func cmdApproveAccess(args []string) error {
 	if rq.Status != "pending" {
 		return fmt.Errorf("request %s is already %s", id, cleanServerText(rq.Status))
 	}
-	fmt.Fprint(os.Stderr, approvalPrompt(rq, paths, ttl))
+	fmt.Fprint(os.Stderr, approvalPrompt(rq, paths, ttl, uses))
 	if !yes {
 		fmt.Fprint(os.Stderr, "\nApprove? [y/N]: ")
 		answer, err := readFromTTY()
@@ -433,23 +543,69 @@ func cmdApproveAccess(args []string) error {
 	if ttl != "" {
 		body["ttl"] = ttl
 	}
+	endpoint := "/approve"
+	if uses > 0 {
+		// Its own address: a server too old to count uses must refuse, not
+		// allow any number of them.
+		body["uses"], endpoint = uses, "/approve-limited"
+	}
 	var res struct {
 		GrantID   string   `json:"grant_id"`
+		MaxUses   int64    `json:"max_uses"`
 		Paths     []string `json:"paths"`
 		ExpiresAt string   `json:"expires_at"`
 	}
-	if _, err := apiJSON("POST", "/v1/access-requests/"+escapeName(id)+"/approve", body, &res); err != nil {
+	resp, err := approveCall("/v1/access-requests/"+escapeName(id)+endpoint, body, &res)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Approved: grant %s for %s until %s\n", cleanServerText(res.GrantID),
-		cleanList(res.Paths, ", "), cleanServerText(res.ExpiresAt))
+	if resp == http.StatusNotFound {
+		return fmt.Errorf("this server is too old to limit uses; nothing was approved. Approve without --uses, or answer Once on the dashboard after updating it")
+	}
+	if uses > 0 && res.MaxUses != uses {
+		msg := "the server answered with a grant that has a different use limit; check it with: phoenix grants"
+		if grantIDPattern.MatchString(res.GrantID) { // only a real ID goes into a command to paste
+			msg += "\n  or take it back: phoenix grants revoke " + res.GrantID
+		}
+		return errors.New(msg)
+	}
+	limit := ""
+	if uses > 0 {
+		limit = ", " + usesLeftText(uses, nil)
+	}
+	fmt.Fprintf(os.Stderr, "Approved: grant %s for %s until %s%s\n", cleanServerText(res.GrantID),
+		cleanList(res.Paths, ", "), cleanServerText(res.ExpiresAt), limit)
 	return nil
+}
+
+// approveCall posts an approval. A 404 without a denial code is a server that
+// has no such address, reported as the status and no error.
+func approveCall(path string, body any, out any) (int, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := apiRequest("POST", path, bytes.NewReader(raw))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		var code string
+		if code, resp = peekDenialCode(resp); code == "" {
+			return http.StatusNotFound, nil
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, handleError(resp)
+	}
+	return resp.StatusCode, json.NewDecoder(resp.Body).Decode(out)
 }
 
 // approvalPrompt is the text shown before a y/N on an access request. It
 // lists every path in full (marking ones --path removes), the action, the
 // TTL that will be granted and the reason, labelled as unverified.
-func approvalPrompt(rq accessRequestView, keep []string, ttl string) string {
+func approvalPrompt(rq accessRequestView, keep []string, ttl string, uses int64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nAccess request %s\n", cleanServerText(rq.ID))
 	fmt.Fprintf(&b, "  Agent:   %s (%s from %s)\n", cleanServerText(rq.Agent), cleanServerText(rq.AuthMethod), cleanServerText(rq.SourceIP))
@@ -470,6 +626,9 @@ func approvalPrompt(rq accessRequestView, keep []string, ttl string) string {
 		ttl = rq.RequestedTTL
 	}
 	fmt.Fprintf(&b, "  TTL:     %s (requested %s)\n", cleanServerText(ttl), cleanServerText(rq.RequestedTTL))
+	if uses > 0 {
+		fmt.Fprintf(&b, "  Uses:    %d of each path\n", uses)
+	}
 	fmt.Fprintf(&b, "  Agent says (not verified): %s\n", cleanServerText(rq.Reason))
 	fmt.Fprintln(&b, "  Revoking later does not recall a value already used.")
 	return b.String()
@@ -566,8 +725,12 @@ func cmdGrants(args []string) error {
 		if last == "" {
 			last = "never"
 		}
-		fmt.Printf("%s  %-8s  agent=%s  %s  expires=%s  uses=%d  last=%s\n", cleanServerText(g.ID), cleanServerText(g.State),
-			cleanServerText(g.Agent), cleanServerText(g.Action), cleanServerText(g.ExpiresAt), g.UseCount, cleanServerText(last))
+		left := ""
+		if u := usesLeftText(g.MaxUses, g.UsesLeft); u != "" {
+			left = "  (" + u + ")"
+		}
+		fmt.Printf("%s  %-8s  agent=%s  %s  expires=%s  uses=%d  last=%s%s\n", cleanServerText(g.ID), cleanServerText(g.State),
+			cleanServerText(g.Agent), cleanServerText(g.Action), cleanServerText(g.ExpiresAt), g.UseCount, cleanServerText(last), left)
 		for _, p := range g.Paths {
 			fmt.Printf("    %s\n", cleanPath(p))
 		}

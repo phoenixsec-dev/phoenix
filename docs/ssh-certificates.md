@@ -24,14 +24,14 @@ phoenix ssh --list
 # Agent: asks if there is no approval yet, waits, then logs in and runs the command
 phoenix ssh build-1 --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
 
-# Human: dashboard -> Approvals -> approve. The card says "root login on this machine".
+# Human: dashboard -> Requests -> Once or 15 minutes. The card says "root login on <machine>".
 
 # Agent: more commands in the same window need no new approval and no --reason
 phoenix ssh build-1 -- sudo -n systemctl status something
 
 # Human: take it back. New logins stop at once, even with a pass the agent kept.
 # Open sessions under that approval end within about 30 seconds.
-#   dashboard -> Grants -> Revoke
+#   dashboard -> Requests -> Revoke
 ```
 
 It uses the [request-use grant flow](access-requests.md): the same request
@@ -106,7 +106,7 @@ ends any open session that came in with a certificate:
 | `phoenix-ssh-window.timer` | Every 30s, ends each `agent` SSH session whose own approval is over |
 
 Check it from the machine: `sshd -T -C user=agent,host=x,addr=127.0.0.1 | grep -i -E 'trustedusercakeys|authorizedprincipalscommand|authorizedkeysfile'`.
-The machine's sshd log names who logged in: `ID grant=gnt_...,agent=vector,host=build-1`.
+The machine's sshd log names who logged in: `ID grant=gnt_...,agent=deployer,host=build-1`.
 Set `KEEP_AUTHORIZED_KEYS=1` on the install to leave existing keys working while a
 machine moves over. Sessions from those keys have no grant, so the timer leaves them
 alone until you run install again without it.

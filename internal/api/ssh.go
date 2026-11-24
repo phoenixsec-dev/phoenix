@@ -113,6 +113,12 @@ func (s *Server) handleSSHSign(w http.ResponseWriter, r *http.Request) {
 		writeAccessError(w, CodeInvalidRequest, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The certificate is the use. It can open logins until the approval's time
+	// ends or a human revokes it.
+	if reason := s.useGrants(info, ip, grant.ActionSSHLogin, []string{path}, []*grant.Grant{m.Grant}, false)[0]; reason != "" {
+		s.denySSHSign(w, r, info, path, ip, reason)
+		return
+	}
 	s.auditAllowedAccess(r, info, "ssh.sign", path, ip, false, m.Grant)
 	jsonOK(w, map[string]any{
 		"certificate": cert,
@@ -130,6 +136,12 @@ func (s *Server) denySSHSign(w http.ResponseWriter, r *http.Request, info *authI
 	switch reason {
 	case grant.ReasonGrantExpired:
 		code, detail = CodeGrantExpired, "your temporary access to this machine has ended"
+	case grant.ReasonGrantUsedUp:
+		code, detail = CodeGrantExpired, "every login certificate a human allowed for this machine has been issued"
+	case reasonUseNotSaved:
+		s.auditDeniedMetadata(info, "ssh.sign", path, ip, reason, callerAuditMetadata(r))
+		writeAccessError(w, CodeRequestsDegraded, "your approval could not be used right now; no certificate was issued", http.StatusServiceUnavailable)
+		return
 	case grant.ReasonGrantRevoked:
 		code, step, detail = CodeGrantRevoked, NextAskUser, "a human revoked your access to this machine"
 	default:

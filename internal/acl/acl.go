@@ -58,6 +58,9 @@ func ValidatePermissions(perms []Permission) error {
 		if len(p.Actions) == 0 {
 			return fmt.Errorf("no actions specified for path %q", p.Path)
 		}
+		if p.Always != nil {
+			return fmt.Errorf("path %q: \"always\" cannot be set by hand; it marks an answered access request", p.Path)
+		}
 		for _, a := range p.Actions {
 			if a == removedRead {
 				return fmt.Errorf("path %q: %s", p.Path, removedReadMsg)
@@ -74,6 +77,9 @@ func ValidatePermissions(perms []Permission) error {
 type Permission struct {
 	Path    string   `json:"path"`
 	Actions []Action `json:"actions"`
+	// Always is set on a rule made by an "always" answer (always.go). Servers
+	// older than that ignore it and treat the rule as any other.
+	Always *AlwaysOrigin `json:"always,omitempty"`
 }
 
 // Agent represents an authenticated entity with permissions.
@@ -109,6 +115,7 @@ type ACL struct {
 	// writeFile saves the ACL file; tests replace it to fail. Strict: a
 	// replaced token must not come back after a power cut.
 	writeFile func(path string, data []byte, perm os.FileMode) error
+	unsaved   []AlwaysRule // taken back but not saved yet (always.go)
 }
 
 // New creates a new ACL from a config file.
@@ -181,6 +188,7 @@ func (a *ACL) saveLocked() error {
 	if err := a.writeFile(a.path, data, 0600); err != nil {
 		return fmt.Errorf("writing ACL file: %w", err)
 	}
+	a.unsaved = nil
 
 	return nil
 }

@@ -45,7 +45,7 @@ password_from_init() { awk '/DASHBOARD PASSWORD/{getline; print; exit}' "$1"; }
 dashboard_login() {
   local url="$1" password="$2" jar="$3"; shift 3
   curl -sS "$@" -c "$jar" -o /dev/null --data-urlencode "credential=$password" "$url/dashboard/login" || return 1
-  [[ "$(curl -sS --no-location "$@" -b "$jar" -o /dev/null -w '%{http_code}' "$url/dashboard/approvals")" == 200 ]]
+  [[ "$(curl -sS --no-location "$@" -b "$jar" -o /dev/null -w '%{http_code}' "$url/dashboard/requests")" == 200 ]]
 }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbidden text}: $2"; }
 

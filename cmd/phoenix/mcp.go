@@ -187,7 +187,7 @@ var mcpSessionTools = []mcpTool{
 var mcpAccessTools = []mcpTool{
 	{
 		Name:        "phoenix_request_use",
-		Description: "Ask a human for temporary use of exact secret paths you were denied (next step request_use). A human approves or denies in the Phoenix dashboard. Approved secrets are used through phoenix exec, not returned here. Must run on the agent's own identity, not a session.",
+		Description: "Ask a human for temporary use of exact secret paths you were denied (next step request_use). A human answers in the Phoenix dashboard: no, once (one use), a time like 15 minutes, or always. Check the answer with phoenix_request_status. After a no, do not ask again: ask the user in chat. Approved secrets are used through phoenix exec, not returned here. Runs on the agent's own identity, also when this server uses a role.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -200,7 +200,7 @@ var mcpAccessTools = []mcpTool{
 	},
 	{
 		Name:        "phoenix_request_status",
-		Description: "Check an access request (req_...) made with phoenix_request_use: pending, approved, denied or expired, and what to do next.",
+		Description: "Check an access request (req_...) made with phoenix_request_use: pending, approved, denied or expired, how far an approval goes (\"one use left\", \"until 14:32\", \"always\"), and what to do next. With one use left, get the command right first: a failed run still spends it.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -823,7 +823,7 @@ func mcpToolRequestUse(args json.RawMessage, logger *log.Logger) (string, bool) 
 		params.Paths[i] = strings.TrimPrefix(p, "phoenix://")
 	}
 	body, _ := json.Marshal(map[string]any{"paths": params.Paths, "action": "read_value", "reason": params.Reason, "ttl": params.TTL})
-	resp, err := apiRequest("POST", "/v1/access-requests", strings.NewReader(string(body)))
+	resp, err := ownIdentityRequest("POST", "/v1/access-requests", body, nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -851,7 +851,7 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 	if !requestIDPattern.MatchString(params.RequestID) {
 		return "request_id must look like req_ followed by 32 hex characters", true
 	}
-	resp, err := apiRequest("GET", "/v1/access-requests/"+escapeName(params.RequestID), nil)
+	resp, err := ownIdentityRequest("GET", "/v1/access-requests/"+escapeName(params.RequestID), nil, nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -864,7 +864,28 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 	if err := json.Unmarshal(respBody, &rq); err != nil {
 		return fmt.Sprintf("Failed to decode response: %v", err), true
 	}
+	if !mcpOwnRequest(rq) {
+		return formatDenial(serverDenial{Code: "NOT_FOUND", Detail: "request not found", NextStep: "none"}, ""), true
+	}
 	return mcpRequestText(rq), false
+}
+
+// mcpOwnRequest guards the one way a role could see another agent's request:
+// the status tool asks with the agent's own token, and an agent that is an
+// approver may see everybody's. The server names the owner only to approvers.
+func mcpOwnRequest(rq accessRequestView) bool {
+	if ownToken() == "" || rq.Agent == "" {
+		return true
+	}
+	resp, err := ownIdentityRequest("GET", "/v1/whoami", nil, nil)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var me struct {
+		Agent string `json:"agent"`
+	}
+	return resp.StatusCode == 200 && json.NewDecoder(resp.Body).Decode(&me) == nil && me.Agent == rq.Agent
 }
 
 // mcpRequestText renders a request for the model: cleaned server facts plus
@@ -876,7 +897,10 @@ func mcpRequestText(rq accessRequestView) string {
 		"paths: " + cleanList(rq.Paths, ", "),
 	}
 	if len(rq.GrantedPaths) > 0 {
-		lines = append(lines, "granted: "+cleanList(rq.GrantedPaths, ", ")+" until "+cleanServerText(rq.GrantExpiresAt))
+		lines = append(lines, "granted: "+cleanList(rq.GrantedPaths, ", ")+", "+grantedLimit(rq))
+	}
+	if rq.Note != "" {
+		lines = append(lines, "note: "+cleanServerText(rq.Note))
 	}
 	lines = append(lines, "next: "+requestNextHint(rq))
 	return strings.Join(lines, "\n")

@@ -160,6 +160,7 @@ type Handler struct {
 	logins     *loginTable // signed-in browsers (logins.go)
 	reveal     bool        // secret values may be shown and copied (secrets.go)
 	pingReveal bool        // doing so pings the owner (secrets.go)
+	cards      cardCache   // drawn request cards (requests.go)
 	mux        *http.ServeMux
 }
 
@@ -214,12 +215,11 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	}
 
 	pageTemplates := []string{
-		"templates/approvals.html",
 		"templates/audit.html",
-		"templates/grants.html",
 		"templates/login.html",
 		"templates/more.html",
 		"templates/overview.html",
+		"templates/requests.html",
 		"templates/roles.html",
 		"templates/secret.html",
 		"templates/secret_edit.html",
@@ -246,11 +246,7 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	h.mux.HandleFunc("POST /dashboard/login", h.handleLogin)
 	h.mux.HandleFunc("POST /dashboard/logout", h.requireAuth(h.handleLogout))
 	h.mux.HandleFunc("GET /dashboard/", h.requireAuth(h.handleOverview))
-	h.mux.HandleFunc("GET /dashboard/approvals", h.requireAuth(h.handleApprovals))
-	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/approve", h.requireAuth(h.handleAccessApprove))
-	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/deny", h.requireAuth(h.handleAccessDeny))
-	h.mux.HandleFunc("GET /dashboard/grants", h.requireAuth(h.handleGrants))
-	h.mux.HandleFunc("POST /dashboard/grants/{id}/revoke", h.requireAuth(h.handleGrantRevoke))
+	h.requestRoutes()
 	h.mux.HandleFunc("GET /dashboard/sessions", h.requireAuth(h.handleSessions))
 	h.mux.HandleFunc("POST /dashboard/sessions/{id}/revoke", h.requireAuth(h.handleRevoke))
 	h.mux.HandleFunc("POST /dashboard/logins/{id}/revoke", h.requireAuth(h.handleLoginRevoke))
@@ -282,6 +278,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "login.html", map[string]interface{}{
 		"Error": r.URL.Query().Get("error"),
+		"Next":  safeNext(r.URL.Query().Get("next")),
 	})
 }
 
@@ -293,7 +290,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDenied("dashboard", "dashboard.login", "rate_limited", clientIP, err.Error())
 		}
-		http.Redirect(w, r, "/dashboard/login?error="+escapeFlash(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/dashboard/login?error="+escapeFlash(err.Error())+nextParam(r), http.StatusSeeOther)
 		return
 	}
 
@@ -302,7 +299,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDenied("dashboard", "dashboard.login", "login", clientIP, "invalid_credentials")
 		}
-		http.Redirect(w, r, "/dashboard/login?error=invalid+credentials", http.StatusSeeOther)
+		http.Redirect(w, r, "/dashboard/login?error=invalid+credentials"+nextParam(r), http.StatusSeeOther)
 		return
 	}
 
@@ -352,7 +349,11 @@ func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, c
 		}
 	}
 
-	http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
+	to := "/dashboard/"
+	if next := safeNext(r.FormValue("next")); next != "" {
+		to = next
+	}
+	http.Redirect(w, r, to, http.StatusSeeOther)
 }
 
 // setLoginCookie sends a signed login cookie that lasts ttl.
@@ -410,7 +411,7 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 					h.deps.Audit.LogDenied("dashboard", "dashboard.auth", r.URL.Path, clientIP, err.Error())
 				}
 			}
-			http.Redirect(w, r, "/dashboard/login", http.StatusSeeOther)
+			http.Redirect(w, r, loginPath(r), http.StatusSeeOther)
 			return
 		}
 
@@ -540,18 +541,6 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"Uptime":          fmtAgo(h.deps.StartTime),
 		"RecentAudit":     recentAudit,
 		"SessionsEnabled": h.deps.Sessions != nil,
-	})
-}
-
-// handleApprovals shows the pending access requests (approvals.html).
-func (h *Handler) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	h.render(w, "approvals.html", map[string]interface{}{
-		"CSRF":        r.Header.Get("X-Csrf-Token"),
-		"Active":      "approvals",
-		"Flash":       r.URL.Query().Get("flash"),
-		"Error":       accessErrorMessage(r.URL.Query().Get("error")),
-		"AccessCards": h.accessCards(),
-		"AccessOn":    h.accessEnabled(),
 	})
 }
 

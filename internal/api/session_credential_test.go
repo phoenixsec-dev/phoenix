@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -272,6 +274,51 @@ func TestForceWithSameTokenKeepsSessions(t *testing.T) {
 	e.wantAlive("after --force with the same token", sess)
 }
 
+// publicRoutes need no login, or (the dashboard) have their own.
+var publicRoutes = []string{
+	"GET /v1/health", "GET /v1/ssh/ca", "GET /v1/ssh/window/{host}/{grant}",
+	"/dashboard/", "GET /dashboard", "GET /{$}",
+}
+
+var routeCall = regexp.MustCompile(`mux\.Handle(?:Func)?\(([^,]+),`)
+
+// wantRowPerRoute fails unless every route registered in this package's source
+// is public or is what some row in endpoints reaches. removed.go is skipped:
+// its routes only answer 410.
+func wantRowPerRoute(t *testing.T, endpoints [][3]string) {
+	t.Helper()
+	covered := slices.Clone(publicRoutes)
+	mux := newCredEnv(t).srv.mux
+	for _, ep := range endpoints {
+		_, pattern := mux.Handler(httptest.NewRequest(ep[0], ep[1], nil))
+		covered = append(covered, pattern)
+	}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, f := range files {
+		if f == "removed.go" || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range routeCall.FindAllStringSubmatch(string(src), -1) {
+			found++
+			pattern, err := strconv.Unquote(strings.TrimSpace(m[1]))
+			if err != nil || !slices.Contains(covered, pattern) {
+				t.Errorf("%s: route %s needs a row in the endpoint table, or in publicRoutes if it needs no login", f, m[1])
+			}
+		}
+	}
+	if found == 0 {
+		t.Error("found no routes in the source")
+	}
+}
+
 // Every endpoint a session reaches refuses one whose agent is gone or has
 // another token, even if the change did not come through a route that ends
 // sessions. Each endpoint gets a fresh session so none is spared the check.
@@ -298,7 +345,21 @@ func TestEveryEndpointChecksSessionCredential(t *testing.T) {
 		{"GET", "/v1/grants", ""},
 		{"POST", "/v1/ssh/sign", `{}`},
 		{"GET", "/v1/ssh/machines", ""},
+		{"POST", "/v1/agents", `{}`},
+		{"DELETE", "/v1/agents/other", ""},
+		{"GET", "/v1/agents/worker/seal-key", ""},
+		{"POST", "/v1/rotate-master", ""},
+		{"POST", "/v1/keypair", `{}`},
+		{"GET", "/v1/access-requests/req_x", ""},
+		{"POST", "/v1/access-requests/req_x/approve", `{}`},
+		{"POST", "/v1/access-requests/req_x/deny", `{}`},
+		{"POST", "/v1/grants/gnt_x/revoke", ""},
+		{"POST", "/v1/access-requests/req_x/approve-limited", `{}`},
+		{"POST", "/v1/resolve-approved", `{"refs":["phoenix://test/a"]}`},
+		{"PATCH", "/v1/agents/worker/identity", `{}`},
+		{"PATCH", "/v1/metadata/test/a", `{}`},
 	}
+	wantRowPerRoute(t, endpoints)
 	changes := map[string]func(e *credEnv) error{
 		"deleted":  func(e *credEnv) error { return e.srv.acl.RemoveAgent("worker") },
 		"replaced": func(e *credEnv) error { return e.srv.acl.UpdateAgent("worker", "new-token", nil) },
