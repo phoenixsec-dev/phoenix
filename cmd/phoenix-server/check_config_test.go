@@ -39,6 +39,10 @@ func TestRunCheckConfig(t *testing.T) {
 	}
 
 	write(policyPath, `{"attestation": {"a/*": {"source_ip": ["10.0.0.1"]}}}`)
+	if err := runCheckConfig(cfgPath); err == nil || !strings.Contains(err.Error(), "acl.json is not there") {
+		t.Fatalf("no ACL file: %v", err)
+	}
+	write(filepath.Join(dir, "acl.json"), `{"agents": {}}`)
 	if err := runCheckConfig(cfgPath); err != nil {
 		t.Fatalf("clean config: %v", err)
 	}

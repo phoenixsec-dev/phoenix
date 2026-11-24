@@ -154,6 +154,11 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
+	// Before anything is made, lock files included, where data is missing.
+	if err := refuseMissingData(cfg); err != nil {
+		log.Fatalf("not starting: %v", err)
+	}
+
 	// Before anything is opened: opening a data file can already write to it.
 	locks, err := lockDataFiles(cfg, log.Printf)
 	if err != nil {
@@ -425,7 +430,10 @@ func runCheckConfig(path string) error {
 			fmt.Printf("policy OK: %s (%d rules)\n", cfg.Policy.Path, len(pe.Rules()))
 		}
 	}
-	if cfg.ACL.Path != "" {
+	if err := refuseMissingData(cfg); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.ACL.Path != "" && !missing(cfg.ACL.Path) {
 		a, err := acl.New(cfg.ACL.Path)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("acl %s: %w", cfg.ACL.Path, err))

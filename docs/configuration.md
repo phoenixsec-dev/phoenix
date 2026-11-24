@@ -194,6 +194,20 @@ undo each other's writes. The same goes for an older server's `rotate-master` or
 `--protect-key`. Stop the old server before you start the new one on its files; to
 roll back, stop the new one before you start the old one.
 
+## A missing store or access list
+
+The server refuses to start, and `--check-config` fails, when `acl.path` is not
+there, or `store.path` is not there although there was a store before. Both look the
+same as an unmounted volume or a wrong path, and the next write would put an empty
+file in the place of the real one. Mount it, fix the path, or restore a backup; the
+message also says how to start empty on purpose.
+
+`phoenix-server --init` makes the access list, so it is always there. A new install
+has no store until the first secret. The audit log and its archives tell that apart:
+a line about a secret that was written, handed over, changed or deleted means there
+was a store. If you delete audit archives, log to something that is not a file, or
+lose the log together with the store, the server cannot know and starts empty.
+
 ## Audit log rotation
 
 When `audit.log` passes `audit.rotate_mb` (default 50), Phoenix renames it to a

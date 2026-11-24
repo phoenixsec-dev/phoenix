@@ -164,6 +164,12 @@ that dies halfway can do to it. Nothing to configure; what changed:
   it again (a restart before that may bring the old token back). Replacing your own
   token is undone instead, or nobody could run it again. Access that was taken away
   but not saved, such as a removed Always, is saved by itself once the disk works.
+- **A missing `store.json` or `acl.json` looked like a healthy start** with no
+  secrets or no agents, and the next write made an empty file in its place. The server
+  (and `--check-config`) now refuses, names the file and says what to do. A new
+  install still starts: it has no `store.json` until the first secret, and is told
+  apart by the audit log, which then has no line about a secret that was written or
+  handed over.
 - **The server did not start on a full disk** (since v0.23.0), because it rewrote
   `role-sessions.json` at every start. It now writes only what changed, and starts
   with a `WARNING` if that fails: ended sessions stay ended, and the save is
