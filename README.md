@@ -91,7 +91,9 @@ go build -o bin/ ./cmd/...
 phoenix-server --init ~/.phoenix
 ```
 
-Save the printed admin token immediately — it is only shown once.
+It asks for a dashboard password (Enter generates one and shows it) and prints
+the admin token. What it prints is shown only once, so save it immediately. Run
+it yourself, not through an agent.
 
 ### 3. Start the server
 
@@ -110,8 +112,11 @@ phoenix set myapp/api-key -d "API key"   # paste at the hidden prompt
 phoenix exec --env API_KEY=phoenix://myapp/api-key -- env | grep API_KEY
 ```
 
+Answer agents' requests at `http://127.0.0.1:9090/dashboard/`, signed in with the
+dashboard password.
+
 Prefer Docker? See [Quickstart](docs/quickstart.md) for the two-minute
-Docker path (`docker run ... --init /data`, then `docker exec`).
+Docker path (`docker run ... --init /data --https`, then `docker exec`).
 
 > The default server config listens on `127.0.0.1:9090` over plain HTTP.
 > That is the supported default — loopback traffic never touches the network.

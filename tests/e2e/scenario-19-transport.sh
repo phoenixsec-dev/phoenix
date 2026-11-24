@@ -54,7 +54,7 @@ run_expect_warning() {
   [[ "$rc" -ne 0 ]] || die "server unexpectedly bound a TEST-NET-1 address"
 }
 
-config_patch "d['server']['listen']='192.0.2.1:$PORT'"
+config_patch "d['server']['listen']='192.0.2.1:$PORT'; d['dashboard']={'enabled': False}"
 run_expect_warning "$RUN_DIR/warn.log"
 warn_log="$(cat "$RUN_DIR/warn.log")"
 assert_contains "$warn_log" "INSECURE TRANSPORT: PLAINTEXT HTTP ON A NON-LOOPBACK ADDRESS" "non-loopback plaintext must warn"

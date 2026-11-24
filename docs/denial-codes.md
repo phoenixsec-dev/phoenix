@@ -87,7 +87,7 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | Code | HTTP | `next_step` | When |
 |---|---|---|---|
 | `ACL_DENIED` | 403 | `request_use` if requestable, else `ask_user` | The identity's ACL does not allow the action on this path and no grant covers it |
-| `GRANT_EXPIRED` | 403 | `request_use` if requestable, else `ask_user` | A grant for this path ended by time in the last 24h |
+| `GRANT_EXPIRED` | 403 | `request_use` if requestable, else `ask_user` | A grant for this path ran out of time, or of uses, in the last 24h |
 | `GRANT_REVOKED` | 403 | `ask_user` | A human revoked the grant for this path in the last 24h |
 | `SSH_GRANT_REQUIRED` | 403 | `request_use` | `POST /v1/ssh/sign` with no approval for this machine. See [SSH certificates](ssh-certificates.md) |
 | `ATTESTATION_REQUIRED` | 403 | `ask_user` | The path's attestation policy (`source_ip`, `require_sealed`) was not met |
@@ -145,6 +145,9 @@ Returned by `/v1/access-requests*` and `/v1/grants*` (see
 | `AUDIT_WRITE_FAILED` | 500 | `ask_user` | The audit log refused the "attempt" line; nothing changed |
 | `STORE_WRITE_FAILED` | 500 | `ask_user` | The grants file could not be saved; nothing changed |
 | `REVOKE_NOT_DURABLE` | 500 | `ask_user` | Revoked in memory (denies at once) but not saved; fix the disk, retry, or rotate the secret |
+| `CREDENTIAL_CHANGED` | 409 | `ask_user` | Approval refused: the agent's token was replaced after it asked |
+| `ALWAYS_NOT_ALLOWED` | 400 | `none` | "Always" for a request that has none (an SSH login) |
+| `ACL_WRITE_FAILED` | 500 | `ask_user` | The agent's access list could not be saved; nothing changed |
 | `AGENT_DELETE_ACL_FAILED` | 500 | `ask_user` | Agent delete revoked the grants but could not remove the ACL entry |
 
 ## Compatibility

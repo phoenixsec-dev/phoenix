@@ -14,7 +14,7 @@
 - Attestation policy engine (IP binding, sealed requirements)
 - Session identity — role-based, short-lived session tokens with auto-renewal
 - Access requests and grants — an agent asks, a human approves exact paths for a limited time
-- Operator dashboard — browser-based approval, session, audit, and role management
+- Operator dashboard — browser-based secrets, approval, session, audit, and role management
 - Go SDK with session support
 - 1Password broker backend (read-only)
 - Import from `.env` files and 1Password

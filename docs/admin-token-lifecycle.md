@@ -12,7 +12,8 @@ When init prints:
 <token>
 ```
 
-Immediately move it into a secure store:
+Immediately move it into a secure store (and the `DASHBOARD PASSWORD`, if init
+generated one, in an entry agents cannot read):
 
 - password manager entry (recommended)
 - encrypted secrets vault

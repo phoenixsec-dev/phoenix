@@ -11,7 +11,7 @@ type SecretBackend interface {
 	// Get retrieves a decrypted secret by path.
 	Get(path string) (*Secret, error)
 
-	// Metadata returns a secret's description, tags, times and authors
+	// Metadata returns a secret's description, tags, login, times and authors
 	// without reading or decrypting its value. It must be cheap: the API
 	// calls it once per listed path. It may skip the existence check
 	// (1Password does); callers that need one use List.
@@ -22,6 +22,15 @@ type SecretBackend interface {
 
 	// Set creates or updates a secret. Returns ErrReadOnly for read-only backends.
 	Set(path, value, createdBy, description string, tags []string) error
+
+	// Write stores a value together with metadata changes, optionally only
+	// if the secret is new or only if it exists (WriteMode). Returns
+	// ErrReadOnly for read-only backends.
+	Write(path, value, by string, ch MetadataChange, mode WriteMode) error
+
+	// Describe changes metadata of an existing secret without reading or
+	// writing its value. Returns ErrReadOnly for read-only backends.
+	Describe(path string, ch MetadataChange) error
 
 	// Delete removes a secret. Returns ErrReadOnly for read-only backends.
 	Delete(path string) error

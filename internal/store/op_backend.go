@@ -186,6 +186,16 @@ func (b *OPBackend) Set(path, value, createdBy, description string, tags []strin
 	return ErrReadOnly
 }
 
+// Write is not supported — 1Password backend is read-only.
+func (b *OPBackend) Write(path, value, by string, ch MetadataChange, mode WriteMode) error {
+	return ErrReadOnly
+}
+
+// Describe is not supported — 1Password backend is read-only.
+func (b *OPBackend) Describe(path string, ch MetadataChange) error {
+	return ErrReadOnly
+}
+
 // Delete is not supported — 1Password backend is read-only.
 func (b *OPBackend) Delete(path string) error {
 	return ErrReadOnly

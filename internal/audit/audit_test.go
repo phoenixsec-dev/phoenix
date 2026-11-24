@@ -22,7 +22,7 @@ func TestLogAndQuery(t *testing.T) {
 	}
 	defer logger.Close()
 
-	logger.LogAllowed("vector", "read", "openclaw/api-key", "192.0.2.12")
+	logger.LogAllowed("deployer", "read", "openclaw/api-key", "192.0.2.12")
 	logger.LogDenied("openclaw", "read", "proxmox/admin", "192.0.2.11", "acl")
 	logger.LogAllowed("admin", "write", "monitoring/grafana", "192.0.2.10")
 
@@ -36,12 +36,12 @@ func TestLogAndQuery(t *testing.T) {
 	}
 
 	// Query by agent
-	entries, err = Query(logPath, QueryOptions{Agent: "vector"})
+	entries, err = Query(logPath, QueryOptions{Agent: "deployer"})
 	if err != nil {
 		t.Fatalf("Query by agent: %v", err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry for vector, got %d", len(entries))
+		t.Fatalf("expected 1 entry for deployer, got %d", len(entries))
 	}
 	if entries[0].Status != "allowed" {
 		t.Fatalf("expected 'allowed', got %q", entries[0].Status)

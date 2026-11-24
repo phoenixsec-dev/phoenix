@@ -132,6 +132,8 @@ type env struct {
 	fs    *faultFS
 	path  string
 
+	always AlwaysRules // nil = none, as in a store without an access list
+
 	aclMu sync.Mutex
 	gone  map[string]bool   // agents removed from the ACL
 	hook  func(name string) // optional; runs inside AgentExists before the answer
@@ -156,7 +158,7 @@ func (e *env) reopen() *Store {
 	e.t.Helper()
 	s, err := Open(Options{
 		Path: e.path, FS: e.fs, Audit: e.sink, Now: e.clock.Now,
-		AgentExists: e.exists, Logf: e.t.Logf,
+		AgentExists: e.exists, Always: e.always, Logf: e.t.Logf,
 	})
 	if err != nil {
 		e.t.Fatal(err)

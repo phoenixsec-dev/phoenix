@@ -55,9 +55,32 @@ func newLoginRateLimiter() *loginRateLimiter {
 	return rl
 }
 
-func (rl *loginRateLimiter) check(ip string) error {
+// admit lets one password attempt through for every key (an address, or a
+// login), or says how long to wait. It counts the attempt as failed right
+// away; recordSuccess takes that back. Checking and counting are one step, so
+// parallel guesses cannot all get in before the first failure counts.
+func (rl *loginRateLimiter) admit(keys ...string) error {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	for _, k := range keys {
+		if err := rl.checkLocked(k); err != nil {
+			return err
+		}
+	}
+	for _, k := range keys {
+		e, ok := rl.entries[k]
+		if !ok {
+			e = &loginRateEntry{}
+			rl.entries[k] = e
+		}
+		e.failures++
+		e.blockedAt = time.Now()
+	}
+	return nil
+}
+
+// checkLocked reports whether key must wait. Caller holds rl.mu.
+func (rl *loginRateLimiter) checkLocked(ip string) error {
 	e, ok := rl.entries[ip]
 	if !ok || e.failures < loginMaxFailures {
 		return nil
@@ -76,22 +99,13 @@ func (rl *loginRateLimiter) check(ip string) error {
 	return nil
 }
 
-func (rl *loginRateLimiter) recordFailure(ip string) {
+// recordSuccess clears the count for each key after a right password.
+func (rl *loginRateLimiter) recordSuccess(keys ...string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	e, ok := rl.entries[ip]
-	if !ok {
-		e = &loginRateEntry{}
-		rl.entries[ip] = e
+	for _, k := range keys {
+		delete(rl.entries, k)
 	}
-	e.failures++
-	e.blockedAt = time.Now()
-}
-
-func (rl *loginRateLimiter) recordSuccess(ip string) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	delete(rl.entries, ip)
 }
 
 func (rl *loginRateLimiter) cleanupLoop() {
@@ -141,6 +155,8 @@ type Handler struct {
 	sessionTTL time.Duration
 	loginRL    *loginRateLimiter
 	logins     *loginTable    // signed-in browsers (logins.go)
+	reveal     bool           // secret values may be shown and copied (secrets.go)
+	cards      cardCache      // drawn request cards (requests.go)
 	trusted    []netip.Prefix // reverse proxies whose headers count (clientip.go)
 	hints      proxyHints
 	mux        *http.ServeMux
@@ -167,6 +183,7 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		sessionTTL: 4 * time.Hour,
 		loginRL:    newLoginRateLimiter(),
 		logins:     newLoginTable(),
+		reveal:     cfg.RevealEnabled(),
 		mux:        http.NewServeMux(),
 	}
 
@@ -201,12 +218,15 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	}
 
 	pageTemplates := []string{
-		"templates/approvals.html",
 		"templates/audit.html",
-		"templates/grants.html",
 		"templates/login.html",
+		"templates/more.html",
 		"templates/overview.html",
+		"templates/requests.html",
 		"templates/roles.html",
+		"templates/secret.html",
+		"templates/secret_edit.html",
+		"templates/secrets.html",
 		"templates/sessions.html",
 	}
 	h.tmpls = make(map[string]*template.Template, len(pageTemplates))
@@ -229,17 +249,16 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 	h.mux.HandleFunc("POST /dashboard/login", h.handleLogin)
 	h.mux.HandleFunc("POST /dashboard/logout", h.requireAuth(h.handleLogout))
 	h.mux.HandleFunc("GET /dashboard/", h.requireAuth(h.handleOverview))
-	h.mux.HandleFunc("GET /dashboard/approvals", h.requireAuth(h.handleApprovals))
-	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/approve", h.requireAuth(h.handleAccessApprove))
-	h.mux.HandleFunc("POST /dashboard/access-requests/{id}/deny", h.requireAuth(h.handleAccessDeny))
-	h.mux.HandleFunc("GET /dashboard/grants", h.requireAuth(h.handleGrants))
-	h.mux.HandleFunc("POST /dashboard/grants/{id}/revoke", h.requireAuth(h.handleGrantRevoke))
+	h.requestRoutes()
 	h.mux.HandleFunc("GET /dashboard/sessions", h.requireAuth(h.handleSessions))
 	h.mux.HandleFunc("POST /dashboard/sessions/{id}/revoke", h.requireAuth(h.handleRevoke))
 	h.mux.HandleFunc("POST /dashboard/logins/{id}/revoke", h.requireAuth(h.handleLoginRevoke))
 	h.mux.HandleFunc("GET /dashboard/audit", h.requireAuth(h.handleAudit))
 	h.mux.HandleFunc("GET /dashboard/roles", h.requireAuth(h.handleRoles))
+	h.mux.HandleFunc("GET /dashboard/more", h.requireAuth(h.handleMore))
 	h.mux.Handle("GET /dashboard/static/", http.StripPrefix("/dashboard/static/", staticHandler))
+	h.appRoutes()
+	h.secretRoutes()
 
 	return h, nil
 }
@@ -247,7 +266,16 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.hints.check(r, h.trusted)
-	h.mux.ServeHTTP(w, withClient(r, h.trusted))
+	r = withClient(r, h.trusted)
+	setSecurityHeaders(w, r)
+	if r.Method == http.MethodPost && !sameOrigin(r) {
+		if h.deps.Audit != nil {
+			h.deps.Audit.LogDenied("dashboard", "dashboard.csrf", r.URL.Path, extractClientIP(r), "cross_site_request")
+		}
+		http.Error(w, "This request came from another site", http.StatusForbidden)
+		return
+	}
+	h.mux.ServeHTTP(w, r)
 }
 
 // --- Auth ---
@@ -255,6 +283,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "login.html", map[string]interface{}{
 		"Error": r.URL.Query().Get("error"),
+		"Next":  safeNext(r.URL.Query().Get("next")),
 	})
 }
 
@@ -262,21 +291,20 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 
 	// Rate limit check
-	if err := h.loginRL.check(clientIP); err != nil {
+	if err := h.loginRL.admit(clientIP); err != nil {
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDenied("dashboard", "dashboard.login", "rate_limited", clientIP, err.Error())
 		}
-		http.Redirect(w, r, "/dashboard/login?error="+escapeFlash(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/dashboard/login?error="+escapeFlash(err.Error())+nextParam(r), http.StatusSeeOther)
 		return
 	}
 
 	credential := r.FormValue("credential")
 	if !h.checkCredential(credential) {
-		h.loginRL.recordFailure(clientIP)
 		if h.deps.Audit != nil {
 			h.deps.Audit.LogDenied("dashboard", "dashboard.login", "login", clientIP, "invalid_credentials")
 		}
-		http.Redirect(w, r, "/dashboard/login?error=invalid+credentials", http.StatusSeeOther)
+		http.Redirect(w, r, "/dashboard/login?error=invalid+credentials"+nextParam(r), http.StatusSeeOther)
 		return
 	}
 
@@ -300,6 +328,41 @@ func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 
+	h.setLoginCookie(w, r, cookie, h.sessionTTL)
+
+	ua := r.UserAgent()
+	if len(ua) > 256 {
+		ua = ua[:256]
+	}
+	id := randomHex(8)
+	evicted := h.logins.add(&dashLogin{
+		ID:        id,
+		nonce:     nonce,
+		Device:    describeDevice(ua),
+		UserAgent: ua,
+		IP:        clientIP,
+		Started:   now,
+		authAt:    now,
+		LastUsed:  now,
+		Expires:   time.Unix(payload.Exp, 0),
+	}, now)
+
+	if h.deps.Audit != nil {
+		h.deps.Audit.LogAllowedWithMetadata("dashboard@"+clientIP, auditAction, "login", clientIP, map[string]string{"dashboard.login": id})
+		if evicted != nil {
+			h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.login_evicted", evicted.ID, evicted.IP)
+		}
+	}
+
+	to := "/dashboard/"
+	if next := safeNext(r.FormValue("next")); next != "" {
+		to = next
+	}
+	http.Redirect(w, r, to, http.StatusSeeOther)
+}
+
+// setLoginCookie sends a signed login cookie that lasts ttl.
+func (h *Handler) setLoginCookie(w http.ResponseWriter, r *http.Request, cookie string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "phoenix_dash",
 		Value:    cookie,
@@ -307,32 +370,8 @@ func (h *Handler) mintDashboardSession(w http.ResponseWriter, r *http.Request, c
 		HttpOnly: true,
 		Secure:   isTLS(r),
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(h.sessionTTL.Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 	})
-
-	ua := r.UserAgent()
-	if len(ua) > 256 {
-		ua = ua[:256]
-	}
-	evicted := h.logins.add(&dashLogin{
-		ID:        randomHex(8),
-		nonce:     nonce,
-		Device:    describeDevice(ua),
-		UserAgent: ua,
-		IP:        clientIP,
-		Started:   now,
-		LastUsed:  now,
-		Expires:   time.Unix(payload.Exp, 0),
-	}, now)
-
-	if h.deps.Audit != nil {
-		h.deps.Audit.LogAllowed("dashboard@"+clientIP, auditAction, "login", clientIP)
-		if evicted != nil {
-			h.deps.Audit.LogAllowed("dashboard@"+clientIP, "dashboard.login_evicted", evicted.ID, evicted.IP)
-		}
-	}
-
-	http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
 }
 
 // checkCredential verifies the dashboard password against its bcrypt hash.
@@ -377,7 +416,7 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 					h.deps.Audit.LogDenied("dashboard", "dashboard.auth", r.URL.Path, clientIP, err.Error())
 				}
 			}
-			http.Redirect(w, r, "/dashboard/login", http.StatusSeeOther)
+			http.Redirect(w, r, loginPath(r), http.StatusSeeOther)
 			return
 		}
 
@@ -510,18 +549,6 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleApprovals shows the pending access requests (approvals.html).
-func (h *Handler) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	h.render(w, "approvals.html", map[string]interface{}{
-		"CSRF":        r.Header.Get("X-Csrf-Token"),
-		"Active":      "approvals",
-		"Flash":       r.URL.Query().Get("flash"),
-		"Error":       accessErrorMessage(r.URL.Query().Get("error")),
-		"AccessCards": h.accessCards(),
-		"AccessOn":    h.accessEnabled(),
-	})
-}
-
 func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	var sessions []*session.Session
 	if h.deps.Sessions != nil {
@@ -622,9 +649,10 @@ func (h *Handler) handleLoginRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
-	agentFilter := r.URL.Query().Get("agent")
-	statusFilter := r.URL.Query().Get("status")
-	limitStr := r.URL.Query().Get("limit")
+	q := r.URL.Query()
+	agentFilter := q.Get("agent")
+	statusFilter := q.Get("status")
+	limitStr := q.Get("limit")
 
 	limit := 50
 	switch limitStr {
@@ -637,7 +665,13 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 	// Status is filtered inside the search, so a page of "denied" holds
 	// `limit` denied entries rather than the denied ones among the newest
 	// `limit` of everything.
-	opts := audit.QueryOptions{Limit: limit, Agent: agentFilter, Status: statusFilter}
+	opts := audit.QueryOptions{
+		Limit: limit, Agent: agentFilter, Status: statusFilter,
+		Who: q.Get("who"), Host: q.Get("host"), Authority: q.Get("authority"),
+	}
+	if h.deps.ACL != nil && agentFilter != "" {
+		opts.FormerAgents = h.deps.ACL.FormerNames(agentFilter)
+	}
 	var res audit.Result
 	if h.deps.AuditPath != "" {
 		res, _ = audit.Search(h.deps.AuditPath, opts)
@@ -650,14 +684,18 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "audit.html", map[string]interface{}{
-		"CSRF":         r.Header.Get("X-Csrf-Token"),
-		"Active":       "audit",
-		"Entries":      entries,
-		"AgentFilter":  agentFilter,
-		"StatusFilter": statusFilter,
-		"Limit":        limit,
-		"Truncated":    res.Truncated,
-		"ScanMB":       audit.DefaultMaxScanBytes >> 20,
+		"CSRF":            r.Header.Get("X-Csrf-Token"),
+		"Active":          "audit",
+		"Entries":         entries,
+		"AgentFilter":     agentFilter,
+		"FormerAgents":    opts.FormerAgents,
+		"WhoFilter":       opts.Who,
+		"HostFilter":      opts.Host,
+		"AuthorityFilter": opts.Authority,
+		"StatusFilter":    statusFilter,
+		"Limit":           limit,
+		"Truncated":       res.Truncated,
+		"ScanMB":          audit.DefaultMaxScanBytes >> 20,
 	})
 }
 

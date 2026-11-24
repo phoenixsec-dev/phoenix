@@ -3,7 +3,7 @@
 // Usage:
 //
 //	phoenix-server [--config /data/config.json]
-//	phoenix-server --init /data  (first-time setup)
+//	phoenix-server --init /data [--https]  (first-time setup)
 //	phoenix-server --reissue-cert --san <ip-or-host> [--san ...] --config /data/config.json
 package main
 
@@ -20,8 +20,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/api"
@@ -53,6 +51,7 @@ func (s *sanList) Set(v string) error {
 func main() {
 	configPath := flag.String("config", "", "Path to config file (default: /data/config.json)")
 	initDir := flag.String("init", "", "Initialize a new Phoenix data directory")
+	initHTTPS := flag.Bool("https", false, "With --init: turn on the HTTPS address (0.0.0.0:9443) in the new config")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	passphraseStdin := flag.Bool("passphrase-stdin", false, "Read master key passphrase from stdin")
 	flag.String("passphrase", "", "Removed: use --passphrase-stdin or PHOENIX_MASTER_PASSPHRASE")
@@ -67,6 +66,11 @@ func main() {
 	if flagSet("passphrase") {
 		fmt.Fprintln(os.Stderr, "phoenix-server --passphrase was removed: a passphrase on the command line is visible to every user in the process list and lands in shell history. "+
 			"Pipe it in with --passphrase-stdin, or set PHOENIX_MASTER_PASSPHRASE.")
+		os.Exit(2)
+	}
+
+	if *initHTTPS && *initDir == "" {
+		fmt.Fprintln(os.Stderr, "phoenix-server --https only works together with --init; for an existing install set https_listener.enabled to true in its config.")
 		os.Exit(2)
 	}
 
@@ -97,11 +101,20 @@ func main() {
 	}
 
 	if *initDir != "" {
+		// Checked before any question is asked; runInit checks again.
+		if err := refuseExisting(*initDir); err != nil {
+			log.Fatalf("init failed: %v", err)
+		}
 		passphrase, err := initPassphrase(*passphraseStdin)
 		if err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
-		if err := runInit(*initDir, passphrase); err != nil {
+		password, generated, err := initDashboardPassword()
+		if err != nil {
+			log.Fatalf("init failed: %v", err)
+		}
+		opts := initOptions{Passphrase: passphrase, DashboardPassword: password, ShowPassword: generated, HTTPS: *initHTTPS}
+		if err := runInit(*initDir, opts); err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
 		return
@@ -426,7 +439,38 @@ func initPassphrase(stdin bool) (string, error) {
 	return crypto.ReadPassphrase(stdin)
 }
 
-func runInit(dir, passphrase string) error {
+// initOptions is what --init was asked for.
+type initOptions struct {
+	Passphrase        string // protects the master key; empty = unprotected
+	DashboardPassword string // stored only as a bcrypt hash
+	ShowPassword      bool   // print it once (it was generated)
+	HTTPS             bool   // write https_listener switched on
+}
+
+// refuseExisting stops --init on a directory that already has any file it would
+// write, or a store: a key, store, CA or config there is one nobody can make
+// again. Lstat, so a link that leads nowhere counts.
+func refuseExisting(dir string) error {
+	for _, name := range []string{"master.key", "store.json", "acl.json", "config.json", "ca.crt", "ca.key", "server.crt", "server.key"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("%s already exists — refusing to overwrite. --init is for a new directory; "+
+				"to start over, move the old files away first", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// runInit is --init: it fills dir with everything a first start needs (master
+// key, admin token, CA and certificate, config with the dashboard on).
+func runInit(dir string, opts initOptions) error {
+	// First, so a password that cannot be used leaves nothing half made.
+	passwordHash, err := hashDashboardPassword(opts.DashboardPassword)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
@@ -442,26 +486,18 @@ func runInit(dir, passphrase string) error {
 		log.Printf("WARNING: cannot lock %s: %v", dir, err)
 	}
 
-	// Never replace anything, not only the key: a store, CA or config here is
-	// one nobody can make again. Lstat, so a link that leads nowhere counts.
-	for _, name := range []string{"master.key", "store.json", "acl.json", "config.json", "ca.crt", "ca.key", "server.crt", "server.key"} {
-		path := filepath.Join(dir, name)
-		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("%s already exists — refusing to overwrite. --init is for a new directory; "+
-				"to start over, move the old files away first", path)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	if err := refuseExisting(dir); err != nil {
+		return err
 	}
 
 	// Generate master key
 	keyPath := filepath.Join(dir, "master.key")
-	if passphrase != "" {
+	if opts.Passphrase != "" {
 		key, err := crypto.GenerateKey()
 		if err != nil {
 			return fmt.Errorf("generating master key: %w", err)
 		}
-		if err := crypto.SaveProtectedMasterKey(keyPath, key, passphrase); err != nil {
+		if err := crypto.SaveProtectedMasterKey(keyPath, key, opts.Passphrase); err != nil {
 			return fmt.Errorf("saving protected master key: %w", err)
 		}
 		fmt.Printf("Generated passphrase-protected master key: %s\n", keyPath)
@@ -529,18 +565,23 @@ func runInit(dir, passphrase string) error {
 	cfg.Store.MasterKey = keyPath
 	cfg.ACL.Path = aclPath
 	cfg.Audit.Path = filepath.Join(dir, "audit.log")
-	// HTTPS is written off: turning it on is one setting ("enabled": true)
-	// once clients have ca.crt. --reissue-cert uses ca_cert/ca_key.
+	// Without --https this is written off: turning it on is one setting
+	// ("enabled": true) once clients have ca.crt. --reissue-cert uses
+	// ca_cert/ca_key.
 	cfg.HTTPSListener = config.HTTPSListenerConfig{
-		Listen: "0.0.0.0:9443",
-		Cert:   serverCertPath,
-		Key:    serverKeyPath,
-		CACert: caCertPath,
-		CAKey:  caKeyPath,
+		Enabled: opts.HTTPS,
+		Listen:  "0.0.0.0:9443",
+		Cert:    serverCertPath,
+		Key:     serverKeyPath,
+		CACert:  caCertPath,
+		CAKey:   caKeyPath,
 	}
 	// New installs get request-use grants switched on (plan Q1); configs
 	// written before this release have no block and stay off.
 	cfg.AccessRequests = config.NewInstallAccessRequests()
+	// On, so there is somebody who can answer those requests.
+	cfg.Dashboard.Enabled = true
+	cfg.Dashboard.PasswordHash = passwordHash
 
 	cfgData, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -551,8 +592,18 @@ func runInit(dir, passphrase string) error {
 	}
 	fmt.Printf("Created config: %s\n", cfgPath)
 
+	if opts.ShowPassword {
+		fmt.Printf("\n*** DASHBOARD PASSWORD (save this — it won't be shown again): ***\n%s\n", opts.DashboardPassword)
+	}
+
 	fmt.Println("\nPhoenix initialized. Start the server with:")
 	fmt.Printf("  phoenix-server --config %s\n", cfgPath)
+	dashURL := "http://" + cfg.Server.Listen
+	if opts.HTTPS {
+		dashURL = "https://127.0.0.1:9443"
+	}
+	fmt.Printf("Then sign in at %s/dashboard/ to answer agents' requests.\n", dashURL)
+	fmt.Println("Keep the dashboard password and the admin token away from agents.")
 
 	return nil
 }
@@ -652,11 +703,11 @@ func runHashPassword() error {
 	if pass != confirm {
 		return fmt.Errorf("passwords do not match")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	hash, err := hashDashboardPassword(pass)
 	if err != nil {
-		return fmt.Errorf("generating hash: %w", err)
+		return err
 	}
-	fmt.Println(string(hash))
+	fmt.Println(hash)
 	return nil
 }
 
@@ -708,8 +759,9 @@ func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger) (*grant.St
 	}
 	set := cfg.AccessRequestsSettings()
 	return grant.Open(grant.Options{
-		Path:  set.StorePath,
-		Audit: api.NewGrantAuditSink(al),
+		Path:   set.StorePath,
+		Audit:  api.NewGrantAuditSink(al),
+		Always: api.NewAlwaysRules(a),
 		AgentExists: func(name string) bool {
 			_, err := a.GetAgent(name)
 			return err == nil

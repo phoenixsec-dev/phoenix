@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/fsutil"
@@ -40,11 +41,17 @@ var chunkSize = 64 << 10
 
 // QueryOptions filters a query. Empty fields match everything.
 type QueryOptions struct {
-	Since  *time.Time
-	Agent  string
-	Path   string
-	Status string // "allowed" or "denied"
-	Limit  int    // newest N matches; 0 = every match within the scan cap
+	Since *time.Time
+	Agent string
+	// FormerAgents are older names that count as Agent too (an identity's
+	// formerly list). Ignored when Agent is empty.
+	FormerAgents []string
+	Who          string
+	Host         string
+	Authority    string
+	Path         string
+	Status       string // "allowed" or "denied"
+	Limit        int    // newest N matches; 0 = every match within the scan cap
 	// MaxScanBytes caps how much log the query reads; 0 = DefaultMaxScanBytes.
 	MaxScanBytes int64
 }
@@ -249,7 +256,8 @@ func lineTime(line []byte) (time.Time, bool) {
 // matcher applies QueryOptions to lines and entries.
 type matcher struct {
 	opts    QueryOptions
-	needles [][]byte // `"agent":"x"` etc.; a matching line contains them all
+	needles [][]byte // `"path":"x"` etc.; a matching line contains them all
+	agents  [][]byte // `"agent":"x"` per accepted name; it contains at least one
 }
 
 // newMatcher builds the needles for the cheap byte prefilter. Every writer
@@ -257,16 +265,24 @@ type matcher struct {
 // line exactly as `"field":` followed by json.Marshal(v).
 func newMatcher(opts QueryOptions) matcher {
 	m := matcher{opts: opts}
-	add := func(field, v string) {
-		if v == "" {
-			return
-		}
+	needle := func(field, v string) []byte {
 		b, _ := json.Marshal(v)
-		m.needles = append(m.needles, append([]byte(`"`+field+`":`), b...))
+		return append([]byte(`"`+field+`":`), b...)
 	}
-	add("agent", opts.Agent)
-	add("path", opts.Path)
-	add("status", opts.Status)
+	for _, f := range [][2]string{
+		{"who", opts.Who}, {"host", opts.Host}, {"authority", opts.Authority},
+		{"path", opts.Path}, {"status", opts.Status},
+	} {
+		if f[1] != "" {
+			m.needles = append(m.needles, needle(f[0], f[1]))
+		}
+	}
+	if opts.Agent != "" {
+		m.agents = append(m.agents, needle("agent", opts.Agent))
+		for _, name := range opts.FormerAgents {
+			m.agents = append(m.agents, needle("agent", name))
+		}
+	}
 	return m
 }
 
@@ -278,14 +294,19 @@ func (m matcher) maybe(line []byte) bool {
 			return false
 		}
 	}
-	return true
+	return len(m.agents) == 0 || slices.ContainsFunc(m.agents, func(n []byte) bool {
+		return bytes.Contains(line, n)
+	})
 }
 
 // match is the exact check on a decoded entry.
 func (m matcher) match(e Entry) bool {
 	o := m.opts
 	return (o.Since == nil || !e.Timestamp.Before(*o.Since)) &&
-		(o.Agent == "" || e.Agent == o.Agent) &&
+		(o.Agent == "" || e.Agent == o.Agent || slices.Contains(o.FormerAgents, e.Agent)) &&
+		(o.Who == "" || e.Who == o.Who) &&
+		(o.Host == "" || e.Host == o.Host) &&
+		(o.Authority == "" || e.Authority == o.Authority) &&
 		(o.Path == "" || e.Path == o.Path) &&
 		(o.Status == "" || e.Status == o.Status)
 }

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 )
@@ -70,6 +71,9 @@ const (
 	CodeStoreWriteFailed     = "STORE_WRITE_FAILED"
 	CodeRevokeNotDurable     = "REVOKE_NOT_DURABLE"
 	CodeAgentDeleteACLFailed = "AGENT_DELETE_ACL_FAILED"
+	CodeCredentialChanged    = "CREDENTIAL_CHANGED"
+	CodeAlwaysNotAllowed     = "ALWAYS_NOT_ALLOWED"
+	CodeACLWriteFailed       = "ACL_WRITE_FAILED"
 )
 
 // denialNextStep maps every code the server emits to its next step.
@@ -114,6 +118,9 @@ var denialNextStep = map[string]string{
 	CodeStoreWriteFailed:     NextAskUser,
 	CodeRevokeNotDurable:     NextAskUser,
 	CodeAgentDeleteACLFailed: NextAskUser,
+	CodeCredentialChanged:    NextAskUser,
+	CodeAlwaysNotAllowed:     NextNone,
+	CodeACLWriteFailed:       NextAskUser,
 
 	// Session codes.
 	"SESSION_EXPIRED":     NextRemintSession,
@@ -192,6 +199,15 @@ func (s *Server) writeDataDenial(w http.ResponseWriter, r *http.Request, info *a
 			"your temporary grant for this path has ended",
 			"request temporary use again if it is still needed",
 			s.denialNextStep(CodeGrantExpired, path, action), http.StatusForbidden)
+	case grant.ReasonGrantUsedUp:
+		s.auditDenied(r, info, action, path, ip, reason)
+		jsonDeniedStep(w, "access_denied", CodeGrantExpired,
+			"every use a human allowed for this path has been spent",
+			"request it again if it is still needed",
+			s.denialNextStep(CodeGrantExpired, path, action), http.StatusForbidden)
+	case reasonUseNotSaved:
+		s.auditDenied(r, info, action, path, ip, reason)
+		writeAccessError(w, CodeRequestsDegraded, "your approval could not be used right now; nothing was delivered", http.StatusServiceUnavailable)
 	case grant.ReasonGrantRevoked:
 		s.auditDenied(r, info, action, path, ip, reason)
 		jsonDeniedStep(w, "access_denied", CodeGrantRevoked,
@@ -216,6 +232,10 @@ func resolveDenial(reason string) (code, msg string) {
 		return reason, "the session is no longer valid"
 	case grant.ReasonGrantExpired:
 		return CodeGrantExpired, "access denied: temporary grant has ended"
+	case grant.ReasonGrantUsedUp:
+		return CodeGrantExpired, "access denied: every allowed use has been spent"
+	case reasonUseNotSaved:
+		return CodeRequestsDegraded, "your approval could not be used right now; nothing was delivered"
 	case grant.ReasonGrantRevoked:
 		return CodeGrantRevoked, "access denied: temporary grant was revoked"
 	}
@@ -280,15 +300,11 @@ func (s *Server) auditDeniedDetail(r *http.Request, info *authInfo, action, path
 // auditDeniedMetadata writes a denied audit entry with the given metadata,
 // as a session entry when the caller used a session token.
 func (s *Server) auditDeniedMetadata(info *authInfo, action, path, ip, reason string, metadata map[string]string) {
-	agent := ""
+	e := audit.Entry{Action: action, Path: path, Status: "denied", IP: ip, Reason: reason, Metadata: metadata}
 	if info != nil {
-		agent = info.Agent
+		e.Agent, e.Caller, e.SessionID = info.Agent, info.Caller, info.SessionID
 	}
-	if info != nil && info.UsedSession {
-		s.logAudit(s.audit.LogSessionDeniedWithMetadata(agent, action, path, ip, reason, info.SessionID, metadata))
-		return
-	}
-	s.logAudit(s.audit.LogDeniedWithMetadata(agent, action, path, ip, reason, metadata))
+	s.logAudit(s.audit.Log(e))
 }
 
 // denialAuditMetadata returns the request's caller audit metadata plus

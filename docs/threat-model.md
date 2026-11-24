@@ -94,6 +94,10 @@ inside the envelope.
   Note: IP binding and `source_ip` policy are meaningful only inside the LAN
   envelope, where addresses are operator-assigned and not attacker-chosen.
   They are not a defense against internet-scale attackers (out of scope).
+  The `who`, `host` and `authority` on audit lines are never read from a request.
+  For a token, `who` and `authority` are what an admin declared, marked
+  `attested: false`, and `host` is empty: whoever holds the token gets the same
+  labels.
 - **Operational leakage**
   Structured audit logs record allows/denies without writing secret values.
 - **At-rest theft of store data**
@@ -130,14 +134,30 @@ API and must be evaluated separately.
 
 ### What the dashboard exposes
 
-The dashboard can: view secret/agent/session counts, view and revoke active sessions,
+The dashboard can: search every secret's name, description, tags and username, see its
+link, show and copy secret values, add secrets and change them, view agent and session counts,
+view and revoke active sessions,
 approve and deny secret access requests and revoke grants, view the full audit log, and view role
 configuration.
 
-The dashboard **cannot**: read or write secret values, create or modify agents, or
-change server configuration.
+The dashboard **cannot**: delete secrets, create or modify agents, or change server
+configuration.
 
-Approval is the highest-risk action — it grants an agent temporary use of secrets.
+`phoenix-server --init` turns the dashboard on, because a new install also lets
+agents ask for access and somebody has to be able to answer. It is served where
+the server listens: `server.listen` (loopback by default; keep it there) and
+`https_listener` when that is on. Its password is stored only as a bcrypt hash.
+Someone who reads the `--init` output (an agent that ran it, a captured log) has
+the admin token, and the dashboard password too if it was generated (100 random
+bits, shown once). A password typed at the prompt is never printed.
+
+**The dashboard password opens every secret** that no policy rule withholds from it.
+Rules guard values (showing, copying, setting), not names and details.
+Up to v0.24 it could only approve access. Anyone (or any agent) who knows it, or can
+read it where it is stored, can read the store. Change it if it was shared, keep it
+away from agents, or set `"reveal": false`.
+
+Showing values and approving access are the highest-risk actions.
 
 ### Authentication model
 
@@ -158,6 +178,11 @@ operators, not programmatic access. The trade-off is that all dashboard users sh
 one credential and are distinguished only by source IP in the audit trail
 (`dashboard@<ip>`).
 
+Login remembers only the Requests page or one request to return to, so it cannot
+be used to send someone elsewhere. A link tapped on another site gets one reload
+page without any content, because `SameSite=Strict` holds the cookie back on that
+first load.
+
 ### Threats specific to the dashboard
 
 | Threat | Mitigation | Residual risk |
@@ -166,6 +191,16 @@ one credential and are distinguished only by source IP in the audit trail
 | Session cookie theft (network) | `Secure` flag set when HTTPS detected; `HttpOnly` prevents JS access; `SameSite=Strict` prevents CSRF via cross-origin requests | Plain HTTP on a shared network exposes the cookie — **do not do this**. The server warns loudly at startup when the dashboard is enabled on a non-loopback plain HTTP bind |
 | Session cookie theft (XSS) | `HttpOnly` flag; no user-supplied content rendered unescaped; embedded static assets (no CDN/external JS) | XSS in Go `html/template` is unlikely but not impossible if templates are modified |
 | CSRF | Token-per-session in signed cookie, validated on all POST actions | Relies on `SameSite=Strict` + token check |
+| Stolen cookie, used for values | Values and changes need the password typed within 5 minutes. Typing it again moves the login to a new cookie, so an older copy is signed out and its next use is audited as `dashboard.auth` denied. Wrong passwords are rate limited per address and per login. Every read is audited with the login's ID | A cookie stolen and used inside the 5 minutes after a password works until they end. It can read all metadata until the login ends |
+| Cross-site request for a value or change | POST only, CSRF token, `SameSite=Strict`, and any POST whose `Sec-Fetch-Site` (or, without it, `Origin`) is not the dashboard's own is refused, which covers sibling subdomains. No CORS headers, and `Cross-Origin-Resource-Policy: same-origin` | A browser that sends neither header relies on the token and cookie |
+| Clickjacking | `frame-ancestors 'none'` and `X-Frame-Options: DENY` on every response; `Cross-Origin-Opener-Policy: same-origin` | |
+| Injected script reads a value | Content-Security-Policy allows only script files and connections on the dashboard's own address; all stored text is escaped; links are limited to http(s) when saved and again when shown | A script that did run on the page could use an open 5-minute window |
+| Page left open | The value hides after 20 seconds, when the tab is hidden and when the page is left; the window is fixed, so the page goes back to asking | Someone at an unlocked device inside the window can read values |
+| Back button, phone page cache, history | Values are only in POST answers, `no-store`; pages are `no-store`; a page restored from the browser's back/forward cache has had its value and typed fields cleared and reloads itself | |
+| Offline copies | The service worker stores a fixed list of static files, each only if the answer really is that file, and nothing else | |
+| Changed link sends a person to a fake site | Changing a link needs a recent password (or an agent with `write` on the path), the site is named under the button, a page left open cannot pair a new password with the old link, and the change is audited | An agent with `write` can change the link; look at the name before pasting |
+| Clipboard | Copy never shows the value | The value stays on the device's clipboard, where other apps and clipboard history may see it |
+| Overwritten secret | Adding never overwrites; a new value needs a confirm and a recent password | The old value is not kept |
 | Unauthorized approval | Runs the same approve code as the API, so every API check (request still pending, paths still requestable, sealed-delivery rules) applies | A compromised dashboard session can approve any pending request |
 | Shared credential | All operators share one password; no per-user identity | Forensic distinction limited to source IP (`dashboard@<ip>`) |
 | Config file credential exposure | Password stored as bcrypt hash in config (`password_hash`); plaintext rejected by validation; agent reading config gets only the hash | An agent that can read the config can run an offline guessing attack on the hash; keep the password long |
@@ -228,7 +263,9 @@ Phoenix does about them.
 |--------|-----------|---------------|
 | Request spam / approval fatigue | 3 pending per agent, 50 in total, 10 new requests per agent per hour, 10-minute cooldown after a deny, 10 active grants per agent. Limits survive a restart; each `429` has `Retry-After` | A human can still approve something without reading it |
 | Social engineering via the reason | Reason shown as "Agent says (not verified)", escaped, control/bidi/zero-width characters stripped, 300-character cap, never a link. The approval card is built from server facts (paths, badges, attestation), not from the reason | The reason can still be a convincing lie |
-| Approving more than intended | Exact paths only (no wildcards), at most 10, `read_value` only. The approver can untick paths and shorten the TTL, never widen. No bulk approve | |
+| Approving more than intended | Exact paths only (no wildcards), at most 10, `read_value` only. The approver can untick paths, shorten the TTL and limit uses, never widen. No bulk approve | Always is one tap and has no end. It is exact-path and `read_value` only, listed on the Requests page with Remove, and audited with its request |
+| Using a "once" twice | Uses are counted under one lock and saved before the value leaves the server, so neither calls at once, a replayed answer nor a restart gives another. If the count cannot be saved nothing is delivered | A value handed over can be kept. For an SSH login a once is one certificate, which can log in until the approval's time ends or it is revoked. If the disk fails twice in a row a use may be lost, never gained |
+| An answer reaching the wrong token | Approval is refused when the agent was deleted or its token replaced since it asked; for Always that is checked together with the change | |
 | Self-approval / collusion | An agent can never approve its own request. API approval needs a name in `access_requests.approvers`; ACL `admin` alone is not enough | Two agents that are both approvers can approve each other's requests |
 | Replay | Grants carry no token. Approve and deny are one-way saved transitions. Dashboard POSTs keep CSRF and `SameSite=Strict`. IDs are 128-bit random | |
 | Stolen agent token | It can file requests (the human sees the source IP) and could use a live grant only from the bound IP, with the agent's registered seal key, as a non-session call. Sessions never use grants. Grants are short and revocable | A thief who also holds the agent's seal private key, on the bound IP, can use a live grant |

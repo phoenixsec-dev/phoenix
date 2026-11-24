@@ -61,6 +61,9 @@ func ValidatePermissions(perms []Permission) error {
 		if len(p.Actions) == 0 {
 			return fmt.Errorf("no actions specified for path %q", p.Path)
 		}
+		if p.Always != nil {
+			return fmt.Errorf("path %q: \"always\" cannot be set by hand; it marks an answered access request", p.Path)
+		}
 		for _, a := range p.Actions {
 			if a == removedRead {
 				return fmt.Errorf("path %q: %s", p.Path, removedReadMsg)
@@ -77,6 +80,9 @@ func ValidatePermissions(perms []Permission) error {
 type Permission struct {
 	Path    string   `json:"path"`
 	Actions []Action `json:"actions"`
+	// Always is set on a rule made by an "always" answer (always.go). Servers
+	// older than that ignore it and treat the rule as any other.
+	Always *AlwaysOrigin `json:"always,omitempty"`
 }
 
 // Agent represents an authenticated entity with permissions.
@@ -87,7 +93,14 @@ type Agent struct {
 	// tells apart two issues of the same token, so a session made with a token
 	// that was taken away stays dead if the same token is given out again. Not
 	// secret. Empty for tokens issued by v0.23.0 and older or written by hand.
-	CredentialID  string       `json:"credential_id,omitempty"`
+	CredentialID string `json:"credential_id,omitempty"`
+	// Serial is a random ID set once, when the identity is made. It tells an
+	// identity apart from a later one re-made under the same name. Unlike
+	// CredentialID it survives a new token, and an identity without a token
+	// can have one. Not secret, but never shown or sent to anyone. Identities
+	// from v0.24.0 and older get theirs at the next ACL change (fillSerialsLocked).
+	Serial string `json:"serial,omitempty"`
+	Labels
 	Permissions   []Permission `json:"permissions"`
 	SealPublicKey string       `json:"seal_public_key,omitempty"`
 }
@@ -106,6 +119,7 @@ type ACL struct {
 	// writeFile saves the ACL file; tests replace it to fail. Strict: a
 	// replaced token must not come back after a power cut.
 	writeFile func(path string, data []byte, perm os.FileMode) error
+	unsaved   []AlwaysRule // taken back but not saved yet (always.go)
 }
 
 // New creates a new ACL from a config file.
@@ -152,18 +166,20 @@ func (a *ACL) load() error {
 
 // Save writes the ACL config to disk.
 func (a *ACL) Save() error {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	return a.saveLocked()
 }
 
-// saveLocked writes the ACL config to disk. Caller must hold the mutex.
+// saveLocked writes the ACL config to disk. Caller must hold the mutex for
+// writing: it also fills in missing serials.
 func (a *ACL) saveLocked() error {
 	if a.path == "" {
 		return errors.New("no file path set for ACL")
 	}
 
+	a.fillSerialsLocked()
 	data, err := json.MarshalIndent(a.config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling ACL: %w", err)
@@ -178,6 +194,7 @@ func (a *ACL) saveLocked() error {
 	if err := a.writeFile(a.path, data, 0600); err != nil {
 		return fmt.Errorf("writing ACL file: %w", err)
 	}
+	a.unsaved = nil
 
 	return nil
 }
@@ -225,6 +242,15 @@ func (a *ACL) Authorize(agentName string, secretPath string, action Action) erro
 // AddAgent registers a new agent with a token and permissions.
 // Returns ErrAgentExists if an agent with the same name already exists.
 func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
+	return a.AddAgentLabeled(name, token, permissions, LabelChange{})
+}
+
+// AddAgentLabeled is AddAgent that also sets the new identity's labels.
+func (a *ACL) AddAgentLabeled(name, token string, permissions []Permission, labels LabelChange) error {
+	labels, err := labels.Normalized(name)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -235,7 +261,9 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	a.config.Agents[name] = Agent{
 		Name:         name,
 		TokenHash:    crypto.HashToken(token),
-		CredentialID: newCredentialID(),
+		CredentialID: newRandomID(),
+		Serial:       newRandomID(),
+		Labels:       labels.applyTo(Labels{}),
 		Permissions:  permissions,
 	}
 
@@ -257,17 +285,26 @@ func (a *ACL) saveOrUndo(undo func()) error {
 	return err
 }
 
-// newCredentialID returns a random ID for a newly issued token.
-func newCredentialID() string {
+// newRandomID returns a random ID for a newly issued token or a new identity.
+func newRandomID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b) // never fails on Go 1.24+
 	return hex.EncodeToString(b)
 }
 
 // UpdateAgent overwrites an existing agent's token and permissions. The same
-// token keeps its CredentialID.
+// token keeps its CredentialID. The serial, labels and seal key stay.
 // Returns ErrAgentNotFound if the agent does not exist.
 func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
+	return a.UpdateAgentLabeled(name, token, permissions, LabelChange{})
+}
+
+// UpdateAgentLabeled is UpdateAgent that also changes the labels it is given.
+func (a *ACL) UpdateAgentLabeled(name, token string, permissions []Permission, labels LabelChange) error {
+	labels, err := labels.Normalized(name)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -278,20 +315,23 @@ func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 
 	hash, credentialID := crypto.HashToken(token), existing.CredentialID
 	if hash != existing.TokenHash {
-		credentialID = newCredentialID()
+		credentialID = newRandomID()
 	}
 	a.config.Agents[name] = Agent{
 		Name:          name,
 		TokenHash:     hash,
 		CredentialID:  credentialID,
+		Serial:        existing.Serial,
+		Labels:        labels.applyTo(existing.Labels),
 		Permissions:   permissions,
 		SealPublicKey: existing.SealPublicKey,
 	}
 
-	err := a.saveOrUndo(func() {
+	err = a.saveOrUndo(func() {
 		// A replaced token stays dead even if the save failed. With the same
 		// token there is none to kill, only permissions nobody was told about.
 		if hash == existing.TokenHash {
+			existing.Serial = a.config.Agents[name].Serial // the save may have given it one
 			a.config.Agents[name] = existing
 		}
 	})
@@ -365,7 +405,10 @@ func (a *ACL) SetAgentSealKey(name string, publicKey string) error {
 	agent.SealPublicKey = publicKey
 	a.config.Agents[name] = agent
 
-	return a.saveOrUndo(func() { a.config.Agents[name] = old })
+	return a.saveOrUndo(func() {
+		old.Serial = a.config.Agents[name].Serial // the save may have given it one
+		a.config.Agents[name] = old
+	})
 }
 
 // GetAgentSealKey returns an agent's registered public seal key.

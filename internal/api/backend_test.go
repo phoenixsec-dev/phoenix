@@ -63,6 +63,20 @@ func (b *stubBackend) Set(path, value, createdBy, description string, tags []str
 	return nil
 }
 
+func (b *stubBackend) Write(path, value, by string, ch store.MetadataChange, mode store.WriteMode) error {
+	if b.readOnly {
+		return store.ErrReadOnly
+	}
+	return nil
+}
+
+func (b *stubBackend) Describe(path string, ch store.MetadataChange) error {
+	if b.readOnly {
+		return store.ErrReadOnly
+	}
+	return nil
+}
+
 func (b *stubBackend) Delete(path string) error {
 	if b.readOnly {
 		return store.ErrReadOnly

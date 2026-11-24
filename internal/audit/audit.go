@@ -28,6 +28,28 @@ type Entry struct {
 	SessionID string            `json:"session_id,omitempty"`
 	Sealed    bool              `json:"sealed"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	Caller
+}
+
+// Caller says who an entry is about, as separate fields. All of it comes from
+// Phoenix: the identity's record, or (Host) what Phoenix itself established
+// about the machine. Nothing is taken from what a caller says about itself.
+// All four are on every line. The text fields are empty when not known: an identity without labels, a
+// line Phoenix or the dashboard wrote, or one written before v0.25.0.
+type Caller struct {
+	Who       string `json:"who"`
+	Host      string `json:"host"`
+	Authority string `json:"authority"`
+	// Attested is true only when Phoenix checked the caller itself. A token
+	// proves nothing about who holds it, so its lines say false, and who and
+	// authority are then only declared by the operator.
+	Attested bool `json:"attested"`
+}
+
+// Declared reports whether the entry names a who or authority that nothing
+// checked.
+func (c Caller) Declared() bool {
+	return !c.Attested && (c.Who != "" || c.Authority != "")
 }
 
 // Logger writes audit entries to a file.
@@ -99,7 +121,7 @@ func NewWriterLogger(w io.Writer) *Logger {
 
 // logWithMetadata writes a low-level audit entry with optional sanitized metadata.
 func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessionID string, sealed bool, metadata map[string]string) error {
-	entry := Entry{
+	return l.Log(Entry{
 		Agent:     agent,
 		Action:    action,
 		Path:      path,
@@ -108,8 +130,13 @@ func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessio
 		Reason:    reason,
 		SessionID: sessionID,
 		Sealed:    sealed,
-		Metadata:  cloneMetadata(metadata),
-	}
+		Metadata:  metadata,
+	})
+}
+
+// Log writes one entry, stamped with the time now.
+func (l *Logger) Log(entry Entry) error {
+	entry.Metadata = cloneMetadata(entry.Metadata)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

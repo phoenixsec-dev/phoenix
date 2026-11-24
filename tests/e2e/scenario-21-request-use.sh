@@ -87,23 +87,23 @@ call "$AGENT" GET '/v1/policy/check?path=infra/other&check=allow_unseal'
 assert_eq "$(jq -r .allowed "$RUN_DIR/resp")" false "allow_unseal for a grant-only path"
 
 # 5b. Dashboard leg: log in, approve a narrowed request, use it through
-# phoenix exec --redact-output, revoke it on the grants page.
+# phoenix exec --redact-output, revoke it on the same page.
 jar="$RUN_DIR/dash.cookies"
-dash() { curl -sS -b "$jar" -c "$jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
+dash() { curl -sS --no-location -b "$jar" -c "$jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
 assert_eq "$(dash -X POST --data-urlencode credential=e2e-dash-password "$PHOENIX_SERVER/dashboard/login")" 303 "dashboard login"
 call "$AGENT" POST /v1/access-requests '{"paths":["infra/dash","infra/dash-extra"],"reason":"e2e: <script>dash</script>","ttl":"30m"}'
 assert_eq "$HTTP_CODE" 201 "dashboard request"
 rd="$(jq -r .id "$RUN_DIR/resp")"
-assert_eq "$(dash "$PHOENIX_SERVER/dashboard/approvals")" 200 "approvals page"
+assert_eq "$(dash "$PHOENIX_SERVER/dashboard/requests")" 200 "requests page"
 page="$(cat "$RUN_DIR/dash.html")"
 assert_contains "$page" "id=\"$rd\"" "request card anchor"
 assert_contains "$page" "Agent says (not verified)" "reason label"
 assert_contains "$page" "&lt;script&gt;dash&lt;/script&gt;" "escaped reason"
 assert_not_contains "$page" "<script>dash" "raw reason"
 csrf="$(grep -o 'name="_csrf" value="[0-9a-f]*"' "$RUN_DIR/dash.html" | head -1 | sed 's/.*value="//; s/"//')"
-[[ -n "$csrf" ]] || die "no CSRF token on the approvals page"
-assert_eq "$(dash -X POST --data "path=infra/dash&ttl=5m" "$PHOENIX_SERVER/dashboard/access-requests/$rd/approve")" 403 "approve without CSRF"
-assert_eq "$(dash -X POST --data "_csrf=$csrf&path=infra/dash&ttl=5m" "$PHOENIX_SERVER/dashboard/access-requests/$rd/approve")" 303 "dashboard approve"
+[[ -n "$csrf" ]] || die "no CSRF token on the requests page"
+assert_eq "$(dash -X POST --data "path=infra/dash&choice=custom&ttl=5m" "$PHOENIX_SERVER/dashboard/requests/$rd/answer")" 403 "approve without CSRF"
+assert_eq "$(dash -X POST --data "_csrf=$csrf&path=infra/dash&choice=custom&ttl=5m" "$PHOENIX_SERVER/dashboard/requests/$rd/answer")" 303 "dashboard approve"
 call "$APPROVER" GET "/v1/access-requests/$rd"
 assert_eq "$(jq -r .status "$RUN_DIR/resp")" approved "dashboard-approved status"
 assert_eq "$(jq -r .decided_by "$RUN_DIR/resp")" dashboard@127.0.0.1 "dashboard approver identity"
@@ -118,9 +118,42 @@ assert_eq "$rc" 5 "exec --redact-output exit code"
 assert_eq "$(cat "$RUN_DIR/redact.out")" "value=[REDACTED:DASH]"$'\n'"token=none" "redacted stdout"
 assert_eq "$(cat "$RUN_DIR/redact.err")" "err=[REDACTED:DASH]" "redacted stderr"
 if agent_exec --env X=phoenix://infra/dash-extra -- true >"$RUN_DIR/dash-extra" 2>&1; then die "dashboard narrowed-out path was readable"; fi
-assert_eq "$(dash -X POST --data "_csrf=$csrf" "$PHOENIX_SERVER/dashboard/grants/$grant_d/revoke")" 303 "dashboard revoke"
+assert_eq "$(dash -X POST --data "_csrf=$csrf" "$PHOENIX_SERVER/dashboard/requests/grants/$grant_d/revoke")" 303 "dashboard revoke"
 if agent_exec --env DASH=phoenix://infra/dash -- true >"$RUN_DIR/dash-revoked" 2>&1; then die "dashboard-revoked grant still usable"; fi
 assert_contains "$(cat "$RUN_DIR/dash-revoked")" GRANT_REVOKED "dashboard revoked denial"
+
+# 5c. Once: one delivery, exact across a restart; a refused batch costs nothing.
+printf '%s' synthetic-once | phoenix_admin set ops/once --value-stdin >/dev/null
+printf '%s' synthetic-always | phoenix_admin set ops/always --value-stdin >/dev/null
+call "$AGENT" POST /v1/access-requests '{"paths":["ops/once"],"reason":"e2e: once","ttl":"30m"}'
+ro="$(jq -r .id "$RUN_DIR/resp")"
+assert_eq "$(dash -X POST --data "_csrf=$csrf&path=ops/once&choice=once" "$PHOENIX_SERVER/dashboard/requests/$ro/answer")" 303 "once"
+assert_contains "$(PHOENIX_TOKEN="$AGENT" "$PHOENIX" request status "$ro")" "one use left" "status says one use left"
+if agent_exec --env ONCE=phoenix://ops/once --env NO=phoenix://infra/third -- true >"$RUN_DIR/once-batch" 2>&1; then die "batch with a refused ref ran"; fi
+stop_server
+start_server
+agent_exec --env ONCE=phoenix://ops/once -- env | grep -qx 'ONCE=synthetic-once' || die "the one use did not survive a refused batch and a restart"
+stop_server
+start_server
+if agent_exec --env ONCE=phoenix://ops/once -- true >"$RUN_DIR/once-again" 2>&1; then die "a spent use came back after a restart"; fi
+assert_contains "$(cat "$RUN_DIR/once-again")" GRANT_EXPIRED "spent use denial"
+
+# 5d. Always: on the agent's own list across a restart, gone at once on Remove.
+assert_eq "$(dash -X POST --data-urlencode credential=e2e-dash-password "$PHOENIX_SERVER/dashboard/login")" 303 "dashboard login after restart"
+dash "$PHOENIX_SERVER/dashboard/requests" >/dev/null
+csrf="$(grep -o 'name="_csrf" value="[0-9a-f]*"' "$RUN_DIR/dash.html" | head -1 | sed 's/.*value="//; s/"//')"
+call "$AGENT" POST /v1/access-requests '{"paths":["ops/always"],"reason":"e2e: always"}'
+ra="$(jq -r .id "$RUN_DIR/resp")"
+assert_eq "$(dash -X POST --data "_csrf=$csrf&path=ops/always&choice=always" "$PHOENIX_SERVER/dashboard/requests/$ra/answer")" 303 "always"
+stop_server
+start_server
+agent_exec --env ALWAYS=phoenix://ops/always -- env | grep -qx 'ALWAYS=synthetic-always' || die "always not usable after a restart"
+assert_contains "$(PHOENIX_TOKEN="$AGENT" "$PHOENIX" request status "$ra")" "ops/always, always" "status says always"
+assert_eq "$(dash -X POST --data-urlencode credential=e2e-dash-password "$PHOENIX_SERVER/dashboard/login")" 303 "dashboard login again"
+dash "$PHOENIX_SERVER/dashboard/requests" >/dev/null
+csrf="$(grep -o 'name="_csrf" value="[0-9a-f]*"' "$RUN_DIR/dash.html" | head -1 | sed 's/.*value="//; s/"//')"
+assert_eq "$(dash -X POST --data "_csrf=$csrf&agent=e2e-agent&path=ops/always&request=$ra" "$PHOENIX_SERVER/dashboard/requests/always/remove")" 303 "remove always"
+if agent_exec --env ALWAYS=phoenix://ops/always -- true >"$RUN_DIR/always-removed" 2>&1; then die "removed always still reads"; fi
 
 # 6. The narrowed-out path stays denied.
 if agent_exec --env NOPE=phoenix://infra/third -- true >"$RUN_DIR/third" 2>&1; then die "narrowed-out path was readable"; fi
@@ -160,7 +193,7 @@ if ((remaining > 0)); then log "waiting ${remaining}s for the 1m grant to expire
 if agent_exec --env SHORT=phoenix://infra/short -- true >"$RUN_DIR/expired" 2>&1; then die "expired grant still usable"; fi
 assert_contains "$(cat "$RUN_DIR/expired")" GRANT_EXPIRED "expired denial"
 call "$AGENT" GET '/v1/grants?include=inactive'
-assert_eq "$(jq -r '[.grants[] | .state] | sort | join(",")' "$RUN_DIR/resp")" "expired,revoked,revoked" "grant states"
+assert_eq "$(jq -r '[.grants[] | .state] | sort | join(",")' "$RUN_DIR/resp")" "expired,revoked,revoked,used" "grant states"
 call "$ADMIN_TOKEN" GET /v1/status
 assert_eq "$(jq -r .access_requests.state "$RUN_DIR/resp")" ok "status access_requests"
 ok "Scenario 21 PASS"

@@ -142,14 +142,182 @@ that dies halfway can do to it. Nothing to configure; what changed:
   three are undone now. Replacing a token or deleting an agent still takes
   effect at once even if the save fails, so the old token stays dead at least
   until a restart; the answer to a failed `--force` now says so.
+### One live Requests page: No, Once, 15 minutes or Always
+
+Approvals and Grants were two pages for one thing, neither updated by itself,
+and a request could expire while you looked at the page.
+
+- **Requests** (`/dashboard/requests`) replaces both. A card asks "May vector
+  use infra/b2/app-key?" with four buttons: **No**, **Once**, **15 minutes**,
+  **Always**. Below: open access with Revoke, what is on Always with Remove,
+  requests that expired unanswered, and history. The old addresses redirect.
+- **Live.** A new request appears within about two seconds on any open
+  dashboard page, as a popup when you are on another page, with a countdown.
+  Optional browser notification. A choice you are making is never wiped, and
+  an expired request stays, marked expired.
+- **Once** and "N uses or M minutes": grants can have a use limit, counted per
+  secret. Counting is exact and survives a restart; only a value that is handed
+  over costs a use. `phoenix approve --uses N` for CLI approvers.
+- **Always** puts `read_value` on exactly that path on the agent's own access
+  list, marked with the request, removable on the page at once. Never a
+  wildcard, never for SSH logins, only from the dashboard.
+- **Notifications link to the request** (`/dashboard/requests/<req_id>`), also
+  through the login page.
+- A request whose agent got a new token since asking can no longer be approved
+  (`CREDENTIAL_CHANGED`). Before, the approval looked fine and did nothing.
+- `phoenix request`, `phoenix request status`, `phoenix whoami` and the MCP
+  request tools say what was granted: `one use left`, `until 14:32`, `always`.
+  MCP requests run as the agent itself also under `PHOENIX_ROLE`.
+- `phoenix exec` uses approvals also under `PHOENIX_ROLE`, resolves all or
+  nothing, and checks that the command exists before it resolves.
+
+**Upgrading:** nothing to change. On an install without an `access_requests`
+block the feature is still off; see
+[Turning it on](docs/access-requests.md#turning-it-on). **Going back:** an
+older server opens the new files and works; it ignores grants with a use limit
+and keeps Always rules as ordinary ones. Details in
+[docs/access-requests.md](docs/access-requests.md#the-grants-file-and-older-servers).
+Links in notifications sent before the upgrade still work.
+
+### Who, host and authority as fields of their own
+
+An identity's name often mashes together who uses it and what role it has.
+Both can now be recorded next to the name, and the audit log shows them as
+separate columns. The words are yours; Phoenix has no list of allowed values,
+and they decide nothing about access.
+
+- An identity can have `who`, `authority`, `kind` and `formerly` (older names).
+  Set them with `phoenix agent set <name> --who ... --authority ... --kind ...
+  --formerly old1,old2`: the token stays and no session ends. `phoenix agent
+  show [name]` prints them, `phoenix agent create` takes the same options, and
+  `phoenix whoami` and MCP `phoenix_whoami` show the caller's own. API:
+  `PATCH /v1/agents/{name}/identity`, and `identities` in `GET /v1/agents`.
+- Audit lines gain `who`, `host`, `authority` and `attested`. No field was
+  renamed or removed. They come from the identity's record, never from a
+  caller. A line about a refused credential, the dashboard or Phoenix itself
+  has an empty `who` and `authority`. Grant events keep the actor's labels in
+  `grants.json` until their line is written, so a delayed line stays right.
+- `attested` is `false` on every line for now: a token doesn't prove who holds
+  it. The dashboard calls such a `who` "declared". `host` is recorded only when
+  Phoenix has established it, so it is empty until the per-machine service
+  exists.
+- The dashboard Audit page has the four columns and filters by who, host and
+  authority. `phoenix audit` takes `--who`, `--host` and `--authority`, and adds
+  the fields at the end of a line. Searching for an identity by name also finds
+  its former names.
+- Each identity gets a hidden `serial` in `acl.json`. Unlike `credential_id` (one
+  per token), it stays when the token is replaced and is new when the identity
+  is deleted and made again. Nothing uses it yet.
+
+**Upgrading:** update the server first: the new CLI options say so when the
+server is too old. Otherwise nothing to change. `acl.json` and old audit lines load as they
+are; a missing field shows as `-`. Existing identities have no labels until you
+run `phoenix agent set`, and get their serial at the next change to any agent.
+
+**Going back:** an older server reads the new `acl.json` and works, but the
+first agent change it saves drops the new fields. Old audit readers skip the
+new keys.
+
+### A fresh install can approve
+
+`phoenix-server --init` used to turn on access requests with nobody able to
+answer them: no dashboard, no approvers. Now it also turns on the dashboard. It
+asks for the password (12 characters or more), or makes one up and shows it
+once: press Enter, or run it without a terminal (Docker, scripts). Only the
+bcrypt hash is stored.
+
+- `--init --https` writes the config with HTTPS (`0.0.0.0:9443`) already on.
+  The Docker quickstart and `docker-compose.yml` use it and publish 9443 to the
+  host's loopback, so the dashboard works without editing a file. The image now
+  also lists port 9443.
+- `--hash-password` says so when a password is over bcrypt's 72 bytes.
+
+**Upgrading:** existing installs do not change. To get the dashboard on one, run
+`phoenix-server --hash-password`, put the result in the config as
+`"dashboard": {"enabled": true, "password_hash": "..."}` and restart. Scripts that
+run `--init` at a terminal now get a question; give it `</dev/null` to have the
+password generated and printed. `docker-compose.yml` now publishes
+`127.0.0.1:9443`; remove that line if the port is taken.
+
+### Fixed: the CLI ignored proxies when it used Phoenix's own CA
+
+With `PHOENIX_CA_CERT` set, `phoenix` (and `phoenix mcp-server`) ignored
+`HTTPS_PROXY` and dialed the server directly, so HTTPS failed on machines that
+only get out through a proxy, such as hosted agents on userspace Tailscale. It
+now uses it for `https://` servers, like it already did without a CA. Plain
+`http://` servers are still reached directly when the CA file loads. Connecting now times out after 30
+seconds instead of the system's limit (requests themselves have no new limit).
+
+**Upgrading:** if a machine sets `HTTPS_PROXY` but reaches Phoenix directly, add
+the Phoenix host to `NO_PROXY`. If the proxy's own address is `https://`, add its
+CA to the `PHOENIX_CA_CERT` file, but only if you trust that CA to vouch for the
+Phoenix server itself: both connections are checked against the same file.
+
+### Smaller things
+
+- The end-to-end scenarios run in CI on every pull request (into any branch), with two new ones:
+  upgrade from the previous release and back on the same files, and a fresh
+  install that approves a request.
+- Docs say which systems are supported (Linux and macOS; no Windows build).
+- The agent skill no longer offers `phoenix keypair generate`, which needs admin.
+- The runnable examples use the `go` on `PATH`.
+
+### Find and use a secret from your phone
+
+Getting one password used to take a terminal, the exact name, and a guess at
+the username. The dashboard now has a **Secrets** page: search by name,
+description, tag or username, open one, copy the username, show or copy the
+password, or copy it and open the page in one tap. You can add a secret (paste,
+type or generate), give one a new value, and edit its description, tags,
+username and link. The dashboard is laid out for a phone first, with one
+navigation, and can be installed as an app. Nothing is stored offline except
+its static files.
+
+**Read this before upgrading if the dashboard is on: the dashboard password now
+opens secrets.** Until now it could only approve access. Anyone who knows it can
+show every value that no policy rule withholds. If it was shared, or an agent
+can read it, change it first (`phoenix-server --hash-password`). To keep values
+out of the dashboard set `"dashboard": {"reveal": false}`; finding, adding and
+editing still work.
+
+How it is protected ([threat model](docs/threat-model.md#threats-specific-to-the-dashboard)):
+showing, copying or changing needs the password typed within the last 5
+minutes; every show and copy is audited (`read_value`, with the address and the
+login's ID) before the value is sent; policy rules (`source_ip`,
+`require_sealed`) hold for values in the dashboard too; values are never in a page's HTML
+and never cached; no page can be framed or run foreign script.
+
+Dashboard responses now carry a Content-Security-Policy: scripts must be files
+on the dashboard's own address, never inline. Every dashboard POST refuses
+requests from other sites. Wrong passwords sent in parallel now count one by
+one, at login too.
+
+### A secret can carry its username and link
+
+- `phoenix set` takes `--username` and `--url`. `phoenix info`, MCP
+  `phoenix_list`, `GET /v1/metadata` and the dashboard show them to callers with
+  `list` on the path. They are never in a value read.
+- `phoenix describe <path> [-d ...] [--tags ...] [--username ...] [--url ...]`
+  (`PATCH /v1/metadata/{path}`) changes them without reading or writing the
+  value. Needs `write` on the path; audited as `describe`; who wrote the value
+  and when stays as it was.
+- `phoenix set`, `info` and `describe` refuse a name with `?`, `#` or `%`. It
+  used to reach the server cut short, as another secret's name.
+- A save that fails now leaves the old value in use. Before, the server kept
+  serving the new value from memory although it reported an error.
+
+**Upgrading:** nothing to do. Store files load unchanged and the new fields
+appear only on secrets that have them. Going back: v0.24 opens a file with
+usernames and links and keeps every value, but drops those two fields the next
+time it writes. Update the server before the CLI: an older server cannot store
+them, and the CLI says so.
 
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine
 
-`phoenix ssh` was already in the CLI help, but an agent could not ask Phoenix
-which machines it may log in to; it had to learn that from hand-written notes in
-its owner's files. One recently told its owner to open a terminal instead.
+An agent can now ask Phoenix which machines it may log in to, and whether it
+already has an approval.
 
 - `GET /v1/ssh/machines` lists the machines this server can sign logins for,
   to any signed-in caller: names only, never addresses or users. Each shows
@@ -163,20 +331,18 @@ its owner's files. One recently told its owner to open a terminal instead.
   and a short "Root on another machine" section. The MCP `phoenix_whoami`
   description points at `phoenix ssh --list` too.
 
-### Fixed: "needs a human's approval" right after a human approved
+### A clearer error when `phoenix ssh` has no approval
 
-Inside an active approval `phoenix ssh <machine> -- '<command>'` already ran
-without `--reason`. The reported failure had another cause: the command ran
-with a different `PHOENIX_TOKEN` (a shell function set the token, and
-`timeout phoenix ...` skipped it), so it was a different agent with no
-approval, and the CLI only said "run again with --reason". The retry happened
-to go through the function and worked, which made `--reason` look required.
-The error now names the agent the CLI ran as, says that an approval belongs to
-one agent, token and IP (so check `PHOENIX_TOKEN` and where it runs from), and
-says so plainly when the approval has ended. `phoenix ssh --list` uses the
-agent's own token even with `PHOENIX_ROLE` set, so it shows the approvals a
-login would use. `--reason` is shown as
-optional in the usage line.
+- An approval belongs to one agent, token and IP, so a login with another token
+  or from another IP is refused even after a human approved it. The error now
+  says to check `PHOENIX_TOKEN` and where the command runs from and, when the
+  server is v0.24.0 or newer, names the agent the CLI ran as. Before, it only
+  said to run again with `--reason`.
+- It says so plainly when the approval has ended.
+- When `PHOENIX_TOKEN` holds the agent's own token, `phoenix ssh --list` uses it
+  even with `PHOENIX_ROLE` set, so it shows the approvals a login would use.
+- The usage line shows `--reason` as optional. Inside an active approval it was
+  never required.
 
 **Upgrading:** update the server first. An older server has no
 `/v1/ssh/machines` and answers 404; `phoenix ssh --list` then says the server

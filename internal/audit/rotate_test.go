@@ -147,16 +147,25 @@ func TestRotateThroughSymlink(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	l, err := NewRotatingLogger(link, 500)
+	write := func(lines int, maxBytes int64) {
+		t.Helper()
+		l, err := NewRotatingLogger(link, maxBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		for range lines {
+			if err := l.LogAllowed("a", "read_value", "ns/x", "192.0.2.1"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write(3, 0)
+	fi, err := os.Stat(real)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range 6 {
-		if err := l.LogAllowed("a", "read_value", "ns/x", "192.0.2.1"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	l.Close()
+	write(3, fi.Size()+1) // the fourth line rotates, the others start a new log
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("the link is gone: %v %v", fi, err)
 	}

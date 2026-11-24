@@ -99,7 +99,7 @@ func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 	c := grant.Caller{Agent: info.Agent, SourceIP: ip, AuthMethod: s.bootstrapMethod(info)}
 	switch c.AuthMethod {
 	case grant.AuthBearer:
-		c.CredentialFP = info.BearerFP
+		c.CredentialFP, c.IssueFP = info.BearerFP, info.SessionFP
 	}
 	return c
 }
@@ -108,7 +108,9 @@ func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 
 // accessDecision is dataAccess's answer. Reason is "" when allowed, else
 // "session_scope", "session_action", "acl", why the login ended (loginEnded),
-// "grant_expired" or "grant_revoked". Grant is set when access comes only from a grant.
+// "grant_expired", "grant_used_up" or "grant_revoked". Grant is set when access
+// comes only from a grant; useGrants must then say yes before a value is handed
+// over.
 type accessDecision struct {
 	Reason string
 	Grant  *grant.Grant
@@ -121,8 +123,8 @@ type accessDecision struct {
 //  2. non-session caller the ACL allows: allowed.
 //  3. non-session, grants on, grantable action, store healthy, Match finds an
 //     active grant for this exact credential: allowed with Grant.
-//  4. otherwise denied; grant_expired / grant_revoked when a matching grant
-//     ended in the last 24h, else acl.
+//  4. otherwise denied; grant_expired / grant_used_up / grant_revoked when a
+//     matching grant ended in the last 24h, else acl.
 //
 // list, write and delete never reach step 3 (only read_value is grantable).
 func (s *Server) dataAccess(info *authInfo, path, sessionAction string, aclAction acl.Action, ip string) accessDecision {
@@ -145,6 +147,33 @@ func (s *Server) dataAccess(info *authInfo, path, sessionAction string, aclActio
 		return accessDecision{Reason: m.Reason}
 	}
 	return accessDecision{Reason: reason}
+}
+
+// approvedAccess is dataAccess for reads that may use nothing but what a human
+// approved: an exact "always" rule or a grant that matches this caller now. The
+// rest of the agent's access list does not count. phoenix exec uses it for
+// secrets its role may not read.
+func (s *Server) approvedAccess(info *authInfo, path, ip string) accessDecision {
+	if info.UsedSession {
+		return accessDecision{Reason: "acl"}
+	}
+	if s.acl.HasAlways(info.Agent, path) {
+		return accessDecision{Reason: s.loginEnded(info)} // looked up by name
+	}
+	if !s.grantsOn() || !actionGrantable(s.accessSettings(), grant.ActionReadValue) {
+		return accessDecision{Reason: "acl"}
+	}
+	m := s.grants.Match(s.grantCaller(info, ip), path, grant.ActionReadValue)
+	switch {
+	case m.Grant != nil:
+		if ended := s.loginEnded(info); ended != "" {
+			return accessDecision{Reason: ended}
+		}
+		return accessDecision{Grant: m.Grant}
+	case m.Reason != "":
+		return accessDecision{Reason: m.Reason}
+	}
+	return accessDecision{Reason: "acl"}
 }
 
 // checkGrantSealed enforces sealed_only on grant-backed reads: without a
@@ -172,15 +201,60 @@ func grantAuditMetadata(r *http.Request, g *grant.Grant) map[string]string {
 	return md
 }
 
-// auditAllowedAccess logs an allowed read. Grant-backed reads carry
-// metadata grant_id and bump the grant's use counter.
+// useGrants is the last check before granted values are delivered: it spends
+// one use of each grant that has a use limit, all or none of them when
+// allOrNone is set. The result has one entry per path, "" meaning deliver;
+// anything else is the denial reason. A nil grant (the ACL allows the path)
+// needs nothing.
+func (s *Server) useGrants(info *authInfo, ip, action string, paths []string, gs []*grant.Grant, allOrNone bool) []string {
+	reasons := make([]string, len(paths))
+	var items []grant.SpendItem
+	var at []int
+	for i, g := range gs {
+		if g != nil && g.MaxUses > 0 {
+			items, at = append(items, grant.SpendItem{GrantID: g.ID, Path: paths[i]}), append(at, i)
+		}
+	}
+	for n, err := range s.spend(info, ip, action, items, allOrNone) {
+		if err == nil {
+			continue
+		}
+		if reasons[at[n]] = grant.SpendReason(err); reasons[at[n]] == "" {
+			log.Printf("access requests: spending a use: %v", err)
+			reasons[at[n]] = reasonUseNotSaved
+		}
+	}
+	return reasons
+}
+
+// reasonUseNotSaved is useGrants' reason when the store could not record the
+// use, so nothing was delivered.
+const reasonUseNotSaved = "grant_use_not_saved"
+
+// spend calls the store only when there is something to spend, so a
+// server without a grant store never needs one.
+func (s *Server) spend(info *authInfo, ip, action string, items []grant.SpendItem, allOrNone bool) []error {
+	if len(items) == 0 {
+		return nil
+	}
+	c := s.grantCaller(info, ip)
+	c.Current = func() bool { return s.sessionCredentialCurrent(info.Agent, info.SessionFP) }
+	return s.grants.Spend(c, action, items, allOrNone)
+}
+
+// auditAllowedAccess logs an allowed read. Grant-backed reads carry metadata
+// grant_id and count as a use (useGrants already counted the limited ones).
 func (s *Server) auditAllowedAccess(r *http.Request, info *authInfo, action, path, ip string, sealed bool, g *grant.Grant) {
 	if g == nil {
 		s.auditAllowedWithSeal(r, info, action, path, ip, sealed)
 		return
 	}
-	s.logAudit(s.audit.LogAllowedSealedWithMetadata(info.Agent, action, path, ip, sealed, grantAuditMetadata(r, g)))
-	s.grants.RecordUse(g.ID)
+	s.logAudit(s.writeAudit(r, audit.Entry{
+		Agent: info.Agent, Action: action, Path: path, Status: "allowed", IP: ip, Sealed: sealed, Metadata: grantAuditMetadata(r, g),
+	}))
+	if g.MaxUses == 0 && action != "dry-resolve" {
+		s.grants.RecordUse(g.ID)
+	}
 }
 
 // --- routes and shared plumbing ----------------------------------------------
@@ -190,6 +264,7 @@ func (s *Server) accessRoutes() {
 	s.mux.HandleFunc("GET /v1/access-requests", s.handleAccessRequestList)
 	s.mux.HandleFunc("GET /v1/access-requests/{id}", s.handleAccessRequestGet)
 	s.mux.HandleFunc("POST /v1/access-requests/{id}/approve", s.handleAccessRequestApprove)
+	s.mux.HandleFunc("POST /v1/access-requests/{id}/approve-limited", s.handleAccessRequestApprove)
 	s.mux.HandleFunc("POST /v1/access-requests/{id}/deny", s.handleAccessRequestDeny)
 	s.mux.HandleFunc("GET /v1/grants", s.handleGrantList)
 	s.mux.HandleFunc("POST /v1/grants/{id}/revoke", s.handleGrantRevoke)
@@ -293,6 +368,9 @@ var grantErrStatus = map[grant.Code]int{
 	grant.CodeRevokeNotDurable:   http.StatusInternalServerError,
 	grant.CodeRequestsDegraded:   http.StatusServiceUnavailable,
 	grant.CodeDeleteACLFailed:    http.StatusInternalServerError,
+	grant.CodeCredentialChanged:  http.StatusConflict,
+	grant.CodeAlwaysNotAllowed:   http.StatusBadRequest,
+	grant.CodeACLWriteFailed:     http.StatusInternalServerError,
 }
 
 // writeGrantError maps a store error to the denial shape. Only the store's
@@ -368,8 +446,11 @@ func requestNextStep(rq grant.Request, g *grant.Grant, now time.Time) (step, msg
 		return NextWait, fmt.Sprintf("Waiting for a human to approve in Phoenix. Check again in 15s. Request expires at %s UTC.",
 			rq.ExpiresAt.UTC().Format("15:04"))
 	case grant.StatusDenied:
-		return NextAskUser, "A human denied this. Do not re-request for 10 minutes; ask the user in chat if it is needed."
+		return NextAskUser, "A human said no. Do not ask again; ask the user in chat if it is really needed."
 	case grant.StatusExpired:
+		if rq.Note != "" { // ended by Phoenix, which says why
+			return NextAskUser, "This request ended: " + rq.Note + "."
+		}
 		return NextAskUser, "Nobody decided in time. Ask the user before requesting again."
 	}
 	if g == nil {
@@ -378,13 +459,29 @@ func requestNextStep(rq grant.Request, g *grant.Grant, now time.Time) (step, msg
 	switch g.State(now) {
 	case grant.GrantActive:
 		if g.Action == grant.ActionSSHLogin {
+			if g.UsesLeft(g.Paths[0]) == 0 {
+				return NextRequestUse, "Every login certificate that was allowed has been issued. Request again for another."
+			}
 			return NextUseExec, fmt.Sprintf("Log in with phoenix ssh %s until %s.",
 				strings.TrimPrefix(g.Paths[0], sshPathPrefix), fmtTime(g.ExpiresAt))
 		}
-		return NextUseExec, fmt.Sprintf("Use it with phoenix exec --redact-output --env NAME=phoenix://%s -- <command> until %s.",
-			g.Paths[0], fmtTime(g.ExpiresAt))
+		// Name a path that can still be used.
+		path, limit := g.Paths[0], ""
+		for _, p := range g.Paths {
+			if n := g.UsesLeft(p); n != 0 {
+				path = p
+				if n > 0 {
+					limit = fmt.Sprintf(" (uses left: %d)", n)
+				}
+				break
+			}
+		}
+		return NextUseExec, fmt.Sprintf("Use it with phoenix exec --redact-output --env NAME=phoenix://%s -- <command> until %s%s.",
+			path, fmtTime(g.ExpiresAt), limit)
 	case grant.GrantRevoked:
 		return NextAskUser, "A human revoked this. Ask the user before requesting again."
+	case grant.GrantUsed:
+		return NextRequestUse, "Every allowed use was spent. Request again if still needed."
 	}
 	return NextRequestUse, "Grant ended. Request again if still needed."
 }
@@ -399,10 +496,19 @@ func (s *Server) requestView(rq grant.Request, full bool) map[string]any {
 		}
 	}
 	step, msg := requestNextStep(rq, g, now)
+	var always []string
+	if rq.Always {
+		always = s.alwaysStillAllowed(rq)
+		if len(always) > 0 {
+			step, msg = NextUseExec, fmt.Sprintf("Allowed always. Use it with phoenix exec --redact-output --env NAME=phoenix://%s -- <command>.", always[0])
+		} else {
+			step, msg = NextAskUser, "A human took this access away again. Ask the user before requesting it."
+		}
+	}
 	// Apply the current settings: a grant cannot be used while the feature
 	// is off, and request_use is only advertised for requestable paths.
 	switch {
-	case step == NextUseExec && !s.grantsOn():
+	case step == NextUseExec && !rq.Always && !s.grantsOn():
 		step, msg = NextAskUser, "Access requests are turned off on this server, so the grant cannot be used. Ask the user."
 	case step == NextRequestUse && !s.allRequestable(rq.Paths, rq.Action):
 		step, msg = NextAskUser, "Grant ended and these paths cannot be requested right now. Ask the user."
@@ -433,6 +539,11 @@ func (s *Server) requestView(rq grant.Request, full bool) map[string]any {
 		v["grant_expires_at"] = fmtTime(g.ExpiresAt)
 		v["grant_state"] = string(g.State(now))
 		v["sealed_only"] = g.SealedOnly
+		addUses(v, *g)
+	}
+	if rq.Always {
+		v["always"] = true
+		v["granted_paths"] = always
 	}
 	if full {
 		v["agent"] = rq.Agent
@@ -451,6 +562,31 @@ func (s *Server) requestView(rq grant.Request, full bool) map[string]any {
 		v["already_allowed_paths"] = allowed
 	}
 	return v
+}
+
+// alwaysStillAllowed is the part of an "always" answer the agent's access list
+// still holds. A human may have removed the rest since.
+func (s *Server) alwaysStillAllowed(rq grant.Request) []string {
+	out := []string{}
+	for _, p := range rq.GrantedPaths {
+		if s.acl.Authorize(rq.Agent, p, acl.Action(rq.Action)) == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// addUses adds a grant's use limit to its JSON; nothing when it has none.
+func addUses(v map[string]any, g grant.Grant) {
+	if g.MaxUses == 0 {
+		return
+	}
+	left := map[string]int64{}
+	for _, p := range g.Paths {
+		left[p] = g.UsesLeft(p)
+	}
+	v["max_uses"] = g.MaxUses
+	v["uses_left"] = left
 }
 
 // grantView is the JSON for one grant. full adds approver-only facts.
@@ -473,6 +609,7 @@ func (s *Server) grantView(g grant.Grant, full bool) map[string]any {
 	if !g.RevokedAt.IsZero() {
 		v["revoked_at"] = fmtTime(g.RevokedAt)
 	}
+	addUses(v, g)
 	if full {
 		v["approved_by"] = g.ApprovedBy
 		v["auth_method"] = g.AuthMethod
@@ -569,7 +706,8 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if cfg.RequireSealed && !s.hasSealKey(info.Agent) {
-			reject(CodeSealKeyNotRegistered, "granted values are served sealed, and this agent has no registered seal key", http.StatusBadRequest)
+			reject(CodeSealKeyNotRegistered, "this server hands out approved values only sealed, and this agent has no seal key yet, so nobody was asked. "+
+				"Once, an admin runs phoenix keypair generate for this agent, and the agent gets PHOENIX_SEAL_KEY set to the file it writes", http.StatusBadRequest)
 			return
 		}
 	}
@@ -582,8 +720,9 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 	}
 	c := s.grantCaller(info, ip)
 	rq, created, err := s.grants.Create(grant.CreateInput{
-		Agent: info.Agent, Paths: paths, Action: body.Action, Reason: body.Reason, TTL: ttl,
-		SourceIP: ip, AuthMethod: c.AuthMethod, CredentialFP: c.CredentialFP,
+		Labels: grantLabels(info.Caller),
+		Agent:  info.Agent, Paths: paths, Action: body.Action, Reason: body.Reason, TTL: ttl,
+		SourceIP: ip, AuthMethod: c.AuthMethod, CredentialFP: c.CredentialFP, IssueFP: c.IssueFP,
 	})
 	if err != nil {
 		s.auditRequestRejected(r, info, "access_request.create", paths, ip, string(grant.CodeOf(err)))
@@ -698,6 +837,7 @@ func (s *Server) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	g, err := s.grants.Revoke(grant.RevokeInput{
 		GrantID: r.PathValue("id"), By: info.Agent, IP: clientIP(r), OwnerOnly: !approver,
+		Labels: grantLabels(info.Caller),
 	})
 	if err != nil {
 		writeGrantError(w, err)
@@ -711,6 +851,9 @@ func (s *Server) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
 type approveBody struct {
 	Paths []string `json:"paths"` // nil = every requested path; [] = EMPTY_GRANT
 	TTL   string   `json:"ttl"`
+	// Uses allowed per path; only on approve-limited. Raw, so that one given
+	// as 0 or null is noticed and refused instead of meaning "any number".
+	Uses json.RawMessage `json:"uses"`
 }
 
 // approverAuth authenticates and requires an approver. Checked before the
@@ -729,7 +872,12 @@ func (s *Server) approverAuth(w http.ResponseWriter, r *http.Request) (*authInfo
 
 // handleAccessRequestApprove: POST /v1/access-requests/{id}/approve with an
 // optional {"paths": [subset], "ttl": "15m"}. The caller must be an API
-// approver; the re-checks themselves live in approveRequest.
+// approver; the re-checks themselves live in approveRequest. With a use limit,
+// {"uses": 1}, it is .../approve-limited: a server from before use limits has
+// no such address, where /approve would ignore the limit and allow any number
+// of uses. /approve refuses "uses" so nobody learns to send it there. "Always" is
+// not offered here: it changes an agent's access list, and an approver need
+// not be an admin. Only the dashboard can answer "always".
 func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Request) {
 	info, ok := s.approverAuth(w, r)
 	if !ok {
@@ -748,7 +896,13 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 	if !ok || s.writeLoginEnded(w, r, info) {
 		return
 	}
-	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, body.Paths, ttl, func(paths []string, code string) {
+	var uses int64
+	limited, given := strings.HasSuffix(r.URL.Path, "/approve-limited"), len(body.Uses) > 0
+	if limited != given || (given && (json.Unmarshal(body.Uses, &uses) != nil || uses < 1)) {
+		writeAccessError(w, CodeInvalidRequest, "a use limit goes to .../approve-limited with uses of at least 1, and only there", http.StatusBadRequest)
+		return
+	}
+	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, grantLabels(info.Caller), grant.Approval{Paths: body.Paths, TTL: ttl, Uses: uses}, func(paths []string, code string) {
 		s.auditRequestRejected(r, info, "access_request.approve", paths, ip, code)
 	})
 	if err != nil {
@@ -768,6 +922,7 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 		"paths":       g.Paths,
 		"expires_at":  fmtTime(g.ExpiresAt),
 		"sealed_only": g.SealedOnly,
+		"max_uses":    g.MaxUses,
 	})
 }
 
@@ -790,13 +945,14 @@ func (e *ApprovalError) ErrorCode() string { return e.Code }
 // approveRequest is the one approval path for the API and the dashboard.
 // Everything is re-checked against the CURRENT config: feature on, action
 // grantable, no path in deny_paths, require_sealed (and that the agent still
-// has a seal key), bind_source_ip, TTL clamped to max_grant_ttl. The store
+// has a seal key), bind_source_ip, TTL clamped to max_grant_ttl, and that the
+// agent's token is still the one that asked. The store
 // re-checks that the agent still exists and the active-grant cap. onReject
 // audits refusals (not NOT_PENDING, which is an ordinary race).
 //
 // It does NOT decide who may approve: the API checks the approvers list
 // first, the dashboard checks its login.
-func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl time.Duration, onReject func(paths []string, code string)) (grant.Request, grant.Grant, error) {
+func (s *Server) approveRequest(id, approver, ip string, labels grant.Labels, how grant.Approval, onReject func(paths []string, code string)) (grant.Request, grant.Grant, error) {
 	cfg := s.accessSettings()
 	if s.grants == nil || !cfg.Enabled {
 		return grant.Request{}, grant.Grant{}, &ApprovalError{CodeRequestsDisabled, "access requests are turned off; approvals are paused", http.StatusNotImplemented}
@@ -817,8 +973,17 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 		return reject(CodeActionNotGrantable, "this action is no longer grantable", http.StatusBadRequest)
 	}
 	check := rq.Paths
-	if paths != nil {
-		check = paths
+	if how.Paths != nil {
+		check = how.Paths
+	}
+	// Access is tied to the token that asked. If it was replaced, a yes could
+	// only reach whoever holds the new one.
+	a, err := s.acl.GetAgent(rq.Agent)
+	if err != nil {
+		return reject(CodeUnknownAgent, "requesting agent no longer exists", http.StatusForbidden)
+	}
+	if !tokenAsked(rq, a) {
+		return reject(CodeCredentialChanged, "this agent's token was replaced after it asked; it has to ask again", http.StatusConflict)
 	}
 	if sshLogin {
 		if !s.sshRequestAllowed(rq.Paths) {
@@ -834,11 +999,18 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 			return reject(CodeSealKeyNotRegistered, "sealed delivery is required and the agent has no registered seal key", http.StatusBadRequest)
 		}
 	}
-	nr, g, err := s.grants.Approve(grant.ApproveInput{
-		RequestID: id, Approver: approver, ApproverIP: ip, Paths: paths, TTL: ttl,
-		// A login is always tied to the IP that asked, whatever secrets are set to.
-		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed && !sshLogin, BindSourceIP: cfg.BindSourceIP || sshLogin,
-	})
+	var nr grant.Request
+	var g grant.Grant
+	if how.Always {
+		nr, err = s.grants.ApproveAlways(grant.AlwaysInput{RequestID: id, Approver: approver, ApproverIP: ip, Paths: how.Paths, Labels: labels})
+	} else {
+		nr, g, err = s.grants.Approve(grant.ApproveInput{
+			RequestID: id, Approver: approver, ApproverIP: ip, Paths: how.Paths, TTL: how.TTL, MaxUses: how.Uses,
+			// A login is always tied to the IP that asked, whatever secrets are set to.
+			MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed && !sshLogin, BindSourceIP: cfg.BindSourceIP || sshLogin,
+			Labels: labels,
+		})
+	}
 	if err != nil {
 		if grant.CodeOf(err) != grant.CodeNotPending {
 			onReject(rq.Paths, string(grant.CodeOf(err)))
@@ -853,11 +1025,10 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 // uses it with approver "dashboard@<ip>"; it is not subject to the
 // access_requests.approvers list (that list is for API/CLI identities).
 // Refusals are audited under the approver's name.
-func (s *Server) ApproveAccessRequestAs(id, approver, ip string, paths []string, ttl time.Duration) (grant.Grant, error) {
-	_, g, err := s.approveRequest(id, approver, ip, paths, ttl, func(paths []string, code string) {
+func (s *Server) ApproveAccessRequestAs(id, approver, ip string, how grant.Approval) (grant.Request, grant.Grant, error) {
+	return s.approveRequest(id, approver, ip, grant.Labels{}, how, func(paths []string, code string) {
 		s.logAudit(s.audit.LogDenied(approver, "access_request.approve", strings.Join(paths, ","), ip, strings.ToLower(code)))
 	})
-	return g, err
 }
 
 // AccessRequestSettings returns the access_requests settings in force now
@@ -881,7 +1052,7 @@ func (s *Server) handleAccessRequestDeny(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	rq, err := s.grants.Deny(grant.DenyInput{
-		RequestID: r.PathValue("id"), Denier: info.Agent, DenierIP: clientIP(r), Note: body.Note,
+		RequestID: r.PathValue("id"), Denier: info.Agent, DenierIP: clientIP(r), Note: body.Note, Labels: grantLabels(info.Caller),
 	})
 	if err != nil {
 		writeGrantError(w, err)
@@ -911,6 +1082,12 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{
 		"agent":     info.Agent,
+		"who":       info.Caller.Who,
+		"host":      info.Caller.Host,
+		"authority": info.Caller.Authority,
+		"kind":      info.Labels.Kind,
+		"formerly":  info.Labels.Formerly,
+		"attested":  info.Caller.Attested,
 		"source_ip": clientIP(r),
 		"access_requests": map[string]any{
 			"enabled":             enabled,
@@ -937,7 +1114,14 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	rules := []map[string]any{}
 	if a, err := s.acl.GetAgent(info.Agent); err == nil {
 		for _, p := range a.Permissions {
-			rules = append(rules, map[string]any{"path": p.Path, "actions": p.Actions})
+			if p.Always != nil && p.Always.Staged {
+				continue // not a permission yet
+			}
+			rule := map[string]any{"path": p.Path, "actions": p.Actions}
+			if p.Always != nil {
+				rule["always"] = true
+			}
+			rules = append(rules, rule)
 		}
 	}
 	resp["acl"] = rules
@@ -945,10 +1129,12 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	pending := []map[string]any{}
 	if s.grants != nil {
 		for _, g := range s.grants.ListGrants(info.Agent, false) {
-			grants = append(grants, map[string]any{
+			v := map[string]any{
 				"id": g.ID, "paths": g.Paths, "action": g.Action,
 				"expires_at": fmtTime(g.ExpiresAt), "sealed_only": g.SealedOnly,
-			})
+			}
+			addUses(v, g)
+			grants = append(grants, v)
 		}
 		for _, rq := range s.grants.ListRequests(info.Agent, grant.StatusPending) {
 			pending = append(pending, map[string]any{"id": rq.ID, "paths": rq.Paths, "expires_at": fmtTime(rq.ExpiresAt)})
@@ -975,7 +1161,7 @@ func (s *Server) deleteAgentWithGrants(w http.ResponseWriter, r *http.Request, a
 		jsonError(w, "agent not found", http.StatusNotFound)
 		return false
 	}
-	_, err := s.grants.DeleteAgent(target, actor, clientIP(r), remove)
+	_, err := s.grants.DeleteAgentBy(target, actor, clientIP(r), grantLabels(callerFor(r, actor)), remove)
 	if err == nil {
 		return true
 	}
@@ -1043,9 +1229,12 @@ func (g grantAuditSink) Append(e grant.Event) error {
 	if actor == "" {
 		actor = e.Agent
 	}
-	path := strings.Join(e.Paths, ",")
-	if e.Phase == grant.PhaseFailed {
-		return g.l.LogDeniedWithMetadata(actor, e.Name, path, e.ActorIP, "store_write_failed", md)
+	entry := audit.Entry{
+		Agent: actor, Action: e.Name, Path: strings.Join(e.Paths, ","), Status: "allowed", IP: e.ActorIP, Metadata: md,
+		Caller: audit.Caller{Who: e.ActorWho, Authority: e.ActorAuthority},
 	}
-	return g.l.LogAllowedWithMetadata(actor, e.Name, path, e.ActorIP, md)
+	if e.Phase == grant.PhaseFailed {
+		entry.Status, entry.Reason = "denied", "store_write_failed"
+	}
+	return g.l.Log(entry)
 }

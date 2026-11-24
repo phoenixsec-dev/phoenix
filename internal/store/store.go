@@ -39,6 +39,10 @@ type SecretMetadata struct {
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	RotationDue string   `json:"rotation_due,omitempty"`
+	// Username and URL are the login that goes with the value and the page
+	// it is for (metadata.go). Neither is secret.
+	Username string `json:"username,omitempty"`
+	URL      string `json:"url,omitempty"`
 }
 
 // encryptedSecret is the on-disk representation of a secret.
@@ -292,73 +296,17 @@ func (s *Store) getDEK(ns string) ([]byte, error) {
 	return dek, nil
 }
 
-// Set creates or updates a secret.
+// Set creates or updates a secret. An empty description or nil tags keep
+// what is stored.
 func (s *Store) Set(path, value, createdBy, description string, tags []string) error {
-	if err := ValidatePath(path); err != nil {
-		return err
+	var ch MetadataChange
+	if description != "" {
+		ch.Description = &description
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	ns := namespace(path)
-	dek, err := s.getDEK(ns)
-	if err != nil {
-		return err
+	if tags != nil {
+		ch.Tags = &tags
 	}
-
-	blob, err := crypto.Encrypt(dek, []byte(value))
-	if err != nil {
-		return fmt.Errorf("encrypting secret: %w", err)
-	}
-
-	now := time.Now().UTC()
-	existing, exists := s.data.Secrets[path]
-
-	meta := SecretMetadata{
-		Created:     now,
-		Updated:     now,
-		CreatedBy:   createdBy,
-		UpdatedBy:   createdBy,
-		Description: description,
-		Tags:        tags,
-	}
-
-	if exists {
-		meta.Created = existing.Metadata.Created
-		meta.CreatedBy = existing.Metadata.CreatedBy
-		if description == "" {
-			meta.Description = existing.Metadata.Description
-		}
-		if tags == nil {
-			meta.Tags = existing.Metadata.Tags
-		}
-	}
-
-	s.data.Secrets[path] = encryptedSecret{
-		Path:      path,
-		Value:     *blob,
-		Namespace: ns,
-		Metadata:  meta,
-	}
-
-	return s.saveOrUndo(path, existing, exists)
-}
-
-// saveOrUndo saves a change to one secret. If that fails the secret is put
-// back as it was (old, if it existed): the caller is told nothing changed, so
-// the next save that works must not carry the change after all. A namespace
-// key made for a new secret may stay; it is empty and harmless.
-func (s *Store) saveOrUndo(path string, old encryptedSecret, existed bool) error {
-	err := s.save()
-	if err != nil {
-		if existed {
-			s.data.Secrets[path] = old
-		} else {
-			delete(s.data.Secrets, path)
-		}
-	}
-	return err
+	return s.Write(path, value, createdBy, ch, WriteAny)
 }
 
 // Get retrieves a secret by path.
@@ -416,7 +364,11 @@ func (s *Store) Delete(path string) error {
 	}
 
 	delete(s.data.Secrets, path)
-	return s.saveOrUndo(path, old, true)
+	if err := s.save(); err != nil {
+		s.data.Secrets[path] = old // the caller is told nothing changed
+		return err
+	}
+	return nil
 }
 
 // List returns all secret paths, optionally filtered by prefix.

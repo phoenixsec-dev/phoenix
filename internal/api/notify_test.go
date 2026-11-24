@@ -111,7 +111,7 @@ func TestNotifyDefaultPayload(t *testing.T) {
 
 	id := e.request(t, vectorTok, "infra/b2/app-key", "infra/other")
 	h := waitHit(t, hits)
-	link := "https://phoenix.example.net/dashboard/approvals#" + id
+	link := "https://phoenix.example.net/dashboard/requests/" + id
 	for _, want := range []string{"vector", "read_value", "2 secrets", id, link} {
 		if !strings.Contains(h.body, want) {
 			t.Errorf("body missing %q:\n%s", want, h.body)

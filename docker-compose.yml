@@ -1,21 +1,22 @@
-# Phoenix server in Docker. First run, initialize the volume once (prints
-# the admin token a single time):
+# Phoenix server in Docker. First run, initialize the volume once (it asks for
+# a dashboard password, and prints the admin token a single time):
 #
-#   docker compose run --rm phoenix --init /data
+#   docker compose run --rm phoenix --init /data --https
 #   docker compose up -d
 #   export PHOENIX_TOKEN=<admin token>
 #   docker compose exec -e PHOENIX_TOKEN phoenix phoenix status
 #
-# No ports are published: the generated config listens on the container's
-# own loopback, which is the safe default. To reach Phoenix from the host,
-# turn on https_listener first, then uncomment "ports" (see
-# docs/quickstart.md, "Reaching the container from the host").
+# Dashboard: https://127.0.0.1:9443/dashboard/ . Only HTTPS is published, to
+# this machine only; plain HTTP stays on the container's own loopback. A volume
+# initialized without --https has nothing on 9443 until https_listener.enabled
+# is true in its config (see docs/quickstart.md, "Reaching the container from
+# the host").
 services:
   phoenix:
     build: .
     container_name: phoenix
-    # ports:
-    #   - "127.0.0.1:9443:9443"
+    ports:
+      - "127.0.0.1:9443:9443"
     volumes:
       - phoenix-data:/data
     restart: unless-stopped

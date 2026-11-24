@@ -82,6 +82,7 @@ var knownDenialCodes = map[string]bool{
 	"GRANT_LIMIT": true, "TOO_MANY_PENDING": true, "RATE_LIMITED": true,
 	"REQUEST_COOLDOWN": true, "UNKNOWN_AGENT": true, "AUDIT_WRITE_FAILED": true,
 	"STORE_WRITE_FAILED": true, "REVOKE_NOT_DURABLE": true, "AGENT_DELETE_ACL_FAILED": true,
+	"CREDENTIAL_CHANGED": true, "ALWAYS_NOT_ALLOWED": true, "ACL_WRITE_FAILED": true,
 }
 
 // denialHint returns the hint for a denial. The server's next_step is used

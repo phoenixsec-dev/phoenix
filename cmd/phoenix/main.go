@@ -9,10 +9,13 @@
 //	phoenix delete <path>
 //	phoenix list [folder/] [--names] [--tag <tag>]
 //	phoenix info <path>
+//	phoenix describe <path> [-d <desc>] [--tags <t1,t2>] [--username <name>] [--url <link>]
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
-//	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
+//	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>] [--who W] [--host H] [--authority A]
 //	phoenix agent create <name> --token <token> --acl <path:actions,...> [--force]
+//	phoenix agent set <name> [--who W] [--authority A] [--kind K] [--formerly old1,old2]
+//	phoenix agent show [name]
 //	phoenix agent list
 //	phoenix resolve <ref> [ref...]
 //	phoenix openclaw-exec-provider
@@ -43,11 +46,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,6 +85,7 @@ func init() {
 
 // buildHTTPClient creates an HTTP client with optional TLS configuration.
 // Set PHOENIX_CA_CERT to trust the Phoenix CA for TLS connections.
+// HTTPS_PROXY and NO_PROXY apply with and without it.
 func buildHTTPClient() *http.Client {
 	caCertPath := os.Getenv("PHOENIX_CA_CERT")
 	if os.Getenv("PHOENIX_CLIENT_CERT") != "" || os.Getenv("PHOENIX_CLIENT_KEY") != "" {
@@ -106,11 +112,22 @@ func buildHTTPClient() *http.Client {
 		MinVersion: tls.VersionTLS12,
 	}
 
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsCfg,
-		},
+	// Copy the default transport instead of starting from an empty one: an
+	// empty transport ignores the proxy variables and has no dial timeout.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = tlsCfg
+	tr.Proxy = proxyHTTPSOnly
+	return &http.Client{Transport: tr}
+}
+
+// proxyHTTPSOnly is the proxy choice for a client with Phoenix's CA: HTTPS
+// requests follow the environment. Plain http ones always go direct, as they
+// did before, so a token for a host-local server is never handed to a proxy.
+func proxyHTTPSOnly(r *http.Request) (*url.URL, error) {
+	if r.URL.Scheme != "https" {
+		return nil, nil
 	}
+	return http.ProxyFromEnvironment(r)
 }
 
 // noHTTPSClient is the client when PHOENIX_CA_CERT is set but unusable: https
@@ -167,6 +184,8 @@ func main() {
 		err = cmdList(args)
 	case "info":
 		err = cmdInfo(args)
+	case "describe":
+		err = cmdDescribe(args)
 	case "export":
 		err = cmdExport(args)
 	case "import":
@@ -175,12 +194,16 @@ func main() {
 		err = cmdAudit(args)
 	case "agent":
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|list|delete>")
+			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|set|show|list|delete>")
 			os.Exit(1)
 		}
 		switch args[0] {
 		case "create":
 			err = cmdAgentCreate(args[1:])
+		case "set":
+			err = cmdAgentSet(args[1:])
+		case "show":
+			err = cmdAgentShow(args[1:])
 		case "list":
 			err = cmdAgentList()
 		case "delete":
@@ -299,20 +322,27 @@ func usage() {
 
 Usage:
   phoenix get <path>                          Read a secret
-  phoenix set <path> [-d desc]                Create/update a secret (hidden prompt)
+  phoenix set <path> [-d desc] [--username name] [--url link]
+                                              Create/update a secret (hidden prompt)
   phoenix set <path> --multiline              Hidden multi-line paste (PEM keys), end with Ctrl-D
   phoenix set <path> --value-stdin            Read secret value from stdin
   phoenix delete <path>                       Delete a secret
   phoenix list [folder/] [--tag <tag>]        List secrets in a folder with their descriptions
                                               (folder, folder/ or folder/* all list folder/)
   phoenix list [folder/] --names              Bare paths only, one per line (for scripts)
-  phoenix info <path>                         Description, tags, dates, authors; never the value
+  phoenix info <path>                         Description, tags, username, link, dates; never the value
+  phoenix describe <path> [-d desc] [--tags t1,t2] [--username name] [--url link]
+                                              Change those without reading or writing the value
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
-  phoenix audit [-n N] [-a agent] [-s time]   Query audit log
+  phoenix audit [-n N] [-a agent] [-s time] [--who W] [--host H] [--authority A]
+                                              Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]
                                               ACL path globs: ns/* = one level, ns/** = recursive
+  phoenix agent set <name> [--who W] [--authority A] [--kind K] [--formerly old1,old2]
+                                              Describe an identity; its token and sessions carry on
+  phoenix agent show [name]                   Show who, authority, kind and former names
   phoenix agent list                          List agents
   phoenix agent delete <name>                 Delete an agent
   phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
@@ -342,7 +372,7 @@ Usage:
   phoenix request status <req_id>              Show a request's state and what to do next
   phoenix whoami                               Show identity, ACL rules, grants, pending requests
   phoenix pending                              List access requests waiting for a human (approver)
-  phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]
+  phoenix approve <req_id> [--ttl 15m] [--uses N] [--path p ...] [--yes]
                                               Approve an access request (approver; may narrow)
   phoenix deny <req_id> [--note "..."]         Deny an access request
   phoenix grants [--all] [--agent <name>]      List grants (own; approvers see all)
@@ -583,6 +613,7 @@ func cmdSet(args []string) error {
 
 	var path, value, desc string
 	var tags []string
+	var login loginOptions
 	var valueStdin, multiline bool
 
 	i := 0
@@ -607,6 +638,11 @@ func cmdSet(args []string) error {
 			if i < len(args) {
 				tags = strings.Split(args[i], ",")
 			}
+		case "--username", "--url":
+			i++
+			if i < len(args) {
+				login.take(args[i-1], args[i])
+			}
 		}
 		i++
 	}
@@ -626,9 +662,12 @@ func cmdSet(args []string) error {
 		}
 	}
 
-	setUsage := fmt.Errorf("usage: phoenix set <path> [-d description] [--tags t1,t2]   (hidden prompt)\n       phoenix set <path> --multiline [-d description]   (hidden, ends with Ctrl-D)\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]")
+	setUsage := fmt.Errorf("usage: phoenix set <path> [-d description] [--tags t1,t2] [--username name] [--url link]   (hidden prompt)\n       phoenix set <path> --multiline [-d description]   (hidden, ends with Ctrl-D)\n       phoenix set <path> --value-stdin [-d description] [--tags t1,t2]")
 	if path == "" {
 		return setUsage
+	}
+	if err := plainPath(path); err != nil {
+		return err
 	}
 
 	if multiline && !crypto.IsTerminal() {
@@ -653,6 +692,7 @@ func cmdSet(args []string) error {
 		"description": desc,
 		"tags":        tags,
 	}
+	login.addTo(body)
 	bodyBytes, _ := json.Marshal(body)
 
 	resp, err := apiRequest("PUT", "/v1/secrets/"+path, strings.NewReader(string(bodyBytes)))
@@ -669,11 +709,15 @@ func cmdSet(args []string) error {
 	// Nudge, never fail: the server reports has_description (older servers,
 	// and callers without list access, get no field, and then we stay quiet).
 	var result struct {
-		HasDescription *bool `json:"has_description"`
+		HasDescription *bool    `json:"has_description"`
+		Changed        []string `json:"changed"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&result) == nil {
+		if missing := login.notIn(result.Changed); missing != "" {
+			return fmt.Errorf("the value was saved, but this Phoenix server is too old to store the %s; update phoenix-server", missing)
+		}
 		if result.HasDescription != nil && !*result.HasDescription {
-			fmt.Fprintf(os.Stderr, "note: %s has no description. Add -d \"what it is for\" next time you set it, so phoenix list and info can show it.\n", path)
+			fmt.Fprintf(os.Stderr, "note: %s has no description, so nobody can find it by what it is for. Add one: phoenix describe %s -d \"what it is for\"\n", path, path)
 		}
 	}
 	return nil
@@ -1026,6 +1070,11 @@ func cmdAudit(args []string) error {
 			if i < len(args) {
 				params.Set("since", args[i])
 			}
+		case "--who", "--host", "--authority":
+			if i+1 < len(args) {
+				params.Set(strings.TrimPrefix(args[i], "--"), args[i+1])
+				i++
+			}
 		}
 		i++
 	}
@@ -1054,18 +1103,23 @@ func cmdAudit(args []string) error {
 			Status    string `json:"status"`
 			IP        string `json:"ip"`
 			Reason    string `json:"reason"`
+			auditCaller
 		} `json:"entries"`
-		Truncated bool `json:"truncated"`
+		Truncated       bool `json:"truncated"`
+		IdentityFilters bool `json:"identity_filters"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.IdentityFilters && (params.Has("who") || params.Has("host") || params.Has("authority")) {
+		return errors.New(serverTooOldForIdentity) // it ignored the filter
+	}
 
 	for _, e := range result.Entries {
 		status := e.Status
 		if e.Reason != "" {
 			status += " (" + e.Reason + ")"
 		}
-		fmt.Printf("%s  %-10s %-8s %-40s %s  %s\n",
-			e.Timestamp, e.Agent, e.Action, e.Path, status, e.IP)
+		fmt.Printf("%s  %-10s %-8s %-40s %s  %s%s\n",
+			e.Timestamp, e.Agent, e.Action, e.Path, status, e.IP, e.suffix())
 	}
 	if result.Truncated {
 		fmt.Fprintln(os.Stderr, "note: only the newest part of the audit log was searched; older entries may match (see the archived audit-*.log files)")
@@ -1080,6 +1134,7 @@ func cmdAgentCreate(args []string) error {
 
 	var name, agentToken, aclStr string
 	var force bool
+	labels := map[string]any{}
 	i := 0
 	if i < len(args) && !isOption("agent create", args[i]) {
 		name = args[i]
@@ -1099,6 +1154,16 @@ func cmdAgentCreate(args []string) error {
 			}
 		case "--force":
 			force = true
+		default:
+			if i+1 < len(args) {
+				ok, err := labelOption(labels, args[i], args[i+1])
+				if err != nil {
+					return err
+				}
+				if ok {
+					i++
+				}
+			}
 		}
 		i++
 	}
@@ -1139,11 +1204,13 @@ func cmdAgentCreate(args []string) error {
 		}
 	}
 
-	body, _ := json.Marshal(map[string]interface{}{
+	reqBody := map[string]interface{}{
 		"name":        name,
 		"token":       agentToken,
 		"permissions": permissions,
-	})
+	}
+	maps.Copy(reqBody, labels)
+	body, _ := json.Marshal(reqBody)
 
 	endpoint := "/v1/agents"
 	if force {
@@ -1160,10 +1227,18 @@ func cmdAgentCreate(args []string) error {
 		return handleError(resp)
 	}
 
+	var created struct {
+		Identity *identityView `json:"identity"`
+	}
+	json.NewDecoder(resp.Body).Decode(&created)
+
 	if force {
 		fmt.Printf("agent created/updated: %s\n", name)
 	} else {
 		fmt.Printf("agent created: %s\n", name)
+	}
+	if len(labels) > 0 && created.Identity == nil {
+		return fmt.Errorf("the agent was saved, but not its %s: %s", strings.Join(slices.Sorted(maps.Keys(labels)), ", "), serverTooOldForIdentity)
 	}
 	return nil
 }
@@ -1571,72 +1646,30 @@ func cmdExec(args []string) error {
 		}
 	}
 
-	body, _ := json.Marshal(map[string]interface{}{"refs": refs})
-	hdrs := sealHeaders(sealPrivKey)
-	var resp *http.Response
-	var err error
+	ctx := context.Background()
 	if timeout > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-		resp, err = apiRequestCtx(ctx, "POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
-	} else {
-		resp, err = apiRequestWithHeaders("POST", "/v1/resolve", strings.NewReader(string(body)), hdrs)
 	}
+	// Look for the command first: a typo in it must not cost a one-time use.
+	binary, err := exec.LookPath(cmdArgs[0])
 	if err != nil {
-		return fmt.Errorf("resolve request failed: %w", err)
+		return fmt.Errorf("command not found: %s", cmdArgs[0])
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return handleError(resp)
+	resolved, err := resolveForExec(ctx, refs, sealPrivKey)
+	if err != nil {
+		return err
 	}
-
-	// Decode response — handle sealed or plaintext
-	resolvedValues := make(map[string]string)
-	var resolveErrors map[string]string
-	var resolveErrorCodes map[string]refDenial
-
-	if sealPrivKey != nil {
-		var result struct {
-			SealedValues map[string]interface{} `json:"sealed_values"`
-			Errors       map[string]string      `json:"errors"`
-			ErrorCodes   map[string]refDenial   `json:"error_codes"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return fmt.Errorf("decoding resolve response: %w", err)
-		}
-		resolveErrors = result.Errors
-		resolveErrorCodes = result.ErrorCodes
-		for ref, raw := range result.SealedValues {
-			if envMap, ok := raw.(map[string]interface{}); ok {
-				if envRef, _ := envMap["ref"].(string); envRef != ref {
-					return fmt.Errorf("sealed envelope ref mismatch: map key %q, envelope %q", ref, envRef)
-				}
-			}
-			val, err := decryptSealedValue(raw, sealPrivKey)
-			if err != nil {
-				return fmt.Errorf("decrypting %s: %w", displayRef(ref), err)
-			}
-			resolvedValues[ref] = val
-		}
-	} else {
-		var result struct {
-			Values     map[string]string    `json:"values"`
-			Errors     map[string]string    `json:"errors"`
-			ErrorCodes map[string]refDenial `json:"error_codes"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return fmt.Errorf("decoding resolve response: %w", err)
-		}
-		resolvedValues = result.Values
-		resolveErrors = result.Errors
-		resolveErrorCodes = result.ErrorCodes
-	}
+	resolvedValues, resolveErrors, resolveErrorCodes := resolved.values, resolved.errs, resolved.codes
 
 	// Check for resolution errors
 	if len(resolveErrors) > 0 {
 		for ref, errMsg := range resolveErrors {
 			fmt.Fprintf(os.Stderr, "error resolving %s: %s\n", displayRef(ref), formatRefError(ref, errMsg, resolveErrorCodes))
+			if resolveErrorCodes[ref].Code == "SEALED_REQUIRED" && os.Getenv("PHOENIX_SEAL_KEY") == "" {
+				fmt.Fprintln(os.Stderr, "  set PHOENIX_SEAL_KEY to this agent's seal key file, then run the same command again")
+			}
 		}
 		return fmt.Errorf("failed to resolve %d reference(s)", len(resolveErrors))
 	}
@@ -1654,10 +1687,6 @@ func cmdExec(args []string) error {
 		values = append(values, redactValue{Name: m.envVar, Value: val})
 	}
 
-	binary, err := exec.LookPath(cmdArgs[0])
-	if err != nil {
-		return fmt.Errorf("command not found: %s", cmdArgs[0])
-	}
 	if redactOutput {
 		// Stay as the parent and filter the child's output (redact.go).
 		for _, v := range values {

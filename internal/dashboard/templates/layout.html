@@ -1,41 +1,53 @@
+{{define "head"}}
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#141417">
+    <link rel="stylesheet" href="/dashboard/static/style.css">
+    <link rel="icon" href="/dashboard/static/phoenix-icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/dashboard/static/icon-180.png">
+    <link rel="manifest" href="/dashboard/static/manifest.json">
+{{end}}
 {{define "layout"}}<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Phoenix Dashboard</title>
-    <link rel="stylesheet" href="/dashboard/static/style.css">
-    <link rel="icon" href="/dashboard/static/phoenix-icon.svg" type="image/svg+xml">
+    {{template "head" .}}
+    <title>Phoenix</title>
+    <link rel="stylesheet" href="/dashboard/static/requests.css">
 </head>
 <body>
-    <nav class="sidebar" id="sidebar">
+    {{/* One navigation. On a phone it is the bottom bar; the nav-wide links
+         do not fit there and are on the More page instead. */}}
+    <nav class="sidebar" id="sidebar" aria-label="Main">
         <div class="sidebar-brand">
-            <img src="/dashboard/static/phoenix-icon.svg" alt="Phoenix" class="sidebar-icon">
+            <img src="/dashboard/static/phoenix-icon.svg" alt="" class="sidebar-icon">
             <span class="sidebar-title">Phoenix</span>
         </div>
-        <a href="/dashboard/" class="nav-link{{if eq .Active "overview"}} active{{end}}">
-            <span class="nav-icon">&#9632;</span> Overview
+        <a href="/dashboard/" class="nav-link{{if eq .Active "overview"}} active{{end}}"{{if eq .Active "overview"}} aria-current="page"{{end}}>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-7 8 7v9h-5v-6H9v6H4z"/></svg> Home
         </a>
-        <a href="/dashboard/approvals" class="nav-link{{if eq .Active "approvals"}} active{{end}}">
-            <span class="nav-icon">&#10003;</span> Approvals
-            {{if and .PendingCount (gt .PendingCount 0)}}<span class="badge">{{.PendingCount}}</span>{{end}}
+        <a href="/dashboard/secrets" class="nav-link{{if eq .Active "secrets"}} active{{end}}"{{if eq .Active "secrets"}} aria-current="page"{{end}}>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg> Secrets
         </a>
-        <a href="/dashboard/grants" class="nav-link{{if eq .Active "grants"}} active{{end}}">
-            <span class="nav-icon">&#9873;</span> Grants
+        <a href="/dashboard/requests" class="nav-link{{if eq .Active "requests"}} active{{end}}"{{if eq .Active "requests"}} aria-current="page"{{end}}>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13l5 5L20 6"/></svg> Requests
+            <span class="badge" data-requests-badge{{if not .PendingCount}} hidden{{end}}>{{.PendingCount}}</span>
         </a>
-        <a href="/dashboard/sessions" class="nav-link{{if eq .Active "sessions"}} active{{end}}">
-            <span class="nav-icon">&#9679;</span> Sessions
+        <a href="/dashboard/sessions" class="nav-link nav-wide{{if eq .Active "sessions"}} active{{end}}"{{if eq .Active "sessions"}} aria-current="page"{{end}}>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-5 4-7 8-7s7 2 8 7"/></svg> Sessions
         </a>
-        <a href="/dashboard/audit" class="nav-link{{if eq .Active "audit"}} active{{end}}">
-            <span class="nav-icon">&#9776;</span> Audit
+        <a href="/dashboard/audit" class="nav-link nav-wide{{if eq .Active "audit"}} active{{end}}"{{if eq .Active "audit"}} aria-current="page"{{end}}>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/></svg> Audit log
         </a>
-        <a href="/dashboard/roles" class="nav-link{{if eq .Active "roles"}} active{{end}}">
-            <span class="nav-icon">&#9881;</span> Roles
+        <a href="/dashboard/roles" class="nav-link nav-wide{{if eq .Active "roles"}} active{{end}}"{{if eq .Active "roles"}} aria-current="page"{{end}}>
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-4 8-8 9-4-1-8-4-8-9V6z"/></svg> Roles
+        </a>
+        <a href="/dashboard/more" class="nav-link nav-narrow{{if or (eq .Active "more") (eq .Active "sessions") (eq .Active "audit") (eq .Active "roles")}} active{{end}}">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg> More
         </a>
         <div class="sidebar-footer">
             <form method="POST" action="/dashboard/logout">
                 <input type="hidden" name="_csrf" value="{{.CSRF}}">
-                <button type="submit" class="nav-link logout-btn">Logout</button>
+                <button type="submit" class="nav-link logout-btn">Sign out</button>
             </form>
         </div>
     </nav>
@@ -43,5 +55,27 @@
         {{template "content" .}}
     </main>
     <script src="/dashboard/static/dashboard.js"></script>
+    <script src="/dashboard/static/requests.js"></script>
+    {{block "scripts" .}}{{end}}
 </body>
 </html>{{end}}
+
+{{/* The password box secrets.js opens when the server asks for a recent
+     sign-in. Include it on any page that uses PhoenixSecrets.post. */}}
+{{define "reauth"}}
+<dialog id="reauth" class="dialog">
+    <form id="reauth-form" method="dialog">
+        <h2>Type your password</h2>
+        <p class="hint">It stays unlocked for 5 minutes.</p>
+        <div class="flash flash-error flash-sticky" id="reauth-error" role="alert" hidden></div>
+        <input type="password" id="reauth-password" class="input" autocomplete="current-password" aria-label="Dashboard password" required>
+        <div class="button-row">
+            <button type="submit" class="btn btn-primary">Unlock</button>
+            <button type="button" class="btn btn-quiet" id="reauth-cancel">Cancel</button>
+        </div>
+    </form>
+</dialog>
+<noscript><div class="flash flash-error flash-sticky">This page needs JavaScript.</div></noscript>
+{{end}}
+
+{{define "plain-warning"}}{{if .Plain}}<div class="flash flash-error flash-sticky">This connection is not encrypted (http). Anyone on the network can read passwords you show, copy or type here. Use https.</div>{{end}}{{end}}
