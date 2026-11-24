@@ -247,13 +247,12 @@ func decodeState(data []byte) (*state, error) {
 	if f.Version != fileVersion {
 		return nil, fmt.Errorf("unsupported grants file version %d", f.Version)
 	}
+	// Every grants file has both. Another Phoenix file configured here by
+	// mistake may also say version 1, and would be replaced by the next save.
+	if f.Requests == nil || f.Grants == nil {
+		return nil, errors.New("not a grants file: no requests or grants")
+	}
 	st := state{Version: f.Version, Requests: f.Requests, Grants: f.Grants, AuditPending: f.AuditPending}
-	if st.Requests == nil {
-		st.Requests = map[string]*Request{}
-	}
-	if st.Grants == nil {
-		st.Grants = map[string]*Grant{}
-	}
 	for id, g := range st.Grants {
 		if g != nil && g.MaxUses != 0 {
 			return nil, fmt.Errorf("malformed grant record %q: use limit outside limited_grants", id)
@@ -498,6 +497,9 @@ type CreateInput struct {
 	CredentialFP string // BearerFingerprint(hash) of the agent's token
 	Labels       Labels // the agent's
 	IssueFP      string // which issue of that token; tells A from A given out again after B
+	// Current reports whether that token is still the agent's. Asked under the
+	// lock. nil = not asked.
+	Current func() bool
 }
 
 // Create files a new pending request. It returns created=true for a new
@@ -546,6 +548,11 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 	}
 	if !s.exist(in.Agent) {
 		return Request{}, false, newErr(CodeUnknownAgent, "agent no longer exists")
+	}
+	if in.Current != nil && !in.Current() {
+		// Replaced while this call was waiting here. Below it would take the
+		// new token's requests for stale ones.
+		return Request{}, false, newErr(CodeCredentialChanged, "this agent's token was replaced; ask again with the new one")
 	}
 	now := s.now()
 	cur := s.snapshot()

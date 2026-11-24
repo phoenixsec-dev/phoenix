@@ -25,6 +25,10 @@ import (
 // the two fsyncs, rename can reach disk before the data does, which is how
 // a single-file store gets truncated to zero bytes on power loss.
 //
+// If path is a symlink the link itself is replaced, which is right for files
+// Phoenix names itself (backups, temp files). For a path the owner configured,
+// pass RealPath(path), so that their link stays.
+//
 // An error means path was NOT replaced and still holds its old content.
 // Callers (key rotation in particular) roll back on error, so a failure
 // after the rename must not be reported as one — see the SyncDir note below.
@@ -115,6 +119,13 @@ func writeAtomic(path string, data []byte, perm os.FileMode, ops AtomicOps) (ren
 		return false, fmt.Errorf("%s: %w", step, err)
 	}
 
+	// Keep the owner of the file being replaced, so that a command run as root
+	// does not leave one the server cannot read. Best effort: only root may
+	// give files away. The owner goes before the mode, because chown can clear
+	// mode bits.
+	if uid, gid, ok := owner(path); ok {
+		_ = f.Chown(uid, gid)
+	}
 	if err := f.Chmod(perm); err != nil {
 		return fail("setting temp file mode", err)
 	}

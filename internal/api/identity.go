@@ -109,12 +109,12 @@ func (s *Server) identityRoutes() {
 // labels in the body and leaves out-of-body ones alone. The token, the
 // permissions and any sessions are not touched.
 func (s *Server) handleSetIdentity(w http.ResponseWriter, r *http.Request) {
-	agentName, err := s.authenticate(r)
+	info, err := s.authenticate(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
-	if err := s.acl.Authorize(agentName, "agents", acl.ActionAdmin); err != nil {
+	if err := s.authorize(info, "agents", acl.ActionAdmin); err != nil {
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
@@ -138,18 +138,21 @@ func (s *Server) handleSetIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 	labels, err := s.acl.SetLabels(target, change)
 	if errors.Is(err, acl.ErrAgentNotFound) {
 		jsonError(w, "agent not found", http.StatusNotFound)
 		return
 	}
 	if err != nil {
-		s.auditIfUnsynced(r, agentName, "set-identity", target, change, err)
+		s.auditIfUnsynced(r, info.Agent, "set-identity", target, change, err)
 		log.Printf("error setting identity fields on %q: %v", target, err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.auditAgentChange(r, agentName, "set-identity", target, change, "")
+	s.auditAgentChange(r, info.Agent, "set-identity", target, change, "")
 	jsonOK(w, map[string]any{"status": "ok", "identity": acl.Identity{Name: target, Labels: labels}})
 }
 

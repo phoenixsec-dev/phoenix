@@ -294,3 +294,16 @@ func TestCollectHiddenInput(t *testing.T) {
 		}
 	}
 }
+
+// A damaged protected key is an error, not a crash.
+func TestDamagedNonceDoesNotPanic(t *testing.T) {
+	key, _ := GenerateKey()
+	pf, err := EncryptMasterKey(key, "fake-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf.Nonce = "AAAA"
+	if _, err := DecryptMasterKey(pf, "fake-pass"); err == nil {
+		t.Error("want an error")
+	}
+}

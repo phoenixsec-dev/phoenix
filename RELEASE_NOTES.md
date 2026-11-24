@@ -2,6 +2,150 @@
 
 ## Unreleased
 
+### Security: a request already running could use a replacement token's permissions
+
+A request logs in with its bearer token, then looks up permissions by agent
+name. If the token was replaced (or the agent deleted and made again) between
+those two steps, the request used the new token's permissions. The window is
+normally microseconds, but a `POST /v1/resolve` that sends its body slowly
+could hold it open for up to 15 seconds. Now every permission check, admin
+and approver checks included, also requires that the token the request logged
+in with is still the agent's. So does everything looked up by agent name
+("your" sessions, requests and grants). Requests that send a body are checked
+again after it arrived, so one kept waiting with an old token can no longer
+write a secret, make an agent or approve anything once that token is replaced.
+Such a request is refused, normally with `401 unauthorized` and audit reason
+`token_replaced`. Replaced at the very last moment it can also be a 403 (a few
+admin endpoints, a grant with a use limit), a 409 (a new access request) or a
+per-ref error in a batch resolve. Writing the same
+token again with `--force` is not a replacement. Nothing to configure.
+
+### Security: a revoked session could be quietly replaced after a role change
+
+At start the server drops sessions whose role was removed or changed. It
+dropped revoked ones too, so a revoked token then answered `SESSION_INVALID`
+("mint a new one") instead of `SESSION_REVOKED` ("ask a human"), and the CLI
+minted a fresh session on its own. Revoked sessions are now kept until they
+expire, whatever happened to their role.
+
+### Security: replacing an agent's token now ends its SSH logins
+
+A grant is bound to the token that asked, so replacing the token stopped new
+reads and new SSH certificates. An SSH login already signed carried on until
+the grant ended. The machine's own check (`/v1/ssh/window`) now also says no
+once the token was replaced or the agent deleted: a kept certificate stops
+working at once and an open session ends within about 30 seconds. Nothing to
+change on the machines.
+
+### Security: the dashboard believed X-Forwarded-For from anyone
+
+Any visitor could send their own `X-Forwarded-For`, use a new one for each
+guess to dodge the login lockout, and choose the address shown beside a login
+or an approval. The dashboard now uses the address the connection comes from.
+The API always did. `X-Forwarded-Proto: https` is still believed from anyone,
+on purpose: it gives the sender's own login cookie its `Secure` flag, can refuse
+posts from an `http://` page and leaves out the plain-HTTP warning, all for the
+sender alone, so a lie gains nothing, and no install behind a proxy loses that
+flag.
+
+**Action needed only if your dashboard is behind a reverse proxy:** add the
+proxy's address to the new `dashboard.trusted_proxies` and restart, for example
+`"trusted_proxies": ["127.0.0.1"]` for a proxy on the same host. Until you do,
+the dashboard works (as after any restart, sign in again once), but logins and
+approvals show the proxy's address, and everyone behind the proxy shares one
+login lockout (a wait of up to 60 seconds after repeated wrong passwords). The
+log names the address to add, for the first ten peers that send the header:
+`Dashboard: ignored X-Forwarded-For from <address>`. A config with the
+setting still loads on older versions, which ignore it. Details:
+[Dashboard](docs/dashboard.md#network-access-tls-reverse-proxy).
+
+### Security: an unusable PHOENIX_CA_CERT was only a warning
+
+If `PHOENIX_CA_CERT` named a file that was missing or held no certificate, the
+CLI and `phoenix mcp-server` warned and then trusted every public CA for that
+request, the token included. HTTPS requests now fail and say why. Plain HTTP,
+where the certificate is not used, works as before. **If your server's
+certificate is from a public CA and you have a stale `PHOENIX_CA_CERT`, unset
+it.**
+
+### Store safety: ways a data file could be lost
+
+Every place the server writes a file was checked for what a failed or cut-off
+write, a full disk, a wrong path, a symlink, a second server or a key rotation
+that dies halfway can do to it. Nothing to configure; what changed:
+- **A key rotation cut off by a crash could end in losing every secret.** The
+  server started on a store its key could not open, and trying `rotate-master`
+  again overwrote `<store>.pre-rotate`, the one good copy. Now the rotation
+  reads everything with the current key before it touches that backup, and the
+  server refuses to start when the key opens nothing in the store, naming the
+  backup if it works. If only some namespaces are unreadable it starts and logs
+  them. If the new key is saved but the disk could not confirm it would survive
+  a power cut, the backup is kept.
+- **A data file that was a symlink was replaced by a plain file** on its first
+  save (store, ACL, master key, audit rotation), so new content landed next to
+  the link instead of on the disk the owner pointed it at, for example inside a
+  container that is later thrown away. Writes now go to the file the link
+  points at and the link stays.
+- **Two servers on the same files silently undid each other's writes.** Each
+  keeps the store, ACL, grants and sessions in memory and rewrites them whole,
+  and even a second start that then failed on the port had already rewritten
+  the sessions file. The server now holds a lock on each file it rewrites (an
+  empty `<file>.lock` next to it, safe to leave there, gone with the process)
+  and refuses to start while another one holds it. Two servers may share an
+  audit log only if neither rotates it. Two servers with their own stores may
+  share a master key, but then neither can rotate it (409) until the other has
+  its own copy. Where locking does
+  not work the server starts and logs a `WARNING`.
+- **`--protect-key` and `rotate-master` could overwrite each other's key
+  file.** Adding a passphrase and then rotating without a restart saved the new
+  key with no passphrase again; rotating while `--protect-key` waited for a
+  passphrase put the old key back over the new one, leaving a store no key on
+  disk opened. Both now check that the file is still the one they read:
+  `rotate-master` answers 409 and asks for a restart, `--protect-key` stops.
+- **A failed rotation no longer replaces `master.key.prev`**: the old key waits
+  in `master.key.prev.new` and takes that name once the new key is saved.
+  `rotate-master` on an empty store keeps the key and says so.
+- **A damaged namespace key or protected master key crashed the server** (a
+  wrong-length nonce). It is now an ordinary error for that namespace or file.
+- **A grants file that was really another version 1 Phoenix file** was replaced
+  by the next save. It is now set aside like a damaged one.
+- **`store.path` pointing at another JSON file** (the ACL, the config, a
+  passphrase-protected key, or a store of a newer format) loaded as an empty
+  store, and the first secret written replaced that file. The server now
+  refuses to start on anything that is not a version 1 store file.
+- **A write or delete that failed (full disk) could still happen later.** The
+  caller got an error, but the server kept the change in memory, served it and
+  saved it with the next write that worked. It is now undone.
+- **Two settings naming one file** (for example `audit.path` and
+  `store.master_key`, or `store.path` and the SSH key) could destroy it. Only
+  the grants and sessions files were checked, and not against the config file,
+  TLS keys, the SSH key or the names of audit archives. The server now refuses
+  to start, and `--check-config` fails, when a file it writes is also another of
+  its files.
+- **`--init` in a directory without `master.key`** (the key kept elsewhere, or
+  lost) replaced `config.json` and the CA and server keys there. It now refuses
+  if any file it would write, or `store.json`, is already there, or if another
+  `--init` is running there.
+- **`--reissue-cert` rewrote the CA certificate in place,** so a full disk or a
+  crash could leave it empty, and it cannot be made again. It is now left alone
+  and only ever replaced in one step, like the CA key. (The server certificate
+  and key are still written in place, so that whoever you let read them still
+  can; if that is cut off, run `--reissue-cert` again.) `--reissue-cert` also
+  refuses a config that would make it write over the CA key or any other Phoenix
+  file. The SSH signing key appears whole or not at all: one cut off half way
+  used to stop the server from starting.
+- **Replaced files keep their owner** when Phoenix runs as root, so
+  `--protect-key` run with sudo no longer leaves a key the server cannot read.
+- **An audit line cut off by a full disk or a power cut swallowed the next
+  one:** that entry was written and reported as written, but no search could
+  read it. It now starts on its own line.
+- **A new agent or seal key whose save failed** was likewise kept in memory and
+  saved later, although the caller was told it failed; a kept seal key no longer
+  matched the private key the agent uses. The same went for `--force` with the
+  token unchanged: wider permissions took effect although the save failed. All
+  three are undone now. Replacing a token or deleting an agent still takes
+  effect at once even if the save fails, so the old token stays dead at least
+  until a restart; the answer to a failed `--force` now says so.
 ### One live Requests page: No, Once, 15 minutes or Always
 
 Approvals and Grants were two pages for one thing, neither updated by itself,

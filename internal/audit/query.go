@@ -10,6 +10,8 @@ import (
 	"os"
 	"slices"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // Reading the audit log for the dashboard and the API.
@@ -72,6 +74,7 @@ func Query(path string, opts QueryOptions) ([]Entry, error) {
 // Search reads the log at path backwards (current file, then the newest
 // archive) and returns the newest entries matching opts, oldest first.
 func Search(path string, opts QueryOptions) (Result, error) {
+	path = fsutil.RealPath(path) // archives sit next to the real file
 	f, err := openCurrent(path)
 	if err != nil {
 		return Result{}, fmt.Errorf("opening audit log for query: %w", err)

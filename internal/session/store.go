@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -209,8 +210,8 @@ func (s *Store) Create(role, agent, credentialFP string, sealPubKey []byte, name
 		Agent:              agent,
 		CredentialFP:       credentialFP,
 		SealKeyFingerprint: fingerprint,
-		Namespaces:         namespaces,
-		Actions:            actions,
+		Namespaces:         slices.Clone(namespaces),
+		Actions:            slices.Clone(actions),
 		BootstrapMethod:    bootstrapMethod,
 		SourceIP:           sourceIP,
 		CreatedAt:          now,
@@ -244,7 +245,15 @@ func (s *Store) Create(role, agent, credentialFP string, sealPubKey []byte, name
 		return "", nil, err
 	}
 
-	return token, sess, nil
+	return token, sess.snapshot(), nil
+}
+
+// snapshot is a copy to hand to callers: the stored record changes when the
+// session is renewed or revoked, and nothing a caller does may change it.
+func (sess *Session) snapshot() *Session {
+	c := *sess
+	c.Namespaces, c.Actions = slices.Clone(sess.Namespaces), slices.Clone(sess.Actions)
+	return &c
 }
 
 // Renew extends an existing session's expiry and mints a new signed token.
@@ -296,8 +305,7 @@ func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, er
 		return "", nil, err
 	}
 
-	renewed := *sess // a copy: another renewal may change the record
-	return token, &renewed, nil
+	return token, sess.snapshot(), nil
 }
 
 // Validate verifies a session token and returns the associated session.
@@ -317,16 +325,17 @@ func (s *Store) Validate(tokenStr string) (*Session, error) {
 		return sess, err
 	}
 
-	return nil, s.endStale(sess)
+	return nil, s.endStale(sess.ID)
 }
 
 // endStale ends the session a lookup found stale, unless something else got
 // there since. It returns the error for the caller.
-func (s *Store) endStale(sess *Session) error {
+func (s *Store) endStale(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	sess := s.sessions[id]
 	switch {
-	case s.sessions[sess.ID] == nil:
+	case sess == nil:
 		return ErrSessionNotFound
 	case sess.Revoked: // keep the record, it must say so
 		return ErrSessionRevoked
@@ -334,7 +343,7 @@ func (s *Store) endStale(sess *Session) error {
 	return s.endStaleLocked(sess)
 }
 
-// lookup finds a usable session by ID. stale means it is live but its
+// lookup finds a usable session by ID and returns a snapshot. stale means it is live but its
 // credential check failed, so the caller must end it.
 func (s *Store) lookup(id string) (sess *Session, stale bool, err error) {
 	s.mu.RLock()
@@ -349,9 +358,9 @@ func (s *Store) lookup(id string) (sess *Session, stale bool, err error) {
 	case time.Now().After(sess.ExpiresAt):
 		return nil, false, ErrTokenExpired
 	case !s.credentialOKLocked(sess):
-		return sess, true, nil
+		return sess.snapshot(), true, nil
 	}
-	return sess, false, nil
+	return sess.snapshot(), false, nil
 }
 
 // Revoke marks a session as revoked. Revocation is idempotent. The session
@@ -372,14 +381,18 @@ func (s *Store) Revoke(sessionID string) error {
 	return nil
 }
 
-// Get returns a session by ID, or nil if not found.
+// Get returns a snapshot of a session by ID, or nil if not found.
 func (s *Store) Get(sessionID string) *Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.sessions[sessionID]
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	return sess.snapshot()
 }
 
-// List returns all active (non-expired, non-revoked) sessions.
+// List returns snapshots of all active (non-expired, non-revoked) sessions.
 func (s *Store) List() []*Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -388,7 +401,7 @@ func (s *Store) List() []*Session {
 	var result []*Session
 	for _, sess := range s.sessions {
 		if !sess.Revoked && now.Before(sess.ExpiresAt) {
-			result = append(result, sess)
+			result = append(result, sess.snapshot())
 		}
 	}
 	return result

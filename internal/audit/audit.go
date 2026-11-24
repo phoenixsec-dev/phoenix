@@ -12,6 +12,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // Entry is a single audit log record.
@@ -60,6 +62,7 @@ type Logger struct {
 	path     string
 	maxBytes int64
 	size     int64 // bytes in the current file
+	cutOff   bool  // the file ends in half a line
 	kick     chan struct{}
 	wg       sync.WaitGroup
 }
@@ -74,6 +77,7 @@ func NewLogger(path string) (*Logger, error) {
 // NewRotatingLogger is NewLogger that moves the file to a dated archive
 // once it passes maxBytes (0 = never). Archives are never deleted.
 func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
+	path = fsutil.RealPath(path) // rotation must move the file, not a symlink to it
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("opening audit log: %w", err)
@@ -83,7 +87,7 @@ func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 		f.Close()
 		return nil, fmt.Errorf("opening audit log: %w", err)
 	}
-	l := &Logger{w: f, file: f, path: path, maxBytes: maxBytes, size: st.Size()}
+	l := &Logger{w: f, file: f, path: path, maxBytes: maxBytes, size: st.Size(), cutOff: endsInHalfLine(path, st.Size())}
 	if maxBytes > 0 {
 		l.kick = make(chan struct{}, 1)
 		l.wg.Add(1)
@@ -91,6 +95,23 @@ func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 		l.kickCompress() // finish anything a crash left half compressed
 	}
 	return l, nil
+}
+
+// endsInHalfLine reports whether the log's last write was cut off, by a full
+// disk or a power cut. If that cannot be read it says yes: a wrong yes only
+// costs an empty line.
+func endsInHalfLine(path string, size int64) bool {
+	if size == 0 {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	last := make([]byte, 1)
+	_, err = f.ReadAt(last, size-1)
+	return err != nil || last[0] != '\n'
 }
 
 // NewWriterLogger creates an audit logger backed by any io.Writer (useful for tests).
@@ -127,8 +148,17 @@ func (l *Logger) Log(entry Entry) error {
 	if err != nil {
 		return err
 	}
-	n, err := l.w.Write(append(line, '\n'))
+	line = append(line, '\n')
+	if l.cutOff {
+		// Close off the half line, or this entry becomes part of it and no
+		// search can read it.
+		line = append([]byte{'\n'}, line...)
+	}
+	n, err := l.w.Write(line)
 	l.size += int64(n)
+	if n > 0 {
+		l.cutOff = line[n-1] != '\n'
+	}
 	if err != nil {
 		return err
 	}

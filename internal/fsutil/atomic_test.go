@@ -2,6 +2,7 @@ package fsutil
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -183,5 +184,143 @@ func TestWriteFileAtomicStrict(t *testing.T) {
 				t.Fatalf("temp file left behind: %d entries", len(entries))
 			}
 		})
+	}
+}
+
+// A file reached through a symlink is replaced where it really is and the link
+// stays. Replacing the link would leave the new content off the volume the
+// owner pointed it at, and the old content on it.
+func TestWriteGoesThroughSymlinks(t *testing.T) {
+	for name, target := range map[string]string{
+		"absolute":     "ABS",
+		"relative":     "../vol/real.json",
+		"link to link": "LINK",
+	} {
+		for _, exists := range []bool{true, false} {
+			t.Run(name+fmt.Sprintf(" exists=%v", exists), func(t *testing.T) {
+				dir := t.TempDir()
+				real := filepath.Join(dir, "vol", "real.json")
+				link := filepath.Join(dir, "data", "file.json")
+				for _, d := range []string{filepath.Dir(real), filepath.Dir(link)} {
+					if err := os.Mkdir(d, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				target := target
+				switch target {
+				case "ABS":
+					target = real
+				case "LINK":
+					target = filepath.Join(dir, "vol", "second")
+					if err := os.Symlink("real.json", target); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+				if exists {
+					if err := os.WriteFile(real, []byte("old"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := WriteFileAtomic(RealPath(link), []byte("new"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+					t.Errorf("the link is gone: %v %v", fi, err)
+				}
+				if b, err := os.ReadFile(real); string(b) != "new" {
+					t.Errorf("target = %q %v", b, err)
+				}
+			})
+		}
+	}
+}
+
+// A link whose target directory is gone (a volume that is not mounted) is a
+// failed write, not a reason to write somewhere else.
+func TestWriteThroughDanglingSymlinkFails(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "file.json")
+	if err := os.Symlink(filepath.Join(dir, "unmounted", "file.json"), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(RealPath(link), []byte("new"), 0600); err == nil {
+		t.Error("want an error")
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link is gone: %v %v", fi, err)
+	}
+}
+
+// A replaced file keeps its owner and group where the system allows it, so a
+// command run as root (--protect-key, --reissue-cert) does not leave a file
+// the server's own user cannot read.
+func TestReplaceKeepsGroup(t *testing.T) {
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Skip(err)
+	}
+	for _, gid := range groups {
+		if gid == os.Getegid() {
+			continue
+		}
+		path := filepath.Join(t.TempDir(), "server.key")
+		if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(path, -1, gid); err != nil {
+			continue
+		}
+		if err := WriteFileAtomic(path, []byte("new"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, got, ok := owner(path)
+		if !ok || got != gid {
+			t.Errorf("group = %d %v, want %d", got, ok, gid)
+		}
+		return
+	}
+	t.Skip("this user is in only one group")
+}
+
+// Without RealPath a link is replaced, not followed: that is what a file
+// Phoenix names itself needs, whatever someone left at that name.
+func TestWriteDoesNotFollowSymlinkByItself(t *testing.T) {
+	dir := t.TempDir()
+	victim, link := filepath.Join(dir, "store.json"), filepath.Join(dir, "master.key.prev")
+	if err := errors.Join(os.WriteFile(victim, []byte("secrets"), 0600), os.Symlink(victim, link)); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileAtomic(link, []byte("key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "secrets" {
+		t.Errorf("the link's target was overwritten: %q", b)
+	}
+}
+
+// WriteFileNew never replaces a file, with or without hard links.
+func TestWriteFileNew(t *testing.T) {
+	t.Run("links", testWriteFileNew)
+	defer func() { linkFile = os.Link }()
+	linkFile = func(string, string) error { return errors.ErrUnsupported }
+	t.Run("no links", testWriteFileNew)
+}
+
+func testWriteFileNew(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ssh_ca.key")
+	if err := WriteFileNew(path, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFileNew(path, []byte("second"), 0600); !errors.Is(err, os.ErrExist) {
+		t.Errorf("second write: %v, want ErrExist", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "first" {
+		t.Errorf("content = %q", b)
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(path)); len(ents) != 1 {
+		t.Errorf("%d files left, want 1", len(ents))
 	}
 }

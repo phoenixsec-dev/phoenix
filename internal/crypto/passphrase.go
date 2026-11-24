@@ -130,6 +130,9 @@ func DecryptMasterKey(pf *ProtectedKeyFile, passphrase string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding nonce: %w", err)
 	}
+	if len(nonce) != NonceSize { // GCM panics on any other size
+		return nil, fmt.Errorf("invalid protected key file: wrong nonce size")
+	}
 	ciphertext, err := base64.StdEncoding.DecodeString(pf.Ciphertext)
 	if err != nil {
 		return nil, fmt.Errorf("decoding ciphertext: %w", err)
@@ -160,7 +163,7 @@ func DecryptMasterKey(pf *ProtectedKeyFile, passphrase string) ([]byte, error) {
 }
 
 // SaveProtectedMasterKey encrypts the master key with a passphrase and writes
-// it to disk crash-safely (fsynced write-tmp + rename).
+// it to disk crash-safely; errors are those of SaveMasterKeyAtomic.
 func SaveProtectedMasterKey(path string, masterKey []byte, passphrase string) error {
 	pf, err := EncryptMasterKey(masterKey, passphrase)
 	if err != nil {
@@ -172,7 +175,7 @@ func SaveProtectedMasterKey(path string, masterKey []byte, passphrase string) er
 		return fmt.Errorf("marshaling protected key: %w", err)
 	}
 
-	if err := fsutil.WriteFileAtomic(path, data, 0600); err != nil {
+	if err := fsutil.WriteFileAtomicStrict(path, data, 0600); err != nil {
 		return fmt.Errorf("saving protected key file: %w", err)
 	}
 	return nil

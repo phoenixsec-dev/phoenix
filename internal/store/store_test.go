@@ -497,12 +497,8 @@ func assertOpensWithKey(t *testing.T, path string, key []byte) {
 // (it still holds wrappers for some other key).
 func assertNotOpensWithKey(t *testing.T, path string, key []byte) {
 	t.Helper()
-	st, err := New(path, key)
-	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
-	}
-	if _, err := st.Get("ns1/key1"); err == nil {
-		t.Fatalf("%s unexpectedly decrypts with this key", path)
+	if _, err := New(path, key); err == nil || !strings.Contains(err.Error(), "does not open") {
+		t.Fatalf("%s: %v, want a refusal because the key does not open it", path, err)
 	}
 }
 

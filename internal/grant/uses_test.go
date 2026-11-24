@@ -445,3 +445,24 @@ func TestSpendDoubleFaultNeverGivesAUseBack(t *testing.T) {
 		t.Fatalf("%d uses of one", ok)
 	}
 }
+
+// A request that waited until the token it came with was replaced is refused
+// under the lock, so it cannot expire what the new token asked for meanwhile.
+func TestLateRequestFromOldTokenExpiresNothing(t *testing.T) {
+	e := newEnv(t)
+	in := bearerIn("vector", "infra/a")
+	in.CredentialFP = "fp-new"
+	fresh, _, err := e.s.Create(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := bearerIn("vector", "infra/b")
+	late.Current = func() bool { return false }
+	if _, created, err := e.s.Create(late); CodeOf(err) != CodeCredentialChanged || created {
+		t.Errorf("late request: created=%v %v, want CREDENTIAL_CHANGED", created, err)
+	}
+	e.reopen()
+	if r, _ := e.s.GetRequest(fresh.ID); r.Status != StatusPending {
+		t.Errorf("the new token's request is %s, want pending", r.Status)
+	}
+}

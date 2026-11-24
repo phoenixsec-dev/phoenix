@@ -179,3 +179,67 @@ func TestLoadCAFromPEM_RejectsNonCA(t *testing.T) {
 		t.Fatal("LoadCAFromPEM should reject non-CA certificates")
 	}
 }
+
+// The CA, which cannot be made again, is replaced in one step and left alone by
+// a reissue. The server certificate and key are written in place: whoever the
+// owner lets read them still can, a directory's default ACL cannot add readers,
+// and a symlink loop is an error, not replaced.
+func TestSaveKeepsCAAndAccess(t *testing.T) {
+	authority, err := GenerateCA("Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	in := func(n string) string { return filepath.Join(dir, n) }
+	if err := authority.Save(in("ca.crt"), in("ca.key")); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := authority.IssueServerCert([]string{"localhost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	save := func() error { return bundle.Save(in("s.crt"), in("s.key"), in("ca.crt")) }
+	stat := func(n string) os.FileInfo {
+		fi, err := os.Stat(in(n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi
+	}
+	if err := save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(in("s.key"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	old := map[string]os.FileInfo{}
+	for _, n := range []string{"ca.crt", "ca.key", "s.crt", "s.key"} {
+		old[n] = stat(n)
+	}
+	if err := save(); err != nil {
+		t.Fatal(err)
+	}
+	for n, fi := range old {
+		if !os.SameFile(fi, stat(n)) || stat(n).Mode() != fi.Mode() {
+			t.Errorf("reissuing replaced %s or changed its mode", n)
+		}
+	}
+	if err := authority.Save(in("ca.crt"), in("ca.key")); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"ca.crt", "ca.key"} {
+		if os.SameFile(old[n], stat(n)) {
+			t.Errorf("%s was rewritten in place", n)
+		}
+	}
+	loop := in("loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Save(in("s.crt"), loop, in("ca.crt")); err == nil {
+		t.Error("a looped link should be an error")
+	}
+	if fi, err := os.Lstat(loop); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link was replaced: %v", err)
+	}
+}

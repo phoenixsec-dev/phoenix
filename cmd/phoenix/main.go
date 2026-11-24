@@ -99,14 +99,12 @@ func buildHTTPClient() *http.Client {
 
 	caCert, err := os.ReadFile(caCertPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cannot read PHOENIX_CA_CERT %q: %v\n", caCertPath, err)
-		return http.DefaultClient
+		return noHTTPSClient(fmt.Errorf("cannot read PHOENIX_CA_CERT: %w", err))
 	}
 
 	rootPool := x509.NewCertPool()
 	if !rootPool.AppendCertsFromPEM(caCert) {
-		fmt.Fprintf(os.Stderr, "warning: PHOENIX_CA_CERT contains no valid certificates\n")
-		return http.DefaultClient
+		return noHTTPSClient(fmt.Errorf("PHOENIX_CA_CERT %q contains no valid certificates", caCertPath))
 	}
 
 	tlsCfg := &tls.Config{
@@ -130,6 +128,22 @@ func proxyHTTPSOnly(r *http.Request) (*url.URL, error) {
 		return nil, nil
 	}
 	return http.ProxyFromEnvironment(r)
+}
+
+// noHTTPSClient is the client when PHOENIX_CA_CERT is set but unusable: https
+// fails with err instead of trusting every public CA. Plain http does not use
+// the certificate, so it works as before.
+func noHTTPSClient(err error) *http.Client {
+	return &http.Client{Transport: noHTTPS{err}}
+}
+
+type noHTTPS struct{ err error }
+
+func (n noHTTPS) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Scheme == "https" {
+		return nil, n.err
+	}
+	return http.DefaultTransport.RoundTrip(r)
 }
 
 func main() {
@@ -1723,13 +1737,19 @@ func cmdRotateMaster() error {
 	}
 
 	var result struct {
-		Rotated int    `json:"rotated"`
+		Rotated *int   `json:"rotated"`
 		Backup  string `json:"backup"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Rotated == nil {
+		return fmt.Errorf("the server accepted the rotation but its answer could not be read; check the audit log for rotate-master before trying again")
+	}
 
+	if *result.Rotated == 0 {
+		fmt.Println("Nothing to rotate: the store has no namespaces yet, so the key was kept")
+		return nil
+	}
 	fmt.Printf("Master key rotated successfully\n")
-	fmt.Printf("  Namespaces re-wrapped: %d\n", result.Rotated)
+	fmt.Printf("  Namespaces re-wrapped: %d\n", *result.Rotated)
 	fmt.Printf("  Old key backed up to: %s\n", result.Backup)
 	return nil
 }

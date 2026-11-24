@@ -124,8 +124,8 @@ func (s *Server) handleSecretMetadata(w http.ResponseWriter, r *http.Request) {
 			}
 			out = append(out, newSecretInfo(p, m))
 		}
-		// Not a short list: say so if the session ended meanwhile.
-		if reason := s.sessionEnded(info); reason != "" {
+		// Not a short list: say so if the login ended meanwhile.
+		if reason := s.loginEnded(info); reason != "" {
 			s.writeDataDenial(w, r, info, "list", path, ip, reason)
 			return
 		}
@@ -240,6 +240,9 @@ func (s *Server) handleDescribeSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 	switch err := s.backend.Describe(path, ch); err {
 	case nil:
 	case store.ErrInvalidPath:

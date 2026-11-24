@@ -149,6 +149,7 @@ Then put it in the config and restart:
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
+| `dashboard.trusted_proxies` | `[]string` | Reverse proxies (IPs or CIDRs) whose `X-Forwarded-For` the dashboard believes (default: none). Set it if the dashboard is behind a reverse proxy; see [Dashboard](dashboard.md#network-access-tls-reverse-proxy) |
 | `dashboard.reveal` | `bool` | Let the dashboard show and copy secret values (default `false`). Finding, adding and editing work either way. Only this file can turn it on |
 | `dashboard.notify_on_reveal` | `bool` | Ping the owner when a value is shown or copied (default `true`). Goes to `access_requests.notify_url`, also with access requests off. The audit line is always written |
 
@@ -163,8 +164,7 @@ Login attempts are rate-limited with exponential backoff (5 failures before lock
 up to 60s delay, per source IP). Failed login attempts are logged to the audit trail.
 
 **Transport security:** When a request arrives over HTTPS (`https_listener`)
-or through a TLS reverse proxy (detected via
-`X-Forwarded-Proto: https`),
+or through a TLS reverse proxy (detected via `X-Forwarded-Proto: https`),
 the session cookie is set with `Secure` flag automatically. For production use:
 
 - Restrict to loopback access only (`server.listen: "127.0.0.1:9090"`), or
@@ -173,6 +173,20 @@ the session cookie is set with `Secure` flag automatically. For production use:
 
 Do not expose the dashboard over plain HTTP on a network you do not control —
 the server logs a loud startup warning if you do.
+
+## One server per set of files
+
+`phoenix-server` keeps its store, ACL, grants and sessions in memory and
+rewrites each file whole, so two servers on the same files would undo each
+other's writes. At start it locks every file it rewrites (store, ACL, grants
+file, sessions file, audit log) through an empty `<file>.lock` next to it, and
+refuses to start while another server holds one. Two servers may share an audit
+log if both have a negative `rotate_mb`, and a master key if their stores are
+separate. A shared key cannot be rotated (409) while both run: give the other
+server its own copy of the key file first, because after a rotation the old key
+is the only one that opens its store.
+The lock ends with the process, however it ends; a leftover `.lock` file blocks
+nothing. On a filesystem without locks the server starts and logs a `WARNING`.
 
 ## Audit log rotation
 

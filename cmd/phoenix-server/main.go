@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/dashboard"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
@@ -100,7 +102,7 @@ func main() {
 
 	if *initDir != "" {
 		// Checked before any question is asked; runInit checks again.
-		if err := refuseExistingKey(*initDir); err != nil {
+		if err := refuseExisting(*initDir); err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
 		passphrase, err := initPassphrase(*passphraseStdin)
@@ -151,6 +153,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}
+
+	// Before anything is opened: opening a data file can already write to it.
+	locks, err := lockDataFiles(cfg, log.Printf)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	defer locks.release()
 
 	// Initialize backend
 	var backend store.SecretBackend
@@ -243,6 +252,7 @@ func main() {
 	srv := api.NewServer(backend, a, al, cfg.Audit.Path)
 	srv.SetBearerEnabled(cfg.Auth.Bearer.Enabled)
 	srv.SetMasterKeyPath(cfg.Store.MasterKey)
+	srv.SetMasterKeyLock(locks.key)
 
 	// Load attestation policy if configured
 	var pe *policy.Engine
@@ -445,12 +455,18 @@ type initOptions struct {
 	Reveal            bool   // let the dashboard show secret values
 }
 
-// refuseExistingKey stops --init on a directory that already has a master
-// key: overwriting it would make every stored secret unreadable.
-func refuseExistingKey(dir string) error {
-	keyPath := filepath.Join(dir, "master.key")
-	if _, err := os.Stat(keyPath); err == nil {
-		return fmt.Errorf("master key already exists at %s — refusing to overwrite", keyPath)
+// refuseExisting stops --init on a directory that already has any file it would
+// write, or a store: a key, store, CA or config there is one nobody can make
+// again. Lstat, so a link that leads nowhere counts.
+func refuseExisting(dir string) error {
+	for _, name := range []string{"master.key", "store.json", "acl.json", "config.json", "ca.crt", "ca.key", "server.crt", "server.key"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("%s already exists — refusing to overwrite. --init is for a new directory; "+
+				"to start over, move the old files away first", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
 }
@@ -463,11 +479,23 @@ func runInit(dir string, opts initOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := refuseExistingKey(dir); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
+	}
+
+	// Two --init at once would both find the directory empty.
+	lock, err := fsutil.Lock(filepath.Join(dir, "init"))
+	switch {
+	case err == nil:
+		defer lock.Release()
+	case errors.Is(err, fsutil.ErrLocked):
+		return fmt.Errorf("another --init is running in %s", dir)
+	default:
+		log.Printf("WARNING: cannot lock %s: %v", dir, err)
+	}
+
+	if err := refuseExisting(dir); err != nil {
+		return err
 	}
 
 	// Generate master key
@@ -570,7 +598,7 @@ func runInit(dir string, opts initOptions) error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	if err := os.WriteFile(cfgPath, cfgData, 0600); err != nil {
+	if err := fsutil.WriteFileAtomic(cfgPath, cfgData, 0600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 	fmt.Printf("Created config: %s\n", cfgPath)
@@ -603,6 +631,14 @@ func runProtectKey(keyPath string) error {
 		return fmt.Errorf("--protect-key requires an interactive terminal (TTY)")
 	}
 
+	// What the prompts below are about; see replaceKeyFile.
+	before, err := os.ReadFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("loading master key: %w", err)
+	}
+
+	keyPath = fsutil.RealPath(keyPath) // replace the file, not a symlink to it
+
 	// Load current key (with old passphrase if needed)
 	key, err := crypto.LoadMasterKey(keyPath)
 	if err == crypto.ErrPassphraseRequired {
@@ -631,18 +667,42 @@ func runProtectKey(keyPath string) error {
 		if cErr != nil || confirm != "REMOVE" {
 			return fmt.Errorf("aborted — passphrase not changed")
 		}
-		if err := crypto.SaveMasterKeyAtomic(keyPath, key); err != nil {
+		if err := replaceKeyFile(keyPath, before, func() error { return crypto.SaveMasterKeyAtomic(keyPath, key) }); err != nil {
 			return fmt.Errorf("saving unprotected key: %w", err)
 		}
-		fmt.Println("Master key passphrase removed.")
+		fmt.Println("Master key passphrase removed. Restart the server.")
 	} else {
-		if err := crypto.SaveProtectedMasterKey(keyPath, key, newPass); err != nil {
+		if err := replaceKeyFile(keyPath, before, func() error { return crypto.SaveProtectedMasterKey(keyPath, key, newPass) }); err != nil {
 			return fmt.Errorf("saving protected key: %w", err)
 		}
-		fmt.Println("Master key passphrase updated.")
+		fmt.Println("Master key passphrase updated. Restart the server.")
 	}
 
 	return nil
+}
+
+// replaceKeyFile runs save unless the key file is no longer what it was when
+// read. A running server may have rotated the key while a person was typing a
+// passphrase; saving the old key over it would leave a store no key opens. The
+// lock is the one rotate-master holds while it works.
+func replaceKeyFile(keyPath string, before []byte, save func() error) error {
+	lock, err := fsutil.Lock(keyPath)
+	switch {
+	case err == nil:
+		defer lock.Release()
+	case errors.Is(err, fsutil.ErrLocked):
+		return fmt.Errorf("a key rotation is running, nothing was changed; run this again: %w", err)
+	default:
+		log.Printf("WARNING: cannot lock %s: %v", keyPath, err)
+	}
+	now, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(now, before) {
+		return errors.New("the key file was changed by something else meanwhile (a key rotation?), nothing was changed; run this again")
+	}
+	return save()
 }
 
 // runHashPassword prompts for a password and prints its bcrypt hash.
@@ -676,6 +736,10 @@ func runReissueCert(cfg *config.Config, sans []string) error {
 	}
 	if hl.Cert == "" || hl.Key == "" {
 		return fmt.Errorf("config is missing https_listener.cert and https_listener.key paths")
+	}
+
+	if err := cfg.ValidateReissuePaths(); err != nil {
+		return err
 	}
 
 	// Always include localhost and loopback

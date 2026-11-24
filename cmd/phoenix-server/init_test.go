@@ -9,6 +9,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/phoenixsec/phoenix/internal/config"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 // --passphrase was removed; --init takes the passphrase from the environment
@@ -131,4 +132,77 @@ func TestAskReveal(t *testing.T) {
 	if initReveal() { // tests have no terminal
 		t.Error("on without a terminal")
 	}
+}
+
+// --init never replaces a file that is already there. A data directory whose
+// master key lives elsewhere, or was lost, still holds a store, CA and config
+// that nothing can make again.
+func TestInitRefusesToReplaceAnything(t *testing.T) {
+	for _, name := range []string{"master.key", "store.json", "acl.json", "config.json", "ca.crt", "ca.key", "server.crt", "server.key"} {
+		for _, kind := range []string{"file", "dangling link"} {
+			t.Run(name+" "+kind, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, name)
+				var err error
+				if kind == "file" {
+					err = os.WriteFile(path, []byte("{}"), 0600)
+				} else {
+					err = os.Symlink(filepath.Join(dir, "elsewhere", "x"), path)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := quietInit(t, dir); err == nil || !strings.Contains(err.Error(), name) {
+					t.Errorf("runInit = %v, want a refusal naming %s", err, name)
+				}
+				if ents, _ := os.ReadDir(dir); len(ents) != 2 {
+					t.Errorf("init left %d files, want only the one that was there and its lock", len(ents))
+				}
+			})
+		}
+	}
+}
+
+// Two at once would both find the directory empty.
+func TestInitRefusesWhileAnotherRuns(t *testing.T) {
+	dir := t.TempDir()
+	lock, err := fsutil.Lock(filepath.Join(dir, "init"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := quietInit(t, dir); err == nil || !strings.Contains(err.Error(), "another --init") {
+		t.Errorf("runInit = %v, want a refusal", err)
+	}
+	lock.Release()
+	if err := quietInit(t, dir); err != nil {
+		t.Errorf("afterwards: %v", err)
+	}
+}
+
+// A new directory, and one that holds unrelated files, both work.
+func TestInitNextToOtherFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("mine"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := quietInit(t, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCheckConfig(filepath.Join(dir, "config.json")); err != nil {
+		t.Errorf("the config --init wrote: %v", err)
+	}
+}
+
+// quietInit is runInit without its output, which ends with an admin token.
+func quietInit(t *testing.T, dir string) error {
+	t.Helper()
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	stdout := os.Stdout
+	os.Stdout = null
+	defer func() { os.Stdout = stdout }()
+	return runInit(dir, initOptions{DashboardPassword: "synthetic-dash-password"})
 }

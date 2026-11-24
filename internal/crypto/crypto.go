@@ -104,6 +104,9 @@ func Decrypt(key []byte, blob *EncryptedBlob) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding nonce: %w", err)
 	}
+	if len(nonce) != NonceSize { // GCM panics on any other size
+		return nil, ErrDecryptionFailed
+	}
 
 	ciphertext, err := base64.StdEncoding.DecodeString(blob.Ciphertext)
 	if err != nil {
@@ -225,10 +228,11 @@ func GenerateAndSaveMasterKey(path string) ([]byte, error) {
 }
 
 // SaveMasterKeyAtomic writes a master key to disk crash-safely (fsynced
-// write-tmp + rename, see fsutil.WriteFileAtomic). Same pattern as store.save().
+// write-tmp + rename, see fsutil.WriteFileAtomicStrict: an error wrapping
+// ErrDirSyncFailed means it was written but a power cut could undo it).
 func SaveMasterKeyAtomic(path string, key []byte) error {
 	encoded := base64.StdEncoding.EncodeToString(key)
-	if err := fsutil.WriteFileAtomic(path, []byte(encoded), 0600); err != nil {
+	if err := fsutil.WriteFileAtomicStrict(path, []byte(encoded), 0600); err != nil {
 		return fmt.Errorf("saving key file: %w", err)
 	}
 	return nil

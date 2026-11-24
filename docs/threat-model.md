@@ -227,8 +227,10 @@ The dashboard **must** be deployed behind one of:
    `--init` server certificate); the cookie gets `Secure` via `r.TLS != nil`.
 
 3. **TLS reverse proxy** — proxy terminates TLS, sets `X-Forwarded-Proto: https`,
-   Phoenix detects this and sets `Secure` on the cookie. The server itself
-   binds to loopback.
+   so Phoenix sets `Secure` on the cookie, and `X-Forwarded-For`, and is listed in
+   `dashboard.trusted_proxies`, so Phoenix records the visitor's own address.
+   `X-Forwarded-For` is ignored from anyone not listed. The server itself binds
+   to loopback.
 
 Exposing the dashboard over plain HTTP on a network you do not fully control is
 **not acceptable**. The session cookie would transit in cleartext. The server

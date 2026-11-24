@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -32,6 +33,9 @@ type Config struct {
 	AccessRequests *AccessRequestsConfig `json:"access_requests,omitempty"`
 	// SSHCA is nil when the block is missing, which means SSH certificates are off.
 	SSHCA *SSHCAConfig `json:"ssh_ca,omitempty"`
+
+	// file is the path Load was given, "" if this was not loaded.
+	file string
 
 	// removed lists the removed settings Load found in the file (removed.go);
 	// Validate refuses to start while any are left.
@@ -189,12 +193,43 @@ type DashboardConfig struct {
 	// NotifyOnReveal pings the owner when a value is shown or copied.
 	// Default true.
 	NotifyOnReveal *bool `json:"notify_on_reveal,omitempty"`
+	// TrustedProxies are the reverse proxies (IPs or CIDRs) whose
+	// X-Forwarded-For the dashboard believes. Unset = nobody: the address
+	// shown is the one the connection comes from.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 }
 
 // NotifyOnRevealEnabled reports whether showing or copying a value pings the
 // owner. On unless "notify_on_reveal": false.
 func (d DashboardConfig) NotifyOnRevealEnabled() bool {
 	return d.NotifyOnReveal == nil || *d.NotifyOnReveal
+}
+
+// TrustedProxyPrefixes parses trusted_proxies. It refuses "everyone" (/0),
+// which would let any visitor choose the address Phoenix records for them.
+func (c DashboardConfig) TrustedProxyPrefixes() ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for i, s := range c.TrustedProxies {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			var a netip.Addr
+			if a, err = netip.ParseAddr(s); err == nil {
+				a = a.Unmap().WithZone("")
+				p = netip.PrefixFrom(a, a.BitLen())
+			}
+		}
+		switch {
+		case err != nil:
+			// Not quoted: something pasted here by mistake must not reach the log.
+			return nil, fmt.Errorf("dashboard.trusted_proxies: entry %d is not an IP address or CIDR", i+1)
+		case p.Bits() == 0:
+			return nil, fmt.Errorf("dashboard.trusted_proxies: %q trusts everyone; list your proxy's own address", s)
+		case p.Addr().Is4In6():
+			return nil, fmt.Errorf("dashboard.trusted_proxies: write %q as an IPv4 CIDR", s)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 // validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.
@@ -292,6 +327,7 @@ func ExampleConfig() *Config {
 // Load reads a config file from disk. Missing file returns defaults.
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
+	cfg.file = path // also when missing: nothing else may be written there
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -384,6 +420,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if _, err := c.Dashboard.TrustedProxyPrefixes(); err != nil {
+		return err
+	}
+
 	// Validate session config
 	if c.Session.Enabled {
 		if c.Session.TTL != "" {
@@ -432,8 +472,7 @@ func (c *Config) Validate() error {
 	if err := c.ValidateGrantStorePath(); err != nil {
 		return err
 	}
-
-	return nil
+	return c.validateDataPaths()
 }
 
 // SaveExample writes a default config to disk as a reference.

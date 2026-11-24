@@ -312,8 +312,10 @@ idempotent. The very next use gets `403 GRANT_REVOKED` with next step
 red: access is denied until the next restart but that is not saved, so fix the
 disk and do it again, or rotate the secret.
 
-Expiry and revoke are checked on every request (no cache). Rotating an agent's
+Expiry and revoke are checked on every request (no cache). Replacing an agent's
 bearer token ends its grants: a grant is bound to the exact token that asked.
+That includes an SSH login already signed under one: new logins stop at once
+and an open session ends within about 30 seconds, as with a revoke.
 Deleting an agent revokes its grants first.
 
 ### What revoke cannot do

@@ -286,7 +286,8 @@ Sessions survive a server restart:
   cannot be used to log in. Deleting it ends every session; clients mint
   new ones.
 - Revoked sessions stay in the file until they expire, so a revoked token keeps
-  getting `SESSION_REVOKED` after a restart.
+  getting `SESSION_REVOKED` after a restart, even if its role was removed or
+  changed.
 - A role change still takes effect at restart. The file keeps a hash of each
   role's settings; sessions of a role that was removed or changed in any way
   are dropped at start (the log says how many), and clients mint new ones under

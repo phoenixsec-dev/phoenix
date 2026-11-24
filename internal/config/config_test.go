@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -733,6 +734,26 @@ func TestDashboardRevealDefaults(t *testing.T) {
 		}
 		if got := [2]bool{cfg.Dashboard.Reveal, cfg.Dashboard.NotifyOnRevealEnabled()}; got != want {
 			t.Errorf("%s: %v, want %v", raw, got, want)
+		}
+	}
+}
+
+func TestTrustedProxies(t *testing.T) {
+	cfg := DefaultConfig()
+	if got, err := cfg.Dashboard.TrustedProxyPrefixes(); err != nil || len(got) != 0 {
+		t.Errorf("unset: %v %v, want nobody", got, err)
+	}
+	cfg.Dashboard.TrustedProxies = []string{"192.0.2.5", "10.0.0.1/8", "::1", "::ffff:192.0.2.6"}
+	got, err := cfg.Dashboard.TrustedProxyPrefixes()
+	if err != nil || fmt.Sprint(got) != "[192.0.2.5/32 10.0.0.0/8 ::1/128 192.0.2.6/32]" {
+		t.Errorf("got %v %v", got, err)
+	}
+	for _, bad := range []string{"", "proxy.example.net", "0.0.0.0/0", "::/0", "::ffff:10.0.0.0/104", "10.0.0.0/33"} {
+		cfg.Dashboard.TrustedProxies = []string{bad}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_proxies") {
+			t.Errorf("%q: %v, want a trusted_proxies error", bad, err)
+		} else if bad == "proxy.example.net" && strings.Contains(err.Error(), bad) {
+			t.Errorf("the error quotes what was pasted: %v", err)
 		}
 	}
 }

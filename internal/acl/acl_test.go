@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
@@ -736,5 +737,78 @@ func TestTokenChangeNotDoneUntilDurable(t *testing.T) {
 		if !errors.Is(err, fsutil.ErrDirSyncFailed) {
 			t.Errorf("%s: %v, want ErrDirSyncFailed", what, err)
 		}
+	}
+}
+
+// A new agent or seal key whose save failed was not added: not now, and not by
+// the next save that works. A kept seal key would not match the private key the
+// agent still uses. If the file was replaced and only the directory sync failed, both keep the new one.
+func TestFailedSaveOfNewAgentOrSealKeyIsUndone(t *testing.T) {
+	keys := []string{strings.Repeat("A", 43) + "=", strings.Repeat("B", 42) + "A="}
+	for name, c := range map[string]struct {
+		err  error
+		keep bool
+	}{
+		"disk full":       {syscall.ENOSPC, false},
+		"dir sync failed": {fsutil.ErrDirSyncFailed, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "acl.json")
+			a, err := New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := errors.Join(a.AddAgent("worker", "fake-1", nil), a.SetAgentSealKey("worker", keys[0])); err != nil {
+				t.Fatal(err)
+			}
+			write := a.writeFile
+			a.writeFile = func(p string, d []byte, m os.FileMode) error {
+				if c.keep {
+					return errors.Join(write(p, d, m), c.err)
+				}
+				return c.err
+			}
+			if a.AddAgent("late", "fake-2", nil) == nil || a.SetAgentSealKey("worker", keys[1]) == nil {
+				t.Fatal("both should fail")
+			}
+			a.writeFile = write
+			if err := a.AddAgent("other", "fake-3", nil); err != nil {
+				t.Fatal(err)
+			}
+			again, err := New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for when, x := range map[string]*ACL{"now": a, "after a restart": again} {
+				_, missing := x.GetAgent("late")
+				key, _ := x.GetAgentSealKey("worker")
+				if (missing == nil) != c.keep || (key == keys[1]) != c.keep {
+					t.Errorf("%s: late kept %v, new key kept %v, want %v", when, missing == nil, key == keys[1], c.keep)
+				}
+			}
+		})
+	}
+}
+
+// With the token unchanged, permissions from a failed save are undone. A
+// replaced token stays dead all the same.
+func TestFailedUpdateKeepsOldPermissionsNotOldToken(t *testing.T) {
+	a, err := New(filepath.Join(t.TempDir(), "acl.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := []Permission{{Path: "**", Actions: []Action{ActionAdmin}}}
+	if err := a.AddAgent("worker", "fake-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	a.writeFile = func(string, []byte, os.FileMode) error { return syscall.ENOSPC }
+	if a.UpdateAgent("worker", "fake-1", all) == nil || a.Authorize("worker", "x/y", ActionWrite) == nil {
+		t.Error("the failed update widened the agent's access")
+	}
+	if err := a.UpdateAgent("worker", "fake-2", nil); !errors.Is(err, ErrReplacedNotSaved) {
+		t.Errorf("replacing: %v, want ErrReplacedNotSaved", err)
+	}
+	if _, err := a.Authenticate("fake-1"); err == nil {
+		t.Error("the replaced token still works")
 	}
 }

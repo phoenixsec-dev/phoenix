@@ -76,8 +76,8 @@ func (s *Server) requestable(path, action string) bool {
 	return actionGrantable(cfg, action) && !pathDenied(cfg, path)
 }
 
-// isApprover: not a session, listed in access_requests.approvers, and still
-// an agent in the ACL.
+// isApprover: not a session, listed in access_requests.approvers, and the
+// token it logged in with is still its agent's.
 // Admin ACL alone does not count. Self-approval is checked per request.
 // Every approver-only path (approve, deny, ?agent= lists, full views,
 // revoking others' grants) goes through this one check.
@@ -85,8 +85,7 @@ func (s *Server) isApprover(info *authInfo) bool {
 	if info.UsedSession || !slices.Contains(s.accessSettings().Approvers, info.Agent) {
 		return false
 	}
-	_, err := s.acl.GetAgent(info.Agent)
-	return err == nil
+	return s.loginEnded(info) == ""
 }
 
 // grantCaller describes the caller's credential for grant binding: the auth
@@ -108,9 +107,10 @@ func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 // --- enforcement (plan section 8) --------------------------------------------
 
 // accessDecision is dataAccess's answer. Reason is "" when allowed, else
-// "session_scope", "session_action", "acl", a SESSION_ code, "grant_expired",
-// "grant_used_up" or "grant_revoked". Grant is set when access comes only from
-// a grant; useGrants must then say yes before a value is handed over.
+// "session_scope", "session_action", "acl", why the login ended (loginEnded),
+// "grant_expired", "grant_used_up" or "grant_revoked". Grant is set when access
+// comes only from a grant; useGrants must then say yes before a value is handed
+// over.
 type accessDecision struct {
 	Reason string
 	Grant  *grant.Grant
@@ -129,7 +129,7 @@ type accessDecision struct {
 // list, write and delete never reach step 3 (only read_value is grantable).
 func (s *Server) dataAccess(info *authInfo, path, sessionAction string, aclAction acl.Action, ip string) accessDecision {
 	reason := s.baseAccessReason(info, path, sessionAction, aclAction)
-	if reason == "" || info.UsedSession {
+	if reason != "acl" || info.UsedSession {
 		return accessDecision{Reason: reason}
 	}
 	if !s.grantsOn() || !actionGrantable(s.accessSettings(), string(aclAction)) {
@@ -137,6 +137,10 @@ func (s *Server) dataAccess(info *authInfo, path, sessionAction string, aclActio
 	}
 	m := s.grants.Match(s.grantCaller(info, ip), path, string(aclAction))
 	if m.Grant != nil {
+		// The grant was the old token's: replacing the token ended it.
+		if ended := s.loginEnded(info); ended != "" {
+			return accessDecision{Reason: ended}
+		}
 		return accessDecision{Grant: m.Grant}
 	}
 	if m.Reason != "" {
@@ -154,7 +158,7 @@ func (s *Server) approvedAccess(info *authInfo, path, ip string) accessDecision 
 		return accessDecision{Reason: "acl"}
 	}
 	if s.acl.HasAlways(info.Agent, path) {
-		return accessDecision{}
+		return accessDecision{Reason: s.loginEnded(info)} // looked up by name
 	}
 	if !s.grantsOn() || !actionGrantable(s.accessSettings(), grant.ActionReadValue) {
 		return accessDecision{Reason: "acl"}
@@ -162,6 +166,9 @@ func (s *Server) approvedAccess(info *authInfo, path, ip string) accessDecision 
 	m := s.grants.Match(s.grantCaller(info, ip), path, grant.ActionReadValue)
 	switch {
 	case m.Grant != nil:
+		if ended := s.loginEnded(info); ended != "" {
+			return accessDecision{Reason: ended}
+		}
 		return accessDecision{Grant: m.Grant}
 	case m.Reason != "":
 		return accessDecision{Reason: m.Reason}
@@ -689,7 +696,7 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 		}
 		allAllowed := true
 		for _, p := range paths {
-			if s.acl.Authorize(info.Agent, p, acl.Action(body.Action)) != nil {
+			if s.authorize(info, p, acl.Action(body.Action)) != nil {
 				allAllowed = false
 				break
 			}
@@ -708,11 +715,15 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 	c := s.grantCaller(info, ip)
 	rq, created, err := s.grants.Create(grant.CreateInput{
 		Labels: grantLabels(info.Caller),
 		Agent:  info.Agent, Paths: paths, Action: body.Action, Reason: body.Reason, TTL: ttl,
 		SourceIP: ip, AuthMethod: c.AuthMethod, CredentialFP: c.CredentialFP, IssueFP: c.IssueFP,
+		Current: func() bool { return s.sessionCredentialCurrent(info.Agent, info.SessionFP) },
 	})
 	if err != nil {
 		s.auditRequestRejected(r, info, "access_request.create", paths, ip, string(grant.CodeOf(err)))
@@ -761,6 +772,9 @@ func (s *Server) handleAccessRequestList(w http.ResponseWriter, r *http.Request)
 	for _, rq := range s.grants.ListRequests(agent, status) {
 		items = append(items, s.requestView(rq, approver))
 	}
+	if s.writeLoginEnded(w, r, info) {
+		return // after the lookup: the name may be another's now
+	}
 	jsonOK(w, map[string]any{"requests": items})
 }
 
@@ -773,11 +787,19 @@ func (s *Server) handleAccessRequestGet(w http.ResponseWriter, r *http.Request) 
 	}
 	rq, found := s.grants.GetRequest(r.PathValue("id"))
 	approver := s.isApprover(info)
-	if !found || (!approver && rq.Agent != info.Agent) {
+	visible := found && (approver || rq.Agent == info.Agent)
+	var view map[string]any
+	if visible {
+		view = s.requestView(rq, approver)
+	}
+	if s.writeLoginEnded(w, r, info) {
+		return // after the lookups: the name may be another's now
+	}
+	if !visible {
 		writeAccessError(w, CodeNotFound, "request not found", http.StatusNotFound)
 		return
 	}
-	jsonOK(w, s.requestView(rq, approver))
+	jsonOK(w, view)
 }
 
 // handleGrantList: GET /v1/grants[?include=inactive&agent=]. Approvers see
@@ -800,6 +822,9 @@ func (s *Server) handleGrantList(w http.ResponseWriter, r *http.Request) {
 	for _, g := range s.grants.ListGrants(agent, q.Get("include") == "inactive") {
 		items = append(items, s.grantView(g, approver))
 	}
+	if s.writeLoginEnded(w, r, info) {
+		return // after the lookup: the name may be another's now
+	}
 	jsonOK(w, map[string]any{"grants": items})
 }
 
@@ -812,8 +837,12 @@ func (s *Server) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	approver := s.isApprover(info)
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 	g, err := s.grants.Revoke(grant.RevokeInput{
-		GrantID: r.PathValue("id"), By: info.Agent, IP: clientIP(r), OwnerOnly: !s.isApprover(info),
+		GrantID: r.PathValue("id"), By: info.Agent, IP: clientIP(r), OwnerOnly: !approver,
 		Labels: grantLabels(info.Caller),
 	})
 	if err != nil {
@@ -870,7 +899,7 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ttl, ok := parseTTL(w, body.TTL)
-	if !ok {
+	if !ok || s.writeLoginEnded(w, r, info) {
 		return
 	}
 	var uses int64
@@ -1025,7 +1054,7 @@ func (s *Server) handleAccessRequestDeny(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Note string `json:"note"`
 	}
-	if !decodeBody(w, r, &body, true) {
+	if !decodeBody(w, r, &body, true) || s.writeLoginEnded(w, r, info) {
 		return
 	}
 	rq, err := s.grants.Deny(grant.DenyInput{
@@ -1119,6 +1148,10 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["grants"] = grants
 	resp["pending_requests"] = pending
+	// Everything above was looked up by name, so it may be a new token's.
+	if s.writeLoginEnded(w, r, info) {
+		return
+	}
 	jsonOK(w, resp)
 }
 

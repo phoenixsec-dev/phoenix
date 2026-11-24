@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -249,5 +251,66 @@ func TestQueryHugeLimit(t *testing.T) {
 		if err != nil || len(got) != 2 {
 			t.Fatalf("limit %d: %d entries, err %v", limit, len(got), err)
 		}
+	}
+}
+
+// shortWriter writes only part of one line, as a full disk does.
+type shortWriter struct {
+	f     *os.File
+	short bool
+}
+
+func (s *shortWriter) Write(p []byte) (int, error) {
+	if !s.short {
+		return s.f.Write(p)
+	}
+	s.short = false
+	n, _ := s.f.Write(p[:len(p)/2])
+	return n, syscall.ENOSPC
+}
+
+// A line cut off by a full disk or a power cut must not take the next one with
+// it: that entry was reported as written, so a search has to find it.
+func TestEntryAfterCutOffLineIsReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l, err := NewLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := func(l *Logger, agent string) error { return l.LogAllowed(agent, "read_value", "ns/x", "192.0.2.1") }
+	if err := entry(l, "first"); err != nil {
+		t.Fatal(err)
+	}
+	l.w = &shortWriter{f: l.file, short: true}
+	if err := entry(l, "cut"); err == nil {
+		t.Fatal("the short write should fail")
+	}
+	if err := entry(l, "second"); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"ts":"2026-01-01T00:00:00Z","agent":"po`) // power cut
+	f.Close()
+	if l, err = NewLogger(path); err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if err := entry(l, "third"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Search(path, QueryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range res.Entries {
+		got = append(got, e.Agent)
+	}
+	if strings.Join(got, " ") != "first second third" {
+		t.Errorf("entries = %v, want first second third", got)
 	}
 }

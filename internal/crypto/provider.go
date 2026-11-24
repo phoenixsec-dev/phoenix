@@ -1,7 +1,10 @@
 package crypto
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 )
 
@@ -169,6 +172,38 @@ func (p *FileKeyProvider) PendingMasterKey() []byte {
 		return nil
 	}
 	return append([]byte(nil), p.pendingKey...)
+}
+
+// ErrKeyFileChanged means the master key file is not the one the provider is
+// using any more.
+var ErrKeyFileChanged = errors.New("the master key file changed since it was loaded")
+
+// CheckKeyFile returns nil if the key file at path still holds the active key,
+// protected the way this provider would save a new one. Check it before a
+// rotation replaces the file: after --protect-key or a key swapped by hand it
+// does not, and saving would undo that change.
+func (p *FileKeyProvider) CheckKeyFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrKeyFileChanged, err)
+	}
+	protected := IsProtectedKeyFile(data)
+	ZeroBytes(data)
+	passphrase := p.Passphrase()
+	if protected != (passphrase != "") {
+		return ErrKeyFileChanged
+	}
+	key, err := LoadMasterKeyWithPassphrase(path, passphrase)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrKeyFileChanged, err)
+	}
+	defer ZeroBytes(key)
+	active := p.MasterKey()
+	defer ZeroBytes(active)
+	if !bytes.Equal(key, active) {
+		return ErrKeyFileChanged
+	}
+	return nil
 }
 
 // SetPassphrase stores the passphrase used to protect the master key on disk.
