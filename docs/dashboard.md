@@ -219,9 +219,17 @@ params handled server-side.
 
 ### Audit (`/dashboard/audit`)
 
-Table of audit entries: timestamp, agent, action, path, status (green/red
-dot), IP, session ID, reason. Filters for agent, status (allowed/denied),
-and result limit (50/100/500). Secret paths are always shown in full and
+Table of audit entries: timestamp, agent, who, host, authority, attested,
+action, path, status (green/red dot), IP, session ID, reason. Filters for
+agent, who, host, authority, status (allowed/denied), and result limit
+(50/100/500). Filters match whole values. The agent filter also finds lines
+under the identity's former names and says so.
+
+`no (declared)` under Attested means an admin gave the identity that who or
+authority and nothing checked it; a `-` means the line has no such field, as
+in lines from before v0.25.0. See
+[Who, authority and kind](authentication.md#who-authority-and-kind).
+ Secret paths are always shown in full and
 wrap on narrow screens. Filters run on the server while it reads the
 log backwards from the newest entry, so "denied, 50" shows the newest 50
 denied entries. The search covers the current file and the newest archive,

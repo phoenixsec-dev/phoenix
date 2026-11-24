@@ -428,6 +428,7 @@ type CreateInput struct {
 	SourceIP     string
 	AuthMethod   string // AuthBearer (the only method left)
 	CredentialFP string // BearerFingerprint(hash) of the agent's token
+	Labels       Labels // the agent's
 }
 
 // Create files a new pending request. It returns created=true for a new
@@ -535,7 +536,7 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 	}
 	next := cur.clone()
 	next.Requests[r.ID] = r
-	ev := s.newEvent(EventRequestCreated, PhaseCommitted, r.Agent, r.Agent, r.SourceIP)
+	ev := s.newEvent(EventRequestCreated, PhaseCommitted, r.Agent, r.Agent, r.SourceIP).by(in.Labels)
 	ev.RequestID, ev.Paths, ev.Action = r.ID, paths, r.Action
 	ev.Detail = map[string]string{"requested_ttl": ttl.String(), "auth_method": r.AuthMethod}
 	if err := s.commit(next, opCreate, ev); err != nil {
@@ -577,6 +578,7 @@ type ApproveInput struct {
 	MaxTTL       time.Duration // current max_grant_ttl (0 = store default); the grant is clamped to it
 	SealedOnly   bool          // current require_sealed
 	BindSourceIP bool          // current bind_source_ip
+	Labels       Labels        // the approver's
 }
 
 // Approve turns a pending request into a grant. Repeating the same approval
@@ -668,7 +670,7 @@ func (s *Store) Approve(in ApproveInput) (Request, Grant, error) {
 	next := cur.clone()
 	next.Requests[r.ID] = &nr
 	next.Grants[g.ID] = g
-	ev := s.newEvent(EventRequestApproved, PhaseCommitted, r.Agent, in.Approver, in.ApproverIP)
+	ev := s.newEvent(EventRequestApproved, PhaseCommitted, r.Agent, in.Approver, in.ApproverIP).by(in.Labels)
 	ev.RequestID, ev.GrantID, ev.Paths, ev.Action = r.ID, g.ID, paths, r.Action
 	ev.Detail = map[string]string{"ttl": ttl.String(), "expires_at": g.ExpiresAt.Format(time.RFC3339)}
 	if err := s.commit(next, opApprove, ev); err != nil {
@@ -683,6 +685,7 @@ type DenyInput struct {
 	Denier    string
 	DenierIP  string
 	Note      string // optional, cleaned like the reason
+	Labels    Labels // the denier's
 }
 
 // Deny rejects a pending request. Denying again with the same note returns the
@@ -720,7 +723,7 @@ func (s *Store) Deny(in DenyInput) (Request, error) {
 	nr.Status, nr.DecidedBy, nr.DeciderIP, nr.DecidedAt, nr.Note = StatusDenied, in.Denier, in.DenierIP, now, note
 	next := cur.clone()
 	next.Requests[r.ID] = &nr
-	ev := s.newEvent(EventRequestDenied, PhaseCommitted, r.Agent, in.Denier, in.DenierIP)
+	ev := s.newEvent(EventRequestDenied, PhaseCommitted, r.Agent, in.Denier, in.DenierIP).by(in.Labels)
 	ev.RequestID, ev.Paths, ev.Action = r.ID, r.Paths, r.Action
 	if note != "" {
 		ev.Detail = map[string]string{"note": note}
@@ -742,6 +745,7 @@ type RevokeInput struct {
 	// anyone else is reported as NOT_FOUND (no existence oracle). Approvers
 	// leave it false; the API decides who counts as an approver.
 	OwnerOnly bool
+	Labels    Labels // of By
 }
 
 // Revoke ends a grant now. It is idempotent: revoking a revoked grant returns
@@ -780,7 +784,7 @@ func (s *Store) Revoke(in RevokeInput) (Grant, error) {
 	ng.RevokedAt, ng.RevokedBy = now, in.By
 	next := cur.clone()
 	next.Grants[g.ID] = &ng
-	ev := s.newEvent(EventGrantRevoked, PhaseCommitted, g.Agent, in.By, in.IP)
+	ev := s.newEvent(EventGrantRevoked, PhaseCommitted, g.Agent, in.By, in.IP).by(in.Labels)
 	ev.RequestID, ev.GrantID, ev.Paths, ev.Action = g.RequestID, g.ID, g.Paths, g.Action
 	err := s.commitRevoke(next, opRevoke, ev, []Event{ev})
 	return s.grantView(&ng), err
@@ -799,6 +803,11 @@ type DeleteAgentResult struct {
 // fails the grants stay revoked (fail closed). removeACL may be nil and must
 // not call back into the Store.
 func (s *Store) DeleteAgent(agent, by, ip string, removeACL func() error) (DeleteAgentResult, error) {
+	return s.DeleteAgentBy(agent, by, ip, Labels{}, removeACL)
+}
+
+// DeleteAgentBy is DeleteAgent with the labels of who does it.
+func (s *Store) DeleteAgentBy(agent, by, ip string, labels Labels, removeACL func() error) (DeleteAgentResult, error) {
 	var res DeleteAgentResult
 	if agent == "" || by == "" {
 		return res, newErr(CodeInvalidRequest, "agent and actor are required")
@@ -820,7 +829,7 @@ func (s *Store) DeleteAgent(agent, by, ip string, removeACL func() error) (Delet
 		ng.RevokedAt, ng.RevokedBy = now, by
 		next.Grants[id] = &ng
 		res.RevokedGrants = append(res.RevokedGrants, id)
-		ev := s.newEvent(EventGrantRevoked, PhaseCommitted, agent, by, ip)
+		ev := s.newEvent(EventGrantRevoked, PhaseCommitted, agent, by, ip).by(labels)
 		ev.RequestID, ev.GrantID, ev.Paths, ev.Action = g.RequestID, g.ID, g.Paths, g.Action
 		ev.Detail = map[string]string{"cause": "agent_deleted"}
 		events = append(events, ev)
@@ -833,14 +842,14 @@ func (s *Store) DeleteAgent(agent, by, ip string, removeACL func() error) (Delet
 		nr.Status, nr.DecidedBy, nr.DeciderIP, nr.DecidedAt, nr.Note = StatusExpired, by, ip, now, "agent deleted"
 		next.Requests[id] = &nr
 		res.ExpiredRequests = append(res.ExpiredRequests, id)
-		ev := s.newEvent(EventRequestExpired, PhaseCommitted, agent, by, ip)
+		ev := s.newEvent(EventRequestExpired, PhaseCommitted, agent, by, ip).by(labels)
 		ev.RequestID, ev.Paths, ev.Action = r.ID, r.Paths, r.Action
 		ev.Detail = map[string]string{"cause": "agent_deleted"}
 		events = append(events, ev)
 	}
 	sort.Strings(res.RevokedGrants)
 	sort.Strings(res.ExpiredRequests)
-	summary := s.newEvent(EventAgentDeleted, PhaseCommitted, agent, by, ip)
+	summary := s.newEvent(EventAgentDeleted, PhaseCommitted, agent, by, ip).by(labels)
 	summary.Detail = map[string]string{
 		"revoked_grants":   fmt.Sprint(len(res.RevokedGrants)),
 		"expired_requests": fmt.Sprint(len(res.ExpiredRequests)),

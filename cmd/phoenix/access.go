@@ -263,9 +263,15 @@ func cmdWhoami(args []string) error {
 		return err
 	}
 	var w struct {
-		Agent      string `json:"agent"`
-		AuthMethod string `json:"auth_method"`
-		SourceIP   string `json:"source_ip"`
+		Agent      string   `json:"agent"`
+		AuthMethod string   `json:"auth_method"`
+		SourceIP   string   `json:"source_ip"`
+		Kind       string   `json:"kind"`
+		Formerly   []string `json:"formerly"`
+		Attested   *bool    `json:"attested"` // nil from a server without identity fields
+		Who        string   `json:"who"`
+		Host       string   `json:"host"`
+		Authority  string   `json:"authority"`
 		ACL        []struct {
 			Path    string   `json:"path"`
 			Actions []string `json:"actions"`
@@ -296,6 +302,14 @@ func cmdWhoami(args []string) error {
 		return err
 	}
 	fmt.Printf("Agent:     %s (%s from %s)\n", cleanServerText(w.Agent), cleanServerText(w.AuthMethod), cleanServerText(w.SourceIP))
+	if w.Attested != nil {
+		fmt.Printf("Who:       %s\n", orDash(w.Who))
+		fmt.Printf("Host:      %s\n", orDash(w.Host))
+		fmt.Printf("Authority: %s\n", orDash(w.Authority))
+		fmt.Printf("Kind:      %s\n", orDash(w.Kind))
+		fmt.Printf("Formerly:  %s\n", listOrDash(w.Formerly))
+		fmt.Printf("Attested:  %s\n", attestedText(*w.Attested))
+	}
 	if w.Session != nil {
 		fmt.Printf("Session:   role %s, %s on %s\n", cleanServerText(w.Session.Role),
 			cleanList(w.Session.Actions, ","), cleanList(w.Session.Namespaces, ", "))

@@ -612,9 +612,10 @@ func (h *Handler) handleLoginRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
-	agentFilter := r.URL.Query().Get("agent")
-	statusFilter := r.URL.Query().Get("status")
-	limitStr := r.URL.Query().Get("limit")
+	q := r.URL.Query()
+	agentFilter := q.Get("agent")
+	statusFilter := q.Get("status")
+	limitStr := q.Get("limit")
 
 	limit := 50
 	switch limitStr {
@@ -627,7 +628,13 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 	// Status is filtered inside the search, so a page of "denied" holds
 	// `limit` denied entries rather than the denied ones among the newest
 	// `limit` of everything.
-	opts := audit.QueryOptions{Limit: limit, Agent: agentFilter, Status: statusFilter}
+	opts := audit.QueryOptions{
+		Limit: limit, Agent: agentFilter, Status: statusFilter,
+		Who: q.Get("who"), Host: q.Get("host"), Authority: q.Get("authority"),
+	}
+	if h.deps.ACL != nil && agentFilter != "" {
+		opts.FormerAgents = h.deps.ACL.FormerNames(agentFilter)
+	}
 	var res audit.Result
 	if h.deps.AuditPath != "" {
 		res, _ = audit.Search(h.deps.AuditPath, opts)
@@ -640,14 +647,18 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "audit.html", map[string]interface{}{
-		"CSRF":         r.Header.Get("X-Csrf-Token"),
-		"Active":       "audit",
-		"Entries":      entries,
-		"AgentFilter":  agentFilter,
-		"StatusFilter": statusFilter,
-		"Limit":        limit,
-		"Truncated":    res.Truncated,
-		"ScanMB":       audit.DefaultMaxScanBytes >> 20,
+		"CSRF":            r.Header.Get("X-Csrf-Token"),
+		"Active":          "audit",
+		"Entries":         entries,
+		"AgentFilter":     agentFilter,
+		"FormerAgents":    opts.FormerAgents,
+		"WhoFilter":       opts.Who,
+		"HostFilter":      opts.Host,
+		"AuthorityFilter": opts.Authority,
+		"StatusFilter":    statusFilter,
+		"Limit":           limit,
+		"Truncated":       res.Truncated,
+		"ScanMB":          audit.DefaultMaxScanBytes >> 20,
 	})
 }
 

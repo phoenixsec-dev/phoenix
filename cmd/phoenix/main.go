@@ -11,8 +11,10 @@
 //	phoenix info <path>
 //	phoenix export <prefix> --format env
 //	phoenix import <file> --prefix <prefix>
-//	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>]
+//	phoenix audit [--last N] [--agent <name>] [--since <RFC3339>] [--who W] [--host H] [--authority A]
 //	phoenix agent create <name> --token <token> --acl <path:actions,...> [--force]
+//	phoenix agent set <name> [--who W] [--authority A] [--kind K] [--formerly old1,old2]
+//	phoenix agent show [name]
 //	phoenix agent list
 //	phoenix resolve <ref> [ref...]
 //	phoenix openclaw-exec-provider
@@ -43,11 +45,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -161,12 +165,16 @@ func main() {
 		err = cmdAudit(args)
 	case "agent":
 		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|list|delete>")
+			fmt.Fprintln(os.Stderr, "usage: phoenix agent <create|set|show|list|delete>")
 			os.Exit(1)
 		}
 		switch args[0] {
 		case "create":
 			err = cmdAgentCreate(args[1:])
+		case "set":
+			err = cmdAgentSet(args[1:])
+		case "show":
+			err = cmdAgentShow(args[1:])
 		case "list":
 			err = cmdAgentList()
 		case "delete":
@@ -296,9 +304,13 @@ Usage:
   phoenix export <prefix> -f env              Export as .env format
   phoenix import <file> -p <prefix>           Import from .env file
   phoenix import --from 1password --vault <v> --prefix <p> [--item <name>] [--dry-run] [--skip-existing]
-  phoenix audit [-n N] [-a agent] [-s time]   Query audit log
+  phoenix audit [-n N] [-a agent] [-s time] [--who W] [--host H] [--authority A]
+                                              Query audit log
   phoenix agent create <name> -t <token> --acl <path:actions;path:actions> [--force]
                                               ACL path globs: ns/* = one level, ns/** = recursive
+  phoenix agent set <name> [--who W] [--authority A] [--kind K] [--formerly old1,old2]
+                                              Describe an identity; its token and sessions carry on
+  phoenix agent show [name]                   Show who, authority, kind and former names
   phoenix agent list                          List agents
   phoenix agent delete <name>                 Delete an agent
   phoenix resolve <ref> [ref...]               Resolve phoenix:// references to values
@@ -1012,6 +1024,11 @@ func cmdAudit(args []string) error {
 			if i < len(args) {
 				params.Set("since", args[i])
 			}
+		case "--who", "--host", "--authority":
+			if i+1 < len(args) {
+				params.Set(strings.TrimPrefix(args[i], "--"), args[i+1])
+				i++
+			}
 		}
 		i++
 	}
@@ -1040,18 +1057,23 @@ func cmdAudit(args []string) error {
 			Status    string `json:"status"`
 			IP        string `json:"ip"`
 			Reason    string `json:"reason"`
+			auditCaller
 		} `json:"entries"`
-		Truncated bool `json:"truncated"`
+		Truncated       bool `json:"truncated"`
+		IdentityFilters bool `json:"identity_filters"`
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.IdentityFilters && (params.Has("who") || params.Has("host") || params.Has("authority")) {
+		return errors.New(serverTooOldForIdentity) // it ignored the filter
+	}
 
 	for _, e := range result.Entries {
 		status := e.Status
 		if e.Reason != "" {
 			status += " (" + e.Reason + ")"
 		}
-		fmt.Printf("%s  %-10s %-8s %-40s %s  %s\n",
-			e.Timestamp, e.Agent, e.Action, e.Path, status, e.IP)
+		fmt.Printf("%s  %-10s %-8s %-40s %s  %s%s\n",
+			e.Timestamp, e.Agent, e.Action, e.Path, status, e.IP, e.suffix())
 	}
 	if result.Truncated {
 		fmt.Fprintln(os.Stderr, "note: only the newest part of the audit log was searched; older entries may match (see the archived audit-*.log files)")
@@ -1066,6 +1088,7 @@ func cmdAgentCreate(args []string) error {
 
 	var name, agentToken, aclStr string
 	var force bool
+	labels := map[string]any{}
 	i := 0
 	if i < len(args) && !isOption("agent create", args[i]) {
 		name = args[i]
@@ -1085,6 +1108,16 @@ func cmdAgentCreate(args []string) error {
 			}
 		case "--force":
 			force = true
+		default:
+			if i+1 < len(args) {
+				ok, err := labelOption(labels, args[i], args[i+1])
+				if err != nil {
+					return err
+				}
+				if ok {
+					i++
+				}
+			}
 		}
 		i++
 	}
@@ -1125,11 +1158,13 @@ func cmdAgentCreate(args []string) error {
 		}
 	}
 
-	body, _ := json.Marshal(map[string]interface{}{
+	reqBody := map[string]interface{}{
 		"name":        name,
 		"token":       agentToken,
 		"permissions": permissions,
-	})
+	}
+	maps.Copy(reqBody, labels)
+	body, _ := json.Marshal(reqBody)
 
 	endpoint := "/v1/agents"
 	if force {
@@ -1146,10 +1181,18 @@ func cmdAgentCreate(args []string) error {
 		return handleError(resp)
 	}
 
+	var created struct {
+		Identity *identityView `json:"identity"`
+	}
+	json.NewDecoder(resp.Body).Decode(&created)
+
 	if force {
 		fmt.Printf("agent created/updated: %s\n", name)
 	} else {
 		fmt.Printf("agent created: %s\n", name)
+	}
+	if len(labels) > 0 && created.Identity == nil {
+		return fmt.Errorf("the agent was saved, but not its %s: %s", strings.Join(slices.Sorted(maps.Keys(labels)), ", "), serverTooOldForIdentity)
 	}
 	return nil
 }

@@ -94,6 +94,10 @@ inside the envelope.
   Note: IP binding and `source_ip` policy are meaningful only inside the LAN
   envelope, where addresses are operator-assigned and not attacker-chosen.
   They are not a defense against internet-scale attackers (out of scope).
+  The `who`, `host` and `authority` on audit lines are never read from a request.
+  For a token, `who` and `authority` are what an admin declared, marked
+  `attested: false`, and `host` is empty: whoever holds the token gets the same
+  labels.
 - **Operational leakage**
   Structured audit logs record allows/denies without writing secret values.
 - **At-rest theft of store data**

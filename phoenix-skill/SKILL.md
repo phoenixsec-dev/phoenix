@@ -153,6 +153,18 @@ Actions: `list` (see names), `read_value` (read values), `write`, `delete`,
 phoenix agent list
 ```
 
+### Describe an agent
+
+```bash
+phoenix agent set <name> --who <w> --authority <a> --kind <k> --formerly <old1,old2>
+phoenix agent show [name]
+```
+
+Records who uses an identity and in what role (admin only), so the audit log
+can show them apart. Its token and sessions stay. These are labels: they grant
+nothing, and no header or argument of yours can set them for your own calls.
+`phoenix whoami` shows yours.
+
 ### Export secrets
 
 ```bash
@@ -172,10 +184,10 @@ Imports `KEY=VALUE` pairs from a `.env` file into a namespace.
 ### Audit log
 
 ```bash
-phoenix audit [-n 20] [-a agent-name] [-s 2025-01-01T00:00:00Z]
+phoenix audit [-n 20] [-a agent-name] [-s 2025-01-01T00:00:00Z] [--who w] [--host h] [--authority a]
 ```
 
-Query the audit log. Filter by count, agent, or time range.
+Query the audit log. Filter by count, agent, time range, or who, host and authority.
 
 ### Generate a seal key pair
 

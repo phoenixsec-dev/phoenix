@@ -51,6 +51,22 @@ type Event struct {
 	Paths     []string          `json:"paths,omitempty"`
 	Action    string            `json:"action,omitempty"`
 	Detail    map[string]string `json:"detail,omitempty"` // ttl, note, error text, ...
+
+	// The actor's labels when it acted, kept so a line written later does not
+	// take a newer identity's.
+	ActorWho       string `json:"actor_who,omitempty"`
+	ActorAuthority string `json:"actor_authority,omitempty"`
+}
+
+// Labels are who an actor is and in what role, as its identity said when it
+// was authenticated. Only for the audit log; empty for the dashboard and for
+// the store's own expiries.
+type Labels struct{ Who, Authority string }
+
+// by returns the event with its actor's labels.
+func (e Event) by(l Labels) Event {
+	e.ActorWho, e.ActorAuthority = l.Who, l.Authority
+	return e
 }
 
 // AuditSink receives audit lines. internal/api adapts its *audit.Logger to

@@ -1,5 +1,46 @@
 # Release Notes
 
+## Unreleased
+
+### Who, host and authority as fields of their own
+
+An identity's name often mashes together who uses it and what role it has.
+Both can now be recorded next to the name, and the audit log shows them as
+separate columns. The words are yours; Phoenix has no list of allowed values,
+and they decide nothing about access.
+
+- An identity can have `who`, `authority`, `kind` and `formerly` (older names).
+  Set them with `phoenix agent set <name> --who ... --authority ... --kind ...
+  --formerly old1,old2`: the token stays and no session ends. `phoenix agent
+  show [name]` prints them, `phoenix agent create` takes the same options, and
+  `phoenix whoami` and MCP `phoenix_whoami` show the caller's own. API:
+  `PATCH /v1/agents/{name}/identity`, and `identities` in `GET /v1/agents`.
+- Audit lines gain `who`, `host`, `authority` and `attested`. No field was
+  renamed or removed. They come from the identity's record, never from a
+  caller. A line about a refused credential, the dashboard or Phoenix itself
+  has an empty `who` and `authority`. Grant events keep the actor's labels in
+  `grants.json` until their line is written, so a delayed line stays right.
+- `attested` is `false` on every line for now: a token doesn't prove who holds
+  it. The dashboard calls such a `who` "declared". `host` is recorded only when
+  Phoenix has established it, so it is empty until the per-machine service
+  exists.
+- The dashboard Audit page has the four columns and filters by who, host and
+  authority. `phoenix audit` takes `--who`, `--host` and `--authority`, and adds
+  the fields at the end of a line. Searching for an identity by name also finds
+  its former names.
+- Each identity gets a hidden `serial` in `acl.json`. Unlike `credential_id` (one
+  per token), it stays when the token is replaced and is new when the identity
+  is deleted and made again. Nothing uses it yet.
+
+**Upgrading:** update the server first: the new CLI options say so when the
+server is too old. Otherwise nothing to change. `acl.json` and old audit lines load as they
+are; a missing field shows as `-`. Existing identities have no labels until you
+run `phoenix agent set`, and get their serial at the next change to any agent.
+
+**Going back:** an older server reads the new `acl.json` and works, but the
+first agent change it saves drops the new fields. Old audit readers skip the
+new keys.
+
 ## v0.24.0 (2026-11-24)
 
 ### Agents can find out they may log in to another machine

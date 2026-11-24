@@ -211,7 +211,7 @@ var mcpAccessTools = []mcpTool{
 	},
 	{
 		Name:        "phoenix_whoami",
-		Description: "Show which Phoenix identity this server uses, its ACL rules, active grants and pending access requests. For root or an SSH login on another machine, this server may sign one with a human's approval: run `phoenix ssh --list` in a shell to see which machines.",
+		Description: "Show which Phoenix identity this server uses (with the who, authority and kind an admin recorded for it, and whether Phoenix attested the caller), its ACL rules, active grants and pending access requests. For root or an SSH login on another machine, this server may sign one with a human's approval: run `phoenix ssh --list` in a shell to see which machines.",
 		InputSchema: json.RawMessage(`{"type": "object", "properties": {}}`),
 	},
 }

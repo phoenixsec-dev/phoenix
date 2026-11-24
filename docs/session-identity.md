@@ -127,7 +127,8 @@ agent's token. Every use, renewal included, checks this.
 - Each token the server issues gets a random `credential_id` in the ACL file, and
   the session is bound to both. So a token that was taken away and given out
   again is a new credential: its old sessions stay dead, also if the change
-  happened while sessions were disabled.
+  happened while sessions were disabled. (An identity also has a `serial`, which
+  is not about tokens: see [Who, authority and kind](authentication.md#who-authority-and-kind).)
 
 An ended session gets `401 SESSION_INVALID`. The CLI and `phoenix mcp-server`
 mint a new one by themselves once `PHOENIX_TOKEN` holds the new token; a

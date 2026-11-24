@@ -176,7 +176,9 @@ func (s *Server) auditAllowedAccess(r *http.Request, info *authInfo, action, pat
 		s.auditAllowedWithSeal(r, info, action, path, ip, sealed)
 		return
 	}
-	s.logAudit(s.audit.LogAllowedSealedWithMetadata(info.Agent, action, path, ip, sealed, grantAuditMetadata(r, g)))
+	s.logAudit(s.writeAudit(r, audit.Entry{
+		Agent: info.Agent, Action: action, Path: path, Status: "allowed", IP: ip, Sealed: sealed, Metadata: grantAuditMetadata(r, g),
+	}))
 	s.grants.RecordUse(g.ID)
 }
 
@@ -576,7 +578,8 @@ func (s *Server) handleAccessRequestCreate(w http.ResponseWriter, r *http.Reques
 	}
 	c := s.grantCaller(info, ip)
 	rq, created, err := s.grants.Create(grant.CreateInput{
-		Agent: info.Agent, Paths: paths, Action: body.Action, Reason: body.Reason, TTL: ttl,
+		Labels: grantLabels(info.Caller),
+		Agent:  info.Agent, Paths: paths, Action: body.Action, Reason: body.Reason, TTL: ttl,
 		SourceIP: ip, AuthMethod: c.AuthMethod, CredentialFP: c.CredentialFP,
 	})
 	if err != nil {
@@ -679,6 +682,7 @@ func (s *Server) handleGrantRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	g, err := s.grants.Revoke(grant.RevokeInput{
 		GrantID: r.PathValue("id"), By: info.Agent, IP: clientIP(r), OwnerOnly: !s.isApprover(info),
+		Labels: grantLabels(info.Caller),
 	})
 	if err != nil {
 		writeGrantError(w, err)
@@ -729,7 +733,7 @@ func (s *Server) handleAccessRequestApprove(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, body.Paths, ttl, func(paths []string, code string) {
+	nr, g, err := s.approveRequest(r.PathValue("id"), info.Agent, ip, grantLabels(info.Caller), body.Paths, ttl, func(paths []string, code string) {
 		s.auditRequestRejected(r, info, "access_request.approve", paths, ip, code)
 	})
 	if err != nil {
@@ -777,7 +781,7 @@ func (e *ApprovalError) ErrorCode() string { return e.Code }
 //
 // It does NOT decide who may approve: the API checks the approvers list
 // first, the dashboard checks its login.
-func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl time.Duration, onReject func(paths []string, code string)) (grant.Request, grant.Grant, error) {
+func (s *Server) approveRequest(id, approver, ip string, labels grant.Labels, paths []string, ttl time.Duration, onReject func(paths []string, code string)) (grant.Request, grant.Grant, error) {
 	cfg := s.accessSettings()
 	if s.grants == nil || !cfg.Enabled {
 		return grant.Request{}, grant.Grant{}, &ApprovalError{CodeRequestsDisabled, "access requests are turned off; approvals are paused", http.StatusNotImplemented}
@@ -819,6 +823,7 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 		RequestID: id, Approver: approver, ApproverIP: ip, Paths: paths, TTL: ttl,
 		// A login is always tied to the IP that asked, whatever secrets are set to.
 		MaxTTL: cfg.MaxGrantTTL, SealedOnly: cfg.RequireSealed && !sshLogin, BindSourceIP: cfg.BindSourceIP || sshLogin,
+		Labels: labels,
 	})
 	if err != nil {
 		if grant.CodeOf(err) != grant.CodeNotPending {
@@ -835,7 +840,7 @@ func (s *Server) approveRequest(id, approver, ip string, paths []string, ttl tim
 // access_requests.approvers list (that list is for API/CLI identities).
 // Refusals are audited under the approver's name.
 func (s *Server) ApproveAccessRequestAs(id, approver, ip string, paths []string, ttl time.Duration) (grant.Grant, error) {
-	_, g, err := s.approveRequest(id, approver, ip, paths, ttl, func(paths []string, code string) {
+	_, g, err := s.approveRequest(id, approver, ip, grant.Labels{}, paths, ttl, func(paths []string, code string) {
 		s.logAudit(s.audit.LogDenied(approver, "access_request.approve", strings.Join(paths, ","), ip, strings.ToLower(code)))
 	})
 	return g, err
@@ -862,7 +867,7 @@ func (s *Server) handleAccessRequestDeny(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	rq, err := s.grants.Deny(grant.DenyInput{
-		RequestID: r.PathValue("id"), Denier: info.Agent, DenierIP: clientIP(r), Note: body.Note,
+		RequestID: r.PathValue("id"), Denier: info.Agent, DenierIP: clientIP(r), Note: body.Note, Labels: grantLabels(info.Caller),
 	})
 	if err != nil {
 		writeGrantError(w, err)
@@ -892,6 +897,12 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{
 		"agent":     info.Agent,
+		"who":       info.Caller.Who,
+		"host":      info.Caller.Host,
+		"authority": info.Caller.Authority,
+		"kind":      info.Labels.Kind,
+		"formerly":  info.Labels.Formerly,
+		"attested":  info.Caller.Attested,
 		"source_ip": clientIP(r),
 		"access_requests": map[string]any{
 			"enabled":             enabled,
@@ -952,7 +963,7 @@ func (s *Server) deleteAgentWithGrants(w http.ResponseWriter, r *http.Request, a
 		jsonError(w, "agent not found", http.StatusNotFound)
 		return false
 	}
-	_, err := s.grants.DeleteAgent(target, actor, clientIP(r), remove)
+	_, err := s.grants.DeleteAgentBy(target, actor, clientIP(r), grantLabels(callerFor(r, actor)), remove)
 	if err == nil {
 		return true
 	}
@@ -1020,9 +1031,12 @@ func (g grantAuditSink) Append(e grant.Event) error {
 	if actor == "" {
 		actor = e.Agent
 	}
-	path := strings.Join(e.Paths, ",")
-	if e.Phase == grant.PhaseFailed {
-		return g.l.LogDeniedWithMetadata(actor, e.Name, path, e.ActorIP, "store_write_failed", md)
+	entry := audit.Entry{
+		Agent: actor, Action: e.Name, Path: strings.Join(e.Paths, ","), Status: "allowed", IP: e.ActorIP, Metadata: md,
+		Caller: audit.Caller{Who: e.ActorWho, Authority: e.ActorAuthority},
 	}
-	return g.l.LogAllowedWithMetadata(actor, e.Name, path, e.ActorIP, md)
+	if e.Phase == grant.PhaseFailed {
+		entry.Status, entry.Reason = "denied", "store_write_failed"
+	}
+	return g.l.Log(entry)
 }

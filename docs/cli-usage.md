@@ -161,7 +161,11 @@ value in process listings).
 ```bash
 phoenix audit --last 10
 phoenix audit --agent deployer --since 2026-02-26T00:00:00Z
+phoenix audit --who robin --authority night-desk     # also --host
 ```
+
+`--agent` also finds lines under the identity's [former names](authentication.md#who-authority-and-kind).
+From a server that records them, lines end with `who=`, `host=`, `authority=` and `attested=`.
 
 Secret values are never written to the audit log.
 
@@ -238,6 +242,13 @@ phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
   --acl "myapp/**:list,read_value,write" --force
 
+# Describe an existing agent (admin only). Its token, permissions and sessions
+# stay as they are. Options left out are not changed; "" clears one.
+phoenix agent set deployer --who robin --authority night-desk --kind agent --formerly old-deployer
+
+# Show those fields, for one agent or all
+phoenix agent show deployer
+
 # List all agents (admin only)
 phoenix agent list
 
@@ -246,7 +257,8 @@ phoenix agent delete deployer
 ```
 
 ACL paths are glob patterns: `ns/*` matches one level, `ns/**` matches
-recursively. See [ACL path patterns](authentication.md#acl-path-patterns).
+recursively. `agent create` takes the `agent set` options too. What they mean:
+[Who, authority and kind](authentication.md#who-authority-and-kind). See [ACL path patterns](authentication.md#acl-path-patterns).
 
 ## Sealed key pairs
 
