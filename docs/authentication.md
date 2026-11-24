@@ -43,6 +43,51 @@ The same pattern semantics apply to policy path patterns
 ([Policy and Attestation](policy-and-attestation.md)) and session role
 namespaces ([Session Identity](session-identity.md)).
 
+## Who, authority and kind
+
+An identity has a name, and may carry four labels beside it:
+
+| Field | Says | Example |
+|-------|------|---------|
+| `who` | who uses it; leave empty for a service | `robin` |
+| `authority` | the role it acts in | `night-desk` |
+| `kind` | what sort of caller it is | `agent`, `service`, `person` |
+| `formerly` | older names of this identity | `old-deployer` |
+
+```bash
+phoenix agent set deployer --who robin --authority night-desk --kind agent --formerly old-deployer
+phoenix agent show deployer
+phoenix whoami                 # an agent sees its own
+```
+
+- **The words are yours.** Phoenix has no list of allowed values. Up to 64
+  characters, no control or invisible characters.
+- **They grant nothing.** Access is the permissions, as before. Setting them
+  needs admin, and changes neither the token nor any session.
+- **Only an admin sets them.** Nothing a caller sends (header, query or body) can
+  change what is recorded about it.
+- **Every audit line shows them** as they were when the caller logged in, with
+  `host` and `attested` beside them. Older lines stay as written.
+- **`attested` is `false` for a token,** and for a role session made from one: a
+  token works for whoever holds it, so its `who` and `authority` are only
+  *declared*. A line about a refused credential, the dashboard or Phoenix itself
+  has none of them.
+- **`host` is empty for a token.** It is only for a machine Phoenix has itself
+  established.
+- **`formerly`** lets a log search for an identity also find the lines written
+  under its older names (`phoenix audit --agent`, the dashboard's agent filter).
+  To rename: make the new identity with `--formerly <old>`, move its users over,
+  and delete the old one.
+
+Each identity also has a `serial` in the ACL file, made by the server and never
+shown. It tells an identity apart from a later one with the same name, and stays
+when the token is replaced; `credential_id` is per token and changes with it.
+Identities from before v0.25.0 get one at the next change to any agent. Do not
+copy or edit either by hand.
+
+An older server reads an ACL file with these fields, but drops them at the first
+change it saves.
+
 ## Sealed-response key pairs
 
 When `PHOENIX_SEAL_KEY` points to a local private key file, Phoenix clients can:
