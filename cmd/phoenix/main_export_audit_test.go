@@ -75,7 +75,7 @@ func TestCmdExportFailsOnSecretGetNon200(t *testing.T) {
 // a single secret (whose one-time use the read would spend) or an unknown format.
 func TestCmdExportRefusesBeforeAsking(t *testing.T) {
 	t.Setenv("PHOENIX_SEAL_KEY", "")
-	for _, args := range [][]string{{"app/key"}, {"app"}, {"app/", "-f", "yaml"}} {
+	for _, args := range [][]string{{"app/key"}, {"app"}, {"app/", "-f", "yaml"}, {"app/", "-f", ""}} {
 		withMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 			t.Errorf("%q: asked the server", args)
 			w.Write([]byte(`{"value":"fake"}`))

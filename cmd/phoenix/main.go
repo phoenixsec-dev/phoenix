@@ -853,7 +853,8 @@ func cmdExport(args []string) error {
 		return fmt.Errorf("loading seal key: %w", err)
 	}
 
-	var prefix, format string
+	var prefix string
+	format := "env"
 	i := 0
 	if i < len(args) && !isOption("export", args[i]) {
 		prefix = args[i]
@@ -868,10 +869,6 @@ func cmdExport(args []string) error {
 			}
 		}
 		i++
-	}
-
-	if format == "" {
-		format = "env"
 	}
 
 	// Anything else would export nothing and look like a success. A path without
