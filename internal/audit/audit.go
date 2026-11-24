@@ -40,6 +40,7 @@ type Logger struct {
 	path     string
 	maxBytes int64
 	size     int64 // bytes in the current file
+	cutOff   bool  // the file ends in half a line
 	kick     chan struct{}
 	wg       sync.WaitGroup
 }
@@ -64,7 +65,7 @@ func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 		f.Close()
 		return nil, fmt.Errorf("opening audit log: %w", err)
 	}
-	l := &Logger{w: f, file: f, path: path, maxBytes: maxBytes, size: st.Size()}
+	l := &Logger{w: f, file: f, path: path, maxBytes: maxBytes, size: st.Size(), cutOff: endsInHalfLine(path, st.Size())}
 	if maxBytes > 0 {
 		l.kick = make(chan struct{}, 1)
 		l.wg.Add(1)
@@ -72,6 +73,23 @@ func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 		l.kickCompress() // finish anything a crash left half compressed
 	}
 	return l, nil
+}
+
+// endsInHalfLine reports whether the log's last write was cut off, by a full
+// disk or a power cut. If that cannot be read it says no: a wrong yes only
+// costs an empty line, but this must never stop the server.
+func endsInHalfLine(path string, size int64) bool {
+	if size == 0 {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	last := make([]byte, 1)
+	_, err = f.ReadAt(last, size-1)
+	return err == nil && last[0] != '\n'
 }
 
 // NewWriterLogger creates an audit logger backed by any io.Writer (useful for tests).
@@ -103,8 +121,17 @@ func (l *Logger) logWithMetadata(agent, action, path, status, ip, reason, sessio
 	if err != nil {
 		return err
 	}
-	n, err := l.w.Write(append(line, '\n'))
+	line = append(line, '\n')
+	if l.cutOff {
+		// Close off the half line, or this entry becomes part of it and no
+		// search can read it.
+		line = append([]byte{'\n'}, line...)
+	}
+	n, err := l.w.Write(line)
 	l.size += int64(n)
+	if n > 0 {
+		l.cutOff = line[n-1] != '\n'
+	}
 	if err != nil {
 		return err
 	}

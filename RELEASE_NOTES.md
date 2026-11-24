@@ -105,6 +105,9 @@ that dies halfway can do to it. Nothing to configure; what changed:
   cut off half way used to stop the server from starting.
 - **Replaced files keep their owner** when Phoenix runs as root, so
   `--protect-key` run with sudo no longer leaves a key the server cannot read.
+- **An audit line cut off by a full disk or a power cut swallowed the next
+  one:** that entry was written and reported as written, but no search could
+  read it. It now starts on its own line.
 
 ## v0.24.0 (2026-11-24)
 
