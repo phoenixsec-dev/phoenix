@@ -37,7 +37,7 @@ done
 dash "$PHOENIX_SERVER/dashboard/requests" >/dev/null
 csrf="$(grep -o 'name="_csrf" value="[0-9a-f]*"' "$RUN_DIR/dash.html" | head -1 | sed 's/.*value="//; s/"//')"
 assert_eq "$(dash -X POST --data "_csrf=$csrf&path=demo/api-key&choice=once" "$PHOENIX_SERVER/dashboard/requests/$req/answer")" 303 "dashboard approve"
-assert_eq "$(agent exec --env KEY=phoenix://demo/api-key -- sh -c 'printf %s "$KEY"')" synthetic-fresh "approved use"
+assert_secret "$(agent exec --env KEY=phoenix://demo/api-key -- sh -c 'printf %s "$KEY"')" synthetic-fresh "approved use"
 ok "a fresh install approves on the dashboard with no file editing"
 stop_server
 

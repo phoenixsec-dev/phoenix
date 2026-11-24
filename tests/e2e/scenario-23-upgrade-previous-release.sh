@@ -105,7 +105,7 @@ r_granted="$(request vault/granted)"; approve "$r_granted"
 r_revoked="$(request vault/revoked)"; approve "$r_revoked"
 agent "$APPROVER" grants revoke "$(grant_of "$r_revoked")" >/dev/null
 r_pending="$(request vault/pending)"
-assert_eq "$(ask_exec vault/granted)" synthetic-granted "grant works on the previous release"
+assert_secret "$(ask_exec vault/granted)" synthetic-granted "grant works on the previous release"
 old_session="$(mint)"
 assert_eq "$(http_code "$old_session" /v1/secrets/app/one)" 200 "session works on the previous release"
 secrets_before="$(phoenix_admin list --names)"
@@ -119,9 +119,9 @@ cp -a "$RUN_DIR/state" "$RUN_DIR/state.before"
 # against whatever server is running.
 check_old_data() {
   local who="$1" line
-  assert_eq "$(phoenix_admin get app/one)" synthetic-one "$who: admin token and first secret"
-  assert_eq "$(phoenix_admin get app/two)" synthetic-two-v2 "$who: updated secret"
-  assert_eq "$(phoenix_admin get app/multi)" "$multiline" "$who: multi-line secret"
+  assert_secret "$(phoenix_admin get app/one)" synthetic-one "$who: admin token and first secret"
+  assert_secret "$(phoenix_admin get app/two)" synthetic-two-v2 "$who: updated secret"
+  assert_secret "$(phoenix_admin get app/multi)" "$multiline" "$who: multi-line secret"
   assert_eq "$(http_code "$ADMIN_TOKEN" /v1/secrets/app/deleted)" 404 "$who: deleted secret stays deleted"
   # Every field the previous release showed is there unchanged; new ones may be added.
   [[ "$(api_admin GET /v1/metadata/app/one | jq --argjson old "$meta_before" '. + $old == .')" == true ]] || die "$who: description, tags, dates or authors changed"
@@ -130,11 +130,11 @@ check_old_data() {
   while read -r line; do grep -qxF -- "$line" "$RUN_DIR/names" || die "$who: secret $line is gone"; done <<<"$secrets_before"
   phoenix_admin agent list >"$RUN_DIR/agents"
   while read -r line; do grep -qF -- "$line" "$RUN_DIR/agents" || die "$who: agent line lost: $line"; done <<<"$agents_before"
-  assert_eq "$(agent "$READER" get app/one)" synthetic-one "$who: reader token"
+  assert_secret "$(agent "$READER" get app/one)" synthetic-one "$who: reader token"
   assert_eq "$(http_code "$READER" /v1/secrets/vault/granted)" 403 "$who: reader stays out of vault/"
   assert_eq "$(http_code "$READER" /v1/secrets/app/elsewhere)" 403 "$who: policy still applies"
   assert_eq "$(http_code "$GONE" /v1/secrets/app/one)" 401 "$who: deleted agent's token stays dead"
-  assert_eq "$(ask_exec vault/granted)" synthetic-granted "$who: active grant and seal key"
+  assert_secret "$(ask_exec vault/granted)" synthetic-granted "$who: active grant and seal key"
   if ask_exec vault/revoked >"$RUN_DIR/revoked" 2>&1; then die "$who: revoked grant came back"; fi
   assert_contains "$(cat "$RUN_DIR/revoked")" GRANT_REVOKED "$who: revoked grant"
   dashboard_login "$PHOENIX_SERVER" e2e-dash-password "$(mktemp "$RUN_DIR/jar.XXXXXX")" || die "$who: dashboard password"
@@ -162,7 +162,7 @@ import hashlib,json,sys
 key='session:reader@'+hashlib.sha256(sys.argv[2].encode()).hexdigest()[:8]
 json.dump({key:{'token':sys.argv[3],'agent':'session:reader','expires_at':'2999-01-01T00:00:00Z'}},open(sys.argv[1],'w'))
 PY
-  assert_eq "$(HOME="$home" PHOENIX_TOKEN="$READER" PHOENIX_ROLE=reader "$PHOENIX" get app/one 2>"$RUN_DIR/remint.err")" synthetic-one "$2: role session through the CLI"
+  assert_secret "$(HOME="$home" PHOENIX_TOKEN="$READER" PHOENIX_ROLE=reader "$PHOENIX" get app/one 2>"$RUN_DIR/remint.err")" synthetic-one "$2: role session through the CLI"
 }
 
 # --- 2. This build on the same files ---
@@ -173,7 +173,7 @@ check_old_data "this build"
 check_session "$old_session" "this build"
 [[ "$(stat -c %s "$RUN_DIR/state/audit.log")" -gt "$(stat -c %s "$RUN_DIR/audit.kept")" ]] || die "nothing was added to the audit log"
 approve "$r_pending" || die "a request left waiting by the previous release could not be approved"
-assert_eq "$(ask_exec vault/pending)" synthetic-pending "request answered after the upgrade"
+assert_secret "$(ask_exec vault/pending)" synthetic-pending "request answered after the upgrade"
 ok "upgrade from $PREV: nothing lost, every credential works"
 
 # --- 3. Data this build makes ---
@@ -186,8 +186,8 @@ keep_audit
 
 # check_new_data WHO: step 3's data (and the grant approved in step 2).
 check_new_data() {
-  assert_eq "$(agent "$LATE" get app/late)" synthetic-late "$1: agent and secret made after the upgrade"
-  assert_eq "$(ask_exec vault/pending)" synthetic-pending "$1: grant approved after the upgrade"
+  assert_secret "$(agent "$LATE" get app/late)" synthetic-late "$1: agent and secret made after the upgrade"
+  assert_secret "$(ask_exec vault/pending)" synthetic-pending "$1: grant approved after the upgrade"
 }
 # Every data file with its checksum, except the audit log: check_audit covers
 # it, and even a refused start may add a line.
@@ -239,5 +239,5 @@ check_session "$old_session" "this build again"
 # After a refused rollback nothing touched this build's own session.
 [[ "$rolled_back" -eq 1 ]] || SESSIONS_SURVIVE=1
 check_session "$new_session" "this build again"
-[[ "$rolled_back" -eq 0 ]] || assert_eq "$(phoenix_admin get app/rolled-back)" synthetic-rolled-back "secret written during the rollback"
+[[ "$rolled_back" -eq 0 ]] || assert_secret "$(phoenix_admin get app/rolled-back)" synthetic-rolled-back "secret written during the rollback"
 ok "Scenario 23 PASS"

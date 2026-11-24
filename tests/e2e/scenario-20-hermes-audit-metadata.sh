@@ -42,7 +42,7 @@ assert_eq "$(jq -r '.metadata["hermes.profile"]' <<<"$deny")" admin "spoof recor
 # X-Phoenix-Tool (once a tool-rule input, now removed) is ignored entirely.
 body="$(curl -fsS "$PHOENIX_SERVER/v1/secrets/tooled/key" \
   -H 'Authorization: Bearer synthetic-hermes-reader' -H 'X-Hermes-Tool: phoenix_resolve' -H 'X-Phoenix-Tool: wrong_tool')"
-assert_eq "$(jq -r .value <<<"$body")" synthetic-tooled "tool headers must not change access"
+assert_secret "$(jq -r .value <<<"$body")" synthetic-tooled "tool headers must not change access"
 audit="$(api_admin GET /v1/audit)"
 toolread="$(jq -c '[.entries[] | select(.path=="tooled/key" and .status=="allowed")][-1]' <<<"$audit")"
 assert_eq "$(jq -r '.metadata["hermes.tool"]' <<<"$toolread")" phoenix_resolve "hermes tool recorded as hint"

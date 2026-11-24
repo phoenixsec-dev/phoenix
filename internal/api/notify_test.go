@@ -126,10 +126,10 @@ func TestNotifyDefaultPayload(t *testing.T) {
 		t.Errorf("Click = %q, want %q", got, link)
 	}
 	if h.header.Get("Title") == "" || h.header.Get("Tags") == "" {
-		t.Errorf("missing ntfy Title/Tags headers: %v", h.header)
+		t.Error("missing ntfy Title/Tags headers")
 	}
 	if a := h.header.Get("Authorization"); a != "" {
-		t.Errorf("Authorization sent without notify_token_ref: %q", a)
+		t.Error("Authorization sent without notify_token_ref")
 	}
 
 	// Identical request while pending: 200, no second notification.
@@ -180,12 +180,12 @@ func TestNotifyTokenResolvedAtSendTime(t *testing.T) {
 
 	e.request(t, vectorTok, "infra/b2/app-key")
 	if got := waitHit(t, hits).header.Get("Authorization"); got != "Bearer tk_first" {
-		t.Fatalf("Authorization = %q, want Bearer tk_first", got)
+		t.Fatal("the first token was not sent")
 	}
 	seedSecret(t, e.srv, adminTok, "phoenix/ntfy-token", "tk_second")
 	e.request(t, vectorTok, "infra/other")
 	if got := waitHit(t, hits).header.Get("Authorization"); got != "Bearer tk_second" {
-		t.Fatalf("Authorization = %q, want Bearer tk_second (resolved at send time)", got)
+		t.Fatal("the second token was not sent (resolved at send time)")
 	}
 
 	logs := captureLog(t)
@@ -194,7 +194,7 @@ func TestNotifyTokenResolvedAtSendTime(t *testing.T) {
 	waitLog(t, logs, "notify_token_ref phoenix://phoenix/missing")
 	expectNoHit(t, hits)
 	if strings.Contains(logs.String(), "tk_") {
-		t.Fatalf("token value in log:\n%s", logs.String())
+		t.Fatal("token value in log")
 	}
 }
 
@@ -213,7 +213,7 @@ func TestNotifyFailureDoesNotBlockRequest(t *testing.T) {
 		waitHit(t, hits)
 		out := waitLog(t, logs, "HTTP 500")
 		if strings.Contains(out, "tk_secret") {
-			t.Fatalf("token value in log:\n%s", out)
+			t.Fatal("token value in log")
 		}
 	})
 

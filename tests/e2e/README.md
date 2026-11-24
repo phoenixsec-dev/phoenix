@@ -36,7 +36,7 @@ Scenario 09 additionally needs Docker Compose and `psql`; it chooses a per-run p
 - Bind listeners and fixture ports to localhost only.
 - No prompts or manual approval steps; drive approval APIs programmatically.
 - Every scenario must be repeatable and clean up its process, temporary state, and containers.
-- Do not print tokens or resolved values except synthetic expected values in controlled assertions.
+- Never print tokens or secret values, not even synthetic ones. Compare them with `assert_secret`, which names the check only.
 - Machine consumers should use JSON Lines or TAP rather than scrape colored human logs.
 
 ## Inventory

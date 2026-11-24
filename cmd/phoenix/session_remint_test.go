@@ -81,7 +81,7 @@ func TestRemintOnceAfterSessionInvalid(t *testing.T) {
 			t.Errorf("calls = %d bodies %q, want the request retried once with its body", f.calls, f.callBodies)
 		}
 		if got := getCachedSessionToken("r1", 0); got != "phxs_fresh" {
-			t.Errorf("cache = %q, want phxs_fresh", got)
+			t.Error("the cached token is not the fresh one")
 		}
 		if token != "phxs_fresh" {
 			t.Error("the token is not phxs_fresh")
@@ -128,7 +128,7 @@ func TestRevokedSessionNotRetried(t *testing.T) {
 			t.Errorf("mints = %d calls = %d, want 0 and 1", f.mints, f.calls)
 		}
 		if got := getCachedSessionToken("r3", 0); got != "" {
-			t.Errorf("revoked session still cached: %q", got)
+			t.Error("revoked session still cached")
 		}
 	})
 }

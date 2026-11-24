@@ -161,7 +161,7 @@ func TestEnsureSealKeyMissingHomeReturnsUnsealed(t *testing.T) {
 		t.Fatalf("ensureSealKey without HOME: %v", err)
 	}
 	if priv != nil || pub != "" {
-		t.Fatalf("expected unsealed result, got priv=%v pub=%q", priv, pub)
+		t.Fatalf("expected unsealed result, got a private key: %v, public %q", priv != nil, pub)
 	}
 }
 
@@ -228,7 +228,7 @@ func TestCmdGetUsesRoleSessionSealKey(t *testing.T) {
 			t.Fatalf("read stdout: %v", err)
 		}
 		if got := string(out); got != "hello" {
-			t.Fatalf("output = %q, want hello", got)
+			t.Fatal("wrong value printed")
 		}
 	})
 }

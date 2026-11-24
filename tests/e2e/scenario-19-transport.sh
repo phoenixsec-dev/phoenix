@@ -132,9 +132,9 @@ for url in "$HTTP_URL" "$HTTPS_URL"; do
     -H 'X-Forwarded-For: 192.0.2.1')" 403 "forwarded IP must not bypass direct source policy"
 done
 printf '%s' synthetic-updated | PHOENIX_SERVER="$HTTPS_URL" PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin set dual/key --value-stdin >/dev/null
-assert_eq "$(phoenix_admin get dual/key)" synthetic-updated "HTTPS write visible over existing HTTP"
+assert_secret "$(phoenix_admin get dual/key)" synthetic-updated "HTTPS write visible over existing HTTP"
 printf '%s' synthetic-http-update | phoenix_admin set dual/key --value-stdin >/dev/null
-assert_eq "$(PHOENIX_SERVER="$HTTPS_URL" PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin get dual/key)" synthetic-http-update "HTTP write visible over HTTPS"
+assert_secret "$(PHOENIX_SERVER="$HTTPS_URL" PHOENIX_CA_CERT="$RUN_DIR/ca.crt" phoenix_admin get dual/key)" synthetic-http-update "HTTP write visible over HTTPS"
 
 mint="$(curl -fsS "$HTTP_URL/v1/session/mint" -H 'Authorization: Bearer synthetic-dual-reader' \
   -H 'Content-Type: application/json' --data '{"role":"dual-reader"}')"
@@ -199,11 +199,11 @@ ok "optional HTTPS misconfiguration stops startup"
 config_patch "d['https_listener']['listen']='127.0.0.1:$PORT'"
 start_server
 assert_contains "$(cat "$RUN_DIR/server.log")" "primary endpoint continues" "overlapping optional port not reported"
-assert_eq "$(phoenix_admin get dual/key)" synthetic-http-update "primary reserves its port before optional HTTPS"
+assert_secret "$(phoenix_admin get dual/key)" synthetic-http-update "primary reserves its port before optional HTTPS"
 stop_server
 config_patch "d['https_listener']['enabled']=False; d['https_listener']['cert']='$RUN_DIR/missing.crt'"
 start_server
-assert_eq "$(phoenix_admin get dual/key)" synthetic-http-update "disabled optional config ignored"
+assert_secret "$(phoenix_admin get dual/key)" synthetic-http-update "disabled optional config ignored"
 assert_not_contains "$(cat "$RUN_DIR/server.log")" "Optional HTTPS listener" "disabled optional listener attempted setup"
 ok "optional bind failure and disabled configuration preserve HTTP"
 

@@ -5,12 +5,11 @@ E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$E2E_DIR" rev-parse --show-toplevel)"
 # Set on purpose: the binaries in it are used as they are. Otherwise every
 # scenario builds, into a folder of this checkout's own, so two checkouts never
-# test each other's binaries.
-E2E_BIN_GIVEN="${E2E_BIN_DIR:+1}"
-E2E_BIN_DIR="${E2E_BIN_DIR:-${TMPDIR:-/tmp}/phoenix-e2e-bin-$(id -u)-$(printf %s "$REPO_ROOT" | cksum | cut -d' ' -f1)}"
+# test each other's binaries. Under the home folder: nobody else can swap them.
+BIN_DIR="${E2E_BIN_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/phoenix-e2e/$(printf %s "$REPO_ROOT" | cksum | cut -d' ' -f1)}"
 GO_BIN="${GO_BIN:-$(command -v go 2>/dev/null || true)}"
-PHOENIX="$E2E_BIN_DIR/phoenix"
-PHOENIX_SERVER_BIN="$E2E_BIN_DIR/phoenix-server"
+PHOENIX="$BIN_DIR/phoenix"
+PHOENIX_SERVER_BIN="$BIN_DIR/phoenix-server"
 
 # Scenarios opt into auth inputs explicitly. Never inherit a developer's live
 # Phoenix role, token, certificate, seal key, or policy configuration.
@@ -33,6 +32,8 @@ skip() { warn "SKIP: $*"; exit 77; }
 scenario_start() { log "Scenario $1: $2"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || skip "$1 is not installed"; }
 assert_eq() { [[ "$1" == "$2" ]] || die "${3:-values differ}: got '$1', want '$2'"; }
+# For tokens and secret values: says which check failed, never what it compared.
+assert_secret() { [[ "$1" == "$2" ]] || die "${3:-wrong secret value} (got ${#1} characters, want ${#2})"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || die "${3:-output missing expected text}: $2"; }
 # token_from_init FILE / password_from_init FILE print the admin token and the
 # dashboard password that "phoenix-server --init" printed.
@@ -47,14 +48,14 @@ dashboard_login() {
   curl -sS "$@" -c "$jar" -o /dev/null --data-urlencode "credential=$password" "$url/dashboard/login" || return 1
   [[ "$(curl -sS --no-location "$@" -b "$jar" -o /dev/null -w '%{http_code}' "$url/dashboard/requests")" == 200 ]]
 }
-assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbidden text}: $2"; }
+assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbidden text}"; }
 
 build_current() {
   [[ -n "$GO_BIN" && -x "$GO_BIN" ]] || die "Go is not available; set GO_BIN to the Go executable"
-  mkdir -p "$E2E_BIN_DIR"
-  if [[ -z "$E2E_BIN_GIVEN" || ! -x "$PHOENIX" || ! -x "$PHOENIX_SERVER_BIN" || "${E2E_REBUILD:-0}" == 1 ]]; then
-    log "Building current Phoenix binaries into $E2E_BIN_DIR"
-    (cd "$REPO_ROOT" && "$GO_BIN" build -o "$E2E_BIN_DIR/" ./cmd/...)
+  mkdir -p "$BIN_DIR"
+  if [[ -z "${E2E_BIN_DIR:-}" || ! -x "$PHOENIX" || ! -x "$PHOENIX_SERVER_BIN" || "${E2E_REBUILD:-0}" == 1 ]]; then
+    log "Building current Phoenix binaries into $BIN_DIR"
+    (cd "$REPO_ROOT" && "$GO_BIN" build -o "$BIN_DIR/" ./cmd/...)
   fi
 }
 

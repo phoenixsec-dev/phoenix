@@ -71,13 +71,13 @@ func TestCmdOpenClawExecProviderEmptyIDsSkipsAPICall(t *testing.T) {
 		out := runOpenClawExecProviderWithStdin(t, `{"protocolVersion":1,"provider":"phoenix","ids":[]}`)
 		var resp openClawExecProviderResponse
 		if err := json.Unmarshal([]byte(out), &resp); err != nil {
-			t.Fatalf("decode stdout: %v; stdout=%q", err, out)
+			t.Fatalf("decode stdout (%d bytes): %v", len(out), err)
 		}
 		if resp.ProtocolVersion != 1 {
 			t.Fatalf("protocolVersion = %d, want 1", resp.ProtocolVersion)
 		}
 		if resp.Values == nil || len(resp.Values) != 0 {
-			t.Fatalf("values = %#v, want empty map", resp.Values)
+			t.Fatalf("%d values, want an empty map", len(resp.Values))
 		}
 		if len(resp.Errors) != 0 {
 			t.Fatalf("errors = %#v, want none", resp.Errors)
@@ -113,10 +113,10 @@ func TestCmdOpenClawExecProviderSealedValues(t *testing.T) {
 		out := runOpenClawExecProviderWithStdin(t, `{"protocolVersion":1,"provider":"phoenix","ids":["api/key"]}`)
 		var resp openClawExecProviderResponse
 		if err := json.Unmarshal([]byte(out), &resp); err != nil {
-			t.Fatalf("decode stdout: %v; stdout=%q", err, out)
+			t.Fatalf("decode stdout (%d bytes): %v", len(out), err)
 		}
 		if got := resp.Values["api/key"]; got != "sealed-secret" {
-			t.Fatalf("api/key value = %q, want decrypted sealed value", got)
+			t.Fatal("api/key is not the decrypted sealed value")
 		}
 		if len(resp.Errors) != 0 {
 			t.Fatalf("errors = %#v, want none", resp.Errors)
@@ -133,10 +133,10 @@ func TestCmdOpenClawExecProviderServerErrorFails(t *testing.T) {
 			return cmdOpenClawExecProvider(nil)
 		})
 		if err == nil {
-			t.Fatalf("expected error for non-200 response, stdout=%q", out)
+			t.Fatal("expected error for non-200 response")
 		}
 		if strings.TrimSpace(out) != "" {
-			t.Fatalf("stdout = %q, want no output on server error", out)
+			t.Fatalf("%d bytes on stdout, want none on server error", len(out))
 		}
 	})
 }
@@ -161,13 +161,13 @@ func TestCmdOpenClawExecProviderStdoutShape(t *testing.T) {
 		out := runOpenClawExecProviderWithStdin(t, `{"protocolVersion":1,"provider":"phoenix","ids":["api/openrouter","phoenix://bot/token"]}`)
 		var resp openClawExecProviderResponse
 		if err := json.Unmarshal([]byte(out), &resp); err != nil {
-			t.Fatalf("decode stdout: %v; stdout=%q", err, out)
+			t.Fatalf("decode stdout (%d bytes): %v", len(out), err)
 		}
 		if resp.ProtocolVersion != 1 {
 			t.Fatalf("protocolVersion = %d, want 1", resp.ProtocolVersion)
 		}
 		if got := resp.Values["api/openrouter"]; got != "openrouter-value" {
-			t.Fatalf("api/openrouter value = %q", got)
+			t.Fatal("wrong value for api/openrouter")
 		}
 		if got := resp.Values["phoenix://bot/token"]; got != "bot-token" {
 			t.Fatal("wrong value for phoenix://bot/token")
@@ -186,10 +186,10 @@ func TestCmdOpenClawExecProviderPartialFailure(t *testing.T) {
 		out := runOpenClawExecProviderWithStdin(t, `{"protocolVersion":1,"provider":"phoenix","ids":["ok","missing"]}`)
 		var resp openClawExecProviderResponse
 		if err := json.Unmarshal([]byte(out), &resp); err != nil {
-			t.Fatalf("decode stdout: %v; stdout=%q", err, out)
+			t.Fatalf("decode stdout (%d bytes): %v", len(out), err)
 		}
 		if got := resp.Values["ok"]; got != "ok-value" {
-			t.Fatalf("ok value = %q", got)
+			t.Fatal("wrong value for ok")
 		}
 		errEntry, ok := resp.Errors["missing"]
 		if !ok {

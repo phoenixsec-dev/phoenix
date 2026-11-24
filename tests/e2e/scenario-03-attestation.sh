@@ -11,7 +11,7 @@ cat >"$RUN_DIR/policy.json" <<'JSON'
 JSON
 config_patch "d['policy']={'path':'$RUN_DIR/policy.json'}"
 start_server
-assert_eq "$(phoenix_admin get local/key)" synthetic-attestation
+assert_secret "$(phoenix_admin get local/key)" synthetic-attestation
 for p in denied/key sealed/key; do if phoenix_admin get "$p" >"$RUN_DIR/deny" 2>&1; then die "$p unexpectedly allowed"; fi; done
 assert_contains "$(phoenix_admin audit -n 30)" attestation "attestation audit"
 ok "Scenario 03 PASS"

@@ -34,7 +34,7 @@ config_patch "d['store']['backend']='1password'; d['onepassword']={'vault': $vau
 start_server
 
 actual="$(phoenix_admin resolve "phoenix://$secret_path")"
-assert_eq "$actual" "$expected" "Phoenix reference did not resolve the 1Password value"
+assert_secret "$actual" "$expected" "Phoenix reference did not resolve the 1Password value"
 unset actual expected
 ok "Phoenix reference resolved through the 1Password backend"
 

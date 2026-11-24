@@ -12,6 +12,6 @@ rotation="$(phoenix_admin rotate-master)"
 wait "$reader"
 [[ -f "$RUN_DIR/master.key.prev" ]] || die "master.key.prev missing"
 assert_contains "$rotation" 'Namespaces re-wrapped: 1' "rotation count"
-for i in 1 17 50; do assert_eq "$(phoenix_admin get "rotation/ns$((i%10))/key$i")" "synthetic-rotation-$i"; done
+for i in 1 17 50; do assert_secret "$(phoenix_admin get "rotation/ns$((i%10))/key$i")" "synthetic-rotation-$i"; done
 assert_contains "$(phoenix_admin audit -n 100)" rotate-master "rotation audit"
 ok "Scenario 05 PASS"

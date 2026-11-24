@@ -115,8 +115,8 @@ agent_exec --redact-output --env DASH=phoenix://infra/dash -- sh -c 'echo "value
 rc=$?
 set -e
 assert_eq "$rc" 5 "exec --redact-output exit code"
-assert_eq "$(cat "$RUN_DIR/redact.out")" "value=[REDACTED:DASH]"$'\n'"token=none" "redacted stdout"
-assert_eq "$(cat "$RUN_DIR/redact.err")" "err=[REDACTED:DASH]" "redacted stderr"
+assert_secret "$(cat "$RUN_DIR/redact.out")" "value=[REDACTED:DASH]"$'\n'"token=none" "redacted stdout"
+assert_secret "$(cat "$RUN_DIR/redact.err")" "err=[REDACTED:DASH]" "redacted stderr"
 if agent_exec --env X=phoenix://infra/dash-extra -- true >"$RUN_DIR/dash-extra" 2>&1; then die "dashboard narrowed-out path was readable"; fi
 assert_eq "$(dash -X POST --data "_csrf=$csrf" "$PHOENIX_SERVER/dashboard/requests/grants/$grant_d/revoke")" 303 "dashboard revoke"
 if agent_exec --env DASH=phoenix://infra/dash -- true >"$RUN_DIR/dash-revoked" 2>&1; then die "dashboard-revoked grant still usable"; fi

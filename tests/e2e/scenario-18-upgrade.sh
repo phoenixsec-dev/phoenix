@@ -32,7 +32,7 @@ start_server
 printf '%s' synthetic-upgrade | phoenix_admin set upgrade/key --value-stdin >/dev/null
 phoenix_admin agent create upgrade-agent -t synthetic-upgrade-agent --acl 'upgrade/*:list,read_value' >/dev/null
 old_mint="$(curl -fsS -X POST "$PHOENIX_SERVER/v1/session/mint" -H 'Authorization: Bearer synthetic-upgrade-agent' -H 'Content-Type: application/json' --data '{"role":"upgrade-reader"}')"; old_session="$(jq -r .session_token <<<"$old_mint")"
-assert_eq "$(PHOENIX_TOKEN="$old_session" "$PHOENIX" get upgrade/key)" synthetic-upgrade
+assert_secret "$(PHOENIX_TOKEN="$old_session" "$PHOENIX" get upgrade/key)" synthetic-upgrade
 old_audit_count="$(wc -l <"$RUN_DIR/state/audit.log")"
 stop_server
 PHOENIX="$NEW_PHOENIX"; PHOENIX_SERVER_BIN="$NEW_SERVER"
@@ -62,15 +62,15 @@ PY
 assert_contains "$("$NEW_SERVER" --check-config --config "$RUN_DIR/config.json")" "config OK" "cleaned config must pass --check-config"
 assert_contains "$("$NEW_SERVER" --reissue-cert --san 127.0.0.1 --config "$RUN_DIR/config.json")" "Server certificate reissued" "reissue-cert with moved CA paths"
 start_server
-assert_eq "$(phoenix_admin get upgrade/key)" synthetic-upgrade "store compatibility"
-assert_eq "$(PHOENIX_TOKEN=synthetic-upgrade-agent "$PHOENIX" get upgrade/key)" synthetic-upgrade "ACL compatibility"
+assert_secret "$(phoenix_admin get upgrade/key)" synthetic-upgrade "store compatibility"
+assert_secret "$(PHOENIX_TOKEN=synthetic-upgrade-agent "$PHOENIX" get upgrade/key)" synthetic-upgrade "ACL compatibility"
 if PHOENIX_TOKEN="$old_session" "$PHOENIX" get upgrade/key >"$RUN_DIR/old-session" 2>&1; then die "session signed by the old server's random key unexpectedly survived the upgrade"; fi
 new_mint="$(curl -fsS -X POST "$PHOENIX_SERVER/v1/session/mint" -H 'Authorization: Bearer synthetic-upgrade-agent' -H 'Content-Type: application/json' --data '{"role":"upgrade-reader"}')"; new_session="$(jq -r .session_token <<<"$new_mint")"
-assert_eq "$(PHOENIX_TOKEN="$new_session" "$PHOENIX" get upgrade/key)" synthetic-upgrade "session config compatibility"
+assert_secret "$(PHOENIX_TOKEN="$new_session" "$PHOENIX" get upgrade/key)" synthetic-upgrade "session config compatibility"
 # From this version on, sessions survive a restart (key derived from the
 # master key, records in role-sessions.json next to the ACL file).
 stop_server; start_server
-assert_eq "$(PHOENIX_TOKEN="$new_session" "$PHOENIX" get upgrade/key)" synthetic-upgrade "session survives restart"
+assert_secret "$(PHOENIX_TOKEN="$new_session" "$PHOENIX" get upgrade/key)" synthetic-upgrade "session survives restart"
 [[ -f "$RUN_DIR/state/role-sessions.json" ]] || die "role-sessions.json not written"
 if grep -q phxs_ "$RUN_DIR/state/role-sessions.json"; then die "role-sessions.json contains a token"; fi
 # A role cache holding a dead session (the old server's) is replaced once.
@@ -81,9 +81,9 @@ key='session:upgrade-reader@'+hashlib.sha256(sys.argv[2].encode()).hexdigest()[:
 json.dump({key:{'token':sys.argv[3],'agent':'session:upgrade-reader','expires_at':'2999-01-01T00:00:00Z'}},open(sys.argv[1],'w'))
 PY
 recovered="$(HOME="$RUN_DIR/home" PHOENIX_TOKEN=synthetic-upgrade-agent PHOENIX_ROLE=upgrade-reader "$PHOENIX" get upgrade/key 2>"$RUN_DIR/remint.err")"
-assert_eq "$recovered" synthetic-upgrade "CLI re-mints a dead cached session"
+assert_secret "$recovered" synthetic-upgrade "CLI re-mints a dead cached session"
 assert_contains "$(cat "$RUN_DIR/remint.err")" "minted a new one and retried" "re-mint is reported"
 [[ "$(wc -l <"$RUN_DIR/state/audit.log")" -gt "$old_audit_count" ]] || die "audit log was not preserved/appended"
 provider="$(printf '%s' '{"protocolVersion":1,"provider":"phoenix","ids":["upgrade/key"]}' | PHOENIX_TOKEN="$new_session" "$PHOENIX" openclaw-exec-provider)"
-assert_eq "$(jq -r '.values["upgrade/key"]' <<<"$provider")" synthetic-upgrade "new feature after upgrade"
+assert_secret "$(jq -r '.values["upgrade/key"]' <<<"$provider")" synthetic-upgrade "new feature after upgrade"
 ok "Scenario 18 PASS"

@@ -307,7 +307,7 @@ func TestRecentPasswordIsNeeded(t *testing.T) {
 		var got struct{ Reauth bool }
 		json.Unmarshal(w.Body.Bytes(), &got)
 		if w.Code != http.StatusUnauthorized || !got.Reauth {
-			t.Errorf("%s with an old sign-in: %d %s", p, w.Code, w.Body)
+			t.Errorf("%s with an old sign-in: %d", p, w.Code)
 		}
 	}
 	if got, _ := e.store.Get("shop/petstore"); got.Value != fakeValue || got.Metadata.Description != "Pet shop account" {
@@ -322,7 +322,7 @@ func TestRecentPasswordIsNeeded(t *testing.T) {
 	}
 	e.newCookie(t, w)
 	if !e.cookie.HttpOnly || e.cookie.SameSite != http.SameSiteStrictMode || e.cookie.Path != "/dashboard/" {
-		t.Errorf("new cookie attributes: %+v", e.cookie)
+		t.Errorf("new cookie: HttpOnly %v, SameSite %v, Path %q", e.cookie.HttpOnly, e.cookie.SameSite, e.cookie.Path)
 	}
 	after := payloadFromCookie(t, e.h, e.cookie)
 	if after.CSRF != before.CSRF || after.Exp != before.Exp || after.Nonce == before.Nonce {
@@ -666,7 +666,7 @@ func TestCopyAndOpenChecksTheLink(t *testing.T) {
 	shown := regexp.MustCompile(`data-link="([^"]*)"`).FindStringSubmatch(e.do("GET", "/dashboard/secrets/open?path=shop/petstore", nil).Body.String())[1]
 	fields := []string{"path", "shop/petstore", "use", "copy", "link", shown}
 	if w := e.post("/dashboard/secrets/value", fields...); w.Code != http.StatusOK {
-		t.Fatalf("same link: %d %s", w.Code, w.Body)
+		t.Fatalf("same link: %d", w.Code)
 	}
 	link := "https://new.example.com/?a=1&b=2|3"
 	e.store.Write("shop/petstore", "fake-new", "me", store.MetadataChange{URL: &link}, store.WriteExisting)
