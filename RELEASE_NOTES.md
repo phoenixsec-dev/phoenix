@@ -13,7 +13,8 @@ a reverse proxy, set `dashboard.trusted_proxies`. The server needs to write smal
 before you start the new one on its files,** and the new one before you go back to
 an older one: servers before v0.25.0 don't see these locks, so nothing stops both
 from running and undoing each other's writes. Update the server first, then every
-CLI. Showing secret values in the dashboard is off until you turn it on.
+CLI. Scripts that run `phoenix export app` must say `phoenix export app/`: without
+the slash it is now refused (it exported nothing and looked like a success). Showing secret values in the dashboard is off until you turn it on.
 
 ### Security: a request already running could use a replacement token's permissions
 
