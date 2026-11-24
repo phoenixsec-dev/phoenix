@@ -85,6 +85,16 @@ type Store struct {
 // NewWithProvider creates a new Store using a KeyProvider for all key operations.
 // This is the preferred constructor for Phase 2+.
 func NewWithProvider(filePath string, provider crypto.KeyProvider) (*Store, error) {
+	return open(filePath, provider, false)
+}
+
+// NewExisting is NewWithProvider for a store that must be there: a file that is
+// missing when it is read is an error, not an empty store.
+func NewExisting(filePath string, provider crypto.KeyProvider) (*Store, error) {
+	return open(filePath, provider, true)
+}
+
+func open(filePath string, provider crypto.KeyProvider, mustExist bool) (*Store, error) {
 	s := &Store{
 		provider: provider,
 		// The real file: rotation renames its backup over this path, which
@@ -93,7 +103,7 @@ func NewWithProvider(filePath string, provider crypto.KeyProvider) (*Store, erro
 		linked:   fsutil.RealPath(filePath) != filePath,
 	}
 
-	if err := s.load(); err != nil {
+	if err := s.load(mustExist); err != nil {
 		return nil, err
 	}
 
@@ -110,10 +120,11 @@ func New(filePath string, masterKey []byte) (*Store, error) {
 	return NewWithProvider(filePath, provider)
 }
 
-// load reads the store from disk, or initializes an empty store if the file doesn't exist.
-func (s *Store) load() error {
+// load reads the store from disk, or initializes an empty store if the file
+// doesn't exist and need not.
+func (s *Store) load(mustExist bool) error {
 	data, err := os.ReadFile(s.filePath)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && !mustExist {
 		s.data = &storeData{
 			Version:    storeVersion,
 			Secrets:    make(map[string]encryptedSecret),

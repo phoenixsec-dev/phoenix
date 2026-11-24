@@ -131,10 +131,16 @@ type ACL struct {
 }
 
 // New creates a new ACL from a config file.
-func New(path string) (*ACL, error) {
+func New(path string) (*ACL, error) { return open(path, false) }
+
+// NewExisting is New for a config file that must be there: one that is missing
+// when it is read is an error, not an empty access list.
+func NewExisting(path string) (*ACL, error) { return open(path, true) }
+
+func open(path string, mustExist bool) (*ACL, error) {
 	// The real file, so that saving does not replace a symlink to it.
 	a := &ACL{path: fsutil.RealPath(path), linked: fsutil.RealPath(path) != path, writeFile: fsutil.WriteFileAtomicStrict}
-	if err := a.load(); err != nil {
+	if err := a.load(mustExist); err != nil {
 		return nil, err
 	}
 	return a, nil
@@ -145,9 +151,9 @@ func NewFromConfig(config *ACLConfig) *ACL {
 	return &ACL{config: config}
 }
 
-func (a *ACL) load() error {
+func (a *ACL) load(mustExist bool) error {
 	data, err := os.ReadFile(a.path)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && !mustExist {
 		a.config = &ACLConfig{Agents: make(map[string]Agent)}
 		return nil
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"os"
@@ -8,10 +9,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/store"
 )
+
+// missingData is refuseMissingData's error.
+func missingData(cfg *config.Config) error {
+	_, err := refuseMissingData(cfg)
+	return err
+}
 
 // A new install has no store yet and starts. Where a store or an access list is
 // gone, the server refuses, names the file and changes nothing.
@@ -53,7 +61,7 @@ func TestMissingDataIsRefused(t *testing.T) {
 			}
 			cfg := config.DefaultConfig()
 			cfg.ACL.Path, cfg.Store.Path, cfg.Audit.Path = filepath.Join(dir, "acl.json"), filepath.Join(dir, "store.json"), filepath.Join(dir, "audit.log")
-			err := refuseMissingData(cfg)
+			err := missingData(cfg)
 			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), filepath.Join(dir, c.want)+" is not there")) {
 				t.Errorf("got %v, want a refusal naming %q", err, c.want)
 			}
@@ -62,12 +70,12 @@ func TestMissingDataIsRefused(t *testing.T) {
 			}
 			// The refusal says how to go on with nothing on purpose.
 			if c.want == "store.json" {
-				if err := errors.Join(os.WriteFile(cfg.Store.Path, []byte(`{"version":1,"secrets":{},"namespaces":{}}`), 0600), refuseMissingData(cfg)); err != nil {
+				if err := errors.Join(os.WriteFile(cfg.Store.Path, []byte(`{"version":1,"secrets":{},"namespaces":{}}`), 0600), missingData(cfg)); err != nil {
 					t.Errorf("with an empty store file: %v", err)
 				}
 			}
 			cfg.Store.Backend = "1password"
-			if err := refuseMissingData(cfg); (err != nil) != (c.want == "acl.json") {
+			if err := missingData(cfg); (err != nil) != (c.want == "acl.json") {
 				t.Errorf("1password: %v", err)
 			}
 		})
@@ -92,7 +100,7 @@ func TestLostStoreSeenThroughLinkedLog(t *testing.T) {
 			os.WriteFile(filepath.Join(logs, "phoenix.log"), nil, 0600), os.Symlink(filepath.Join(logs, "phoenix.log"), cfg.Audit.Path)); err != nil {
 			t.Fatal(err)
 		}
-		if err := refuseMissingData(cfg); err == nil || !strings.Contains(err.Error(), cfg.Store.Path+" is not there") {
+		if err := missingData(cfg); err == nil || !strings.Contains(err.Error(), cfg.Store.Path+" is not there") {
 			t.Errorf("gzipped %v: got %v, want a refusal", gzipped, err)
 		}
 	}
@@ -119,13 +127,13 @@ func TestInitMakesTheStore(t *testing.T) {
 	if err := os.WriteFile(cfg.Audit.Path, []byte(`{"action":"write","status":"allowed"}`+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := refuseMissingData(cfg); err != nil {
+	if err := missingData(cfg); err != nil {
 		t.Errorf("shared log: %v", err)
 	}
 	if err := os.Remove(cfg.Store.Path); err != nil {
 		t.Fatal(err)
 	}
-	if err := refuseMissingData(cfg); err == nil {
+	if err := missingData(cfg); err == nil {
 		t.Error("the lost store was not noticed")
 	}
 }
@@ -138,7 +146,68 @@ func TestMissingDataBehindLink(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "not-mounted", "acl.json"), cfg.ACL.Path); err != nil {
 		t.Fatal(err)
 	}
-	if err := refuseMissingData(cfg); err == nil || !strings.Contains(err.Error(), cfg.ACL.Path) {
+	if err := missingData(cfg); err == nil || !strings.Contains(err.Error(), cfg.ACL.Path) {
 		t.Errorf("got %v", err)
+	}
+}
+
+// A file that goes away after the check, here while the server waits for the
+// passphrase, is refused when it is read, even if it is back right afterwards.
+func TestDataGoneDuringPassphraseWait(t *testing.T) {
+	for _, gone := range []string{"store.json", "acl.json"} {
+		t.Run(gone, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := quietInit(t, dir); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(filepath.Join(dir, "config.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const pass = "synthetic-passphrase"
+			if err := crypto.SaveProtectedMasterKey(cfg.Store.MasterKey, key, pass); err != nil {
+				t.Fatal(err)
+			}
+			st, _, err := openFileStore(cfg, true, func() (string, error) { return pass, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Set("app/key", "synthetic-value", "admin", "", nil); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, gone)
+			before, _ := os.ReadFile(path)
+
+			// Startup's steps, in its order.
+			there, err := refuseMissingData(cfg)
+			if err != nil || !there {
+				t.Fatalf("check: %v %v", there, err)
+			}
+			waited := false
+			_, _, storeErr := openFileStore(cfg, there, func() (string, error) {
+				waited = true
+				return pass, os.Rename(path, path+".away")
+			})
+			_, aclErr := acl.NewExisting(cfg.ACL.Path)
+			if err := os.Rename(path+".away", path); err != nil {
+				t.Fatal(err)
+			}
+			if !waited {
+				t.Fatal("no passphrase was asked for")
+			}
+			got := map[string]error{"store.json": storeErr, "acl.json": aclErr}
+			for name, err := range got {
+				if refused := errors.Is(err, os.ErrNotExist); refused != (name == gone) {
+					t.Errorf("%s: %v, want it refused only if it was gone", name, err)
+				}
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+				t.Error("the file changed")
+			}
+		})
 	}
 }

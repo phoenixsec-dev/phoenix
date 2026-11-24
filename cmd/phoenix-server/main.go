@@ -155,7 +155,8 @@ func main() {
 	}
 
 	// Before anything is made, lock files included, where data is missing.
-	if err := refuseMissingData(cfg); err != nil {
+	storeThere, err := refuseMissingData(cfg)
+	if err != nil {
 		log.Fatalf("not starting: %v", err)
 	}
 
@@ -191,65 +192,24 @@ func main() {
 		log.Printf("  Backend: 1password (vault=%s, cache=%s)", cfg.OnePassword.Vault, cacheTTL)
 
 	default: // "file"
-		// Initialize key provider
-		var keyProvider crypto.KeyProvider
-		switch cfg.Crypto.Provider {
-		case "file", "":
-			key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
-			if err == crypto.ErrPassphraseRequired {
-				passphrase, ppErr := crypto.ReadPassphrase(*passphraseStdin)
-				if ppErr != nil {
-					log.Fatalf("master key is passphrase-protected: %v", ppErr)
-				}
-				key, err = crypto.LoadMasterKeyWithPassphrase(cfg.Store.MasterKey, passphrase)
-				if err != nil {
-					log.Fatalf("decrypting master key: %v", err)
-				}
-				p, provErr := crypto.NewFileKeyProvider(key)
-				if provErr != nil {
-					log.Fatalf("creating key provider: %v", provErr)
-				}
-				p.SetPassphrase(passphrase)
-				keyProvider = p
-			} else if err != nil {
-				log.Fatalf("loading master key: %v", err)
-			} else {
-				p, provErr := crypto.NewFileKeyProvider(key)
-				if provErr != nil {
-					log.Fatalf("creating key provider: %v", provErr)
-				}
-				keyProvider = p
-			}
-		default:
-			log.Fatalf("unknown crypto provider: %q (supported: file)", cfg.Crypto.Provider)
-		}
-		if fp, ok := keyProvider.(*crypto.FileKeyProvider); ok {
-			mk := fp.MasterKey()
-			sessionSigningKey, err = session.DeriveSigningKey(mk)
-			crypto.ZeroBytes(mk)
-			if err != nil {
-				log.Fatalf("%v", err)
-			}
-		}
-
-		s, err := store.NewWithProvider(cfg.Store.Path, keyProvider)
+		s, keyProvider, err := openFileStore(cfg, storeThere, func() (string, error) { return crypto.ReadPassphrase(*passphraseStdin) })
 		if err != nil {
-			log.Fatalf("initializing store: %v", err)
+			log.Fatalf("%v", err)
+		}
+		mk := keyProvider.MasterKey()
+		sessionSigningKey, err = session.DeriveSigningKey(mk)
+		crypto.ZeroBytes(mk)
+		if err != nil {
+			log.Fatalf("%v", err)
 		}
 		backend = store.NewFileBackend(s)
 		log.Printf("  Backend: file (provider=%s)", keyProvider.Name())
 	}
 
 	// Initialize ACL
-	a, err := acl.New(cfg.ACL.Path)
+	a, err := acl.NewExisting(cfg.ACL.Path)
 	if err != nil {
 		log.Fatalf("initializing ACL: %v", err)
-	}
-
-	// Again, now that both are read: a volume that went away in between would
-	// have been read as an empty store or access list.
-	if err := refuseMissingData(cfg); err != nil {
-		log.Fatalf("not starting: %v", err)
 	}
 
 	// Initialize audit logger
@@ -382,6 +342,44 @@ func main() {
 	}
 }
 
+// openFileStore loads the master key, asking passphrase for one if it is
+// protected, and opens the store with it. storeThere is whether the store file
+// was there before that: then it must still be when it is read, because the wait
+// for a passphrase can be long and a file gone by then is not an empty store.
+func openFileStore(cfg *config.Config, storeThere bool, passphrase func() (string, error)) (*store.Store, *crypto.FileKeyProvider, error) {
+	if p := cfg.Crypto.Provider; p != "file" && p != "" {
+		return nil, nil, fmt.Errorf("unknown crypto provider: %q (supported: file)", p)
+	}
+	var pass string
+	key, err := crypto.LoadMasterKey(cfg.Store.MasterKey)
+	if err == crypto.ErrPassphraseRequired {
+		if pass, err = passphrase(); err != nil {
+			return nil, nil, fmt.Errorf("master key is passphrase-protected: %w", err)
+		}
+		if key, err = crypto.LoadMasterKeyWithPassphrase(cfg.Store.MasterKey, pass); err != nil {
+			return nil, nil, fmt.Errorf("decrypting master key: %w", err)
+		}
+	} else if err != nil {
+		return nil, nil, fmt.Errorf("loading master key: %w", err)
+	}
+	provider, err := crypto.NewFileKeyProvider(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating key provider: %w", err)
+	}
+	if pass != "" {
+		provider.SetPassphrase(pass)
+	}
+	open := store.NewWithProvider
+	if storeThere {
+		open = store.NewExisting
+	}
+	s, err := open(cfg.Store.Path, provider)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initializing store: %w", err)
+	}
+	return s, provider, nil
+}
+
 // resolveConfigPath picks the config file: --config, then $PHOENIX_CONFIG,
 // then /data/config.json.
 func resolveConfigPath(flagValue string) string {
@@ -436,7 +434,7 @@ func runCheckConfig(path string) error {
 			fmt.Printf("policy OK: %s (%d rules)\n", cfg.Policy.Path, len(pe.Rules()))
 		}
 	}
-	if err := refuseMissingData(cfg); err != nil {
+	if _, err := refuseMissingData(cfg); err != nil {
 		errs = append(errs, err)
 	}
 	if cfg.ACL.Path != "" && !missing(cfg.ACL.Path) {
