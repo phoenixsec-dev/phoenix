@@ -642,8 +642,8 @@ func openGrantStore(cfg *config.Config, a *acl.ACL, al *audit.Logger) (*grant.St
 	}
 	set := cfg.AccessRequestsSettings()
 	return grant.Open(grant.Options{
-		Path:        set.StorePath,
-		Audit:       api.NewGrantAuditSink(al),
+		Path:  set.StorePath,
+		Audit: api.NewGrantAuditSink(al),
 		AgentExists: func(name string) bool {
 			_, err := a.GetAgent(name)
 			return err == nil
