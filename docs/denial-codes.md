@@ -103,7 +103,7 @@ or grant, sealed requirement, attestation. A grant never waives attestation.
 | Code | HTTP | `next_step` | When |
 |---|---|---|---|
 | `SESSION_EXPIRED` | 401 | `remint_session` | Session TTL elapsed |
-| `SESSION_INVALID` | 401 | `remint_session` | Token malformed or signature invalid |
+| `SESSION_INVALID` | 401 | `remint_session` | Token malformed, signature invalid, or session ended because its agent was deleted or the agent's token was replaced |
 | `SESSION_REVOKED` | 401 | `ask_user` | Session was revoked |
 | `SESSION_REQUIRED` | 400 | `none` | Operation requires a session token |
 | `SEAL_KEY_MISMATCH` | 400/403 | `remint_session` | Seal key does not match the session binding |

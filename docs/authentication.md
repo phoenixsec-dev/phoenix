@@ -66,7 +66,8 @@ phoenix get dev/api-key  # auto-mints session, then reads secret
 ```
 
 Session tokens use a `phxs_` prefix and are scoped to specific namespaces and
-actions. Sessions auto-renew and can be revoked individually.
+actions. Sessions auto-renew and can be revoked individually. Deleting an agent
+or replacing its token ends its sessions.
 
 Do not combine `PHOENIX_ROLE` with a pre-minted `phxs_` session token in
 `PHOENIX_TOKEN`: role mode always re-mints a session, and a session token is

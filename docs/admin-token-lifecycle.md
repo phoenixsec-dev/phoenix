@@ -69,6 +69,8 @@ leaked credentials. See [Session Identity](session-identity.md).
 
 - rotate application secrets on a schedule
 - rotate agent tokens when staff or infrastructure changes
+- if an agent's token leaks, replace it (`phoenix agent create <name> -t <new>
+  --acl ... --force`); that also ends its role sessions and grants
 - keep emergency access documented and tested
 - if you suspect admin token exposure, immediately shift operations to scoped credentials and rotate dependent access paths
 

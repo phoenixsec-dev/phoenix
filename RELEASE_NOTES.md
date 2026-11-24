@@ -1,5 +1,57 @@
 # Release Notes
 
+## Unreleased
+
+### Security: replacing an agent's token did not end its role sessions
+
+A role session (`phxs_`) named its agent but was not tied to the token that
+minted it. So when an agent was deleted, or its token replaced because it had
+leaked, sessions already made with the old token kept logging in and could be
+renewed without limit. While the agent did not exist they could not read
+secrets (but see below for v0.13.5 to v0.20.0). Once an agent with the same
+name existed again, or if its token was replaced with `--force`, they could
+read whatever that agent and the session's role allow. **Replacing a leaked
+token did not cut off someone holding a session made with it.**
+
+**Who is affected:** servers with `session.enabled`, on every release that has
+role sessions: v0.13.3 (2026-03-20) to v0.23.0. Up to v0.22.0 a server restart
+ended such sessions; on v0.23.0 sessions survive restarts, so they did not end
+on their own as long as they were renewed. On v0.13.5 to v0.20.0, a session
+approved for an `elevates_acl` role skipped the ACL, so it could still read
+secrets after its agent was deleted, until it expired.
+
+**What to do:** update. If you replaced an agent's token or deleted an agent on
+one of these versions because the token may have leaked, updating ends every
+session saved by the old version; check the audit log for that agent's reads
+after the replacement. If you cannot update yet, after replacing a token or
+deleting an agent, list that agent's sessions and revoke each one, as an admin:
+
+```bash
+phoenix sessions list --agent <name>
+phoenix sessions revoke <session-id>
+```
+
+Do it after the replacement, not before: the old token could mint more until
+then. On v0.22.0 and older, restarting the server does the same.
+
+**Now:**
+
+- Each session is bound to a fingerprint of the bearer token that minted it
+  (never the token), and works only while that is still its agent's token.
+  Every use and renewal checks this, on every endpoint.
+- Deleting an agent or replacing its token ends the old token's sessions at
+  once and for good, and writes one `session.ended` audit line per session.
+  `--force` with the same token keeps them.
+- An ended session gets `401 SESSION_INVALID`, which the CLI and
+  `phoenix mcp-server` (v0.23.0 and newer) recover from by minting once with
+  their current `PHOENIX_TOKEN`.
+
+**Upgrading:** nothing to configure. The first start ends the sessions saved by
+v0.23.0, which have no fingerprint, and logs how many. CLIs and MCP servers from
+v0.23.0 or newer mint new ones by themselves; older CLIs need
+`~/.phoenix/token-cache.json` cleared once. See
+[Session identity](docs/session-identity.md#ended-with-the-agents-token).
+
 ## v0.23.0 (2026-11-24)
 
 ### Fixed: a server restart broke every role session

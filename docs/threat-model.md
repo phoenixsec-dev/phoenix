@@ -107,7 +107,8 @@ Session tokens (`phxs_` prefix) introduce additional attack surface:
 
 - **Token theft**: Session tokens are bearer-like. If leaked, an attacker gains the
   role's scope until expiry or revocation. Mitigated by short TTLs (default 1h),
-  per-session revocation, and binding to the minting agent's identity.
+  per-session revocation, and binding to the minting agent's identity and token:
+  deleting the agent or replacing its token ends its sessions.
 - **Privilege escalation via role config change**: Roles are re-checked at renewal
   time. A role config change that widens scope does not retroactively expand active
   sessions — the session keeps the scope it was minted with.
