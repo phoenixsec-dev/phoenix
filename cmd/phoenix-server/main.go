@@ -139,6 +139,13 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
+	// Before anything is opened: opening a data file can already write to it.
+	unlock, err := lockDataFiles(cfg, log.Printf)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	defer unlock()
+
 	// Initialize backend
 	var backend store.SecretBackend
 	// Session signing key derived from the master key, so role sessions

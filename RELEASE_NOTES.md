@@ -66,6 +66,14 @@ that dies halfway can do to it. Nothing to configure; what changed:
   the link instead of on the disk the owner pointed it at, for example inside a
   container that is later thrown away. Writes now go to the file the link
   points at and the link stays.
+- **Two servers on the same files silently undid each other's writes.** Each
+  keeps the store, ACL, grants and sessions in memory and rewrites them whole,
+  and even a second start that then failed on the port had already rewritten
+  the sessions file. The server now holds a lock on each file it rewrites (an
+  empty `<file>.lock` next to it, safe to leave there, gone with the process)
+  and refuses to start while another one holds it. If you run two servers that
+  share only an audit log, give each its own. Where locking does not work the
+  server starts and logs a `WARNING`.
 
 ## v0.24.0 (2026-11-24)
 

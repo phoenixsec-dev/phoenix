@@ -169,6 +169,16 @@ the session cookie is set with `Secure` flag automatically. For production use:
 Do not expose the dashboard over plain HTTP on a network you do not control —
 the server logs a loud startup warning if you do.
 
+## One server per set of files
+
+`phoenix-server` keeps its store, ACL, grants and sessions in memory and
+rewrites each file whole, so two servers on the same files would undo each
+other's writes. At start it locks every file it rewrites (store, ACL, grants
+file, sessions file, and the audit log when rotation is on) through an empty
+`<file>.lock` next to it, and refuses to start while another server holds one.
+The lock ends with the process, however it ends; a leftover `.lock` file blocks
+nothing. On a filesystem without locks the server starts and logs a `WARNING`.
+
 ## Audit log rotation
 
 When `audit.log` passes `audit.rotate_mb` (default 50), Phoenix renames it to a
