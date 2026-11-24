@@ -53,7 +53,7 @@ assert_not_contains() { [[ "$1" != *"$2"* ]] || die "${3:-output contains forbid
 build_current() {
   [[ -n "$GO_BIN" && -x "$GO_BIN" ]] || die "Go is not available; set GO_BIN to the Go executable"
   mkdir -p "$BIN_DIR"
-  [[ -O "$BIN_DIR" ]] || die "$BIN_DIR belongs to another user; its binaries cannot be trusted"
+  [[ -n "${E2E_BIN_DIR:-}" || -O "$BIN_DIR" ]] || die "$BIN_DIR belongs to another user; its binaries cannot be trusted"
   if [[ -z "${E2E_BIN_DIR:-}" || ! -x "$PHOENIX" || ! -x "$PHOENIX_SERVER_BIN" || "${E2E_REBUILD:-0}" == 1 ]]; then
     log "Building current Phoenix binaries into $BIN_DIR"
     (cd "$REPO_ROOT" && "$GO_BIN" build -o "$BIN_DIR/" ./cmd/...)

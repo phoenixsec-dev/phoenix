@@ -77,14 +77,16 @@ func TestNotifySecretUsedFailure(t *testing.T) {
 // No two names look the same in a ping.
 func TestQuoteOddKeepsNamesApart(t *testing.T) {
 	seen := map[string]string{}
-	for _, n := range []string{"a/b\nc", `"a/b\nc"`, `a/b\nc`, "a/bc", "a/b\u200bc", "a/b c", `a/"b"`} {
-		q := notifyText(quoteOdd(n), 300)
+	for _, n := range []string{"a/b\nc", `"a/b\nc"`, `a/b\nc`, "a/bc", "a/b\u200bc", "a/b c", `a/"b"`,
+		"a/" + strings.Repeat("\u200b", 50) + "x", "a/" + strings.Repeat("\u200b", 50) + "y",
+		"a/" + strings.Repeat(`"`, 150) + "x", "a/" + strings.Repeat(`"`, 150) + "y"} {
+		q := quoteOdd(n, 300)
 		if other, ok := seen[q]; ok {
 			t.Errorf("%q and %q both show as %s", n, other, q)
 		}
 		seen[q] = n
 	}
-	if quoteOdd("shop/key?v2 #1") != "shop/key?v2 #1" {
+	if quoteOdd("shop/key?v2 #1", 300) != "shop/key?v2 #1" {
 		t.Error("an ordinary name was quoted")
 	}
 }

@@ -90,7 +90,7 @@ func (s *Server) sendRevealNotify(ctx context.Context, cfg config.AccessRequests
 		link = strings.TrimRight(cfg.NotifyDashboardURL, "/") + "/dashboard/sessions"
 	}
 	body := fmt.Sprintf("%s was %s in the dashboard.\nDevice: %s\nAddress: %s\nLogin: %s\nNot you? Sign that login out on the Sessions page and change the dashboard password.\n",
-		notifyText(quoteOdd(path), 300), verb, notifyText(device, 60), notifyText(ip, 60), login)
+		quoteOdd(path, 300), verb, notifyText(device, 60), notifyText(ip, 60), login)
 	if link != "" {
 		body += link + "\n"
 	}
@@ -98,8 +98,11 @@ func (s *Server) sendRevealNotify(ctx context.Context, cfg config.AccessRequests
 }
 
 // quoteOdd quotes a name with invisible characters, quotes or backslashes in it,
-// so no two names look the same.
-func quoteOdd(name string) string {
+// so no two names look the same. A name over max characters is cut first.
+func quoteOdd(name string, max int) string {
+	if r := []rune(name); len(r) > max {
+		name = string(r[:max]) + "..."
+	}
 	if strings.ContainsFunc(name, func(r rune) bool { return !unicode.IsPrint(r) || r == '"' || r == '\\' }) {
 		return strconv.Quote(name)
 	}

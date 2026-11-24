@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -37,13 +38,25 @@ func TestShowingIsOffUntilTheConfigSaysSo(t *testing.T) {
 	e := newSecretsEnv(t, config.DashboardConfig{}, "")
 	e.h.deps.ConfigPath = "/etc/phoenix/config.json"
 	page := e.openPage()
-	for _, want := range []string{`change <code>"reveal": false</code> to <code>true</code>`, `right after <code>"dashboard": {</code>:</p>`, `<pre class="config-line">"reveal": true,</pre>`, "/etc/phoenix/config.json"} {
+	for _, want := range []string{`change <code>"reveal": false</code> to <code>"reveal": true</code>`, `right after <code>"dashboard": {</code>:</p>`, `<pre class="config-line">"reveal": true,</pre>`, "/etc/phoenix/config.json"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page does not hold %s", want)
 		}
 	}
 	if w := e.showValue(); w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), fakeValue) {
 		t.Errorf("value handed out while off: %d", w.Code)
+	}
+
+	// Doing what it says turns it on, wherever the line is in the file.
+	for old, edit := range map[string][2]string{
+		`{"dashboard": {"reveal": false}}`:                  {`"reveal": false`, `"reveal": true`},
+		`{"dashboard": {"reveal": false, "enabled": true}}`: {`"reveal": false`, `"reveal": true`},
+		`{"dashboard": {"enabled": true}}`:                  {`"dashboard": {`, `"dashboard": {` + "\n" + `"reveal": true,`},
+	} {
+		var cfg config.Config
+		if err := json.Unmarshal([]byte(strings.Replace(old, edit[0], edit[1], 1)), &cfg); err != nil || !cfg.Dashboard.Reveal {
+			t.Errorf("%s: reveal %v, %v", old, cfg.Dashboard.Reveal, err)
+		}
 	}
 
 	const rules = `{"attestation":{"shop/*":{"require_sealed":true}}}`

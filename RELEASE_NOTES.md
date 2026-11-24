@@ -311,7 +311,7 @@ withholds. So it is set in the config file only, never from the dashboard:
    output of `phoenix-server --hash-password` in the config as
    `dashboard.password_hash`.
 2. In the server's config file, change `"reveal": false` inside `"dashboard"` to
-   `true`. If there is no `"reveal"` line (an older config), put `"reveal": true,`
+   `"reveal": true`. If there is no `"reveal"` line (an older config), put `"reveal": true,`
    right after `"dashboard": {`. Restart: the log says `showing secrets is ON`.
 
 `phoenix-server --init` asks once at a terminal (default no). While it is off,
