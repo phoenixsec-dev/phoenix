@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased
+## v0.23.1 (2026-11-24)
 
 ### Security: replacing an agent's token did not end its role sessions
 
