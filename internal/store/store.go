@@ -624,6 +624,9 @@ func (s *Store) emergencyPersistPendingKey() (string, error) {
 	return emergencyPath, nil
 }
 
+// Path returns the store file's real path (symlinks followed).
+func (s *Store) Path() string { return s.filePath }
+
 // Provider returns the store's KeyProvider.
 // Used by the server to access the provider after rotation (e.g., to persist
 // the new master key via FileKeyProvider.MasterKey()).

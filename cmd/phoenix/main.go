@@ -1685,6 +1685,10 @@ func cmdRotateMaster() error {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
+	if result.Rotated == 0 {
+		fmt.Println("Nothing to rotate: the store has no namespaces yet, so the key was kept")
+		return nil
+	}
 	fmt.Printf("Master key rotated successfully\n")
 	fmt.Printf("  Namespaces re-wrapped: %d\n", result.Rotated)
 	fmt.Printf("  Old key backed up to: %s\n", result.Backup)

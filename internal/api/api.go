@@ -22,6 +22,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/policy"
 	"github.com/phoenixsec/phoenix/internal/ref"
@@ -148,6 +149,7 @@ type Server struct {
 	audit         *audit.Logger
 	auditPath     string
 	masterKeyPath string         // path to master.key file (needed for KEK rotation)
+	rotateMu      sync.Mutex     // one master key rotation at a time
 	policy        *policy.Engine // nil when no attestation policy configured
 	bearerEnabled bool           // whether bearer token auth is allowed
 	startTime     time.Time      // server start time for uptime reporting
@@ -1287,19 +1289,34 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Backup the old master key as .prev
+	// One rotation at a time, and none while --protect-key saves the key file.
+	s.rotateMu.Lock()
+	defer s.rotateMu.Unlock()
+	release, err := fsutil.Lock(s.masterKeyPath)
+	if errors.Is(err, fsutil.ErrLocked) {
+		jsonError(w, "the master key file is being changed by phoenix-server --protect-key; restart the server afterwards, then rotate", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		log.Printf("WARNING: cannot lock %s during rotation: %v", s.masterKeyPath, err)
+	} else {
+		defer release()
+	}
+	// The rotation replaces the key file with one protected as it was at
+	// start. If it is not that file any more, saving would undo the change.
+	if err := provider.CheckKeyFile(s.masterKeyPath); err != nil {
+		log.Printf("rotation refused: %s: %v", s.masterKeyPath, err)
+		jsonError(w, "the master key file changed since the server started (new passphrase, or another key); restart the server, then rotate", http.StatusConflict)
+		return
+	}
 	oldKey, err := os.ReadFile(s.masterKeyPath)
 	if err != nil {
 		log.Printf("error reading old master key: %v", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	defer crypto.ZeroBytes(oldKey)
 	prevPath := s.masterKeyPath + ".prev"
-	if err := os.WriteFile(prevPath, oldKey, 0600); err != nil {
-		log.Printf("error backing up master key to %s: %v", prevPath, err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
 
 	// Rotate with afterSave callback: the callback writes the new key file
 	// atomically while the store lock is held, preventing any window where
@@ -1308,6 +1325,11 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 		pendingKey := provider.PendingMasterKey()
 		if pendingKey == nil {
 			return fmt.Errorf("no pending key after rotation")
+		}
+		// Keep the old key as .prev, only now: a rotation that failed earlier
+		// must not replace the one from before.
+		if err := fsutil.WriteFileAtomic(prevPath, oldKey, 0600); err != nil {
+			return fmt.Errorf("backing up master key to %s: %w", prevPath, err)
 		}
 		if provider.Passphrase() != "" {
 			return crypto.SaveProtectedMasterKey(s.masterKeyPath, pendingKey, provider.Passphrase())
@@ -1323,11 +1345,11 @@ func (s *Server) handleRotateMaster(w http.ResponseWriter, r *http.Request) {
 	s.auditLogAllowed(r, info.Agent, "rotate-master", fmt.Sprintf("%d namespaces", rotated), ip)
 	log.Printf("master key rotated by %s: %d namespaces re-wrapped", info.Agent, rotated)
 
-	jsonOK(w, map[string]interface{}{
-		"status":  "ok",
-		"rotated": rotated,
-		"backup":  prevPath,
-	})
+	resp := map[string]interface{}{"status": "ok", "rotated": rotated}
+	if rotated > 0 {
+		resp["backup"] = prevPath
+	}
+	jsonOK(w, resp)
 }
 
 // resolveRequest is the JSON body for batch reference resolution.

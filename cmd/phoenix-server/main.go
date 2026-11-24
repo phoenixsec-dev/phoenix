@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/dashboard"
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 	"github.com/phoenixsec/phoenix/internal/grant"
 	"github.com/phoenixsec/phoenix/internal/op"
 	"github.com/phoenixsec/phoenix/internal/policy"
@@ -541,6 +543,12 @@ func runProtectKey(keyPath string) error {
 		return fmt.Errorf("--protect-key requires an interactive terminal (TTY)")
 	}
 
+	// What the prompts below are about; see replaceKeyFile.
+	before, err := os.ReadFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("loading master key: %w", err)
+	}
+
 	// Load current key (with old passphrase if needed)
 	key, err := crypto.LoadMasterKey(keyPath)
 	if err == crypto.ErrPassphraseRequired {
@@ -569,18 +577,42 @@ func runProtectKey(keyPath string) error {
 		if cErr != nil || confirm != "REMOVE" {
 			return fmt.Errorf("aborted — passphrase not changed")
 		}
-		if err := crypto.SaveMasterKeyAtomic(keyPath, key); err != nil {
+		if err := replaceKeyFile(keyPath, before, func() error { return crypto.SaveMasterKeyAtomic(keyPath, key) }); err != nil {
 			return fmt.Errorf("saving unprotected key: %w", err)
 		}
-		fmt.Println("Master key passphrase removed.")
+		fmt.Println("Master key passphrase removed. Restart the server.")
 	} else {
-		if err := crypto.SaveProtectedMasterKey(keyPath, key, newPass); err != nil {
+		if err := replaceKeyFile(keyPath, before, func() error { return crypto.SaveProtectedMasterKey(keyPath, key, newPass) }); err != nil {
 			return fmt.Errorf("saving protected key: %w", err)
 		}
-		fmt.Println("Master key passphrase updated.")
+		fmt.Println("Master key passphrase updated. Restart the server.")
 	}
 
 	return nil
+}
+
+// replaceKeyFile runs save unless the key file is no longer what it was when
+// read. A running server may have rotated the key while a person was typing a
+// passphrase; saving the old key over it would leave a store no key opens. The
+// lock is the one rotate-master holds while it works.
+func replaceKeyFile(keyPath string, before []byte, save func() error) error {
+	release, err := fsutil.Lock(keyPath)
+	switch {
+	case err == nil:
+		defer release()
+	case errors.Is(err, fsutil.ErrLocked):
+		return fmt.Errorf("a key rotation is running, nothing was changed; run this again: %w", err)
+	default:
+		log.Printf("WARNING: cannot lock %s: %v", keyPath, err)
+	}
+	now, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(now, before) {
+		return errors.New("the key file was changed by something else meanwhile (a key rotation?), nothing was changed; run this again")
+	}
+	return save()
 }
 
 // runHashPassword prompts for a password and prints its bcrypt hash.

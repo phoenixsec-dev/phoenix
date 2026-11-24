@@ -74,6 +74,14 @@ that dies halfway can do to it. Nothing to configure; what changed:
   and refuses to start while another one holds it. If you run two servers that
   share only an audit log, give each its own. Where locking does not work the
   server starts and logs a `WARNING`.
+- **`--protect-key` and `rotate-master` could overwrite each other's key
+  file.** Adding a passphrase and then rotating without a restart saved the new
+  key with no passphrase again; rotating while `--protect-key` waited for a
+  passphrase put the old key back over the new one, leaving a store no key on
+  disk opened. Both now check that the file is still the one they read:
+  `rotate-master` answers 409 and asks for a restart, `--protect-key` stops.
+- **A failed rotation no longer replaces `master.key.prev`**, which is written
+  in one step. `rotate-master` on an empty store keeps the key and says so.
 
 ## v0.24.0 (2026-11-24)
 

@@ -26,6 +26,8 @@ and says what to do; the `.pre-rotate` backup below covers that case. It is
 never overwritten by a rotation that cannot read the store. (If only some
 namespaces do not open, the server starts and logs a `WARNING` naming them.)
 
+`master.key.prev` is the key from before the last rotation that worked.
+
 ### If rotation fails
 
 Normally a failed rotation rolls back on its own and the old key stays in
@@ -107,7 +109,11 @@ phoenix-server --config /data/config.json
 phoenix-server --protect-key --config /data/config.json
 ```
 
-Enter an empty new passphrase to remove protection.
+Enter an empty new passphrase to remove protection. Restart the server
+afterwards: until then it refuses `rotate-master` with a 409, because it would
+save the new key with the passphrase it started with. If the key was rotated
+while `--protect-key` waited for you, it changes nothing and asks you to run it
+again.
 
 > **Warning:** If you lose the passphrase, you lose your secrets.
 
