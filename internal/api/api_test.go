@@ -947,7 +947,7 @@ func addSpoofedOpenClawHeaders(req *http.Request, rawSessionKey string) {
 	req.Header.Set("X-OpenClaw-Agent", "admin\nspoof")
 	req.Header.Set("X-OpenClaw-Session-Id", " session-123 ")
 	req.Header.Set("X-OpenClaw-Channel", "growth\tops")
-	req.Header.Set("X-OpenClaw-Requester-Sender", "aaron@example")
+	req.Header.Set("X-OpenClaw-Requester-Sender", "robin@example")
 	req.Header.Set("X-OpenClaw-Sender-Is-Owner", "true")
 	req.Header.Set("X-OpenClaw-Session-Key", rawSessionKey)
 	req.Header.Set("X-OpenClaw-Role", "admin")
@@ -1010,7 +1010,7 @@ func TestOpenClawHeadersCapturedAsSanitizedAuditMetadataOnly(t *testing.T) {
 		"openclaw.agent":            "admin spoof",
 		"openclaw.session_id":       "session-123",
 		"openclaw.channel":          "growth ops",
-		"openclaw.requester_sender": "aaron@example",
+		"openclaw.requester_sender": "robin@example",
 		"openclaw.sender_is_owner":  "true",
 	}
 	if len(entry.Metadata) != len(expected) {
@@ -1370,7 +1370,7 @@ func TestOpenClawAndHermesFamiliesCoexist(t *testing.T) {
 		"openclaw.agent":            "admin spoof",
 		"openclaw.session_id":       "session-123",
 		"openclaw.channel":          "growth ops",
-		"openclaw.requester_sender": "aaron@example",
+		"openclaw.requester_sender": "robin@example",
 		"openclaw.sender_is_owner":  "true",
 		"hermes.profile":            "demomain",
 		"hermes.session_id":         "hermes-session-77",
