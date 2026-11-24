@@ -207,6 +207,7 @@ and they decide nothing about access.
   show [name]` prints them, `phoenix agent create` takes the same options, and
   `phoenix whoami` and MCP `phoenix_whoami` show the caller's own. API:
   `PATCH /v1/agents/{name}/identity`, and `identities` in `GET /v1/agents`.
+  A change is audited as `set-identity`, also when it is refused.
 - Audit lines gain `who`, `host`, `authority` and `attested`. No field was
   renamed or removed. They come from the identity's record, never from a
   caller. A line about a refused credential, the dashboard or Phoenix itself

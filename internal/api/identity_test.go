@@ -137,6 +137,51 @@ func TestAuditLinesCarryIdentity(t *testing.T) {
 	}
 }
 
+// A describe line is as full as any other: labels, session and changed fields.
+func TestDescribeLineIsFull(t *testing.T) {
+	e := newCredEnv(t)
+	e.label(`{"who":"robin","authority":"night-desk"}`)
+	sess := e.mint("old-token")
+	for i, tok := range []string{"old-token", sess} {
+		if code, _ := e.do("PATCH", "/v1/metadata/test/a", tok, `{"username":"u","tags":["x"]}`); code != 200 {
+			t.Fatalf("describe %d: %d", i, code)
+		}
+		l := e.lines(audit.QueryOptions{Limit: 1})[0]
+		if l.Caller != (audit.Caller{Who: "robin", Authority: "night-desk"}) || l.Agent != "worker" || l.Action != "describe" || l.Path != "test/a" ||
+			l.Status != "allowed" || (l.SessionID != "") != (i == 1) || l.Metadata["changed"] != "tags,username" {
+			t.Errorf("describe line %d = %+v", i, l)
+		}
+	}
+}
+
+// A refused identity change leaves exactly one denied line, saying who tried.
+func TestRefusedSetIdentityIsAudited(t *testing.T) {
+	e := newCredEnv(t)
+	e.label(`{"who":"robin","authority":"night-desk"}`)
+	sess := e.mint("old-token")
+	for i, c := range []struct {
+		tok, reason string
+		code        int
+	}{{"old-token", "acl", 403}, {sess, "session", 401}} {
+		before := len(e.lines(audit.QueryOptions{}))
+		if code, _ := e.do("PATCH", "/v1/agents/admin/identity", c.tok, `{"who":"eve"}`); code != c.code {
+			t.Fatalf("%s: %d, want %d", c.reason, code, c.code)
+		}
+		got := e.lines(audit.QueryOptions{})[before:]
+		if len(got) != 1 {
+			t.Fatalf("%s: %d lines, want 1", c.reason, len(got))
+		}
+		l := got[0]
+		if l.Action != "set-identity" || l.Status != "denied" || l.Reason != c.reason || l.Agent != "worker" || l.Path != "admin" || l.IP == "" ||
+			l.Caller != (audit.Caller{Who: "robin", Authority: "night-desk"}) || (l.SessionID != "") != (i == 1) {
+			t.Errorf("%s: line = %+v", c.reason, l)
+		}
+	}
+	if a, _ := e.srv.acl.GetAgent("admin"); a.Who != "" {
+		t.Error("a refused change was made")
+	}
+}
+
 // Grant events go through the grant store's audit sink, not a request. They
 // carry the labels the actor had when it acted, also when the line is written
 // later, after a restart, with another identity under that name.

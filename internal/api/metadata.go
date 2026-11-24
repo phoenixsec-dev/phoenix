@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
+	"github.com/phoenixsec/phoenix/internal/audit"
 	"github.com/phoenixsec/phoenix/internal/store"
 )
 
@@ -267,9 +268,7 @@ func (s *Server) auditDescribe(r *http.Request, info *authInfo, path, ip string,
 		md = map[string]string{}
 	}
 	md["changed"] = strings.Join(fields, ",")
-	if info.UsedSession {
-		s.logAudit(s.audit.LogSessionAllowedWithMetadata(info.Agent, "describe", path, ip, info.SessionID, md))
-		return
-	}
-	s.logAudit(s.audit.LogAllowedWithMetadata(info.Agent, "describe", path, ip, md))
+	s.logAudit(s.writeAudit(r, audit.Entry{
+		Agent: info.Agent, Action: "describe", Path: path, Status: "allowed", IP: ip, SessionID: info.SessionID, Metadata: md,
+	}))
 }

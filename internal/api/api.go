@@ -387,12 +387,15 @@ func (s *Server) authenticate(r *http.Request) (*authInfo, error) {
 		return nil, err
 	}
 	if info.UsedSession {
-		return nil, &sessionAuthError{
-			code: "ADMIN_AUTH_REQUIRED",
-			err:  fmt.Errorf("session tokens cannot access admin endpoints"),
-		}
+		return nil, errSessionNotAdmin
 	}
 	return info, nil
+}
+
+// errSessionNotAdmin refuses a valid session token on an admin endpoint.
+var errSessionNotAdmin = &sessionAuthError{
+	code: "ADMIN_AUTH_REQUIRED",
+	err:  errors.New("session tokens cannot access admin endpoints"),
 }
 
 // authenticateInfo identifies the calling agent and collects what the

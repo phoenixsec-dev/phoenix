@@ -107,19 +107,29 @@ func (s *Server) identityRoutes() {
 
 // handleSetIdentity: PATCH /v1/agents/{name}/identity, admin only. Sets the
 // labels in the body and leaves out-of-body ones alone. The token, the
-// permissions and any sessions are not touched.
+// permissions and any sessions are not touched. A refusal is audited.
 func (s *Server) handleSetIdentity(w http.ResponseWriter, r *http.Request) {
-	info, err := s.authenticate(r)
+	info, err := s.authenticateInfo(r)
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
+	target := r.PathValue("name")
+	if info.UsedSession {
+		s.auditDenied(r, info, "set-identity", target, clientIP(r), "session")
+		handleAuthError(w, errSessionNotAdmin)
+		return
+	}
 	if err := s.authorize(info, "agents", acl.ActionAdmin); err != nil {
+		reason := "acl"
+		if errors.Is(err, acl.ErrUnauthorized) {
+			reason = reasonTokenReplaced
+		}
+		s.auditDenied(r, info, "set-identity", target, clientIP(r), reason)
 		jsonError(w, "access denied: admin required", http.StatusForbidden)
 		return
 	}
 
-	target := r.PathValue("name")
 	var change acl.LabelChange
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	// Refused, not ignored: "host" or "token" here would look as if it worked.
