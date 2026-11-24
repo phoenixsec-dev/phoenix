@@ -34,7 +34,7 @@ func extractClientIP(r *http.Request) string {
 
 // isTLS reports whether the request came over HTTPS, or says a proxy in front
 // did. X-Forwarded-Proto is believed from anyone on purpose: it only affects
-// whoever sends it (a Secure cookie, no posts from an http page in sameOrigin,
+// whoever sends it (a Secure cookie, no posts from an http page where sameOrigin has only Origin to go by,
 // no plain-HTTP hint on secret pages), so a lie gains nothing, while not
 // believing it would take Secure away from every install behind a proxy that
 // has not set trusted_proxies yet. Use it for nothing a lie could gain from.

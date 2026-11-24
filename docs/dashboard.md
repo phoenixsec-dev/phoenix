@@ -171,8 +171,8 @@ signed-in browsers are not affected). The server log says
 send the header: if that is your proxy, that is the address to list.
 
 `X-Forwarded-Proto: https` is believed whoever sends it: it sets the cookie's
-`Secure` flag, refuses posts from an `http://` page, and leaves out the
-plain-HTTP warning on secret pages. It only affects the sender's own requests,
+`Secure` flag, refuses posts from an `http://` page when the browser sends only
+`Origin`, and leaves out the plain-HTTP warning on secret pages. It only affects the sender's own requests,
 so there is nothing to gain from a lie.
 
 The server itself binds to loopback. The API never reads these headers.

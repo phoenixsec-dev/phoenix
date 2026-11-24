@@ -13,10 +13,11 @@ and approver checks included, also requires that the token the request logged
 in with is still the agent's. So does everything looked up by agent name
 ("your" sessions, requests and grants). Requests that send a body are checked
 again after it arrived, so one kept waiting with an old token can no longer
-write a secret, make an agent or approve anything once that token is replaced. Such a
-request gets `401 unauthorized`, audited with reason `token_replaced` (a few
-admin endpoints, and a grant with a use limit whose token is replaced during
-the read, answer 403). Writing the same
+write a secret, make an agent or approve anything once that token is replaced.
+Such a request is refused, normally with `401 unauthorized` and audit reason
+`token_replaced`. Replaced at the very last moment it can also be a 403 (a few
+admin endpoints, a grant with a use limit), a 409 (a new access request) or a
+per-ref error in a batch resolve. Writing the same
 token again with `--force` is not a replacement. Nothing to configure.
 
 ### Security: a revoked session could be quietly replaced after a role change
@@ -42,7 +43,7 @@ Any visitor could send their own `X-Forwarded-For`, use a new one for each
 guess to dodge the login lockout, and choose the address shown beside a login
 or an approval. The dashboard now uses the address the connection comes from.
 The API always did. `X-Forwarded-Proto: https` is still believed from anyone,
-on purpose: it gives the sender's own login cookie its `Secure` flag, refuses
+on purpose: it gives the sender's own login cookie its `Secure` flag, can refuse
 posts from an `http://` page and leaves out the plain-HTTP warning, all for the
 sender alone, so a lie gains nothing, and no install behind a proxy loses that
 flag.
