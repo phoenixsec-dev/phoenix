@@ -44,6 +44,9 @@ var (
 	// ErrEndNotSaved means sessions were ended in memory but the sessions
 	// file could not be written. See Store.ChangeCredential.
 	ErrEndNotSaved = errors.New("sessions ended now but that could not be saved")
+	// ErrReuseNotSaved refuses to bring back a token whose ended sessions are
+	// still in the sessions file, where a restart could revive them.
+	ErrReuseNotSaved = errors.New("token's ended sessions are not saved yet")
 )
 
 // Default actions granted when a role's Actions list is empty.

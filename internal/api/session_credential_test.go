@@ -384,20 +384,20 @@ func TestSessionsWithoutFingerprintEndAtStart(t *testing.T) {
 	}
 }
 
-// A session minted with another session (role trusting "local") belongs to the
-// same bearer token and ends with it.
-func TestSessionMintedBySessionEndsWithToken(t *testing.T) {
+// A session cannot mint another one, even for a role that trusts "local": the
+// new one would shed its scope and seal key and could outlive it.
+func TestSessionCannotMintSession(t *testing.T) {
 	e := newCredEnv(t)
-	code, body := e.do("POST", "/v1/session/mint", e.mint("old-token"), `{"role":"local"}`)
-	var m struct {
-		Tok string `json:"session_token"`
+	sess := e.mint("old-token")
+	for _, role := range []string{"local", "dev"} {
+		code, body := e.do("POST", "/v1/session/mint", sess, `{"role":"`+role+`"}`)
+		if code != 403 || !strings.Contains(body, "BOOTSTRAP_FAILED") {
+			t.Errorf("mint %s with a session: %d %s, want 403 BOOTSTRAP_FAILED", role, code, body)
+		}
 	}
-	if json.Unmarshal([]byte(body), &m); code != 200 || m.Tok == "" {
-		t.Fatalf("mint with a session: %d %s", code, body)
+	if code, body := e.do("POST", "/v1/session/mint", "old-token", `{"role":"local"}`); code != 200 {
+		t.Errorf("mint local with the bearer token: %d %s", code, body)
 	}
-	e.wantAlive("before", m.Tok)
-	e.create("new-token", true)
-	e.wantDead("after --force", m.Tok)
 }
 
 // hookBody runs hook on the first read. Handlers log the caller in before they
@@ -422,25 +422,19 @@ func TestMintDuringCredentialChange(t *testing.T) {
 		"delete and create": func(e *credEnv) { e.remove(); e.create("new-token", false) },
 	}
 	for name, change := range changes {
-		for _, with := range []string{"bearer", "session"} {
-			t.Run(name+" with "+with, func(t *testing.T) {
-				e := newCredEnv(t)
-				tok, role, want := "old-token", "dev", `"unauthorized"`
-				if with == "session" {
-					tok, role, want = e.mint("old-token"), "local", `"SESSION_INVALID"`
-				}
-				// The change is an HTTP call of its own and the mint holds
-				// no lock while reading its body, so this cannot deadlock.
-				code, body := e.doReader("POST", "/v1/session/mint", tok,
-					&hookBody{Reader: strings.NewReader(`{"role":"` + role + `"}`), hook: func() { change(e) }})
-				if code != 401 || !strings.Contains(body, want) {
-					t.Errorf("mint = %d %s, want 401 %s", code, body, want)
-				}
-				if live := e.sessions.List(); len(live) != 0 {
-					t.Errorf("%d live sessions left for the old credential", len(live))
-				}
-			})
-		}
+		t.Run(name, func(t *testing.T) {
+			e := newCredEnv(t)
+			// The change is an HTTP call of its own and the mint holds no
+			// lock while reading its body, so this cannot deadlock.
+			code, body := e.doReader("POST", "/v1/session/mint", "old-token",
+				&hookBody{Reader: strings.NewReader(`{"role":"dev"}`), hook: func() { change(e) }})
+			if code != 401 || !strings.Contains(body, `"unauthorized"`) {
+				t.Errorf("mint = %d %s, want 401", code, body)
+			}
+			if live := e.sessions.List(); len(live) != 0 {
+				t.Errorf("%d live sessions left for the old credential", len(live))
+			}
+		})
 	}
 }
 
@@ -512,8 +506,8 @@ func TestCredentialChangeRaces(t *testing.T) {
 						mu.Lock()
 						old = append(old, tok)
 						mu.Unlock()
-					} else if code != 401 {
-						t.Errorf("renew during replace: %d %s", code, body)
+					} else if code != 401 || !strings.Contains(body, "SESSION_INVALID") {
+						t.Errorf("renew during replace: %d %s, want 401 SESSION_INVALID", code, body)
 					}
 				}
 			}()
@@ -565,11 +559,131 @@ func TestCredentialChangeWhenSessionsCannotBeSaved(t *testing.T) {
 			}
 			e.wantDead("after failed save", sess)
 
+			// The old token may not come back while its ended session is
+			// still on disk; any other token is fine.
+			for _, path := range []string{"/v1/agents", "/v1/agents?force=true"} {
+				if name == "replace" && path == "/v1/agents" {
+					continue // the agent exists: 409 either way
+				}
+				code, body = e.do("POST", path, "admin-token", `{"name":"worker","token":"old-token","permissions":`+workerACL+`}`)
+				if code != 500 || !strings.Contains(body, "not changed") {
+					t.Errorf("old token back via %s: %d %s, want 500 not changed", path, code, body)
+				}
+			}
+			if code, body = e.do("POST", "/v1/agents?force=true", "admin-token", `{"name":"worker","token":"third-token","permissions":`+workerACL+`}`); code != 200 {
+				t.Errorf("another token while the save is failing: %d %s, want 200", code, body)
+			}
+
 			if err := errors.Join(os.Remove(dir), os.Rename(dir+".away", dir)); err != nil {
 				t.Fatal(err)
 			}
+			// Saving works again: the old token may come back, its session not.
+			e.create("old-token", true)
+			e.wantDead("after the old token is back", sess)
 			e.start()
 			e.wantDead("after restart", sess)
+		})
+	}
+}
+
+// Replacing one agent's token reports only its own sessions: a save that
+// failed earlier for another agent is not blamed on it.
+func TestFailedSaveIsNotReportedForAnotherAgent(t *testing.T) {
+	e := newCredEnv(t)
+	e.mint("old-token")
+	dir := filepath.Dir(e.sessionsPath())
+	if err := errors.Join(os.Rename(dir, dir+".away"), os.WriteFile(dir, nil, 0600)); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := e.do("DELETE", "/v1/agents/worker", "admin-token", ""); code != 500 {
+		t.Fatalf("delete: %d %s, want 500", code, body)
+	}
+	for _, tok := range []string{"other-1", "other-2"} {
+		if code, body := e.do("POST", "/v1/agents?force=true", "admin-token", `{"name":"other","token":"`+tok+`","permissions":`+workerACL+`}`); code != 200 {
+			t.Errorf("another agent's token: %d %s, want 200", code, body)
+		}
+	}
+}
+
+// Sessions saved before a start with sessions disabled do not come back when
+// they are enabled again, whatever happened to the token in between.
+func TestDisablingSessionsEndsSavedOnes(t *testing.T) {
+	e := newCredEnv(t)
+	sess, revoked := e.mint("old-token"), e.mint("old-token")
+	_, id, _ := e.sessions.ParseClaimsInsecure(revoked)
+	if err := e.sessions.Revoke(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.srv.EndSavedSessions(e.sessionsPath()); err != nil { // what a disabled start does
+		t.Fatal(err)
+	}
+	e.wantEnded("system", "sessions_disabled")
+	e.start()
+	e.wantDead("after enabling again", sess)
+	if code, body := e.do("GET", "/v1/whoami", revoked, ""); code != 401 || !strings.Contains(body, "SESSION_REVOKED") {
+		t.Errorf("revoked session: %d %s, want SESSION_REVOKED", code, body)
+	}
+
+	// Anything else at that path is left alone.
+	other := filepath.Join(e.dir, "acl.json")
+	before, _ := os.ReadFile(other)
+	for _, path := range []string{other, filepath.Join(e.dir, "missing.json")} {
+		if err := e.srv.EndSavedSessions(path); err != nil {
+			t.Errorf("%s: %v", path, err)
+		}
+	}
+	if after, _ := os.ReadFile(other); !bytes.Equal(before, after) {
+		t.Error("a file that is not a sessions file was changed")
+	}
+}
+
+// pausedBackend runs hook in the middle of a request, after login.
+type pausedBackend struct {
+	store.SecretBackend
+	hook func()
+}
+
+func (p *pausedBackend) List(prefix string) ([]string, error) {
+	p.hook()
+	return p.SecretBackend.List(prefix)
+}
+
+func (p *pausedBackend) Get(path string) (*store.Secret, error) {
+	defer p.hook()
+	return p.SecretBackend.Get(path)
+}
+
+// A request already running with an old session never uses permissions that
+// only the replacement token was given.
+func TestRunningRequestCannotUseReplacementPermissions(t *testing.T) {
+	cases := map[string][3]string{
+		"list":     {"GET", "/v1/secrets/other/", ""},
+		"metadata": {"GET", "/v1/metadata/other/", ""},
+		"resolve":  {"POST", "/v1/resolve", `{"refs":["phoenix://test/a","phoenix://other/b"]}`},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newCredEnv(t)
+			e.srv.sessionRoles["dev"] = config.RoleConfig{Namespaces: []string{"**"}, BootstrapTrust: []string{"bearer"}}
+			seedSecret(t, e.srv, "admin-token", "other/b", "other-value")
+			sess := e.mint("old-token")
+			var once sync.Once
+			e.srv.backend = &pausedBackend{e.srv.backend, func() {
+				once.Do(func() {
+					code, body := e.do("POST", "/v1/agents?force=true", "admin-token",
+						`{"name":"worker","token":"new-token","permissions":[{"path":"**","actions":["list","read_value"]}]}`)
+					if code != 200 {
+						t.Errorf("replace: %d %s", code, body)
+					}
+				})
+			}}
+			code, body := e.do(c[0], c[1], sess, c[2])
+			if strings.Contains(body, "other-value") || strings.Contains(body, `"other/b"`) {
+				t.Errorf("%d %s: used the new token's permissions", code, body)
+			}
+			if name == "resolve" && (!strings.Contains(body, "synthetic-value") || !strings.Contains(body, "SESSION_INVALID")) {
+				t.Errorf("resolve = %d %s, want the first value and SESSION_INVALID for the second", code, body)
+			}
 		})
 	}
 }

@@ -108,7 +108,7 @@ func (s *Server) grantCaller(info *authInfo, ip string) grant.Caller {
 // --- enforcement (plan section 8) --------------------------------------------
 
 // accessDecision is dataAccess's answer. Reason is "" when allowed, else
-// "session_scope", "session_action", "acl", "grant_expired" or
+// "session_scope", "session_action", "acl", "session_ended", "grant_expired" or
 // "grant_revoked". Grant is set when access comes only from a grant.
 type accessDecision struct {
 	Reason string
@@ -944,7 +944,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 
 // deleteAgentWithGrants runs DELETE /v1/agents/{name} through the grant store:
 // under its lock, durably revoke the agent's grants, expire its pending
-// requests and record a tombstone, THEN remove the ACL entry. If the grant
+// requests, THEN remove the ACL entry. If the grant
 // save fails nothing is removed (500). remove ends the agent's sessions and
 // removes the ACL entry. Writes the error response and returns false on failure.
 func (s *Server) deleteAgentWithGrants(w http.ResponseWriter, r *http.Request, actor, target string, remove func() error) bool {

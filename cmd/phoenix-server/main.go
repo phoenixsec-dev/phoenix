@@ -272,6 +272,9 @@ func main() {
 		}
 	} else {
 		log.Printf("  Sessions: disabled")
+		if err := srv.EndSavedSessions(cfg.SessionStorePath()); err != nil {
+			log.Fatalf("ending saved sessions: %v", err)
+		}
 	}
 
 	// Request-use grants. The store is always opened (it only creates

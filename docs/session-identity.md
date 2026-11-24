@@ -87,6 +87,8 @@ auto-renews before expiry.
 POST /v1/session/mint  {"role": "dev"}
 ```
 
+Only the agent's bearer token can mint, also from loopback: a session token gets
+`403 BOOTSTRAP_FAILED`.
 The server checks role existence, bootstrap trust and the seal key.
 Returns a session token (`phxs_...` prefix) with role scope and expiry.
 
@@ -119,8 +121,8 @@ agent's token. Every use, renewal included, checks this.
   on (permissions are checked on every request anyway).
 - A token changed by editing the ACL file takes effect at the next start; the
   old token's sessions end then (the log says how many).
-- A session minted by another session (a role trusting `local`) belongs to the
-  same bearer token and ends with it.
+- A start with `session.enabled` false ends the saved sessions, since nothing
+  would end them when a token changes meanwhile.
 
 An ended session gets `401 SESSION_INVALID`. The CLI and `phoenix mcp-server`
 mint a new one by themselves once `PHOENIX_TOKEN` holds the new token; a
@@ -130,7 +132,9 @@ mint a new one.
 
 If the server answers 500 "could not be saved" to the delete or replace, the
 change is done and the sessions are dead, but the disk needs looking at. The
-server tries to save again every minute.
+server tries to save again every minute. Until that works, going back to the
+token whose sessions were ended is refused (500 "agent not changed"), because a
+restart could revive them; any other token is accepted.
 
 ### Expiry
 
@@ -226,7 +230,7 @@ for the full list and client rules):
 | `SESSION_INVALID` | Token is malformed, its signature is invalid, or the session ended because its agent was deleted or the agent's token was replaced |
 | `SCOPE_EXCEEDED` | Path is outside the role's namespace scope |
 | `ACTION_DENIED` | Action not permitted by the role |
-| `BOOTSTRAP_FAILED` | Auth method not in role's bootstrap_trust |
+| `BOOTSTRAP_FAILED` | Auth method not in role's bootstrap_trust, or minting with a session token |
 | `ROLE_NOT_FOUND` | Requested role does not exist |
 | `SEAL_KEY_REQUIRED` | Role requires a seal key but none was provided |
 | `SEAL_KEY_MISMATCH` | Seal key doesn't match session binding |
@@ -242,7 +246,7 @@ All session lifecycle events are logged to the audit trail:
 | `session.renewed` | allowed | Session renewed |
 | `session.renew` | denied | Renewal failed (for example bootstrap_failed) |
 | `session.revoke` | allowed | Session revoked |
-| `session.ended` | allowed | Phoenix ended a session because of its agent's token. The agent field is who caused it (`system` at start or on use); metadata has `session.agent` and `cause`: `agent_deleted`, `token_replaced` or `credential_not_current` |
+| `session.ended` | allowed | Phoenix ended a session because of its agent's token. The agent field is who caused it (`system` at start or on use); metadata has `session.agent` and `cause`: `agent_deleted`, `token_replaced`, `credential_not_current` or `sessions_disabled` |
 | `session.auth` | denied | Expired, revoked or ended session used for a request |
 | `session.list` | allowed | Sessions listed |
 | `session.info` | allowed | Session details viewed |

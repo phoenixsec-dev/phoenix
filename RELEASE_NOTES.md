@@ -15,8 +15,9 @@ token did not cut off someone holding a session made with it.**
 
 **Who is affected:** servers with `session.enabled`, on every release that has
 role sessions: v0.13.3 (2026-03-20) to v0.23.0. Up to v0.22.0 a server restart
-ended such sessions; on v0.23.0 sessions survive restarts, so they did not end
-on their own as long as they were renewed. On v0.13.5 to v0.20.0, a session
+ended such sessions; on v0.23.0 sessions survive restarts (except with the
+1Password backend), so they did not end on their own as long as they were
+renewed. On v0.13.5 to v0.20.0, a session
 approved for an `elevates_acl` role skipped the ACL, so it could still read
 secrets after its agent was deleted, until it expired.
 
@@ -32,7 +33,12 @@ phoenix sessions revoke <session-id>
 ```
 
 Do it after the replacement, not before: the old token could mint more until
-then. On v0.22.0 and older, restarting the server does the same.
+then. If any role has `local` in `bootstrap_trust`, that is not enough, because
+there a session could mint another one while you work. To be sure, end every
+agent's sessions after the replacement: on v0.22.0 and older restart the server;
+on v0.23.0 stop it, delete `role-sessions.json` (next to the ACL file) and start
+it. Other agents' clients mint new sessions (CLIs older than v0.23.0 need
+`~/.phoenix/token-cache.json` cleared).
 
 **Now:**
 
@@ -42,6 +48,9 @@ then. On v0.22.0 and older, restarting the server does the same.
 - Deleting an agent or replacing its token ends the old token's sessions at
   once and for good, and writes one `session.ended` audit line per session.
   `--force` with the same token keeps them.
+- A session can no longer mint another session (a role trusting `local` let it,
+  although the docs said not). The new one did not keep its scope or seal key.
+- Starting with sessions disabled ends the saved ones.
 - An ended session gets `401 SESSION_INVALID`, which the CLI and
   `phoenix mcp-server` (v0.23.0 and newer) recover from by minting once with
   their current `PHOENIX_TOKEN`.

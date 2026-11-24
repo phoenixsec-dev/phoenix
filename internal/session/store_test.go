@@ -564,3 +564,30 @@ func TestChangeCredentialHoldsOffMintAndUse(t *testing.T) {
 		t.Errorf("use during the change: %v, want ErrSessionNotFound", err)
 	}
 }
+
+// A session revoked while a stale use is being cleaned up keeps saying
+// revoked, so clients do not silently replace it.
+func TestRevokeDuringStaleCleanupWins(t *testing.T) {
+	s := newTestStore(t, time.Hour)
+	tok, sess, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked := make(chan error, 1)
+	s.mu.Lock()
+	s.credentialCurrent = func(_, _ string) bool {
+		go func() { revoked <- s.Revoke(sess.ID) }()
+		time.Sleep(50 * time.Millisecond) // Revoke is now waiting first in line
+		return false
+	}
+	s.mu.Unlock()
+	if _, err := s.Validate(tok); err != ErrSessionRevoked {
+		t.Errorf("Validate: %v, want ErrSessionRevoked", err)
+	}
+	if err := <-revoked; err != nil {
+		t.Errorf("Revoke: %v", err)
+	}
+	if _, err := s.Validate(tok); err != ErrSessionRevoked {
+		t.Errorf("Validate after: %v, want ErrSessionRevoked", err)
+	}
+}

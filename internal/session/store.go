@@ -4,8 +4,12 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"os"
+	"slices"
 	"sync"
 	"time"
+
+	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 const (
@@ -32,10 +36,13 @@ type Store struct {
 	roleFingerprints map[string]string
 	// credentialCurrent is set by BindCredentials; nil refuses every session.
 	credentialCurrent func(agent, credentialFP string) bool
-	unsaved           bool // the last save failed; cleanup retries it
-	defaultTTL        time.Duration
-	stopCh            chan struct{}
-	stopped           bool
+	unsaved           bool       // the last save failed; cleanup retries it
+	endedUnsaved      []*Session // ended, but possibly still in the sessions file
+	// writeFile saves the sessions file; tests replace it to fail.
+	writeFile  func(path string, data []byte, perm os.FileMode) error
+	defaultTTL time.Duration
+	stopCh     chan struct{}
+	stopped    bool
 }
 
 // NewStore creates a memory-only session store with a random signing key and
@@ -75,6 +82,7 @@ func OpenStore(opts Options) (*Store, error) {
 		signingKey:       key,
 		path:             opts.Path,
 		roleFingerprints: opts.RoleFingerprints,
+		writeFile:        fsutil.WriteFileAtomicStrict,
 		defaultTTL:       defaultTTL,
 		stopCh:           make(chan struct{}),
 	}
@@ -117,10 +125,14 @@ func (s *Store) BindCredentials(check func(agent, credentialFP string) bool) ([]
 // If the ended sessions cannot be saved, change still runs: a disk problem must
 // not keep a leaked token alive, and the ended sessions would still fail the
 // credential check after a restart. The error is then ErrEndNotSaved, unless
-// change itself failed. The cleanup loop retries the save.
+// change itself failed. The cleanup loop retries the save. The one change
+// refused is going back to a token with such sessions (ErrReuseNotSaved).
 func (s *Store) ChangeCredential(agent, newCredentialFP string, change func() error) ([]*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reuseLocked(agent, newCredentialFP); err != nil {
+		return nil, err
+	}
 	ended := s.endLocked(func(sess *Session) bool {
 		return sess.Agent == agent && (newCredentialFP == "" || sess.CredentialFP != newCredentialFP)
 	})
@@ -131,10 +143,43 @@ func (s *Store) ChangeCredential(agent, newCredentialFP string, change func() er
 	if err := change(); err != nil {
 		return ended, err
 	}
-	if saveErr != nil {
+	if saveErr != nil && len(ended) > 0 {
 		return ended, fmt.Errorf("%w: %w", ErrEndNotSaved, saveErr)
 	}
 	return ended, nil
+}
+
+// AddCredential runs add, which creates agent with a token whose fingerprint
+// is credentialFP, unless that is ErrReuseNotSaved.
+func (s *Store) AddCredential(agent, credentialFP string, add func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reuseLocked(agent, credentialFP); err != nil {
+		return err
+	}
+	return add()
+}
+
+// reuseLocked refuses a credential that has ended sessions not yet removed
+// from the sessions file, after trying to save them once more. Any other
+// credential is fine. The caller must hold s.mu.
+func (s *Store) reuseLocked(agent, credentialFP string) error {
+	if !slices.ContainsFunc(s.endedUnsaved, func(e *Session) bool {
+		return e.Agent == agent && e.CredentialFP == credentialFP
+	}) {
+		return nil
+	}
+	if err := s.saveLocked(); err != nil {
+		return fmt.Errorf("%w: %w", ErrReuseNotSaved, err)
+	}
+	return nil
+}
+
+// Live reports whether the session is still usable: not ended, revoked or
+// expired, and made with its agent's current token.
+func (s *Store) Live(id string) bool {
+	_, stale, err := s.lookup(id)
+	return err == nil && !stale
 }
 
 // credentialOKLocked reports whether the token sess was minted with is still
@@ -155,6 +200,7 @@ func (s *Store) endLocked(match func(*Session) bool) []*Session {
 			ended = append(ended, sess)
 		}
 	}
+	s.endedUnsaved = append(s.endedUnsaved, ended...)
 	return ended
 }
 
@@ -163,6 +209,7 @@ func (s *Store) endLocked(match func(*Session) bool) []*Session {
 // agent's sessions; this is the second guard. The caller must hold s.mu.
 func (s *Store) endStaleLocked(sess *Session) error {
 	delete(s.sessions, sess.ID)
+	s.endedUnsaved = append(s.endedUnsaved, sess)
 	if err := s.saveLocked(); err != nil {
 		log.Printf("WARNING: session %s ended but not saved: %v", sess.ID, err)
 	}
@@ -309,8 +356,11 @@ func (s *Store) Validate(tokenStr string) (*Session, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sessions[sess.ID] == nil {
+	switch {
+	case s.sessions[sess.ID] == nil:
 		return nil, ErrSessionNotFound
+	case sess.Revoked: // revoked meanwhile: keep the record, it must say so
+		return nil, ErrSessionRevoked
 	}
 	return nil, s.endStaleLocked(sess)
 }

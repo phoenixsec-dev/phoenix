@@ -232,7 +232,7 @@ phoenix agent create deployer \
   --acl "myapp/**:list,read_value;staging/**:list,read_value,write"
 
 # Update an existing agent (re-create with --force). A different token ends
-# the agent's role sessions and grants.
+# the agent's role sessions.
 phoenix agent create deployer \
   -t "$(openssl rand -hex 32)" \
   --acl "myapp/**:list,read_value,write" --force
