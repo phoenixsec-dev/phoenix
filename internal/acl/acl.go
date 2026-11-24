@@ -84,7 +84,14 @@ type Agent struct {
 	// tells apart two issues of the same token, so a session made with a token
 	// that was taken away stays dead if the same token is given out again. Not
 	// secret. Empty for tokens issued by v0.23.0 and older or written by hand.
-	CredentialID  string       `json:"credential_id,omitempty"`
+	CredentialID string `json:"credential_id,omitempty"`
+	// Serial is a random ID set once, when the identity is made. It tells an
+	// identity apart from a later one re-made under the same name. Unlike
+	// CredentialID it survives a new token, and an identity without a token
+	// can have one. Not secret, but never shown or sent to anyone. Identities
+	// from v0.24.0 and older get theirs at the next ACL change (fillSerialsLocked).
+	Serial string `json:"serial,omitempty"`
+	Labels
 	Permissions   []Permission `json:"permissions"`
 	SealPublicKey string       `json:"seal_public_key,omitempty"`
 }
@@ -147,18 +154,20 @@ func (a *ACL) load() error {
 
 // Save writes the ACL config to disk.
 func (a *ACL) Save() error {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	return a.saveLocked()
 }
 
-// saveLocked writes the ACL config to disk. Caller must hold the mutex.
+// saveLocked writes the ACL config to disk. Caller must hold the mutex for
+// writing: it also fills in missing serials.
 func (a *ACL) saveLocked() error {
 	if a.path == "" {
 		return errors.New("no file path set for ACL")
 	}
 
+	a.fillSerialsLocked()
 	data, err := json.MarshalIndent(a.config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling ACL: %w", err)
@@ -219,6 +228,15 @@ func (a *ACL) Authorize(agentName string, secretPath string, action Action) erro
 // AddAgent registers a new agent with a token and permissions.
 // Returns ErrAgentExists if an agent with the same name already exists.
 func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
+	return a.AddAgentLabeled(name, token, permissions, LabelChange{})
+}
+
+// AddAgentLabeled is AddAgent that also sets the new identity's labels.
+func (a *ACL) AddAgentLabeled(name, token string, permissions []Permission, labels LabelChange) error {
+	labels, err := labels.Normalized(name)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -229,7 +247,9 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	a.config.Agents[name] = Agent{
 		Name:         name,
 		TokenHash:    crypto.HashToken(token),
-		CredentialID: newCredentialID(),
+		CredentialID: newRandomID(),
+		Serial:       newRandomID(),
+		Labels:       labels.applyTo(Labels{}),
 		Permissions:  permissions,
 	}
 
@@ -239,17 +259,26 @@ func (a *ACL) AddAgent(name, token string, permissions []Permission) error {
 	return nil
 }
 
-// newCredentialID returns a random ID for a newly issued token.
-func newCredentialID() string {
+// newRandomID returns a random ID for a newly issued token or a new identity.
+func newRandomID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b) // never fails on Go 1.24+
 	return hex.EncodeToString(b)
 }
 
 // UpdateAgent overwrites an existing agent's token and permissions. The same
-// token keeps its CredentialID.
+// token keeps its CredentialID. The serial, labels and seal key stay.
 // Returns ErrAgentNotFound if the agent does not exist.
 func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
+	return a.UpdateAgentLabeled(name, token, permissions, LabelChange{})
+}
+
+// UpdateAgentLabeled is UpdateAgent that also changes the labels it is given.
+func (a *ACL) UpdateAgentLabeled(name, token string, permissions []Permission, labels LabelChange) error {
+	labels, err := labels.Normalized(name)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -260,12 +289,14 @@ func (a *ACL) UpdateAgent(name, token string, permissions []Permission) error {
 
 	hash, credentialID := crypto.HashToken(token), existing.CredentialID
 	if hash != existing.TokenHash {
-		credentialID = newCredentialID()
+		credentialID = newRandomID()
 	}
 	a.config.Agents[name] = Agent{
 		Name:          name,
 		TokenHash:     hash,
 		CredentialID:  credentialID,
+		Serial:        existing.Serial,
+		Labels:        labels.applyTo(existing.Labels),
 		Permissions:   permissions,
 		SealPublicKey: existing.SealPublicKey,
 	}
