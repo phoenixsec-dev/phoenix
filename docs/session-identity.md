@@ -140,6 +140,12 @@ If the sessions file cannot be saved after the change, the sessions are still
 dead, also after a restart, because the ACL no longer holds their credential. The
 server logs it and tries again every minute.
 
+The same goes for every other save of that file on a full disk. The server starts,
+and minting and renewing work, from memory: the log says `WARNING` and the save is
+retried every minute. A restart before that forgets such a session, and the client
+mints another. A revoke that could not be saved denies at once, answers an error
+that says so and is retried too.
+
 ### Expiry
 
 Sessions expire after their TTL. Expired tokens receive a structured

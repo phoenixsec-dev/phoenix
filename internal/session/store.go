@@ -8,8 +8,6 @@ import (
 	"slices"
 	"sync"
 	"time"
-
-	"github.com/phoenixsec/phoenix/internal/fsutil"
 )
 
 const (
@@ -37,7 +35,7 @@ type Store struct {
 	// credentialCurrent is set by BindCredentials; nil refuses every session.
 	credentialCurrent func(agent, credentialFP string) bool
 	unsaved           bool // the last save failed; cleanup retries it
-	// writeFile saves the sessions file; tests replace it to fail.
+	// writeFile saves the sessions file.
 	writeFile  func(path string, data []byte, perm os.FileMode) error
 	defaultTTL time.Duration
 	stopCh     chan struct{}
@@ -67,13 +65,12 @@ func OpenStore(opts Options) (*Store, error) {
 		}
 	}
 
-	sessions := make(map[string]*Session)
+	sessions, dropped := make(map[string]*Session), false
 	if opts.Path != "" {
-		loaded, err := loadSessions(opts.Path, opts.RoleFingerprints)
-		if err != nil {
+		var err error
+		if sessions, dropped, err = loadSessions(opts.Path, opts.RoleFingerprints); err != nil {
 			return nil, err
 		}
-		sessions = loaded
 	}
 
 	s := &Store{
@@ -81,15 +78,19 @@ func OpenStore(opts Options) (*Store, error) {
 		signingKey:       key,
 		path:             opts.Path,
 		roleFingerprints: opts.RoleFingerprints,
-		writeFile:        fsutil.WriteFileAtomicStrict,
+		writeFile:        writeSessionsFile,
 		defaultTTL:       defaultTTL,
 		stopCh:           make(chan struct{}),
 	}
 
-	// Rewrite the file now so sessions dropped at load (expired, or of a
-	// changed role) cannot come back if the role is later changed back.
-	if err := s.saveLocked(); err != nil {
-		return nil, err
+	// Rewrite the file now if sessions were dropped at load (expired, or of a
+	// changed role), so they cannot come back if the role is later changed
+	// back. A full disk must not keep the server from starting: they are gone
+	// from memory, and cleanup retries the save.
+	if dropped {
+		if err := s.saveLocked(); err != nil {
+			log.Printf("WARNING: sessions that ended at start are not saved as ended yet, will retry: %v", err)
+		}
 	}
 
 	go s.cleanupLoop()
@@ -100,7 +101,8 @@ func OpenStore(opts Options) (*Store, error) {
 // (agent plus CredentialFP) is still the agent's, and ends every session that
 // fails it: its agent is gone, its token was replaced (for example by editing
 // the ACL file while the server was down), or it has no fingerprint because
-// v0.23.0 saved it. It returns the ended sessions. Until it is called every
+// v0.23.0 saved it. It returns the ended sessions; the error means they are
+// ended but that is not saved yet (cleanup retries). Until it is called every
 // mint, use and renewal is refused. check runs under the store lock and must
 // not call back into the Store.
 func (s *Store) BindCredentials(check func(agent, credentialFP string) bool) ([]*Session, error) {
@@ -238,12 +240,7 @@ func (s *Store) Create(role, agent, credentialFP string, sealPubKey []byte, name
 		return "", nil, ErrCredentialChanged
 	}
 	s.sessions[id] = sess
-	if err := s.saveLocked(); err != nil {
-		// Not saved means it would vanish at restart; refuse the mint
-		// rather than hand out a token that silently dies later.
-		delete(s.sessions, id)
-		return "", nil, err
-	}
+	s.saveLoginLocked(id)
 
 	return token, sess.snapshot(), nil
 }
@@ -300,12 +297,19 @@ func (s *Store) Renew(sessionID string, ttl time.Duration) (string, *Session, er
 		sess.ExpiresAt = oldExpiry
 		return "", nil, err
 	}
-	if err := s.saveLocked(); err != nil {
-		sess.ExpiresAt = oldExpiry
-		return "", nil, err
-	}
+	s.saveLoginLocked(sess.ID)
 
 	return token, sess.snapshot(), nil
+}
+
+// saveLoginLocked saves a minted or renewed session. A full disk must not keep
+// agents out, and the session allows nothing its agent's token does not: if the
+// save fails it works from memory and cleanup retries. A restart before that
+// forgets it, and the client mints another. The caller must hold s.mu.
+func (s *Store) saveLoginLocked(id string) {
+	if err := s.saveLocked(); err != nil {
+		log.Printf("WARNING: session %s works but is not saved yet, will retry: %v", id, err)
+	}
 }
 
 // Validate verifies a session token and returns the associated session.

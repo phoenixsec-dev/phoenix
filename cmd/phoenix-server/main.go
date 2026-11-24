@@ -284,7 +284,8 @@ func main() {
 			log.Fatalf("initializing session store: %v", err)
 		}
 		if err := srv.SetSessionStore(sessionStore); err != nil {
-			log.Fatalf("initializing session store: %v", err)
+			// Ended in memory, and the ACL no longer has their credential.
+			log.Printf("WARNING: sessions that ended at start are not saved as ended yet, will retry: %v", err)
 		}
 		srv.SetSessionRoles(cfg.Session.Roles)
 		defer sessionStore.Stop()
@@ -312,11 +313,15 @@ func main() {
 	logAccessRequests(cfg, a)
 	if cfg.SSHCAEnabled() {
 		ca, created, err := sshca.LoadOrCreate(cfg.SSHCAKeyPath())
-		if err != nil {
+		switch {
+		case fsutil.NoSpace(err):
+			log.Printf("WARNING: SSH certificates are off until the next start: the disk is full and the new CA key could not be saved: %v", err)
+		case err != nil:
 			log.Fatalf("loading SSH CA key: %v", err)
+		default:
+			srv.SetSSHCA(ca, cfg.SSHCAHosts())
+			log.Printf("SSH certificates: enabled for %d host(s), new key=%v, CA %s", len(cfg.SSHCA.Hosts), created, sshca.PublicKey(ca))
 		}
-		srv.SetSSHCA(ca, cfg.SSHCAHosts())
-		log.Printf("SSH certificates: enabled for %d host(s), new key=%v, CA %s", len(cfg.SSHCA.Hosts), created, sshca.PublicKey(ca))
 	}
 
 	// Initialize dashboard if enabled

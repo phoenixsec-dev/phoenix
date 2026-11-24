@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -324,5 +326,120 @@ func TestDirSyncFailureCountsAsUnsaved(t *testing.T) {
 	s.cleanup()
 	if s.unsaved {
 		t.Error("cleanup did not retry the save")
+	}
+}
+
+// fullDisk makes every save of every sessions file fail until the returned
+// function is called. Reading still works.
+func fullDisk(t *testing.T) (free func()) {
+	t.Helper()
+	var freed atomic.Bool
+	writeSessionsFile = func(p string, data []byte, perm os.FileMode) error {
+		if !freed.Load() {
+			return syscall.ENOSPC
+		}
+		return fsutil.WriteFileAtomicStrict(p, data, perm)
+	}
+	t.Cleanup(func() { writeSessionsFile = fsutil.WriteFileAtomicStrict })
+	return func() { freed.Store(true) }
+}
+
+// mintRole mints a session of agent1 in role.
+func mintRole(t *testing.T, s *Store, role string) (string, *Session) {
+	t.Helper()
+	tok, sess, err := s.Create(role, "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	return tok, sess
+}
+
+// A start on a full disk: nothing changed, so nothing is written; a session
+// that ended stays ended although that cannot be saved, and is saved later.
+func TestStartOnFullDisk(t *testing.T) {
+	path, key := filepath.Join(t.TempDir(), "role-sessions.json"), testSigningKey(t)
+	roles := map[string]string{"dev": "v1", "ops": "v1"}
+	s := openTestStoreRoles(t, path, key, roles)
+	mintRole(t, s, "dev")
+	mintRole(t, s, "ops")
+	s.Stop()
+
+	free := fullDisk(t)
+	if s = openTestStoreRoles(t, path, key, roles); s.ActiveCount() != 2 || s.unsaved {
+		t.Fatalf("nothing changed: %d sessions, unsaved %v", s.ActiveCount(), s.unsaved)
+	}
+	s.Stop()
+	s = openTestStoreRoles(t, path, key, map[string]string{"dev": "v1", "ops": "v2"})
+	if s.ActiveCount() != 1 || !s.unsaved {
+		t.Fatalf("role changed: %d sessions, unsaved %v; want 1 and true", s.ActiveCount(), s.unsaved)
+	}
+	free()
+	s.cleanup()
+	s.Stop()
+	if n := openTestStoreRoles(t, path, key, roles).ActiveCount(); n != 1 {
+		t.Errorf("after the retry: %d sessions, want 1", n)
+	}
+}
+
+// Login goes on from memory on a full disk. Such a session counts like any
+// other: it can be renewed and revoked, its token's replacement ends it, and
+// once saved a role change ends it too. A revoke says it is not saved.
+func TestLoginOnFullDisk(t *testing.T) {
+	path, key := filepath.Join(t.TempDir(), "role-sessions.json"), testSigningKey(t)
+	free := fullDisk(t)
+	s := openTestStore(t, path, key)
+	kept, keptSess := mintRole(t, s, "dev")
+	revoked, revokedSess := mintRole(t, s, "dev")
+	if _, _, err := s.Renew(keptSess.ID, 2*time.Hour); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if err := s.Revoke(revokedSess.ID); err == nil || !strings.Contains(err.Error(), "saving that failed") {
+		t.Fatalf("Revoke = %v, want an error that says it is not saved", err)
+	}
+	check := func(when string, s *Store) {
+		t.Helper()
+		if _, err := s.Validate(kept); err != nil {
+			t.Errorf("%s: minted session: %v", when, err)
+		}
+		if _, err := s.Validate(revoked); !errors.Is(err, ErrSessionRevoked) {
+			t.Errorf("%s: revoked session: %v", when, err)
+		}
+	}
+	check("on the full disk", s)
+	free()
+	s.cleanup()
+	s.Stop()
+	check("after the retry and a restart", openTestStore(t, path, key))
+	if s := openTestStoreRoles(t, path, key, map[string]string{"dev": "v2"}); s.ActiveCount() != 0 {
+		t.Error("a role change did not end a session minted on a full disk")
+	}
+
+	fullDisk(t)
+	s = openTestStore(t, filepath.Join(t.TempDir(), "role-sessions.json"), key)
+	tok, _ := mintRole(t, s, "dev")
+	ended, err := s.ChangeCredential("agent1", func() error { s.credentialCurrent = func(_, _ string) bool { return false }; return nil })
+	if err != nil || len(ended) != 1 {
+		t.Fatalf("ChangeCredential: ended %d, %v", len(ended), err)
+	}
+	if _, err := s.Validate(tok); err == nil {
+		t.Error("a replaced token's session still works")
+	}
+}
+
+// A start that changes nothing does not touch the file.
+func TestUnchangedSessionsAreNotRewritten(t *testing.T) {
+	path, key := filepath.Join(t.TempDir(), "role-sessions.json"), testSigningKey(t)
+	s := openTestStore(t, path, key)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a start without sessions made the file: %v", err)
+	}
+	if _, _, err := s.Create("dev", "agent1", testFP, nil, []string{"dev/*"}, nil, "bearer", "127.0.0.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	s.Stop()
+	before, _ := os.Stat(path)
+	openTestStore(t, path, key)
+	if after, _ := os.Stat(path); !os.SameFile(before, after) {
+		t.Error("the file was replaced although nothing changed")
 	}
 }

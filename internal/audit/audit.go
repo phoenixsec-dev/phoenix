@@ -63,6 +63,7 @@ type Logger struct {
 	maxBytes int64
 	size     int64 // bytes in the current file
 	cutOff   bool  // the file ends in half a line
+	missing  bool  // a full disk kept the file from being made; Log tries again
 	kick     chan struct{}
 	wg       sync.WaitGroup
 }
@@ -75,19 +76,17 @@ func NewLogger(path string) (*Logger, error) {
 }
 
 // NewRotatingLogger is NewLogger that moves the file to a dated archive
-// once it passes maxBytes (0 = never). Archives are never deleted.
+// once it passes maxBytes (0 = never). Archives are never deleted. If the disk
+// is too full to make the file, every Log fails until it can be made.
 func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 	path = fsutil.RealPath(path) // rotation must move the file, not a symlink to it
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("opening audit log: %w", err)
+	l := &Logger{path: path, maxBytes: maxBytes}
+	if err := l.open(); fsutil.NoSpace(err) {
+		l.missing = true
+		log.Printf("audit: WARNING: the disk is full, %s is not there yet and nothing can be logged: %v", path, err)
+	} else if err != nil {
+		return nil, err
 	}
-	st, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("opening audit log: %w", err)
-	}
-	l := &Logger{w: f, file: f, path: path, maxBytes: maxBytes, size: st.Size(), cutOff: endsInHalfLine(path, st.Size())}
 	if maxBytes > 0 {
 		l.kick = make(chan struct{}, 1)
 		l.wg.Add(1)
@@ -95,6 +94,21 @@ func NewRotatingLogger(path string, maxBytes int64) (*Logger, error) {
 		l.kickCompress() // finish anything a crash left half compressed
 	}
 	return l, nil
+}
+
+// open opens the log for appending, making it if it is not there.
+func (l *Logger) open() error {
+	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("opening audit log: %w", err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("opening audit log: %w", err)
+	}
+	l.w, l.file, l.size, l.cutOff, l.missing = f, f, st.Size(), endsInHalfLine(l.path, st.Size()), false
+	return nil
 }
 
 // endsInHalfLine reports whether the log's last write was cut off, by a full
@@ -141,6 +155,11 @@ func (l *Logger) Log(entry Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if l.missing {
+		if err := l.open(); err != nil {
+			return err
+		}
+	}
 	// Stamped under the lock so file order follows the clock (unless the
 	// clock itself steps back; Search does not rely on it).
 	entry.Timestamp = time.Now().UTC()
@@ -269,7 +288,9 @@ func (l *Logger) Close() error {
 	if l.file != nil {
 		err = l.file.Close()
 		l.file = nil
-		l.w = closedWriter{}
+	}
+	if l.path != "" {
+		l.w, l.missing = closedWriter{}, false
 	}
 	if l.kick != nil {
 		close(l.kick)

@@ -314,3 +314,26 @@ func TestEntryAfterCutOffLineIsReadable(t *testing.T) {
 		t.Errorf("entries = %v, want first second third", got)
 	}
 }
+
+// A disk too full to make the log does not stop the server. Lines fail until
+// the file can be made.
+func TestLogThatCannotBeMadeYet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l := &Logger{path: path + "-dir/audit.log", missing: true}
+	if err := l.LogAllowed("courier", "write", "a/b", ""); err == nil {
+		t.Fatal("a line that went nowhere was reported as written")
+	}
+	l.path = path // there is room now
+	if err := l.LogAllowed("courier", "write", "a/b", ""); err != nil {
+		t.Fatal(err)
+	}
+	if es, err := Query(path, QueryOptions{}); err != nil || len(es) != 1 {
+		t.Fatalf("%d lines, %v; want 1", len(es), err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if l.LogAllowed("courier", "write", "a/b", "") == nil {
+		t.Error("a line after Close was reported as written")
+	}
+}
