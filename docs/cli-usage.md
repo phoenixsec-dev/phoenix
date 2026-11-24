@@ -105,7 +105,7 @@ These run on the agent's own token, never a session (except
 
 ```bash
 phoenix ssh --list     # machines you may ask for, and approvals you already have
-phoenix ssh arch-omen --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
+phoenix ssh build-1 --reason "install the firewall rules" --ttl 15m -- sudo -n ./install.sh
 ```
 
 Asks a human if there is no approval yet (inside an approval `--reason` is optional), then logs in with a throwaway key and a
@@ -313,7 +313,7 @@ See [Key Management](key-management.md) for details.
 phoenix policy show production/db-password
 
 # Dry-run an attestation check
-phoenix policy test --agent deployer --ip 192.168.0.110 production/db-password
+phoenix policy test --agent deployer --ip 192.0.2.10 production/db-password
 ```
 
 Requires `PHOENIX_POLICY` to point to the policy JSON file.

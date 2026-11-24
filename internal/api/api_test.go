@@ -356,12 +356,12 @@ func TestSetInvalidPath(t *testing.T) {
 func TestClientIPIgnoresXFF(t *testing.T) {
 	// X-Forwarded-For should be ignored — spoofed header must not affect audit
 	req := httptest.NewRequest("GET", "/", nil)
-	req.RemoteAddr = "192.168.0.115:12345"
+	req.RemoteAddr = "192.0.2.11:12345"
 	req.Header.Set("X-Forwarded-For", "10.0.0.1")
 
 	ip := clientIP(req)
-	if ip != "192.168.0.115" {
-		t.Fatalf("expected RemoteAddr IP '192.168.0.115', got %q (XFF was trusted)", ip)
+	if ip != "192.0.2.11" {
+		t.Fatalf("expected RemoteAddr IP '192.0.2.11', got %q (XFF was trusted)", ip)
 	}
 }
 
@@ -1608,7 +1608,7 @@ func TestAttestationSourceIPOnResolve(t *testing.T) {
 	})
 	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.RemoteAddr = "192.168.0.50:12345"
+	req.RemoteAddr = "192.0.2.50:12345"
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -1716,7 +1716,7 @@ func TestAttestationAuditsDenial(t *testing.T) {
 	})
 	req = httptest.NewRequest("POST", "/v1/resolve", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.RemoteAddr = "192.168.0.1:9999"
+	req.RemoteAddr = "192.0.2.50:9999"
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -1779,7 +1779,7 @@ func TestAttestationListModeHidesProtectedPaths(t *testing.T) {
 	// List all secrets as admin (bearer, from default IP)
 	req := httptest.NewRequest("GET", "/v1/secrets/", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.RemoteAddr = "192.168.0.1:9999"
+	req.RemoteAddr = "192.0.2.50:9999"
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -1826,7 +1826,7 @@ func TestAttestationEnforcedOnWrite(t *testing.T) {
 	body, _ := json.Marshal(setSecretRequest{Value: "should-fail"})
 	req := httptest.NewRequest("PUT", "/v1/secrets/attested/key", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.RemoteAddr = "192.168.0.50:12345"
+	req.RemoteAddr = "192.0.2.50:12345"
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -1878,7 +1878,7 @@ func TestAttestationEnforcedOnDelete(t *testing.T) {
 	// Try to delete from wrong IP — should be denied by attestation
 	req = httptest.NewRequest("DELETE", "/v1/secrets/attested/delkey", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.RemoteAddr = "192.168.0.50:12345"
+	req.RemoteAddr = "192.0.2.50:12345"
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 

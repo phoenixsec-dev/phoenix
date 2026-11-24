@@ -78,8 +78,8 @@ func TestSignLimitsWhoWhereAndWhen(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	until := now.Add(15 * time.Minute)
 	out, err := Sign(ca, CertRequest{
-		PublicKey: agentKey(t), Principal: "arch-omen", KeyID: "agent=vector grant=gnt_1",
-		SourceIP: "192.168.0.155", Now: now, ValidBefore: until,
+		PublicKey: agentKey(t), Principal: "build-1", KeyID: "agent=vector grant=gnt_1",
+		SourceIP: "192.0.2.30", Now: now, ValidBefore: until,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -89,13 +89,13 @@ func TestSignLimitsWhoWhereAndWhen(t *testing.T) {
 		t.Fatal(err)
 	}
 	cert := parsed.(*ssh.Certificate)
-	if cert.CertType != ssh.UserCert || len(cert.ValidPrincipals) != 1 || cert.ValidPrincipals[0] != "arch-omen" {
+	if cert.CertType != ssh.UserCert || len(cert.ValidPrincipals) != 1 || cert.ValidPrincipals[0] != "build-1" {
 		t.Fatalf("type=%d principals=%v", cert.CertType, cert.ValidPrincipals)
 	}
 	if cert.ValidBefore != uint64(until.Unix()) || cert.ValidAfter >= uint64(now.Unix()) {
 		t.Fatalf("validity %d..%d", cert.ValidAfter, cert.ValidBefore)
 	}
-	if cert.CriticalOptions["source-address"] != "192.168.0.155" {
+	if cert.CriticalOptions["source-address"] != "192.0.2.30" {
 		t.Fatalf("source-address = %q", cert.CriticalOptions["source-address"])
 	}
 	for _, ext := range []string{"permit-port-forwarding", "permit-agent-forwarding", "permit-X11-forwarding", "permit-user-rc"} {
@@ -106,10 +106,10 @@ func TestSignLimitsWhoWhereAndWhen(t *testing.T) {
 	checker := ssh.CertChecker{IsUserAuthority: func(k ssh.PublicKey) bool {
 		return string(k.Marshal()) == string(ca.PublicKey().Marshal())
 	}, Clock: func() time.Time { return now }}
-	if err := checker.CheckCert("arch-omen", cert); err != nil {
+	if err := checker.CheckCert("build-1", cert); err != nil {
 		t.Fatalf("a real checker refused it: %v", err)
 	}
-	if err := checker.CheckCert("arch-ryzen", cert); err == nil {
+	if err := checker.CheckCert("gpu-1", cert); err == nil {
 		t.Fatal("the certificate must not work for another machine")
 	}
 }

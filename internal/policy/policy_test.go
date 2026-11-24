@@ -19,7 +19,7 @@ func TestLoadAndEvaluate(t *testing.T) {
 	cfg := `{
 		"attestation": {
 			"openclaw/*": {
-				"source_ip": ["192.168.0.115", "192.168.0.117"]
+				"source_ip": ["192.0.2.11", "192.0.2.12"]
 			},
 			"sealed/*": {
 				"require_sealed": true
@@ -37,7 +37,7 @@ func TestLoadAndEvaluate(t *testing.T) {
 		ctx     RequestContext
 		wantErr bool
 	}{
-		{"allowed IP passes", "openclaw/api-key", RequestContext{SourceIP: "192.168.0.115"}, false},
+		{"allowed IP passes", "openclaw/api-key", RequestContext{SourceIP: "192.0.2.11"}, false},
 		{"wrong IP denied", "openclaw/api-key", RequestContext{SourceIP: "10.0.0.1"}, true},
 		{"no seal key denied", "sealed/key", RequestContext{SourceIP: "10.0.0.1"}, true},
 		{"seal key passes", "sealed/key", RequestContext{SealKeyPresented: true}, false},
@@ -58,7 +58,7 @@ func TestSourceIPCIDR(t *testing.T) {
 	cfg := `{
 		"attestation": {
 			"infra/*": {
-				"source_ip": ["192.168.0.0/24", "10.0.0.5"]
+				"source_ip": ["192.0.2.0/24", "10.0.0.5"]
 			}
 		}
 	}`
@@ -71,9 +71,9 @@ func TestSourceIPCIDR(t *testing.T) {
 		ip      string
 		wantErr bool
 	}{
-		{"192.168.0.50", false},
-		{"192.168.0.255", false},
-		{"192.168.1.1", true},
+		{"192.0.2.50", false},
+		{"192.0.2.255", false},
+		{"192.0.3.1", true},
 		{"10.0.0.5", false},
 		{"10.0.0.6", true},
 	}
@@ -93,7 +93,7 @@ func TestSpecificityMostSpecificWins(t *testing.T) {
 				"source_ip": ["10.0.0.0/8"]
 			},
 			"openclaw/*": {
-				"source_ip": ["192.168.0.115"]
+				"source_ip": ["192.0.2.11"]
 			}
 		}
 	}`
@@ -106,7 +106,7 @@ func TestSpecificityMostSpecificWins(t *testing.T) {
 	if err := e.Evaluate("openclaw/key", &RequestContext{SourceIP: "10.0.0.1"}); err == nil {
 		t.Fatal("more specific rule should deny 10.0.0.1")
 	}
-	if err := e.Evaluate("openclaw/key", &RequestContext{SourceIP: "192.168.0.115"}); err != nil {
+	if err := e.Evaluate("openclaw/key", &RequestContext{SourceIP: "192.0.2.11"}); err != nil {
 		t.Fatalf("more specific rule should allow its IP: %v", err)
 	}
 
@@ -121,7 +121,7 @@ func TestRuleFor(t *testing.T) {
 		"attestation": {
 			"openclaw/*": {
 				"require_sealed": true,
-				"source_ip": ["192.168.0.115"]
+				"source_ip": ["192.0.2.11"]
 			}
 		}
 	}`
@@ -198,7 +198,7 @@ func TestLoadRejectsUnknownRuleField(t *testing.T) {
 		"attestation": {
 			"secure/*": {
 				"require_sealed": true,
-				"allowed_ips": ["192.168.0.0/24"]
+				"allowed_ips": ["192.0.2.0/24"]
 			}
 		}
 	}`

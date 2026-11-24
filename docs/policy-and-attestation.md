@@ -12,10 +12,10 @@ where the request came from (`source_ip`) and how the value is delivered
   "attestation": {
     "dev/**": {},
     "staging/**": {
-      "source_ip": ["192.168.0.0/24"]
+      "source_ip": ["192.0.2.0/24"]
     },
     "production/**": {
-      "source_ip": ["192.168.0.110", "192.168.0.115"],
+      "source_ip": ["192.0.2.10", "192.0.2.11"],
       "require_sealed": true
     }
   }
@@ -79,7 +79,7 @@ export PHOENIX_POLICY="/data/phoenix/policy.json"
 phoenix policy show production/db-password
 
 # Dry-run an attestation check
-phoenix policy test --agent deployer --ip 192.168.0.110 production/db-password
+phoenix policy test --agent deployer --ip 192.0.2.10 production/db-password
 ```
 
 `phoenix policy test` is a local approximation helper: it evaluates `source_ip`
