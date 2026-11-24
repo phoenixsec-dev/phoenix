@@ -11,15 +11,6 @@ import (
 
 const describeUsage = "phoenix describe <path> [-d desc] [--tags t1,t2] [--username name] [--url link]   (an empty value clears that field)"
 
-// plainPath refuses a name with characters that mean something else in a URL:
-// "a/b#old" would reach the server as "a/b", another secret.
-func plainPath(path string) error {
-	if strings.ContainsAny(path, "?#%") {
-		return fmt.Errorf("%q: names with ?, # or %% are not supported here", path)
-	}
-	return nil
-}
-
 // loginOptions collects the metadata options that set and describe share. A
 // nil field was not given; an empty one clears what is stored.
 type loginOptions struct {
@@ -107,9 +98,6 @@ func cmdDescribe(args []string) error {
 	if path == "" || strings.HasSuffix(path, "/") || len(body) == 0 {
 		return fmt.Errorf("usage: %s", describeUsage)
 	}
-	if err := plainPath(path); err != nil {
-		return err
-	}
 	if err := requireAuth(); err != nil {
 		return err
 	}
@@ -121,7 +109,7 @@ func cmdDescribe(args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := apiRequestWithHeaders("PATCH", "/v1/metadata/"+path, strings.NewReader(string(payload)), sealHeaders(sealPrivKey))
+	resp, err := apiRequestWithHeaders("PATCH", "/v1/metadata/"+escapeName(path), strings.NewReader(string(payload)), sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}

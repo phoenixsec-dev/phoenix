@@ -170,7 +170,7 @@ func cmdRequestStatus(args []string) error {
 		return err
 	}
 	var rq accessRequestView
-	if _, err := apiJSON("GET", "/v1/access-requests/"+args[0], nil, &rq); err != nil {
+	if _, err := apiJSON("GET", "/v1/access-requests/"+escapeName(args[0]), nil, &rq); err != nil {
 		return err
 	}
 	printRequest(rq)
@@ -238,7 +238,7 @@ func waitForDecisionTo(w io.Writer, rq accessRequestView) error {
 		}
 		time.Sleep(5 * time.Second)
 		var next accessRequestView
-		if _, err := apiJSON("GET", "/v1/access-requests/"+id, nil, &next); err != nil {
+		if _, err := apiJSON("GET", "/v1/access-requests/"+escapeName(id), nil, &next); err != nil {
 			fmt.Fprintf(os.Stderr, "  poll error: %v\n", err)
 			continue
 		}
@@ -408,7 +408,7 @@ func cmdApproveAccess(args []string) error {
 		return err
 	}
 	var rq accessRequestView
-	if _, err := apiJSON("GET", "/v1/access-requests/"+id, nil, &rq); err != nil {
+	if _, err := apiJSON("GET", "/v1/access-requests/"+escapeName(id), nil, &rq); err != nil {
 		return err
 	}
 	if rq.Status != "pending" {
@@ -438,7 +438,7 @@ func cmdApproveAccess(args []string) error {
 		Paths     []string `json:"paths"`
 		ExpiresAt string   `json:"expires_at"`
 	}
-	if _, err := apiJSON("POST", "/v1/access-requests/"+id+"/approve", body, &res); err != nil {
+	if _, err := apiJSON("POST", "/v1/access-requests/"+escapeName(id)+"/approve", body, &res); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Approved: grant %s for %s until %s\n", cleanServerText(res.GrantID),
@@ -508,7 +508,7 @@ func cmdDeny(args []string) error {
 	if !requestIDPattern.MatchString(id) {
 		return fmt.Errorf("invalid request id %q", cleanServerText(id))
 	}
-	if _, err := apiJSON("POST", "/v1/access-requests/"+id+"/deny", map[string]string{"note": note}, nil); err != nil {
+	if _, err := apiJSON("POST", "/v1/access-requests/"+escapeName(id)+"/deny", map[string]string{"note": note}, nil); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Denied %s. The agent cannot ask for those paths again for 10 minutes.\n", id)
@@ -526,7 +526,7 @@ func cmdGrants(args []string) error {
 		if err := requireBootstrapAuth(); err != nil {
 			return err
 		}
-		if _, err := apiJSON("POST", "/v1/grants/"+args[1]+"/revoke", nil, nil); err != nil {
+		if _, err := apiJSON("POST", "/v1/grants/"+escapeName(args[1])+"/revoke", nil, nil); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "Revoked %s. A value already delivered is not recalled; rotate the secret if that matters.\n", args[1])

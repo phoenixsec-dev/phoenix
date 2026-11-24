@@ -516,7 +516,7 @@ func cmdGet(args []string) error {
 		return fmt.Errorf("loading seal key: %w", err)
 	}
 
-	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+args[0], nil, sealHeaders(sealPrivKey))
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+escapeName(args[0]), nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -652,9 +652,6 @@ func cmdSet(args []string) error {
 	if path == "" {
 		return setUsage
 	}
-	if err := plainPath(path); err != nil {
-		return err
-	}
 
 	if multiline && !crypto.IsTerminal() {
 		return fmt.Errorf("--multiline needs a terminal; scripts should use --value-stdin")
@@ -681,7 +678,7 @@ func cmdSet(args []string) error {
 	login.addTo(body)
 	bodyBytes, _ := json.Marshal(body)
 
-	resp, err := apiRequest("PUT", "/v1/secrets/"+path, strings.NewReader(string(bodyBytes)))
+	resp, err := apiRequest("PUT", "/v1/secrets/"+escapeName(path), strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -717,7 +714,7 @@ func cmdDelete(args []string) error {
 		return fmt.Errorf("usage: phoenix delete <path>")
 	}
 
-	resp, err := apiRequest("DELETE", "/v1/secrets/"+args[0], nil)
+	resp, err := apiRequest("DELETE", "/v1/secrets/"+escapeName(args[0]), nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -813,7 +810,7 @@ func fetchListPaths(prefix string) ([]string, error) {
 		return nil, fmt.Errorf("loading seal key: %w", err)
 	}
 
-	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+prefix, nil, sealHeaders(sealPrivKey))
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+escapeName(prefix), nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -864,7 +861,7 @@ func cmdExport(args []string) error {
 	}
 
 	// Get list of paths
-	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+prefix, nil, sealHeaders(sealPrivKey))
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+escapeName(prefix), nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -881,7 +878,7 @@ func cmdExport(args []string) error {
 	}
 
 	for _, path := range listResult.Paths {
-		resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+path, nil, sealHeaders(sealPrivKey))
+		resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+escapeName(path), nil, sealHeaders(sealPrivKey))
 		if err != nil {
 			return fmt.Errorf("request failed for %q: %w", path, err)
 		}
@@ -1013,7 +1010,7 @@ func importEnvFile(filePath, prefix string) error {
 			"description": fmt.Sprintf("Imported from %s", filePath),
 		})
 
-		resp, err := apiRequest("PUT", "/v1/secrets/"+secretPath, strings.NewReader(string(body)))
+		resp, err := apiRequest("PUT", "/v1/secrets/"+escapeName(secretPath), strings.NewReader(string(body)))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to import %s: %v\n", key, err)
 			continue
@@ -1265,7 +1262,7 @@ func cmdAgentDelete(args []string) error {
 	}
 	name := args[0]
 
-	resp, err := apiRequest("DELETE", "/v1/agents/"+name, nil)
+	resp, err := apiRequest("DELETE", "/v1/agents/"+escapeName(name), nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -1969,7 +1966,7 @@ func cmdKeypairShow(args []string) error {
 	}
 	name := args[0]
 
-	resp, err := apiRequest("GET", "/v1/agents/"+name+"/seal-key", nil)
+	resp, err := apiRequest("GET", "/v1/agents/"+escapeName(name)+"/seal-key", nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -2638,7 +2635,7 @@ func cmdSessionInfo(args []string) error {
 	}
 
 	sessionID := args[0]
-	resp, err := apiRequest("GET", "/v1/sessions/"+sessionID, nil)
+	resp, err := apiRequest("GET", "/v1/sessions/"+escapeName(sessionID), nil)
 	if err != nil {
 		return fmt.Errorf("fetching session: %w", err)
 	}
@@ -2685,7 +2682,7 @@ func cmdSessionRevoke(args []string) error {
 	}
 
 	sessionID := args[0]
-	resp, err := apiRequest("POST", "/v1/sessions/"+sessionID+"/revoke", strings.NewReader("{}"))
+	resp, err := apiRequest("POST", "/v1/sessions/"+escapeName(sessionID)+"/revoke", strings.NewReader("{}"))
 	if err != nil {
 		return fmt.Errorf("revoking session: %w", err)
 	}

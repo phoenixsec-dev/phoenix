@@ -43,7 +43,7 @@ func fetchSecretInfos(prefix, tag string) ([]secretInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading seal key: %w", err)
 	}
-	path := "/v1/metadata/" + prefix
+	path := "/v1/metadata/" + escapeName(prefix)
 	if tag != "" {
 		path += "?tag=" + url.QueryEscape(tag)
 	}
@@ -125,9 +125,6 @@ func cmdInfo(args []string) error {
 		return fmt.Errorf("usage: phoenix info <path>   (shows description, tags, username, link, dates; never the value)")
 	}
 	path := args[0]
-	if err := plainPath(path); err != nil {
-		return err
-	}
 	if err := requireAuth(); err != nil {
 		return err
 	}
@@ -136,7 +133,7 @@ func cmdInfo(args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading seal key: %w", err)
 	}
-	resp, err := apiRequestWithHeaders("GET", "/v1/metadata/"+path, nil, sealHeaders(sealPrivKey))
+	resp, err := apiRequestWithHeaders("GET", "/v1/metadata/"+escapeName(path), nil, sealHeaders(sealPrivKey))
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}

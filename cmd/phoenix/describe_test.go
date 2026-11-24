@@ -27,11 +27,6 @@ func TestCmdDescribe(t *testing.T) {
 				t.Errorf("%v: %v", args, err)
 			}
 		}
-		for _, odd := range []string{"a/b#old", "a/b?x", "a%2Fb"} {
-			if cmdDescribe([]string{odd, "-d", "x"}) == nil || cmdInfo([]string{odd}) == nil || cmdSet([]string{odd}) == nil {
-				t.Errorf("%s was accepted", odd)
-			}
-		}
 		if body != "unsent" {
 			t.Error("a usage error reached the server")
 		}

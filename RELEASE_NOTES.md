@@ -76,6 +76,24 @@ the Phoenix host to `NO_PROXY`. If the proxy's own address is `https://`, add it
 CA to the `PHOENIX_CA_CERT` file, but only if you trust that CA to vouch for the
 Phoenix server itself: both connections are checked against the same file.
 
+### Fixed: a name with `?`, `#` or `%` reached another secret
+
+The CLI and MCP put names into web addresses as they were, so
+`phoenix set 'app/key?v2'` wrote `app/key`, `phoenix delete 'app/key#old'`
+deleted `app/key`, and `phoenix agent delete 'bob?x'` deleted the agent `bob`.
+`get`, `info`, `list`, `export`, `import`, `keypair show`, `phoenix_get`,
+`phoenix_list` and the session, request and grant commands had the same fault.
+Every command now acts on exactly the name it was given, and secrets whose
+names already hold these characters can be read, listed, changed and deleted.
+`phoenix_unseal` now asks the server about the sealed secret's own name, and
+refuses an answer about another one.
+
+**Upgrading:** update the CLI wherever it is installed; the server needs no
+change. If something stored secrets under names with these characters, look at
+the names without them too: they may have been overwritten. Names the server
+redirected, such as `/app/key` or `app//key`, are now refused. `set` and
+`delete` used to print ok for them and do nothing, and `get` read `app/key`.
+
 ### Smaller things
 
 - The end-to-end scenarios run in CI on every pull request (into any branch), with two new ones:
@@ -124,8 +142,6 @@ one, at login too.
   (`PATCH /v1/metadata/{path}`) changes them without reading or writing the
   value. Needs `write` on the path; audited as `describe`; who wrote the value
   and when stays as it was.
-- `phoenix set`, `info` and `describe` refuse a name with `?`, `#` or `%`. It
-  used to reach the server cut short, as another secret's name.
 - A save that fails now leaves the old value in use. Before, the server kept
   serving the new value from memory although it reported an error.
 

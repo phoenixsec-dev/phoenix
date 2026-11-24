@@ -487,7 +487,7 @@ func mcpToolGet(args json.RawMessage, logger *log.Logger) (string, bool) {
 		}
 	}
 
-	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+params.Path, nil, hdrs)
+	resp, err := apiRequestWithHeaders("GET", "/v1/secrets/"+escapeName(params.Path), nil, hdrs)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -549,7 +549,7 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 		return err.Error(), true
 	}
 
-	path := "/v1/metadata/" + prefix
+	path := "/v1/metadata/" + escapeName(prefix)
 	if params.Tag != "" {
 		path += "?tag=" + url.QueryEscape(params.Tag)
 	}
@@ -604,7 +604,7 @@ func mcpToolList(args json.RawMessage, logger *log.Logger) (string, bool) {
 // mcpToolListPaths is phoenix_list for servers that predate /v1/metadata:
 // bare paths from the list route.
 func mcpToolListPaths(prefix string, logger *log.Logger) (string, bool) {
-	resp, err := apiRequest("GET", "/v1/secrets/"+prefix, nil)
+	resp, err := apiRequest("GET", "/v1/secrets/"+escapeName(prefix), nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -680,9 +680,10 @@ func mcpToolUnseal(args json.RawMessage, logger *log.Logger) (string, bool) {
 	return payload.Value, false
 }
 
-// mcpCheckAllowUnseal queries the server's authoritative policy for allow_unseal.
+// mcpCheckAllowUnseal queries the server's authoritative policy for
+// allow_unseal. An answer about any other path is an error, never a yes.
 func mcpCheckAllowUnseal(path string) (bool, error) {
-	resp, err := apiRequest("GET", "/v1/policy/check?path="+path+"&check=allow_unseal", nil)
+	resp, err := apiRequest("GET", "/v1/policy/check?path="+url.QueryEscape(path)+"&check=allow_unseal", nil)
 	if err != nil {
 		return false, fmt.Errorf("request failed: %w", err)
 	}
@@ -693,10 +694,15 @@ func mcpCheckAllowUnseal(path string) (bool, error) {
 	}
 
 	var result struct {
-		Allowed bool `json:"allowed"`
+		Path    string `json:"path"`
+		Allowed bool   `json:"allowed"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return false, fmt.Errorf("decoding response: %w", err)
+	}
+	// Every server that has this route says which path it answered about.
+	if result.Path != path {
+		return false, fmt.Errorf("the server answered about %q, not %q", result.Path, path)
 	}
 	return result.Allowed, nil
 }
@@ -785,7 +791,7 @@ func mcpToolSessionRevoke(args json.RawMessage, logger *log.Logger) (string, boo
 		return "session_id is required", true
 	}
 
-	resp, err := apiRequest("POST", "/v1/sessions/"+params.SessionID+"/revoke", strings.NewReader("{}"))
+	resp, err := apiRequest("POST", "/v1/sessions/"+escapeName(params.SessionID)+"/revoke", strings.NewReader("{}"))
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -845,7 +851,7 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 	if !requestIDPattern.MatchString(params.RequestID) {
 		return "request_id must look like req_ followed by 32 hex characters", true
 	}
-	resp, err := apiRequest("GET", "/v1/access-requests/"+params.RequestID, nil)
+	resp, err := apiRequest("GET", "/v1/access-requests/"+escapeName(params.RequestID), nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
