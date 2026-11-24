@@ -268,7 +268,7 @@ func TestValueRefusesForgedRequests(t *testing.T) {
 // foreign scripts, and no template relies on an inline script.
 func TestSecurityHeaders(t *testing.T) {
 	e := newSecretsEnv(t, config.DashboardConfig{}, "")
-	for _, p := range []string{"/dashboard/login", "/dashboard/secrets", "/dashboard/approvals", "/dashboard/static/secrets.js", "/dashboard/nothing"} {
+	for _, p := range []string{"/dashboard/login", "/dashboard/secrets", "/dashboard/requests", "/dashboard/static/secrets.js", "/dashboard/nothing"} {
 		hd := e.do("GET", p, nil).Header()
 		if hd.Get("X-Frame-Options") != "DENY" || !strings.Contains(hd.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
 			!strings.Contains(hd.Get("Content-Security-Policy"), "script-src 'self';") || hd.Get("X-Content-Type-Options") != "nosniff" {

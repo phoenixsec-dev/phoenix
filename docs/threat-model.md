@@ -178,6 +178,11 @@ operators, not programmatic access. The trade-off is that all dashboard users sh
 one credential and are distinguished only by source IP in the audit trail
 (`dashboard@<ip>`).
 
+Login remembers only the Requests page or one request to return to, so it cannot
+be used to send someone elsewhere. A link tapped on another site gets one reload
+page without any content, because `SameSite=Strict` holds the cookie back on that
+first load.
+
 ### Threats specific to the dashboard
 
 | Threat | Mitigation | Residual risk |
@@ -256,7 +261,9 @@ Phoenix does about them.
 |--------|-----------|---------------|
 | Request spam / approval fatigue | 3 pending per agent, 50 in total, 10 new requests per agent per hour, 10-minute cooldown after a deny, 10 active grants per agent. Limits survive a restart; each `429` has `Retry-After` | A human can still approve something without reading it |
 | Social engineering via the reason | Reason shown as "Agent says (not verified)", escaped, control/bidi/zero-width characters stripped, 300-character cap, never a link. The approval card is built from server facts (paths, badges, attestation), not from the reason | The reason can still be a convincing lie |
-| Approving more than intended | Exact paths only (no wildcards), at most 10, `read_value` only. The approver can untick paths and shorten the TTL, never widen. No bulk approve | |
+| Approving more than intended | Exact paths only (no wildcards), at most 10, `read_value` only. The approver can untick paths, shorten the TTL and limit uses, never widen. No bulk approve | Always is one tap and has no end. It is exact-path and `read_value` only, listed on the Requests page with Remove, and audited with its request |
+| Using a "once" twice | Uses are counted under one lock and saved before the value leaves the server, so neither calls at once, a replayed answer nor a restart gives another. If the count cannot be saved nothing is delivered | A value handed over can be kept. For an SSH login a once is one certificate, which can log in until the approval's time ends or it is revoked. If the disk fails twice in a row a use may be lost, never gained |
+| An answer reaching the wrong token | Approval is refused when the agent was deleted or its token replaced since it asked; for Always that is checked together with the change | |
 | Self-approval / collusion | An agent can never approve its own request. API approval needs a name in `access_requests.approvers`; ACL `admin` alone is not enough | Two agents that are both approvers can approve each other's requests |
 | Replay | Grants carry no token. Approve and deny are one-way saved transitions. Dashboard POSTs keep CSRF and `SameSite=Strict`. IDs are 128-bit random | |
 | Stolen agent token | It can file requests (the human sees the source IP) and could use a live grant only from the bound IP, with the agent's registered seal key, as a non-session call. Sessions never use grants. Grants are short and revocable | A thief who also holds the agent's seal private key, on the bound IP, can use a live grant |

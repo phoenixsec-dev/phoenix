@@ -20,7 +20,7 @@
         <div class="stat-label">Active Sessions</div>
     </div>
     {{if .AccessHealth}}
-    <a class="stat-card" href="/dashboard/approvals">
+    <a class="stat-card" href="/dashboard/requests">
         <div class="stat-value">{{.PendingAccess}}{{if gt .PendingAccess 0}} <span class="badge">new</span>{{end}}</div>
         <div class="stat-label">Access Requests</div>
     </a>

@@ -3,14 +3,14 @@
 An agent gets told "no" for a secret. Instead of a human editing the ACL, the
 agent asks Phoenix for temporary use of **that exact secret**. A human approves
 or denies. An approval becomes a **grant**: this agent, with this credential,
-from this IP, may read this path until a clock runs out. A human can revoke it
-at any time. Every step is in the audit log.
+from this IP, may read this path until a clock runs out or its uses are spent,
+whichever comes first. A human can revoke it at any time. Every step is in the audit log.
 
 A grant holds no secret and no token. The agent keeps using its own identity
 (its bearer token). **Session tokens
 (`phxs_`) can never request or use a grant.** No session roles are needed.
 
-Humans decide on the dashboard (`/dashboard/approvals`) or, for identities
+Humans decide on the dashboard (`/dashboard/requests`) or, for identities
 listed in `approvers`, with `phoenix approve req_...`. Agents ask with
 `phoenix request` (or the MCP tool `phoenix_request_use`) and use a grant with
 `phoenix exec --redact-output`.
@@ -21,13 +21,13 @@ listed in `approvers`, with `phoenix approve req_...`. Agents ask with
 # Agent: told ACL_DENIED with "next: ... phoenix request infra/b2/app-key ..."
 phoenix request infra/b2/app-key --reason "nightly backup fails auth" --ttl 30m --wait
 
-# Human: dashboard -> Approvals -> "Secret access requests" card -> Approve
-#   (or, as an approver identity:  phoenix approve req_... --ttl 15m)
+# Human: dashboard -> Requests -> No / Once / 15 minutes / Always
+#   (or, as an approver identity:  phoenix approve req_... --ttl 15m --uses 1)
 
 # Agent: use it. The value goes into the child's env, never into the output.
 phoenix exec --redact-output --env B2_KEY=phoenix://infra/b2/app-key -- ./backup.sh
 
-# Human: take it back early (dashboard -> Grants -> Revoke, or)
+# Human: take it back early (dashboard -> Requests -> Revoke, or)
 phoenix grants revoke gnt_...
 ```
 
@@ -107,7 +107,9 @@ been revoked.
 4. It waits. `--wait` polls every 5 seconds;
    `phoenix request status req_...` checks once. Each status has a
    `next_step`: `wait` (pending), `use_exec` (approved), `ask_user`
-   (denied, expired or revoked) or `request_use` (grant ended by time).
+   (denied, expired or revoked) or `request_use` (the grant's time or uses
+   ran out). An approval says how far it goes: `one use left`, `until 14:32`
+   or `always`. After a no, the agent must not ask again by itself.
 5. Approved: it uses the secret through `phoenix exec --redact-output`
    (see [Using a grant](#using-a-grant)).
 
@@ -134,46 +136,84 @@ The path is only pasted in when it is plain path characters
 (`A-Z a-z 0-9 . _ / -`); otherwise the hint says `<path>`.
 
 MCP (`phoenix mcp-server`) has `phoenix_request_use`, `phoenix_request_status`
-and `phoenix_whoami`. None of them returns a secret value.
+and `phoenix_whoami`. None of them returns a secret value. The first two ask
+as the agent itself even when the MCP server runs with `PHOENIX_ROLE`.
 
 ## Approving
 
 ### In the dashboard
 
-`/dashboard/approvals` shows a **Secret access requests** section. Each
-pending request is one card (anchor `#req_...`, so a
-notification link can jump straight to it) showing:
+**Requests** (`/dashboard/requests`) is the one page for this. A waiting
+request is a card that asks one question, "May vector use infra/b2/app-key?",
+with who asked and from which address, the agent's reason, the time left, and
+four buttons:
 
-- agent, source IP and auth method (bearer)
-- every path in full, monospace, each with badges: **does not exist**,
-  **hidden from this agent** (its ACL has no `list` there), **already allowed**
-- action, requested TTL, delivery mode (sealed only, or plaintext allowed),
-  and a red line if sealing is required but the agent has no seal key
-- the path's hard attestation requirements and whether the requesting
-  credential met them (`met`, `not met`, or `checked at each use`). Approval
-  never waives them.
-- the reason, in a box labelled **Agent says (not verified)**: escaped,
-  control/bidi/zero-width characters stripped, capped at 300 characters,
-  never turned into a link
-- this agent's other requests in the last 24 hours and how many were denied
-- "Revoking later does not recall a value already used."
+| Button | What it gives |
+|---|---|
+| **No** | Nothing. The agent is told a human said no and not to ask again (10-minute cooldown). An optional note under **More** goes back to it. |
+| **Once** | One read of each ticked secret, within the time the agent asked for. |
+| **15 minutes** | Any number of reads for 15 minutes (less if the agent asked for less, or `max_grant_ttl` is lower). |
+| **Always** | `read_value` on exactly the ticked paths, put on the agent's own access list. See [Always](#always). |
 
-To approve, untick any paths you do not want (all start ticked) and pick a
-TTL. The dropdown only offers legal choices: 5m, 15m, 1h and the requested
-TTL, keeping those >= 1m and <= the request (capped at the current
-`max_grant_ttl`). Anything else posted is refused. There is no bulk approve.
-Deny takes an optional note that the agent sees.
+**More** has the rest: another of the listed times, "or N uses" (whichever
+runs out first), the note, and what each button means for this request. With
+several paths, untick the ones you do not want. Nothing here can widen what
+was asked.
 
-Dashboard approvals run the **same re-checks as the API** (current config,
-`deny_paths`, `require_sealed`, agent still exists, active-grant cap) and are
-recorded as `dashboard@<ip>`. The dashboard login is the approver here: the
-`approvers` list only controls API/CLI identities.
+A card also shows each path in full with badges (**does not exist**, **hidden
+from this agent**, **already allowed**), a red line for anything that would
+make a yes fail (no seal key, token replaced since it asked, agent deleted),
+and the path's attestation requirements. An answer never waives those. The
+reason is in a box labelled **Agent says (not verified)**: escaped,
+control/bidi/zero-width characters stripped, at most 300 characters, never a
+link.
 
-The Overview page shows the pending request count (also in the nav badge)
-and a red banner when the grants file or grant audit events are degraded.
+Below the waiting cards:
 
-Error banners on these pages come from a fixed list keyed by code; text in
-the URL is never shown in red, so a crafted link cannot fake a warning.
+- **Active now**: open grants with the time and uses left, and **Revoke**.
+- **Always**: every path an agent may read because of an Always, and
+  **Remove**. Removing counts from the very next read.
+- **Expired, nobody answered** and **History** (30 days).
+
+The page is live: a new request appears within about two seconds on any open
+dashboard page, as a card in the list here and as a popup anywhere else
+(**Later** closes it). It polls with plain short requests, so it needs nothing
+special from a reverse proxy and picks up by itself after a lost connection. A
+card on screen is never redrawn while you are using it, and one that expires
+stays, marked expired. **Notify me in this browser** turns on a browser
+notification for when the tab is in the background; browsers offer that only
+over HTTPS or on localhost. The page works without JavaScript too, just not
+live.
+
+Answers run the **same re-checks as the API** (current config, `deny_paths`,
+`require_sealed`, the agent still exists with the token that asked,
+active-grant cap) and are recorded as `dashboard@<ip>`. The dashboard login is
+the approver here: the `approvers` list only controls API/CLI identities. Two
+people, or a double tap: the first answer counts, the same answer again
+returns the same result and adds nothing, and any other answer says the
+request was already answered.
+
+`/dashboard/requests/<req_id>` opens the page at one request, or shows how it
+ended. Notifications link there, and the login page brings you back to it. The
+old addresses (`/dashboard/approvals`, `/dashboard/grants`) redirect.
+
+### Always
+
+Always adds a rule to the agent's own access list (`acl.json`): `read_value`
+on that exact path, never a wildcard, marked with the request it came from. It
+is the same as writing the rule by hand, so it has no time limit, works from
+any address, may be served plain (`require_sealed` and `bind_source_ip` are
+for grants), also counts for the agent's role sessions when their scope covers
+the path, and stays when access requests are turned off. Path attestation
+policy still applies.
+
+The audit log has `access_request.approved` with `always: true` and the
+request id, and `always.removed` when it is taken back. Only the dashboard can
+answer Always: an API approver need not be an admin, and this changes an
+access list. Logins ([SSH](ssh-certificates.md)) have no Always.
+
+Giving the agent a new token with a new permission list
+(`phoenix agent create --force`) replaces all its rules, these included.
 
 ### From the CLI
 
@@ -182,7 +222,7 @@ Only identities listed in `approvers` (not sessions):
 | Command | Does |
 |---|---|
 | `phoenix pending` | Pending access requests, with every path |
-| `phoenix approve <req_id> [--ttl 15m] [--path p ...] [--yes]` | Shows every path (`+` kept, `-` removed by `--path`), action, TTL and the unverified reason, then asks y/N |
+| `phoenix approve <req_id> [--ttl 15m] [--uses N] [--path p ...] [--yes]` | Shows every path (`+` kept, `-` removed by `--path`), action, TTL, use limit and the unverified reason, then asks y/N. `--uses 1` is the dashboard's Once |
 | `phoenix deny <req_id> [--note "..."]` | Deny; starts the 10-minute cooldown |
 | `phoenix grants [--all] [--agent name]` | List grants |
 | `phoenix grants revoke <gnt_id>` | Revoke now |
@@ -203,8 +243,37 @@ the agent's own `PHOENIX_TOKEN` and `PHOENIX_SEAL_KEY`, from the
 same IP that asked. Exec resolves sealed, decrypts in its own process, and
 gives the child the value but no Phoenix credentials. A plain `GET` or
 `resolve` without the registered seal key gets `SEALED_REQUIRED` while
-`require_sealed` is on. Do not set `PHOENIX_ROLE` for this: sessions never
-use grants.
+`require_sealed` is on.
+
+With `PHOENIX_ROLE` set, exec first asks with the role's session. Sessions never
+use grants, so for a path the role may not read, exec asks again with the agent's
+own token at `POST /v1/resolve-approved`. There the server allows a read only
+through a grant that matches right now or an exact Always; the agent's other
+access does not count.
+
+### Uses
+
+A grant with a use limit counts each path separately: Once on two secrets lets
+each be read one time.
+
+- A use is spent only when the value is handed over. A refused read, a dry run,
+  a missing secret or an unmet policy costs nothing.
+- `phoenix exec` resolves all or nothing: if one reference is refused, none is
+  delivered and no use is spent. It also looks for the command first, so a typo
+  in it costs nothing. Once the value was handed over the use is gone, even if
+  the command then fails.
+- The same path twice in one `exec` or resolve is one use.
+- The count is saved before the value leaves the server, so it is exact under
+  any number of calls at once and after a restart. If it cannot be saved,
+  nothing is delivered (`REQUESTS_DEGRADED`). If the connection drops right
+  then, the use is still spent: the server cannot know whether the value
+  arrived. The same goes for a disk that fails twice in a row (the save, then
+  putting the old file back): nothing is delivered, and the use may count as
+  spent after a restart. It is never given back twice.
+- When several grants cover a path, one without a use limit is used first.
+- After the last use, reads get `GRANT_EXPIRED` with `request_use`.
+- For an SSH login a use is one certificate, not one connection. It can log in
+  until the approval's time ends, and Revoke ends that earlier.
 
 ### `--redact-output`
 
@@ -236,15 +305,12 @@ What a grant never does:
 
 ## Revoking
 
-Dashboard -> **Grants** -> **Revoke**, or `phoenix grants revoke gnt_...`
-(the owning agent, or an approver). Revoke is idempotent. The very next use
-gets `403 GRANT_REVOKED` with next step `ask_user`.
-
-`/dashboard/grants` lists active grants (agent, paths, action, expires in,
-uses, last used, approved by); "Recent" shows expired and revoked ones. If a
-revoke cannot be saved, the page says `REVOKE_NOT_DURABLE` in red: the grant
-is denied until the next restart but not saved, so fix the disk and revoke
-again, or rotate the secret.
+Dashboard -> **Requests** -> **Revoke** (a grant) or **Remove** (an Always), or
+`phoenix grants revoke gnt_...` (the owning agent, or an approver). Revoke is
+idempotent. The very next use gets `403 GRANT_REVOKED` with next step
+`ask_user`. If either cannot be saved, the page says `REVOKE_NOT_DURABLE` in
+red: access is denied until the next restart but that is not saved, so fix the
+disk and do it again, or rotate the secret.
 
 Expiry and revoke are checked on every request (no cache). Rotating an agent's
 bearer token ends its grants: a grant is bound to the exact token that asked.
@@ -269,7 +335,7 @@ fails, the server logs one line and the request goes on as normal.
 What is sent:
 
 - agent name, action, how many paths, the request id
-- a link to `<notify_dashboard_url>/dashboard/approvals#<req_id>` when
+- a link to `<notify_dashboard_url>/dashboard/requests/<req_id>` when
   `notify_dashboard_url` is set. The link is never built from the address the
   agent used to reach Phoenix.
 - the paths, only when `notify_include_paths` is `true`
@@ -284,12 +350,12 @@ POST <notify_url>
 Content-Type: text/plain; charset=utf-8
 Title: Phoenix: access request
 Tags: key
-Click: https://phoenix.example.net/dashboard/approvals#req_...   (only with notify_dashboard_url)
+Click: https://phoenix.example.net/dashboard/requests/req_...   (only with notify_dashboard_url)
 Authorization: Bearer <token>                                     (only with notify_token_ref)
 
 vector asks for read_value on 1 secret.
-Request req_...: approve or deny it in the Phoenix dashboard.
-https://phoenix.example.net/dashboard/approvals#req_...
+Request req_...: answer it in the Phoenix dashboard.
+https://phoenix.example.net/dashboard/requests/req_...
 ```
 
 Any webhook that accepts a plain-text POST works too; it can ignore the
@@ -320,9 +386,8 @@ phoenix set phoenix/ntfy-token -d "ntfy token for approval pings"   # paste tk_.
 ```
 
 Restart the server. Subscribe to `phoenix-approvals` in the ntfy app; tapping
-a notification opens the request card if you are already logged in to the
-dashboard. If not, you land on the login page, and after logging in you are
-taken to the overview: open Approvals (or tap the notification again). The token is read from the store each
+a notification opens that request. If you are not logged in you get the login
+page first, and then the request. The token is read from the store each
 time a message is sent, so rotating it needs no restart. If the reference
 cannot be read, nothing is sent (an unauthenticated post could land on a
 public topic) and the server logs why, without the token. Consider adding
@@ -341,6 +406,24 @@ public topic) and the server logs why, without the token. Consider adding
 
 Each `429` carries `Retry-After`. Limits are worked out from the saved
 requests, so a restart does not reset them.
+
+## The grants file and older servers
+
+`grants.json` keeps grants with a use limit in their own `limited_grants` map.
+A server older than use limits does not know that map: it opens the file, runs
+normally, never honours one of those grants, and drops them when it next saves.
+Grants without a limit, requests and cooldowns carry over both ways. Files from
+older servers load unchanged.
+
+An Always rule in `acl.json` carries an `always` mark (request, who, when). An
+older server ignores the mark and keeps the rule as any other; if it then
+changes an agent, the mark is lost. The access stays, but the Requests page can
+no longer list or remove it; edit the agent's rules instead.
+
+An Always is written in two steps: an inactive rule first (marked `staged`, with
+no actions, so no server of any version reads through it), and the real one only
+after the answer is saved. If the server dies in between, the next start
+finishes it when the answer was saved and throws it away when it was not.
 
 ## Troubleshooting
 
@@ -361,7 +444,9 @@ Each denial has a `code` and a `next_step`. Full table:
 | `SELF_APPROVAL` | An agent tried to approve its own request | Another approver or the dashboard must decide |
 | `SEALED_REQUIRED` | A grant-backed read without the registered seal key | Use `phoenix exec --redact-output` with `PHOENIX_SEAL_KEY` set |
 | `ATTESTATION_REQUIRED` | The path's policy (`source_ip`, ...) was not met | A grant never waives this; meet the policy |
-| `GRANT_EXPIRED` | The grant ran out of time | Request again if still needed |
+| `GRANT_EXPIRED` | The grant ran out of time or uses | Request again if still needed |
+| `CREDENTIAL_CHANGED` | The agent's token was replaced after it asked | The agent asks again with its new token |
+| `ACL_WRITE_FAILED` | An Always could not be saved; nothing changed | Fix the disk, answer again |
 | `GRANT_REVOKED` | A human revoked it | Ask the user before requesting again |
 | `GRANT_LIMIT` | The agent has 10 active grants | Revoke some, then approve again |
 | `REVOKE_NOT_DURABLE` | Revoked in memory but not saved | Fix the disk, revoke again, or rotate the secret |
@@ -370,7 +455,7 @@ Other things to check:
 
 - **Grant approved but reads still fail:** same IP as the request
   (`bind_source_ip`)? Same credential (a rotated token ends grants)?
-  `PHOENIX_ROLE` unset?
+  `PHOENIX_SEAL_KEY` set? Any uses left (`phoenix whoami`)?
 - **No notification:** look for `access requests: notify for req_... failed`
   in the server log. Check `notify_url`, the token reference and that the
   request was new (a repeat of a pending one sends nothing).
@@ -398,6 +483,7 @@ Approver side (an identity in `approvers`, not a session):
 |---|---|
 | `GET /v1/access-requests[?status=&agent=]` | Every agent's requests, with source IP, auth method and `already_allowed_paths` |
 | `POST /v1/access-requests/{id}/approve` | Optional `{"paths":[subset],"ttl":"15m"}`: may narrow paths and shorten TTL, never widen |
+| `POST /v1/access-requests/{id}/approve-limited` | The same plus `"uses":1` (1 to 1000, required). Its own address so a server too old to count uses answers `404` instead of allowing any number. `/approve` refuses `uses` |
 | `POST /v1/access-requests/{id}/deny` | Optional `{"note":"..."}`; starts a 10-minute cooldown on those paths |
 | `GET /v1/grants?agent=&include=inactive` | Every grant |
 | `POST /v1/grants/{id}/revoke` | Revoke any grant (idempotent) |

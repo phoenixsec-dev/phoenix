@@ -28,15 +28,15 @@ req="$(awk '/^Request:/ {print $2}' <<<"$out")"; [[ "$req" == req_* ]] || die "p
 dash() { curl -sS --no-location -b "$RUN_DIR/jar" -c "$RUN_DIR/jar" -o "$RUN_DIR/dash.html" -w '%{http_code}' "$@"; }
 # A wrong password shows the login form again and gives no login.
 dash -X POST --data-urlencode "credential=wrong-$password" "$PHOENIX_SERVER/dashboard/login" >/dev/null
-[[ "$(dash "$PHOENIX_SERVER/dashboard/approvals")" != 200 ]] || die "a wrong password logged in"
+[[ "$(dash "$PHOENIX_SERVER/dashboard/requests")" != 200 ]] || die "a wrong password logged in"
 assert_eq "$(dash -X POST --data-urlencode "credential=$password" "$PHOENIX_SERVER/dashboard/login")" 303 "login with the printed password"
 # Every page works on a config nobody touched.
-for page in "" approvals grants sessions audit roles; do
+for page in "" requests sessions audit roles; do
   assert_eq "$(dash "$PHOENIX_SERVER/dashboard/$page")" 200 "dashboard page /$page"
 done
-dash "$PHOENIX_SERVER/dashboard/approvals" >/dev/null
+dash "$PHOENIX_SERVER/dashboard/requests" >/dev/null
 csrf="$(grep -o 'name="_csrf" value="[0-9a-f]*"' "$RUN_DIR/dash.html" | head -1 | sed 's/.*value="//; s/"//')"
-assert_eq "$(dash -X POST --data "_csrf=$csrf&path=demo/api-key&ttl=5m" "$PHOENIX_SERVER/dashboard/access-requests/$req/approve")" 303 "dashboard approve"
+assert_eq "$(dash -X POST --data "_csrf=$csrf&path=demo/api-key&choice=once" "$PHOENIX_SERVER/dashboard/requests/$req/answer")" 303 "dashboard approve"
 assert_eq "$(agent exec --env KEY=phoenix://demo/api-key -- sh -c 'printf %s "$KEY"')" synthetic-fresh "approved use"
 ok "a fresh install approves on the dashboard with no file editing"
 stop_server

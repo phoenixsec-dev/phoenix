@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -61,20 +62,51 @@ type Options struct {
 	// the store lock at create/approve and outside it at Match. nil = always.
 	// It must not call back into the Store.
 	AgentExists func(name string) bool
-	Logf        func(format string, args ...any) // nil = log.Printf
+	// Always adds and removes the standing access an "always" answer gives.
+	// nil = "always" is refused.
+	Always AlwaysRules
+	Logf   func(format string, args ...any) // nil = log.Printf
 
 	RequestTTL      time.Duration // how long a request stays pending
 	DefaultGrantTTL time.Duration // TTL when the agent does not ask for one
 	MaxGrantTTL     time.Duration // ceiling for requested TTLs at create time
 }
 
-// state is the whole contents of grants.json. Files written before short-lived
-// tokens were removed also carry "tombstones" (deleted agents); it is ignored.
+// state is the whole contents of grants.json (see stateFile for its layout on
+// disk). Files written before short-lived tokens were removed also carry
+// "tombstones" (deleted agents); it is ignored.
 type state struct {
-	Version      int                 `json:"version"`
-	Requests     map[string]*Request `json:"requests"`
-	Grants       map[string]*Grant   `json:"grants"`
-	AuditPending []Event             `json:"audit_pending"`
+	Version      int
+	Requests     map[string]*Request
+	Grants       map[string]*Grant
+	AuditPending []Event
+}
+
+// stateFile is state as saved. Grants limited by uses sit in their own map: a
+// server from before uses were counted ignores that map and so never honours
+// one of them, instead of reading "one use" as "any number of uses".
+type stateFile struct {
+	Version       int                 `json:"version"`
+	Requests      map[string]*Request `json:"requests"`
+	Grants        map[string]*Grant   `json:"grants"`
+	LimitedGrants map[string]*Grant   `json:"limited_grants,omitempty"`
+	AuditPending  []Event             `json:"audit_pending"`
+}
+
+// encodeState is the bytes of grants.json for st.
+func encodeState(st *state) ([]byte, error) {
+	f := stateFile{Version: st.Version, Requests: st.Requests, AuditPending: st.AuditPending, Grants: map[string]*Grant{}}
+	for id, g := range st.Grants {
+		if g.MaxUses == 0 {
+			f.Grants[id] = g
+			continue
+		}
+		if f.LimitedGrants == nil {
+			f.LimitedGrants = map[string]*Grant{}
+		}
+		f.LimitedGrants[id] = g
+	}
+	return json.MarshalIndent(f, "", "  ")
 }
 
 func emptyState() *state {
@@ -174,6 +206,7 @@ func Open(opts Options) (*Store, error) {
 		usage: map[string]usageDelta{},
 	}
 	s.cur = s.load()
+	s.reconcileAlways()
 	s.Tick()
 	return s, nil
 }
@@ -207,18 +240,30 @@ func (s *Store) load() *state {
 
 // decodeState parses grants.json and checks its basic shape.
 func decodeState(data []byte) (*state, error) {
-	var st state
-	if err := json.Unmarshal(data, &st); err != nil {
+	var f stateFile
+	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, err
 	}
-	if st.Version != fileVersion {
-		return nil, fmt.Errorf("unsupported grants file version %d", st.Version)
+	if f.Version != fileVersion {
+		return nil, fmt.Errorf("unsupported grants file version %d", f.Version)
 	}
+	st := state{Version: f.Version, Requests: f.Requests, Grants: f.Grants, AuditPending: f.AuditPending}
 	if st.Requests == nil {
 		st.Requests = map[string]*Request{}
 	}
 	if st.Grants == nil {
 		st.Grants = map[string]*Grant{}
+	}
+	for id, g := range st.Grants {
+		if g != nil && g.MaxUses != 0 {
+			return nil, fmt.Errorf("malformed grant record %q: use limit outside limited_grants", id)
+		}
+	}
+	for id, g := range f.LimitedGrants {
+		if g == nil || st.Grants[id] != nil || !g.usesConsistent() {
+			return nil, fmt.Errorf("malformed limited grant record %q", id)
+		}
+		st.Grants[id] = g
 	}
 	for id, r := range st.Requests {
 		if r == nil || r.ID != id || r.Agent == "" || len(r.Paths) == 0 {
@@ -308,7 +353,7 @@ func derive(e Event, op string, phase Phase) Event {
 }
 
 func (s *Store) save(st *state) error {
-	data, err := json.MarshalIndent(st, "", "  ")
+	data, err := encodeState(st)
 	if err != nil {
 		return err
 	}
@@ -321,25 +366,33 @@ func (s *Store) save(st *state) error {
 // state back over it; if that also fails the store is degraded until Tick
 // manages to. (A crash in that short window can still bring the change back.)
 func (s *Store) commit(next *state, op string, committed Event) error {
+	if err := s.auditAttempt(op, committed); err != nil {
+		return err
+	}
+	return s.commitAudited(next, op, committed)
+}
+
+// auditAttempt is step 2: the attempt line, whose failure aborts the change.
+func (s *Store) auditAttempt(op string, committed Event) error {
 	if err := s.appendAudit(derive(committed, op, PhaseAttempt)); err != nil {
 		return &Error{Code: CodeAuditWriteFailed, Msg: "audit log unavailable; nothing changed", Err: err}
 	}
+	return nil
+}
+
+// commitAudited is commit after its attempt line was written.
+func (s *Store) commitAudited(next *state, op string, committed Event) error {
 	next.AuditPending = append(next.AuditPending, committed)
-	if err := s.save(next); err != nil {
+	if undone, err := s.saveOrUndo(next); err != nil {
 		msg := "could not save the grants file; nothing changed"
 		maybeSaved := false
-		if errors.Is(err, fsutil.ErrDirSyncFailed) {
-			if rerr := s.save(s.snapshot()); rerr != nil {
-				s.setWriteFailed(err)
-				// Residual risk (review R1 G1, accepted): the unacknowledged
-				// change is on disk and the rollback failed, so a restart
-				// before Tick heals the file loads it. For approve that is a
-				// grant the human did approve; tell them so they can revoke.
-				if op == opApprove {
-					msg = approveMaybeOnDiskMsg
-					maybeSaved = true
-				}
-			}
+		// Residual risk (review R1 G1, accepted): the unacknowledged
+		// change is on disk and the rollback failed, so a restart
+		// before Tick heals the file loads it. For approve that is a
+		// grant the human did approve; tell them so they can revoke.
+		if !undone && op == opApprove {
+			msg = approveMaybeOnDiskMsg
+			maybeSaved = true
 		}
 		s.appendFailed(committed, op, err)
 		return &Error{Code: CodeStoreWriteFailed, Msg: msg, Err: err, MaybeSaved: maybeSaved}
@@ -348,6 +401,21 @@ func (s *Store) commit(next *state, op string, committed Event) error {
 	s.setWriteFailed(nil)
 	s.flushAudit()
 	return nil
+}
+
+// saveOrUndo saves next. When that fails after the file was already replaced,
+// it writes the published state back. undone is false only if disk may still
+// hold next; the store is then degraded.
+func (s *Store) saveOrUndo(next *state) (undone bool, err error) {
+	err = s.save(next)
+	if err == nil || !errors.Is(err, fsutil.ErrDirSyncFailed) {
+		return true, err
+	}
+	if rerr := s.save(s.snapshot()); rerr != nil {
+		s.setWriteFailed(err)
+		return false, err
+	}
+	return true, err
 }
 
 // commitRevoke runs the protocol for revoke and agent delete. A revoke always
@@ -429,6 +497,7 @@ type CreateInput struct {
 	AuthMethod   string // AuthBearer (the only method left)
 	CredentialFP string // BearerFingerprint(hash) of the agent's token
 	Labels       Labels // the agent's
+	IssueFP      string // which issue of that token; tells A from A given out again after B
 }
 
 // Create files a new pending request. It returns created=true for a new
@@ -481,10 +550,16 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 	now := s.now()
 	cur := s.snapshot()
 
-	var agentPending, allPending, recent []*Request
+	var agentPending, allPending, recent, stale []*Request
 	var cooldownUntil time.Time
 	for _, r := range cur.Requests {
 		pending := r.Status == StatusPending && now.Before(r.ExpiresAt)
+		if pending && r.Agent == in.Agent && !r.sameToken(in.CredentialFP, in.IssueFP) {
+			// Made with a token the agent no longer has. It can never be
+			// approved, so it must not answer or crowd out the new one.
+			stale = append(stale, r)
+			pending = false
+		}
 		if pending {
 			allPending = append(allPending, r)
 		}
@@ -531,11 +606,20 @@ func (s *Store) Create(in CreateInput) (Request, bool, error) {
 
 	r := &Request{
 		ID: newID("req_"), Agent: in.Agent, Paths: paths, Action: in.Action, Reason: reason,
-		RequestedTTL: ttl, SourceIP: in.SourceIP, AuthMethod: in.AuthMethod, CredentialFP: in.CredentialFP,
+		RequestedTTL: ttl, SourceIP: in.SourceIP, AuthMethod: in.AuthMethod, CredentialFP: in.CredentialFP, IssueFP: in.IssueFP,
 		Status: StatusPending, CreatedAt: now, ExpiresAt: now.Add(s.opts.RequestTTL),
 	}
 	next := cur.clone()
 	next.Requests[r.ID] = r
+	for _, old := range stale {
+		no := *old
+		no.Status, no.DecidedBy, no.DecidedAt, no.Note = StatusExpired, "system", now, "the agent's token was replaced"
+		next.Requests[no.ID] = &no
+		xe := s.newEvent(EventRequestExpired, PhaseCommitted, no.Agent, "system", "")
+		xe.RequestID, xe.Paths, xe.Action = no.ID, no.Paths, no.Action
+		xe.Detail = map[string]string{"cause": "token_replaced"}
+		next.AuditPending = append(next.AuditPending, xe)
+	}
 	ev := s.newEvent(EventRequestCreated, PhaseCommitted, r.Agent, r.Agent, r.SourceIP).by(in.Labels)
 	ev.RequestID, ev.Paths, ev.Action = r.ID, paths, r.Action
 	ev.Detail = map[string]string{"requested_ttl": ttl.String(), "auth_method": r.AuthMethod}
@@ -576,50 +660,28 @@ type ApproveInput struct {
 	Paths        []string      // nil = all requested paths; non-nil must be a non-empty subset
 	TTL          time.Duration // 0 = requested TTL; may shorten, never lengthen
 	MaxTTL       time.Duration // current max_grant_ttl (0 = store default); the grant is clamped to it
+	MaxUses      int64         // uses allowed per path; 0 = any number until the time ends
 	SealedOnly   bool          // current require_sealed
 	BindSourceIP bool          // current bind_source_ip
 	Labels       Labels        // the approver's
 }
 
 // Approve turns a pending request into a grant. Repeating the same approval
-// (same resolved paths and TTL) returns the original grant; any other call on
-// a non-pending request is NOT_PENDING. The 10-active-grant cap is checked
+// (same resolved paths, TTL and uses) returns the original grant, spent uses
+// and all; any other call on a non-pending request is NOT_PENDING. The 10-active-grant cap is checked
 // here; on GRANT_LIMIT the request stays pending.
 func (s *Store) Approve(in ApproveInput) (Request, Grant, error) {
-	if in.Approver == "" {
-		return Request{}, Grant{}, newErr(CodeInvalidRequest, "approver is required")
+	if in.MaxUses < 0 || in.MaxUses > MaxUsesLimit {
+		return Request{}, Grant{}, newErr(CodeInvalidRequest, "uses must be between 0 and %d", MaxUsesLimit)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.degraded() {
-		return Request{}, Grant{}, newErr(CodeRequestsDegraded, "approvals are temporarily unavailable")
+	r, paths, err := s.approvable(in.RequestID, in.Approver, in.Paths)
+	if err != nil {
+		return Request{}, Grant{}, err
 	}
 	now := s.now()
 	cur := s.snapshot()
-	r, ok := cur.Requests[in.RequestID]
-	if !ok {
-		return Request{}, Grant{}, newErr(CodeNotFound, "request not found")
-	}
-	if in.Approver == r.Agent {
-		return Request{}, Grant{}, newErr(CodeSelfApproval, "an agent cannot approve its own request")
-	}
-
-	paths := r.Paths
-	if in.Paths != nil {
-		if len(in.Paths) == 0 {
-			return Request{}, Grant{}, newErr(CodeEmptyGrant, "at least one path must stay in the grant")
-		}
-		np, err := NormalizePaths(in.Paths)
-		if err != nil {
-			return Request{}, Grant{}, err
-		}
-		for _, p := range np {
-			if !slices.Contains(r.Paths, p) {
-				return Request{}, Grant{}, newErr(CodeWideningNotAllowed, "path %q was not requested", p)
-			}
-		}
-		paths = np
-	}
 	ttl := in.TTL
 	switch {
 	case ttl == 0:
@@ -636,7 +698,7 @@ func (s *Store) Approve(in ApproveInput) (Request, Grant, error) {
 	ttl = min(ttl, maxTTL)
 
 	if r.Status == StatusApproved {
-		if g := cur.Grants[r.GrantID]; g != nil && slices.Equal(g.Paths, paths) && g.ExpiresAt.Sub(g.CreatedAt) == ttl {
+		if g := cur.Grants[r.GrantID]; g != nil && slices.Equal(g.Paths, paths) && g.ExpiresAt.Sub(g.CreatedAt) == ttl && g.MaxUses == in.MaxUses {
 			return r.clone(now), s.grantView(g), nil
 		}
 		return Request{}, Grant{}, newErr(CodeNotPending, "request is %s", r.Status)
@@ -659,8 +721,8 @@ func (s *Store) Approve(in ApproveInput) (Request, Grant, error) {
 
 	g := &Grant{
 		ID: newID("gnt_"), RequestID: r.ID, Agent: r.Agent, Paths: paths, Action: r.Action,
-		SealedOnly: in.SealedOnly, AuthMethod: r.AuthMethod, CredentialFP: r.CredentialFP,
-		CreatedAt: now, ExpiresAt: now.Add(ttl), ApprovedBy: in.Approver,
+		SealedOnly: in.SealedOnly, AuthMethod: r.AuthMethod, CredentialFP: r.CredentialFP, IssueFP: r.IssueFP,
+		CreatedAt: now, ExpiresAt: now.Add(ttl), ApprovedBy: in.Approver, MaxUses: in.MaxUses,
 	}
 	if in.BindSourceIP {
 		g.BoundSourceIP = r.SourceIP
@@ -673,10 +735,49 @@ func (s *Store) Approve(in ApproveInput) (Request, Grant, error) {
 	ev := s.newEvent(EventRequestApproved, PhaseCommitted, r.Agent, in.Approver, in.ApproverIP).by(in.Labels)
 	ev.RequestID, ev.GrantID, ev.Paths, ev.Action = r.ID, g.ID, paths, r.Action
 	ev.Detail = map[string]string{"ttl": ttl.String(), "expires_at": g.ExpiresAt.Format(time.RFC3339)}
+	if g.MaxUses > 0 {
+		ev.Detail["max_uses"] = fmt.Sprint(g.MaxUses)
+	}
 	if err := s.commit(next, opApprove, ev); err != nil {
 		return Request{}, Grant{}, err
 	}
 	return nr.clone(now), s.grantView(g), nil
+}
+
+// approvable does the checks every kind of approval starts with: the store is
+// writable, the request exists, nobody approves their own, and the paths are a
+// non-empty part of what was asked (nil = all). It does not check that the
+// request is still pending. Caller holds s.mu.
+func (s *Store) approvable(id, approver string, want []string) (*Request, []string, error) {
+	if approver == "" {
+		return nil, nil, newErr(CodeInvalidRequest, "approver is required")
+	}
+	if s.degraded() {
+		return nil, nil, newErr(CodeRequestsDegraded, "approvals are temporarily unavailable")
+	}
+	r, ok := s.snapshot().Requests[id]
+	if !ok {
+		return nil, nil, newErr(CodeNotFound, "request not found")
+	}
+	if approver == r.Agent {
+		return nil, nil, newErr(CodeSelfApproval, "an agent cannot approve its own request")
+	}
+	if want == nil {
+		return r, r.Paths, nil
+	}
+	if len(want) == 0 {
+		return nil, nil, newErr(CodeEmptyGrant, "at least one path must stay in the grant")
+	}
+	paths, err := NormalizePaths(want)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, p := range paths {
+		if !slices.Contains(r.Paths, p) {
+			return nil, nil, newErr(CodeWideningNotAllowed, "path %q was not requested", p)
+		}
+	}
+	return r, paths, nil
 }
 
 // DenyInput is a human's "no" on a pending request.
@@ -876,12 +977,16 @@ type Caller struct {
 	SourceIP     string
 	AuthMethod   string // AuthBearer
 	CredentialFP string // same format as CreateInput.CredentialFP
+	IssueFP      string // same format as CreateInput.IssueFP
+	// Current reports whether that token is still the agent's. Spend asks it
+	// under its lock, right before a use is counted. nil = not asked.
+	Current func() bool
 }
 
 // MatchResult is Match's answer. Grant is a copy of the active grant that
-// allows the access, or nil. When Grant is nil, Reason is ReasonGrantExpired
-// or ReasonGrantRevoked if a grant for this agent+path+action ended within the
-// last 24h, else "" (plain ACL denial).
+// allows the access, or nil. When Grant is nil, Reason is ReasonGrantExpired,
+// ReasonGrantUsedUp or ReasonGrantRevoked if a grant for this agent+path+action
+// ended within the last 24h, else "" (plain ACL denial).
 type MatchResult struct {
 	Grant  *Grant
 	Reason string
@@ -911,38 +1016,55 @@ func (s *Store) Match(c Caller, path, action string) MatchResult {
 	var reason string
 	// When several active grants cover the path, prefer one that allows
 	// plain delivery; otherwise the map's random order would make plain
-	// reads succeed or fail at random (review P5 S2).
-	var sealedMatch *Grant
+	// reads succeed or fail at random (review P5 S2). Among those, prefer one
+	// that costs no use, then the one that ends first.
+	var best *Grant
+	ended := func(g *Grant, end time.Time, why string) {
+		if now.Sub(end) < EndedLookback && end.After(endedAt) {
+			endedAt, reason = end, why
+		}
+	}
 	for _, g := range cur.Grants {
 		if g.Agent != c.Agent || !g.covers(path, action) {
 			continue
 		}
 		switch g.State(now) {
 		case GrantActive:
-			if credentialMatches(g, c) {
-				if !g.SealedOnly {
-					v := s.grantView(g)
-					return MatchResult{Grant: &v}
-				}
-				if sealedMatch == nil {
-					sealedMatch = g
-				}
+			switch {
+			case !credentialMatches(g, c):
+			case g.UsesLeft(path) == 0:
+				// This path is spent though another of the grant's is not.
+				ended(g, g.LastUsedAt, ReasonGrantUsedUp)
+			case best == nil || betterMatch(g, best):
+				best = g
 			}
-		case GrantRevoked, GrantExpired:
-			if end := g.endedAt(); now.Sub(end) < EndedLookback && end.After(endedAt) {
-				endedAt = end
-				reason = ReasonGrantExpired
-				if g.State(now) == GrantRevoked {
-					reason = ReasonGrantRevoked
-				}
-			}
+		case GrantUsed:
+			ended(g, g.endedAt(), ReasonGrantUsedUp)
+		case GrantRevoked:
+			ended(g, g.endedAt(), ReasonGrantRevoked)
+		case GrantExpired:
+			ended(g, g.endedAt(), ReasonGrantExpired)
 		}
 	}
-	if sealedMatch != nil {
-		v := s.grantView(sealedMatch)
+	if best != nil {
+		v := s.grantView(best)
 		return MatchResult{Grant: &v}
 	}
 	return MatchResult{Reason: reason}
+}
+
+// betterMatch reports whether Match should prefer grant a over b.
+func betterMatch(a, b *Grant) bool {
+	if a.SealedOnly != b.SealedOnly {
+		return !a.SealedOnly
+	}
+	if (a.MaxUses == 0) != (b.MaxUses == 0) {
+		return a.MaxUses == 0
+	}
+	if !a.ExpiresAt.Equal(b.ExpiresAt) {
+		return a.ExpiresAt.Before(b.ExpiresAt)
+	}
+	return a.ID < b.ID
 }
 
 // credentialMatches applies the plan's credential binding table.
@@ -955,13 +1077,14 @@ func credentialMatches(g *Grant, c Caller) bool {
 	}
 	switch g.AuthMethod {
 	case AuthBearer:
-		return g.CredentialFP != "" &&
+		return g.CredentialFP != "" && (g.IssueFP == "" || c.IssueFP == g.IssueFP) &&
 			subtle.ConstantTimeCompare([]byte(c.CredentialFP), []byte(g.CredentialFP)) == 1
 	}
 	return false
 }
 
-// RecordUse notes that a grant just authorized an access. Counts are kept in
+// RecordUse notes that a grant with no use limit just authorized an access
+// (Spend does it for the limited ones). Counts are kept in
 // memory and saved by the next Tick, so a crash can lose a few seconds of
 // them; the audit log is the authoritative record.
 func (s *Store) RecordUse(grantID string) {
@@ -980,6 +1103,7 @@ func (s *Store) RecordUse(grantID string) {
 func (r *Request) clone(now time.Time) Request {
 	c := *r
 	c.Paths = slices.Clone(r.Paths)
+	c.GrantedPaths = slices.Clone(r.GrantedPaths)
 	if c.Status == StatusPending && !now.Before(c.ExpiresAt) {
 		c.Status = StatusExpired
 	}
@@ -990,6 +1114,7 @@ func (r *Request) clone(now time.Time) Request {
 func (s *Store) grantView(g *Grant) Grant {
 	c := *g
 	c.Paths = slices.Clone(g.Paths)
+	c.PathUses = maps.Clone(g.PathUses)
 	s.usageMu.Lock()
 	if d, ok := s.usage[g.ID]; ok {
 		c.UseCount += d.count

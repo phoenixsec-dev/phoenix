@@ -178,7 +178,7 @@ func (h *Handler) secretReaders(path string) []secretReader {
 	if h.accessEnabled() && h.deps.Access.AccessRequestSettings().Enabled && !h.deps.Grants.Health().Degraded {
 		now := time.Now()
 		for _, g := range h.deps.Grants.ListGrants("", false) {
-			if g.Action == grant.ActionReadValue && g.State(now) == grant.GrantActive && slices.Contains(g.Paths, path) {
+			if g.Action == grant.ActionReadValue && g.State(now) == grant.GrantActive && g.UsesLeft(path) != 0 && slices.Contains(g.Paths, path) {
 				out = append(out, secretReader{Agent: g.Agent, Until: ttlRemain(g.ExpiresAt)})
 			}
 		}
