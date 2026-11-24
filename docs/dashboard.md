@@ -249,9 +249,10 @@ With it on, the dashboard password opens every secret that no policy rule
 withholds. Decide that knowing who and what can read the password. To turn it on:
 
 1. Make sure only you know the dashboard password. If it was shared, or an agent
-   can read it, change it first (`phoenix-server --hash-password`).
-2. Put `"reveal": true,` right after `"dashboard": {` in the config file, or
-   change the `"reveal"` line already there.
+   can read it, change it first: put the output of `phoenix-server
+   --hash-password` in the config as `dashboard.password_hash`.
+2. In the config file, change `"reveal": false` inside `"dashboard"` to `true`. If
+   there is no `"reveal"` line, put `"reveal": true,` right after `"dashboard": {`.
 3. Set up [notifications](access-requests.md#notifications) if you have none, so
    you are pinged.
 4. Restart the server. The log says `Dashboard: showing secrets is ON` and

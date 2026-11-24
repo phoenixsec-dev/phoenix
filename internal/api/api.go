@@ -2018,13 +2018,12 @@ func (s *Server) handleGenerateKeyPair(w http.ResponseWriter, r *http.Request) {
 // handleAgentSubresource routes GET /v1/agents/{name}/seal-key
 func (s *Server) handleAgentSubresource(w http.ResponseWriter, r *http.Request) {
 	// Parse: /v1/agents/{name}/seal-key
-	path := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 || parts[1] != "seal-key" {
+	// An agent's name may itself hold a slash.
+	agentTarget, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/v1/agents/"), "/seal-key")
+	if !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
 	}
-	agentTarget := parts[0]
 	if agentTarget == "" {
 		jsonError(w, "agent name is required", http.StatusBadRequest)
 		return

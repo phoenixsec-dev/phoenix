@@ -280,7 +280,7 @@ phoenix set myapp/api-key -d "OpenAI API key"
 
 # 2. Create an agent with scoped access
 #    (human runs this; the token file goes to the agent's machine)
-(umask 077; openssl rand -hex 32 > deployer.token)
+(umask 077; set -C; openssl rand -hex 32 > deployer.token)
 phoenix agent create deployer --token-stdin --acl "myapp/*:list,read_value" < deployer.token
 
 # 3. Verify the agent can access the secret

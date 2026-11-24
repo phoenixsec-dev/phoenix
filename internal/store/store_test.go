@@ -952,3 +952,29 @@ func TestProvider(t *testing.T) {
 		t.Fatal("Provider() should not return nil")
 	}
 }
+
+// Two names that differ only in bytes that are not UTF-8 would become one when
+// the store is saved, so such a name is refused and nothing is lost.
+func TestNameThatIsNotUTF8IsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("app/\ufffd", "kept", "test", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("app/\xff", "lost", "test", "", nil); err != ErrInvalidPath {
+		t.Errorf("Set = %v, want ErrInvalidPath", err)
+	}
+	if s, err = New(path, key); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Get("app/\ufffd"); err != nil || got.Value != "kept" {
+		t.Errorf("after reopening: wrong value, %v", err)
+	}
+}

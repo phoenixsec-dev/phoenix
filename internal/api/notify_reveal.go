@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,11 +90,20 @@ func (s *Server) sendRevealNotify(ctx context.Context, cfg config.AccessRequests
 		link = strings.TrimRight(cfg.NotifyDashboardURL, "/") + "/dashboard/sessions"
 	}
 	body := fmt.Sprintf("%s was %s in the dashboard.\nDevice: %s\nAddress: %s\nLogin: %s\nNot you? Sign that login out on the Sessions page and change the dashboard password.\n",
-		notifyText(path, 300), verb, notifyText(device, 60), notifyText(ip, 60), login)
+		notifyText(quoteOdd(path), 300), verb, notifyText(device, 60), notifyText(ip, 60), login)
 	if link != "" {
 		body += link + "\n"
 	}
 	return s.postNotify(ctx, cfg, "Phoenix: secret "+verb, "eyes", link, body)
+}
+
+// quoteOdd quotes a name with invisible or control characters in it, so it can
+// be told from the name without them.
+func quoteOdd(name string) string {
+	if strings.ContainsFunc(name, func(r rune) bool { return !unicode.IsPrint(r) }) {
+		return strconv.Quote(name)
+	}
+	return name
 }
 
 // notifyText makes stored or client-sent text fit one line of a message: no

@@ -16,14 +16,15 @@ encrypted in transit. See
 Create an agent with scoped permissions:
 
 ```bash
-(umask 077; openssl rand -hex 32 > deployer.token)   # goes to the agent's machine; then delete it
+(umask 077; set -C; openssl rand -hex 32 > deployer.token)   # goes to the agent's machine; then delete it
 phoenix agent create deployer --token-stdin < deployer.token \
   --acl "myapp/**:list,read_value;staging/**:list,read_value,write"
 ```
 
 The `deployer` agent can read anything under `myapp/` and read/write under `staging/`,
 including nested paths. At a terminal, `phoenix agent create` without
-`--token-stdin` asks for the token (hidden, twice). `-t <token>` still works, but
+`--token-stdin` asks for the token (hidden, twice). `set -C` makes the shell refuse to write into a file that is already there, which
+others may be able to read. `-t <token>` still works, but
 then the token is in shell history and in the process list for every user to read.
 
 ### ACL path patterns

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/fsutil"
@@ -266,6 +267,11 @@ func ValidatePath(path string) error {
 		return ErrInvalidPath
 	}
 	if !strings.Contains(path, "/") {
+		return ErrInvalidPath
+	}
+	// The store is saved as JSON, which would turn bytes that are not UTF-8 into
+	// the same replacement character, so two names could become one.
+	if !utf8.ValidString(path) {
 		return ErrInvalidPath
 	}
 	// Reject double slashes, dots

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -78,10 +79,10 @@ func TestShowAndCopyPing(t *testing.T) {
 			e.post("/dashboard/secrets/value", "path", "shop/petstore", "use", "copy")
 			e.post("/dashboard/secrets/value", "path", "shop/none", "use", "copy")
 			if len(f.pings) != tc.want {
-				t.Fatalf("pings: %q", f.pings)
+				t.Fatalf("%d pings, want %d", len(f.pings), tc.want)
 			}
 			if tc.want > 0 && (f.pings[0] != "shop/petstore shown Unknown browser 192.0.2.1" || f.pings[1] != "shop/petstore copied Unknown browser 192.0.2.1") {
-				t.Errorf("pings: %q", f.pings)
+				t.Error("wrong ping content")
 			}
 			// The audit line has no switch.
 			if n := strings.Count(e.audit.String(), `"action":"read_value"`); n < 2 {
@@ -114,6 +115,27 @@ func TestPageSaysWhenNobodyIsPinged(t *testing.T) {
 		}
 		if w := e.showValue(); w.Code != http.StatusOK {
 			t.Errorf("show: %d", w.Code)
+		}
+	}
+}
+
+// The ping shows the address the dashboard believes, not one the visitor sent.
+func TestPingAddressIsNotForged(t *testing.T) {
+	for _, tc := range []struct {
+		trusted []string
+		want    string
+	}{
+		{nil, "192.0.2.1"},
+		{[]string{"192.0.2.1"}, "203.0.113.9"},
+	} {
+		cfg := revealOn
+		cfg.TrustedProxies = tc.trusted
+		e, f := newSecretsEnv(t, cfg, ""), &fakeNotifier{}
+		e.h.deps.Notify = f
+		form := url.Values{"_csrf": {e.csrf}, "path": {"shop/petstore"}, "use": {"copy"}}
+		e.do("POST", "/dashboard/secrets/value", form, "X-Forwarded-For", "198.51.100.7, 203.0.113.9")
+		if len(f.pings) != 1 || !strings.HasSuffix(f.pings[0], " "+tc.want) {
+			t.Errorf("trusted %v: the ping does not show %s", tc.trusted, tc.want)
 		}
 	}
 }

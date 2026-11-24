@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 )
@@ -118,7 +117,7 @@ func cmdAgentSet(args []string) error {
 	var res struct {
 		Identity identityView `json:"identity"`
 	}
-	code, err := apiJSON("PATCH", "/v1/agents/"+url.PathEscape(args[0])+"/identity", fields, &res)
+	code, err := apiJSON("PATCH", "/v1/agents/"+escapeSegment(args[0])+"/identity", fields, &res)
 	if code == http.StatusMethodNotAllowed {
 		return errors.New(serverTooOldForIdentity)
 	}

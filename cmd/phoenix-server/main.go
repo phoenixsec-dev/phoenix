@@ -321,10 +321,6 @@ func main() {
 
 	// Initialize dashboard if enabled
 	if cfg.Dashboard.Enabled {
-		cfgPath, err := filepath.Abs(resolveConfigPath(*configPath)) // pages name it
-		if err != nil {
-			log.Fatalf("finding the config file: %v", err)
-		}
 		deps := dashboard.Deps{
 			Sessions:     sessionStore,
 			SessionRoles: cfg.Session.Roles,
@@ -337,7 +333,7 @@ func main() {
 			Grants:       grantStore,
 			Access:       srv,
 			Notify:       srv,
-			ConfigPath:   cfgPath,
+			ConfigPath:   realConfigPath(resolveConfigPath(*configPath)),
 		}
 		dash, err := dashboard.New(cfg.Dashboard, deps)
 		if err != nil {
@@ -379,6 +375,18 @@ func resolveConfigPath(flagValue string) string {
 		return env
 	}
 	return "/data/config.json"
+}
+
+// realConfigPath is the full path of the config file pages tell the owner to
+// edit. Links are followed first: "link/../x" is not always "x".
+func realConfigPath(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return path
 }
 
 // runCheckConfig is --check-config: it runs the same checks startup does on

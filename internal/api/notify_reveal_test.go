@@ -21,13 +21,13 @@ func TestNotifySecretUsed(t *testing.T) {
 	})
 	e.srv.NotifySecretUsed("shop/pet\nstore", "shown", "login1", "Chrome on Android", "192.0.2.7\nfake")
 	h := waitHit(t, hits)
-	for _, want := range []string{"shop/petstore was shown", "Device: Chrome on Android\n", "Address: 192.0.2.7fake\n", "Login: login1\n", "https://phoenix.example.net/dashboard/sessions"} {
+	for _, want := range []string{`"shop/pet\nstore" was shown`, "Device: Chrome on Android\n", "Address: 192.0.2.7fake\n", "Login: login1\n", "https://phoenix.example.net/dashboard/sessions"} {
 		if !strings.Contains(h.body, want) {
-			t.Errorf("body missing %q:\n%s", want, h.body)
+			t.Errorf("body missing %q", want)
 		}
 	}
 	if h.header.Get("Title") != "Phoenix: secret shown" || h.header.Get("Click") == "" {
-		t.Errorf("headers: %v", h.header)
+		t.Errorf("title %q, click %q", h.header.Get("Title"), h.header.Get("Click"))
 	}
 
 	e.srv.NotifySecretUsed("shop/pet\nstore", "copied", "login1", "d", "ip")
@@ -54,7 +54,7 @@ func TestNotifySecretUsedFailure(t *testing.T) {
 	e.srv.NotifySecretUsed("shop/petstore", "shown", "login1", "d", "ip")
 	waitHit(t, hits)
 	if s := waitLog(t, buf, "answered HTTP 500"); strings.Contains(s, "private-topic") || !strings.Contains(s, "shop/petstore") {
-		t.Errorf("log: %s", s)
+		t.Error("the log names the URL, or not the secret")
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for len(hits) == 0 && time.Now().Before(deadline) {

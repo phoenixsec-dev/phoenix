@@ -15,7 +15,7 @@ should be encrypted per-agent even in transit.
 
 ```bash
 # Each token goes to its agent's machine; delete the file here afterwards.
-(umask 077; openssl rand -hex 32 > builder.token; openssl rand -hex 32 > deployer.token)
+(umask 077; set -C; openssl rand -hex 32 > builder.token && openssl rand -hex 32 > deployer.token)
 
 phoenix agent create builder --token-stdin \
   --acl "build/**:list,read_value" < builder.token

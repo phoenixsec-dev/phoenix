@@ -17,11 +17,11 @@ import (
 func TestInitPassphraseFromEnv(t *testing.T) {
 	t.Setenv("PHOENIX_MASTER_PASSPHRASE", "")
 	if p, err := initPassphrase(false); err != nil || p != "" {
-		t.Fatalf("no source: got %q, %v", p, err)
+		t.Fatalf("no source: got %d characters, %v", len(p), err)
 	}
 	t.Setenv("PHOENIX_MASTER_PASSPHRASE", "from-env")
 	if p, err := initPassphrase(false); err != nil || p != "from-env" {
-		t.Fatalf("env: got %q, %v", p, err)
+		t.Fatalf("env: wrong passphrase, %v", err)
 	}
 }
 
@@ -205,4 +205,30 @@ func quietInit(t *testing.T, dir string) error {
 	os.Stdout = null
 	defer func() { os.Stdout = stdout }()
 	return runInit(dir, initOptions{DashboardPassword: "synthetic-dash-password"})
+}
+
+// Pages name the config file the server opened, also through "link/..".
+func TestRealConfigPath(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "real", "config.json")
+	for _, p := range []string{real, filepath.Join(dir, "config.json")} {
+		if err := os.MkdirAll(filepath.Join(filepath.Dir(p), "sub"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(dir, "real", "sub"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if got := realConfigPath(dir + "/link/../config.json"); got != real {
+		t.Errorf("got %s, want %s", got, real)
+	}
+	if got := realConfigPath("missing.json"); !filepath.IsAbs(got) {
+		t.Errorf("missing file: %s is not a full path", got)
+	}
 }

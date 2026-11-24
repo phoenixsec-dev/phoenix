@@ -262,15 +262,19 @@ Phoenix server itself: both connections are checked against the same file.
 The CLI and MCP put names into web addresses as they were, so
 `phoenix set 'app/key?v2'` wrote `app/key`, `phoenix delete 'app/key#old'`
 deleted `app/key`, and `phoenix agent delete 'bob?x'` deleted the agent `bob`.
-`get`, `info`, `list`, `export`, `import`, `keypair show`, `phoenix_get`,
-`phoenix_list` and the session, request and grant commands had the same fault.
-Every command now acts on exactly the name it was given, and secrets whose
-names already hold these characters can be read, listed, changed and deleted.
+`get`, `list`, `export`, `import`, `keypair show`, `sessions info`, `sessions
+revoke`, `phoenix_get`, `phoenix_list` and `phoenix_session_revoke` had the same
+fault. Every command now acts on exactly the name it was given, and secrets whose
+names already hold these characters can be read, listed, changed and deleted. To
+list a folder with `?` or `[` in its name, end it with `/`.
 `phoenix_unseal` now asks the server about the sealed secret's own name, and
 refuses an answer about another one.
 
-**Upgrading:** update the CLI wherever it is installed; the server needs no
-change. If something stored secrets under names with these characters, look at
+The server refuses a new secret name that is not valid UTF-8: after a restart it
+could have become another name.
+
+**Upgrading:** update the CLI wherever it is installed. Only `keypair show` for an
+agent with `/` in its name needs the new server too. If something stored secrets under names with these characters, look at
 the names without them too: they may have been overwritten. Names the server
 redirected, such as `/app/key` or `app//key`, are now refused. `set` and
 `delete` used to print ok for them and do nothing, and `get` read `app/key`.
@@ -303,10 +307,12 @@ on a new install. The dashboard password could only approve access until now; wi
 showing on, anyone who knows it can read every value that no policy rule
 withholds. So it is set in the config file only, never from the dashboard:
 
-1. If the password was shared, or an agent can read it, change it first
-   (`phoenix-server --hash-password`).
-2. In the server's config file put `"reveal": true,` right after
-   `"dashboard": {`, and restart. The log then says `showing secrets is ON`.
+1. If the password was shared, or an agent can read it, change it first: put the
+   output of `phoenix-server --hash-password` in the config as
+   `dashboard.password_hash`.
+2. In the server's config file, change `"reveal": false` inside `"dashboard"` to
+   `true`. If there is no `"reveal"` line (an older config), put `"reveal": true,`
+   right after `"dashboard": {`. Restart: the log says `showing secrets is ON`.
 
 `phoenix-server --init` asks once at a terminal (default no). While it is off,
 the page says so where Show and Copy would be, with that line and the name of the

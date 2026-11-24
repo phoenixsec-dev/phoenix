@@ -184,6 +184,9 @@ func usageExit(key string, spec cmdSpec, msg string) {
 func optionNames(spec cmdSpec) []string {
 	var names []string
 	for n := range spec.opts {
+		if n == "-t" || n == "--token" {
+			continue // still works, but not taught (errAgentCreateUsage)
+		}
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -194,14 +197,19 @@ func optionNames(spec cmdSpec) []string {
 // phoenix_list prefix) into the folder to list. "services/browser",
 // "services/browser/" and "services/browser/*" all mean "services/browser/".
 // Any other wildcard is an error saying what works, instead of being sent as
-// a secret name the server would answer with a misleading denial.
+// a secret name the server would answer with a misleading denial. A "?" or "["
+// can be part of a folder's name: ending it with "/" says so.
 func listFolder(p string) (string, error) {
 	if p == "" {
 		return "", nil
 	}
 	folder := strings.TrimSuffix(p, "*")
-	if strings.ContainsAny(folder, "*?[") || (folder != p && folder != "" && !strings.HasSuffix(folder, "/")) {
-		return "", fmt.Errorf("%q: list takes a folder (services/browser, services/browser/ or services/browser/*); other wildcards are not supported", p)
+	wild := "*?["
+	if strings.HasSuffix(folder, "/") {
+		wild = "*"
+	}
+	if strings.ContainsAny(folder, wild) || (folder != p && folder != "" && !strings.HasSuffix(folder, "/")) {
+		return "", fmt.Errorf("%q: list takes a folder (services/browser, services/browser/ or services/browser/*); other wildcards are not supported; if ? or [ is part of the name, end it with /", p)
 	}
 	if folder != "" && !strings.HasSuffix(folder, "/") {
 		folder += "/"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,12 +13,15 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/phoenixsec/phoenix/internal/acl"
 	"github.com/phoenixsec/phoenix/internal/api"
 	"github.com/phoenixsec/phoenix/internal/audit"
+	"github.com/phoenixsec/phoenix/internal/config"
 	"github.com/phoenixsec/phoenix/internal/crypto"
 	"github.com/phoenixsec/phoenix/internal/policy"
+	"github.com/phoenixsec/phoenix/internal/session"
 	"github.com/phoenixsec/phoenix/internal/store"
 )
 
@@ -29,6 +33,7 @@ var oddNames = []string{"app/key?v2", "app/key#old", "app/key%20x", "app/100%", 
 type namesEnv struct {
 	st  *store.Store
 	acl *acl.ACL
+	srv *api.Server
 }
 
 // withNamesServer runs fn with the CLI pointed at a real server.
@@ -52,7 +57,17 @@ func withNamesServer(t *testing.T, fn func(namesEnv)) {
 		t.Fatal(err)
 	}
 	srv := api.NewServer(store.NewFileBackend(st), a, audit.NewWriterLogger(io.Discard), "")
-	withMockServer(t, srv.ServeHTTP, func() { fn(namesEnv{st, a}) })
+	withMockServer(t, srv.ServeHTTP, func() { fn(namesEnv{st, a, srv}) })
+}
+
+// who is the "who" recorded for an agent.
+func (e namesEnv) who(name string) string {
+	for _, id := range e.acl.Identities() {
+		if id.Name == name {
+			return id.Who
+		}
+	}
+	return ""
 }
 
 // value is what the store holds under a name, "" if nothing.
@@ -132,7 +147,7 @@ func TestCommandsActOnTheNameTyped(t *testing.T) {
 
 // Folders too: list, export and phoenix_list name the folder that was typed.
 func TestFoldersWithOddNames(t *testing.T) {
-	for _, folder := range []string{"a#b", "a%62", "50%"} {
+	for _, folder := range []string{"a#b", "a%62", "50%", "a?b", "a[b]"} {
 		withNamesServer(t, func(e namesEnv) {
 			for _, p := range []string{folder + "/in", "ab/other", "a/other"} {
 				if err := e.st.Set(p, "v", "test", "", nil); err != nil {
@@ -140,12 +155,12 @@ func TestFoldersWithOddNames(t *testing.T) {
 				}
 			}
 			want := folder + "/in"
-			for _, args := range [][]string{{folder, "--names"}, {folder}} {
-				if out, err := run(t, "", func() error { return cmdList(args) }); err != nil || strings.Fields(out)[0] != want || strings.Contains(out, "other") {
+			for _, args := range [][]string{{folder + "/", "--names"}, {folder + "/"}} {
+				if out, err := run(t, "", func() error { return cmdList(args) }); err != nil || !strings.HasPrefix(out, want+"\n") || strings.Contains(out, "other") {
 					t.Errorf("list %v = %q, %v", args, out, err)
 				}
 			}
-			arg := json.RawMessage(fmt.Sprintf(`{"prefix":%q}`, folder))
+			arg := json.RawMessage(fmt.Sprintf(`{"prefix":%q}`, folder+"/"))
 			if out, bad := mcpToolList(arg, quietLog()); bad || !strings.HasPrefix(out, want) || strings.Contains(out, "other") {
 				t.Errorf("phoenix_list = %q", out)
 			}
@@ -154,7 +169,7 @@ func TestFoldersWithOddNames(t *testing.T) {
 				t.Errorf("phoenix_list, old route = %q", out)
 			}
 			if out, err := run(t, "", func() error { return cmdExport([]string{folder + "/"}) }); err != nil || out != "IN=v\n" {
-				t.Errorf("export = %q, %v", out, err)
+				t.Errorf("export printed the wrong secrets (%d lines), %v", strings.Count(out, "\n"), err)
 			}
 		})
 	}
@@ -193,13 +208,33 @@ func TestImportsWithOddPrefix(t *testing.T) {
 // "phoenix agent delete 'x?y'" used to delete the agent x.
 func TestAgentCommandsActOnTheNameTyped(t *testing.T) {
 	withNamesServer(t, func(e namesEnv) {
-		for _, n := range []string{"bob", "bob?x"} {
+		odd := []string{"bob?x", "bob/", "team/bob", "a/../bob", ".", "..", "bob%20x", "bob/seal-key"}
+		for _, n := range append(odd, "bob") {
 			if err := e.acl.AddAgent(n, "token of "+n, []acl.Permission{{Path: "app/*", Actions: []acl.Action{acl.ActionList}}}); err != nil {
 				t.Fatal(err)
 			}
+			kp, err := crypto.GenerateSealKeyPair()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := e.acl.SetAgentSealKey(n, crypto.EncodeSealKey(&kp.PublicKey)); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if out, err := run(t, "", func() error { return cmdKeypairShow([]string{"bob?x"}) }); err != nil || !strings.Contains(out, "Agent: bob?x\n") {
-			t.Errorf("keypair show = %q, %v", out, err)
+		for _, n := range odd {
+			key, _ := e.acl.GetAgentSealKey(n)
+			if out, err := run(t, "", func() error { return cmdKeypairShow([]string{n}) }); err != nil || !strings.Contains(out, "Agent: "+n+"\n") || !strings.Contains(out, key) {
+				t.Errorf("keypair show %s = %q, %v", n, out, err)
+			}
+			if _, err := run(t, "", func() error { return cmdAgentSet([]string{n, "--who", "who of " + n}) }); err != nil || e.who(n) != "who of "+n || e.who("bob") != "" {
+				t.Errorf("agent set %s changed another agent (%v)", n, err)
+			}
+			if n == "bob?x" {
+				continue // deleted below
+			}
+			if _, err := run(t, "", func() error { return cmdAgentDelete([]string{n}) }); err != nil || slices.Contains(e.acl.ListAgents(), n) {
+				t.Errorf("agent delete %s: %v", n, err)
+			}
 		}
 		if _, err := run(t, "", func() error { return cmdAgentDelete([]string{"bob?x"}) }); err != nil {
 			t.Error(err)
@@ -209,6 +244,48 @@ func TestAgentCommandsActOnTheNameTyped(t *testing.T) {
 		}
 		if _, err := run(t, "", func() error { return cmdAgentDelete([]string{"bob#x"}) }); err == nil || !slices.Contains(e.acl.ListAgents(), "bob") {
 			t.Errorf("deleting an agent that does not exist: %v", err)
+		}
+	})
+}
+
+// Session commands refuse an ID that only decodes to a real one.
+func TestSessionCommandsActOnTheIDTyped(t *testing.T) {
+	withNamesServer(t, func(e namesEnv) {
+		ss, err := session.NewStore(time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ss.Stop()
+		if err := e.srv.SetSessionStore(ss); err != nil {
+			t.Fatal(err)
+		}
+		e.srv.SetSessionRoles(map[string]config.RoleConfig{"dev": {Namespaces: []string{"app/*"}, BootstrapTrust: []string{"bearer"}}})
+		t.Setenv("PHOENIX_TOKEN", "test-token")
+		if _, _, err := mintSessionViaAPI(context.Background(), "dev", ""); err != nil {
+			t.Fatal(err)
+		}
+		live := ss.List()
+		if len(live) != 1 {
+			t.Fatalf("%d sessions", len(live))
+		}
+		id := live[0].ID
+		for _, odd := range []string{strings.Replace(id, "ses_", "%73es_", 1), id + "?x", id + "#x"} {
+			if _, err := run(t, "", func() error { return cmdSessionInfo([]string{odd}) }); err == nil {
+				t.Error("sessions info answered about another ID")
+			}
+			if _, err := run(t, "", func() error { return cmdSessionRevoke([]string{odd}) }); err == nil {
+				t.Error("sessions revoke said ok for another ID")
+			}
+			arg, _ := json.Marshal(map[string]string{"session_id": odd})
+			if _, bad := mcpToolSessionRevoke(arg, quietLog()); !bad {
+				t.Error("phoenix_session_revoke said ok for another ID")
+			}
+			if len(ss.List()) != 1 {
+				t.Fatal("the session was revoked")
+			}
+		}
+		if _, err := run(t, "", func() error { return cmdSessionInfo([]string{id}) }); err != nil {
+			t.Error(err)
 		}
 	})
 }

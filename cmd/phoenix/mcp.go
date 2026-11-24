@@ -791,7 +791,7 @@ func mcpToolSessionRevoke(args json.RawMessage, logger *log.Logger) (string, boo
 		return "session_id is required", true
 	}
 
-	resp, err := apiRequest("POST", "/v1/sessions/"+escapeName(params.SessionID)+"/revoke", strings.NewReader("{}"))
+	resp, err := apiRequest("POST", "/v1/sessions/"+escapeSegment(params.SessionID)+"/revoke", strings.NewReader("{}"))
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}
@@ -851,7 +851,7 @@ func mcpToolRequestStatus(args json.RawMessage, logger *log.Logger) (string, boo
 	if !requestIDPattern.MatchString(params.RequestID) {
 		return "request_id must look like req_ followed by 32 hex characters", true
 	}
-	resp, err := ownIdentityRequest("GET", "/v1/access-requests/"+escapeName(params.RequestID), nil, nil)
+	resp, err := ownIdentityRequest("GET", "/v1/access-requests/"+escapeSegment(params.RequestID), nil, nil)
 	if err != nil {
 		return fmt.Sprintf("Request failed: %v", err), true
 	}

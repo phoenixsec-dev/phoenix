@@ -1293,7 +1293,7 @@ func cmdAgentDelete(args []string) error {
 	}
 	name := args[0]
 
-	resp, err := apiRequest("DELETE", "/v1/agents/"+escapeName(name), nil)
+	resp, err := apiRequest("DELETE", "/v1/agents/"+escapeSegment(name), nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -1957,7 +1957,7 @@ func cmdKeypairShow(args []string) error {
 	}
 	name := args[0]
 
-	resp, err := apiRequest("GET", "/v1/agents/"+escapeName(name)+"/seal-key", nil)
+	resp, err := apiRequest("GET", "/v1/agents/"+escapeSegment(name)+"/seal-key", nil)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -1973,6 +1973,9 @@ func cmdKeypairShow(args []string) error {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
+	if result.AgentName != name {
+		return fmt.Errorf("the server answered about agent %q, not %q", result.AgentName, name)
+	}
 	fmt.Printf("Agent: %s\n", result.AgentName)
 	if result.SealPublicKey == "" {
 		fmt.Println("Seal key: (none)")
@@ -2626,7 +2629,7 @@ func cmdSessionInfo(args []string) error {
 	}
 
 	sessionID := args[0]
-	resp, err := apiRequest("GET", "/v1/sessions/"+escapeName(sessionID), nil)
+	resp, err := apiRequest("GET", "/v1/sessions/"+escapeSegment(sessionID), nil)
 	if err != nil {
 		return fmt.Errorf("fetching session: %w", err)
 	}
@@ -2673,7 +2676,7 @@ func cmdSessionRevoke(args []string) error {
 	}
 
 	sessionID := args[0]
-	resp, err := apiRequest("POST", "/v1/sessions/"+escapeName(sessionID)+"/revoke", strings.NewReader("{}"))
+	resp, err := apiRequest("POST", "/v1/sessions/"+escapeSegment(sessionID)+"/revoke", strings.NewReader("{}"))
 	if err != nil {
 		return fmt.Errorf("revoking session: %w", err)
 	}
