@@ -9,10 +9,8 @@ GO_BIN="${GO_BIN:-}"
 if [[ -z "$GO_BIN" ]]; then
   if command -v go >/dev/null 2>&1; then
     GO_BIN="$(command -v go)"
-  elif [[ -x "/home/aaron/.local/go/bin/go" ]]; then
-    GO_BIN="/home/aaron/.local/go/bin/go"
   else
-    echo "error: go binary not found in PATH" >&2
+    echo "error: go not found on PATH; add it, or set GO_BIN to the go executable" >&2
     exit 1
   fi
 fi

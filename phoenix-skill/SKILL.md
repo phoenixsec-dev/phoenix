@@ -177,17 +177,11 @@ phoenix audit [-n 20] [-a agent-name] [-s 2025-01-01T00:00:00Z]
 
 Query the audit log. Filter by count, agent, or time range.
 
-### Generate a seal key pair
+### Sealed mode
 
-```bash
-phoenix keypair generate <agent-name> [-o /path/to/<name>.seal.key] [--force]
-```
-
-Makes the key pair on this machine, writes the private key (mode `0600`,
-default `~/.config/phoenix/keys/<name>.seal.key`) and registers only the
-public key with the server, which never sees the private half. `--force`
-replaces an existing key. Set `PHOENIX_SEAL_KEY` to the private key path to
-enable.
+An admin makes your seal key; you cannot. If you get
+`SEAL_KEY_NOT_REGISTERED`, ask the user for one. Set `PHOENIX_SEAL_KEY` to
+the private key file they give you.
 
 When sealed mode is active, `phoenix get`, `phoenix resolve`, and
 `phoenix exec` transparently encrypt/decrypt values using NaCl box.
