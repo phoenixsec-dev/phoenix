@@ -23,11 +23,13 @@ already has an approval.
 
 - An approval belongs to one agent, token and IP, so a login with another token
   or from another IP is refused even after a human approved it. The error now
-  names the agent the CLI ran as and says to check `PHOENIX_TOKEN` and where the
-  command runs from. Before, it only said to run again with `--reason`.
+  says to check `PHOENIX_TOKEN` and where the command runs from and, when the
+  server is v0.24.0 or newer, names the agent the CLI ran as. Before, it only
+  said to run again with `--reason`.
 - It says so plainly when the approval has ended.
 - `phoenix ssh --list` uses the agent's own token even with `PHOENIX_ROLE` set,
-  so it shows the approvals a login would use.
+  so it shows the approvals a login would use. With a session token in
+  `PHOENIX_TOKEN` it lists names only.
 - The usage line shows `--reason` as optional. Inside an active approval it was
   never required.
 

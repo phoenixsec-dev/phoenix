@@ -421,8 +421,15 @@ func TestSSHLoginCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.h.deps.Policy = pe
+	if err := e.acl.AddAgent("deployer", "deployer-token", []acl.Permission{{Path: "dev/**", Actions: []acl.Action{acl.ActionList, acl.ActionReadValue}}}); err != nil {
+		t.Fatal(err)
+	}
+	kp, _ := crypto.GenerateSealKeyPair()
+	if err := e.acl.SetAgentSealKey("deployer", crypto.EncodeSealKey(&kp.PublicKey)); err != nil {
+		t.Fatal(err)
+	}
 	login := e.h.buildCard(grant.Request{ID: "req_x", Agent: "deployer", Action: grant.ActionSSHLogin, Paths: []string{"ssh/build-1"}}, e.cfg)
-	if len(login.Paths) != 1 || !login.Paths[0].SSHLogin || login.SealRequired || len(login.Attestation) != 0 {
+	if len(login.Paths) != 1 || !login.Paths[0].SSHLogin || !login.SealKeyOK || login.SealRequired || len(login.Attestation) != 0 {
 		t.Fatalf("login card = %+v", login)
 	}
 	secret := e.h.buildCard(grant.Request{ID: "req_y", Agent: "deployer", Action: grant.ActionReadValue, Paths: []string{"ssh/build-1"}}, e.cfg)

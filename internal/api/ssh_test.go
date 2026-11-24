@@ -412,7 +412,10 @@ func TestSSHMachinesList(t *testing.T) {
 // With SSH certificates off the list is an empty answer, not an error.
 func TestSSHMachinesListWhenOff(t *testing.T) {
 	e := newGrantEnv(t)
-	m := e.machines(t, approverTok, "192.0.2.1")
+	if err := e.srv.acl.AddAgent("deployer", deployerTok, nil); err != nil {
+		t.Fatal(err)
+	}
+	m := e.machines(t, deployerTok, "192.0.2.1")
 	if m["enabled"] != false || len(m["machines"].([]any)) != 0 || m["note"] == "" || m["note"] == nil {
 		t.Fatalf("off = %v", m)
 	}
