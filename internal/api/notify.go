@@ -61,17 +61,22 @@ func (s *Server) notifyAccessRequest(cfg config.AccessRequestsSettings, rq grant
 	}()
 }
 
-// sendAccessNotify does the one POST. Errors never include the token.
+// sendAccessNotify notifies about one request. Errors never include the token.
 func (s *Server) sendAccessNotify(ctx context.Context, cfg config.AccessRequestsSettings, rq grant.Request) error {
 	link := notifyDashboardLink(cfg.NotifyDashboardURL, rq.ID)
-	body := notifyMessage(cfg, rq, link)
+	return s.postNotify(ctx, cfg, "Phoenix: access request", "key", link, notifyMessage(cfg, rq, link))
+}
+
+// postNotify sends one message to notify_url, with the token if one is set.
+// title, tags and link become ntfy headers; link may be empty.
+func (s *Server) postNotify(ctx context.Context, cfg config.AccessRequestsSettings, title, tags, link, body string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.NotifyURL, strings.NewReader(body))
 	if err != nil {
 		return errors.New("notify_url is not a usable URL")
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	req.Header.Set("Title", "Phoenix: access request")
-	req.Header.Set("Tags", "key")
+	req.Header.Set("Title", title)
+	req.Header.Set("Tags", tags)
 	if link != "" {
 		req.Header.Set("Click", link)
 	}

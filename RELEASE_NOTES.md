@@ -107,19 +107,36 @@ redirected, such as `/app/key` or `app//key`, are now refused. `set` and
 
 Getting one password used to take a terminal, the exact name, and a guess at
 the username. The dashboard now has a **Secrets** page: search by name,
-description, tag or username, open one, copy the username, show or copy the
-password, or copy it and open the page in one tap. You can add a secret (paste,
+description, tag or username, open one and copy the username. With showing turned
+on you can show or copy the password, or copy it and open the page in one tap. You can add a secret (paste,
 type or generate), give one a new value, and edit its description, tags,
 username and link. The dashboard is laid out for a phone first, with one
 navigation, and can be installed as an app. Nothing is stored offline except
 its static files.
 
-**Read this before upgrading if the dashboard is on: the dashboard password now
-opens secrets.** Until now it could only approve access. Anyone who knows it can
-show every value that no policy rule withholds. If it was shared, or an agent
-can read it, change it first (`phoenix-server --hash-password`). To keep values
-out of the dashboard set `"dashboard": {"reveal": false}`; finding, adding and
-editing still work.
+**Showing and copying secrets is off until you turn it on**, after an upgrade and
+on a new install. The dashboard password could only approve access until now; with
+showing on, anyone who knows it can read every value that no policy rule
+withholds. So it is set in the config file only, never from the dashboard:
+
+1. If the password was shared, or an agent can read it, change it first
+   (`phoenix-server --hash-password`).
+2. In the server's config file put `"reveal": true,` right after
+   `"dashboard": {`, and restart. The log then says `showing secrets is ON`.
+
+`phoenix-server --init` asks once at a terminal (default no). While it is off,
+the page says so where Show and Copy would be, with that line and the name of the
+file. Finding, adding and editing work without it. A secret whose rule blocks the
+dashboard stays blocked when showing is on.
+
+**Every secret shown or copied pings you**, if notifications are set up
+(`access_requests.notify_url`, also with access requests off): which secret, and
+the login, device and address that did it, never the value. One ping per secret
+and login per 5 minutes. `"dashboard": {"notify_on_reveal": false}` turns it off
+without touching request notifications; the audit line has no switch. A ping that
+fails never stops anything and is logged. Without `notify_url` the page says once
+that nobody is pinged. The ping names the secret whatever `notify_include_paths`
+says, so check who can read that topic.
 
 How it is protected ([threat model](docs/threat-model.md#threats-specific-to-the-dashboard)):
 showing, copying or changing needs the password typed within the last 5

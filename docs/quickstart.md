@@ -25,8 +25,9 @@ curl -fsSL https://raw.githubusercontent.com/phoenixsec-dev/phoenix/main/scripts
 phoenix-server --init ~/.phoenix
 ```
 
-It asks for a dashboard password (press Enter to have one generated), then
-prints the `ADMIN TOKEN` and, if it made one, the `DASHBOARD PASSWORD`. Copy what
+It asks for a dashboard password (press Enter to have one generated) and whether
+the [dashboard may show secrets](dashboard.md#showing-and-copying-secrets)
+(Enter means no), then prints the `ADMIN TOKEN` and, if it made one, the `DASHBOARD PASSWORD`. Copy what
 it prints: it is shown once and never again. The password is stored only as a
 bcrypt hash.
 

@@ -44,8 +44,8 @@ reads or writes the value, so "created by" and "updated" (who wrote the value,
 and when) stay as they were; the change is in the audit log as `describe` with
 the names of the changed fields. `phoenix set` without `--username` or `--url`
 keeps what is stored. A link must be a full `http://` or `https://` address
-with no password in it. `describe`, `info` and `set` refuse a name with `?`, `#`
-or `%` in it, which would reach the server as another name. `phoenix list`'s output did not change; usernames and
+with no password in it. A name with `?`, `#` or `%` in it is used exactly as
+typed; quote it, or the shell may change it. `phoenix list`'s output did not change; usernames and
 links are shown by `phoenix info`, MCP `phoenix_list` and the dashboard, to
 callers with `list` on the path. An older server has no `describe` (the CLI
 says so) and ignores a username or link sent with `set`; the CLI then exits 1

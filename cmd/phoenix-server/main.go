@@ -111,7 +111,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
-		opts := initOptions{Passphrase: passphrase, DashboardPassword: password, ShowPassword: generated, HTTPS: *initHTTPS}
+		opts := initOptions{Passphrase: passphrase, DashboardPassword: password, ShowPassword: generated, HTTPS: *initHTTPS, Reveal: initReveal()}
 		if err := runInit(*initDir, opts); err != nil {
 			log.Fatalf("init failed: %v", err)
 		}
@@ -322,6 +322,8 @@ func main() {
 			Policy:       pe,
 			Grants:       grantStore,
 			Access:       srv,
+			Notify:       srv,
+			ConfigPath:   resolveConfigPath(*configPath),
 		}
 		dash, err := dashboard.New(cfg.Dashboard, deps)
 		if err != nil {
@@ -329,6 +331,7 @@ func main() {
 		}
 		srv.SetDashboard(dash)
 		log.Printf("  Dashboard: enabled at /dashboard/")
+		logReveal(cfg)
 	}
 
 	log.Printf("Phoenix server starting on %s", cfg.Server.Listen)
@@ -435,6 +438,7 @@ type initOptions struct {
 	DashboardPassword string // stored only as a bcrypt hash
 	ShowPassword      bool   // print it once (it was generated)
 	HTTPS             bool   // write https_listener switched on
+	Reveal            bool   // let the dashboard show secret values
 }
 
 // refuseExistingKey stops --init on a directory that already has a master
@@ -554,6 +558,9 @@ func runInit(dir string, opts initOptions) error {
 	// On, so there is somebody who can answer those requests.
 	cfg.Dashboard.Enabled = true
 	cfg.Dashboard.PasswordHash = passwordHash
+	cfg.Dashboard.Reveal = opts.Reveal
+	pingOn := true // the default, written out so the owner sees the setting
+	cfg.Dashboard.NotifyOnReveal = &pingOn
 
 	cfgData, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -575,6 +582,11 @@ func runInit(dir string, opts initOptions) error {
 		dashURL = "https://127.0.0.1:9443"
 	}
 	fmt.Printf("Then sign in at %s/dashboard/ to answer agents' requests.\n", dashURL)
+	if opts.Reveal {
+		fmt.Printf("The dashboard can show and copy secrets. To turn that off, set \"reveal\": false inside \"dashboard\" in %s.\n", cfgPath)
+	} else {
+		fmt.Printf("The dashboard can find and add secrets, not show them. To turn that on, set \"reveal\": true inside \"dashboard\" in %s and restart.\n", cfgPath)
+	}
 	fmt.Println("Keep the dashboard password and the admin token away from agents.")
 
 	return nil
@@ -739,5 +751,27 @@ func logAccessRequests(cfg *config.Config, a *acl.ACL) {
 		// Worded without "dashboard": e2e scenario 19 checks that the startup
 		// log never mentions it when that UI is off.
 		log.Printf("WARNING: access_requests is enabled but nobody can approve requests: access_requests.approvers is empty and the operator web UI is off")
+	}
+}
+
+// logReveal says at startup whether the dashboard may show secrets, and
+// whether doing so pings the owner.
+func logReveal(cfg *config.Config) {
+	if !cfg.Dashboard.Reveal {
+		log.Printf("  Dashboard: showing secrets is off (dashboard.reveal)")
+		return
+	}
+	set := cfg.AccessRequestsSettings()
+	ping := "pings the owner"
+	switch {
+	case !cfg.Dashboard.NotifyOnRevealEnabled():
+		ping = "pings nobody (dashboard.notify_on_reveal is off)"
+	case set.NotifyURL == "":
+		ping = "pings nobody (access_requests.notify_url is not set)"
+	}
+	log.Printf("  Dashboard: showing secrets is ON; a secret shown or copied %s", ping)
+	// With access requests on, logAccessRequests already says this.
+	if !set.Enabled && cfg.Dashboard.NotifyOnRevealEnabled() && set.NotifyTokenRef != "" && transport.IsPlaintextNonLoopbackURL(set.NotifyURL) {
+		log.Printf("WARNING: access_requests.notify_url uses plain http:// with notify_token_ref set: the notify token crosses the network unencrypted; use https://")
 	}
 }

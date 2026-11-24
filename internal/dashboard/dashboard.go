@@ -143,6 +143,10 @@ type Deps struct {
 	// and grants page show "not configured".
 	Grants *grant.Store
 	Access AccessApprover
+	// Notify pings the owner when a value is shown or copied; nil = nobody is.
+	Notify RevealNotifier
+	// ConfigPath is named on pages that say which setting to change.
+	ConfigPath string
 }
 
 // Handler serves the dashboard web UI.
@@ -155,6 +159,7 @@ type Handler struct {
 	loginRL    *loginRateLimiter
 	logins     *loginTable // signed-in browsers (logins.go)
 	reveal     bool        // secret values may be shown and copied (secrets.go)
+	pingReveal bool        // doing so pings the owner (secrets.go)
 	mux        *http.ServeMux
 }
 
@@ -179,7 +184,8 @@ func New(cfg config.DashboardConfig, deps Deps) (*Handler, error) {
 		sessionTTL: 4 * time.Hour,
 		loginRL:    newLoginRateLimiter(),
 		logins:     newLoginTable(),
-		reveal:     cfg.RevealEnabled(),
+		reveal:     cfg.Reveal,
+		pingReveal: cfg.NotifyOnRevealEnabled(),
 		mux:        http.NewServeMux(),
 	}
 

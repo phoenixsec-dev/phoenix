@@ -166,6 +166,7 @@ type Server struct {
 	now       func() time.Time
 	// notifyTimeout limits one access-request notification (notify.go).
 	notifyTimeout time.Duration
+	reveals       revealPings // notify_reveal.go
 }
 
 // NewServer creates a new API server with all dependencies.

@@ -91,8 +91,8 @@ go build -o bin/ ./cmd/...
 phoenix-server --init ~/.phoenix
 ```
 
-It asks for a dashboard password (Enter generates one and shows it) and prints
-the admin token. What it prints is shown only once, so save it immediately. Run
+It asks for a dashboard password (Enter generates one and shows it) and whether
+the dashboard may show secrets (Enter means no), and prints the admin token. What it prints is shown only once, so save it immediately. Run
 it yourself, not through an agent.
 
 ### 3. Start the server

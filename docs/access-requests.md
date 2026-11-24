@@ -301,6 +301,11 @@ At startup the server logs that notifications are on and the notify host
 `notify_token_ref` is set, because the token would cross the network
 unencrypted.
 
+The same `notify_url`, token and link settings carry the dashboard's ping for a
+secret shown or copied, which works with access requests off too and has its own
+switch: see
+[Showing and copying secrets](dashboard.md#showing-and-copying-secrets).
+
 ### ntfy example
 
 Store the ntfy access token in Phoenix (not in the config), then point the

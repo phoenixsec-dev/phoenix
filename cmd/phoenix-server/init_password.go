@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -28,11 +30,35 @@ var promptHidden = crypto.PromptPassphraseAllowEmpty
 // (Docker without -it, scripts) it makes one up, because nobody can answer.
 // generated tells the caller to show it: that is the only time it is seen.
 func initDashboardPassword() (password string, generated bool, err error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+	if !interactive() {
 		password, err = generateDashboardPassword()
 		return password, true, err
 	}
 	return askDashboardPassword()
+}
+
+// interactive reports whether somebody is there to answer a question.
+func interactive() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// initReveal asks, for --init, whether the dashboard may show secrets. Without
+// a terminal, or with any answer but yes, it may not.
+func initReveal() bool {
+	return interactive() && askReveal(os.Stdin)
+}
+
+// askReveal asks once and reads one line; anything but y or yes is no.
+func askReveal(in io.Reader) bool {
+	fmt.Fprintln(os.Stderr, "\nThe dashboard can also show and copy your secrets, so you can use a password from your phone.")
+	fmt.Fprintln(os.Stderr, "With that on, whoever knows the dashboard password can read every secret that no rule blocks.")
+	fmt.Fprint(os.Stderr, "Let the dashboard show secrets? You can change this later in the config file. [y/N]: ")
+	line, _ := bufio.NewReader(in).ReadString('\n') // no answer is a no
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
 }
 
 // askDashboardPassword asks for a new dashboard password twice, or makes one

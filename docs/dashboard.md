@@ -58,6 +58,12 @@ not use bearer tokens or session tokens. Instead:
   policy rule, and only after its audit line was written. It is never in a page's
   HTML and never cached. On screen it hides after 20 seconds and when you leave
   the page or switch apps.
+- **Showing is off until its owner turns it on**, for new installs and upgrades
+  alike, and only in the config file: the dashboard has no switch for it, so a
+  stolen dashboard password cannot turn it on. See
+  [Showing and copying secrets](#showing-and-copying-secrets).
+- **Ping**: every secret shown or copied pings the owner (one ping per secret and
+  login per 5 minutes).
 - **Headers**: every response forbids framing, runs only the dashboard's own
   script files (Content-Security-Policy) and, except for static files, is
   `no-store`.
@@ -70,7 +76,7 @@ not use bearer tokens or session tokens. Instead:
 | Action | Risk level | Notes |
 |--------|-----------|-------|
 | Find secrets | Medium | Every name, description, tag, username and link |
-| Show or copy a secret value | **High** | Recent password, policy rule and audit line needed; `dashboard.reveal: false` turns it off |
+| Show or copy a secret value | **High** | Off until `dashboard.reveal` is `true`. Recent password, policy rule and audit line needed; pings the owner |
 | Add a secret, set a new value | **High** | Recent password; a new value needs a confirm, the old one is gone |
 | Edit description, tags, username, link | Medium | Recent password; the value is not touched |
 | View agent names | Low | Names only, no tokens |
@@ -169,7 +175,8 @@ Add the hash to your server config:
     "enabled": true,
     "password_hash": "$2a$10$...",
     "session_ttl": "4h",
-    "reveal": true
+    "reveal": false,
+    "notify_on_reveal": true
   }
 }
 ```
@@ -179,7 +186,8 @@ Add the hash to your server config:
 | `enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `password_hash` | `string` | bcrypt hash of operator password |
 | `session_ttl` | `string` | Browser session lifetime (default `4h`) |
-| `reveal` | `bool` | Show and copy secret values (default `true`) |
+| `reveal` | `bool` | Show and copy secret values (default `false`) |
+| `notify_on_reveal` | `bool` | Ping the owner when a value is shown or copied (default `true`) |
 
 `password_hash` is required (generate it with `phoenix-server
 --hash-password`). The old `pin` field was removed: it stored a short
@@ -191,6 +199,38 @@ login lasts from when it signed in. The old `allow_multi_login` setting
 and the Force Login button are gone (several logins are always allowed);
 a config that still has `allow_multi_login` refuses to start until the
 line is deleted.
+
+### Showing and copying secrets
+
+Off by default. Finding, adding and editing work without it; where **Show** and
+**Copy** would be, the page says it is off and which line to put in which file.
+
+With it on, the dashboard password opens every secret that no policy rule
+withholds. Decide that knowing who and what can read the password. To turn it on:
+
+1. Make sure only you know the dashboard password. If it was shared, or an agent
+   can read it, change it first (`phoenix-server --hash-password`).
+2. Put `"reveal": true,` right after `"dashboard": {` in the config file, or
+   change the `"reveal"` line already there.
+3. Set up [notifications](access-requests.md#notifications) if you have none, so
+   you are pinged.
+4. Restart the server. The log says `Dashboard: showing secrets is ON` and
+   whether a ping goes out. The **Secrets** page now has Show and Copy.
+
+`phoenix-server --init` asks once when run at a terminal (default no). Without a
+terminal it stays off. A secret whose rule blocks the dashboard (`require_sealed`,
+`source_ip`) stays blocked when showing is on.
+
+**The ping** says which secret was shown or copied, and the device, address and
+login that did it. Never the value. One ping covers the same secret and login for
+5 minutes, so showing and then copying it is one ping. It goes to
+`access_requests.notify_url` (with its token and link settings), also when access
+requests are off. `notify_include_paths` does not apply: the secret's name is
+always in it, so anyone who can read the notification topic sees the name. Turn
+the ping off with `"notify_on_reveal": false`; request notifications are not
+affected. The audit line is always written and has no switch. A ping that fails
+never stops anything; the server logs it and the next show or copy tries again.
+With no `notify_url` the page says once that nobody is pinged.
 
 The password is stored as a bcrypt hash — the plaintext never appears
 in config. Config validation rejects non-bcrypt values in `password_hash`
@@ -218,6 +258,7 @@ word must match. Open a secret to see its description, tags, username, link,
 who set the value and when, and who may read it (agents by permission, agents
 with temporary access, and the path's policy rule).
 
+- With showing off (the default) the page says so in place of the next two.
 - **Show** puts the value on screen for 20 seconds. **Copy** copies it without
   showing it. **Copy password and open the page** does both steps of a login;
   the site it opens is named under the button. Nothing ties the password to that
@@ -366,7 +407,7 @@ Use this checklist when enabling the dashboard on an existing Phoenix server.
 6. Open browser, verify login page loads at `/dashboard/login`
 
 7. Login, verify all pages render (overview, secrets, approvals, grants, sessions, audit, roles), and
-   open a secret and press Show
+   open a secret. With `reveal` on, press Show and check that the ping arrives
 
 8. Test approval flow end-to-end if access requests are on:
    - Have an agent ask (`phoenix request <path> --reason "test"`)

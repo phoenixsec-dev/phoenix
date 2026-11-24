@@ -711,3 +711,28 @@ func TestSessionStorePathCollisions(t *testing.T) {
 		})
 	}
 }
+
+// Upgrading must not let the dashboard show secrets: only "reveal": true does.
+// The ping is on unless switched off.
+func TestDashboardRevealDefaults(t *testing.T) {
+	for raw, want := range map[string][2]bool{
+		`{"dashboard":{"enabled":true}}`:                         {false, true},
+		`{"dashboard":{"reveal":null}}`:                          {false, true},
+		`{"dashboard":{"reveal":true}}`:                          {true, true},
+		`{"dashboard":{"reveal":true,"notify_on_reveal":false}}`: {true, false},
+		`{"dashboard":{"reveal":false,"notify_on_reveal":true}}`: {false, true},
+		`{}`: {false, true},
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := [2]bool{cfg.Dashboard.Reveal, cfg.Dashboard.NotifyOnRevealEnabled()}; got != want {
+			t.Errorf("%s: %v, want %v", raw, got, want)
+		}
+	}
+}

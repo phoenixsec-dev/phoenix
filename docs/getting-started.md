@@ -42,7 +42,9 @@ phoenix-server --init ~/.phoenix
 ```
 
 It asks for a dashboard password; press Enter to have one generated and shown
-once. (Without a terminal it always generates one.) This creates:
+once. (Without a terminal it always generates one.) Then it asks whether the
+[dashboard may show secrets](dashboard.md#showing-and-copying-secrets); press
+Enter for no. This creates:
 - master encryption key (`master.key`, mode `0600`)
 - admin bearer token — **save this, it is only shown once**
 - internal CA certificate and key

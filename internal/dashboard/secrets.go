@@ -234,12 +234,38 @@ func (h *Handler) policyBlock(r *http.Request, path string) string {
 	return "A rule says this secret can only be used from certain machines, and you are connecting from " + ip + "."
 }
 
-// revealBlock says why a secret's value cannot be shown here, or "".
-func (h *Handler) revealBlock(r *http.Request, path string) string {
-	if !h.reveal {
-		return "Showing secrets in the dashboard is switched off on this server."
+// revealOffText is the answer to a page that still offers Show or Copy after
+// they were switched off.
+const revealOffText = `Showing and copying is off on this server. Its owner can set "reveal": true inside "dashboard" in the config file and restart Phoenix.`
+
+// RevealNotifier pings the owner about a value that was shown or copied.
+// *api.Server implements it.
+type RevealNotifier interface {
+	// NotifyConfigured reports whether a ping has somewhere to go.
+	NotifyConfigured() bool
+	// NotifySecretUsed pings that path was "shown" or "copied" by the login
+	// with this ID, device and address. It must not wait for the ping.
+	NotifySecretUsed(path, verb, login, device, ip string)
+}
+
+// configName is how pages name the config file.
+func (h *Handler) configName() string {
+	if h.deps.ConfigPath == "" {
+		return "the server's config file"
 	}
-	return h.policyBlock(r, path)
+	return h.deps.ConfigPath
+}
+
+// pingState says whether showing or copying a value pings the owner: "on",
+// "off" (dashboard.notify_on_reveal) or "unset" (no notify_url).
+func (h *Handler) pingState() string {
+	switch {
+	case !h.pingReveal:
+		return "off"
+	case h.deps.Notify == nil || !h.deps.Notify.NotifyConfigured():
+		return "unset"
+	}
+	return "on"
 }
 
 // doneText is the green message after a change; only these codes are shown.
@@ -291,7 +317,10 @@ func (h *Handler) handleSecretOpen(w http.ResponseWriter, r *http.Request) {
 		"LinkHost":  linkHost(link),
 		"Readers":   h.secretReaders(path),
 		"Rules":     h.secretRules(path),
-		"Blocked":   h.revealBlock(r, path),
+		"Blocked":   h.policyBlock(r, path),
+		"RevealOff": !h.reveal,
+		"Ping":      h.pingState(),
+		"Config":    h.configName(),
 		"ReadOnly":  h.readOnly(),
 		"Done":      doneText[r.URL.Query().Get("done")],
 		"Plain":     unencrypted(r),
@@ -383,7 +412,7 @@ func (h *Handler) handleSecretValue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.reveal {
-		h.denySecret(w, r, "read_value", path, "reveal_off", h.revealBlock(r, path), "dashboard.use", use)
+		h.denySecret(w, r, "read_value", path, "reveal_off", revealOffText, "dashboard.use", use)
 		return
 	}
 	if msg := h.policyBlock(r, path); msg != "" {
@@ -424,6 +453,10 @@ func (h *Handler) handleSecretValue(w http.ResponseWriter, r *http.Request) {
 	if !h.stillSignedIn(r) { // the audit write waits for the disk
 		h.denySecret(w, r, "read_value", path, "signed_out", "Your sign-in changed. Reload the page.", "dashboard.use", use)
 		return
+	}
+	if l, ok := requestLogin(r); ok && h.pingReveal && h.deps.Notify != nil {
+		verb := map[string]string{"show": "shown", "copy": "copied"}[use]
+		h.deps.Notify.NotifySecretUsed(path, verb, l.ID, l.Device, ip)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"value": secret.Value})
 }

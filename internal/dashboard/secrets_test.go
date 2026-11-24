@@ -27,6 +27,9 @@ import (
 
 const fakeValue = "fake-value-for-tests-only"
 
+// revealOn is a config whose owner turned showing secrets on.
+var revealOn = config.DashboardConfig{Reveal: true}
+
 // secretsEnv is a signed-in dashboard over a real store holding one secret,
 // shop/petstore, with a username and link.
 type secretsEnv struct {
@@ -123,7 +126,7 @@ func (e *secretsEnv) newCookie(t *testing.T, w *httptest.ResponseRecorder) {
 // No page holds a value, every page shows the login details, and the list can
 // be searched by name, description, tag and username.
 func TestSecretPagesNeverHoldTheValue(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	for _, p := range []string{"/dashboard/secrets", "/dashboard/secrets/open?path=shop/petstore", "/dashboard/secrets/new",
 		"/dashboard/secrets/details?path=shop/petstore", "/dashboard/secrets/replace?path=shop/petstore", "/dashboard/more", "/dashboard/"} {
 		w := e.do("GET", p, nil)
@@ -164,7 +167,7 @@ func TestSecretPagesNeverHoldTheValue(t *testing.T) {
 // Show and copy hand out the value as no-store JSON and audit each one with
 // path, address and dashboard login.
 func TestShowAndCopyAreAudited(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	loginID := e.h.logins.list(time.Now())[0].ID
 	for _, use := range []string{"show", "copy"} {
 		e.audit.Reset()
@@ -197,7 +200,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk ful
 
 // No audit line, no value.
 func TestNoValueWithoutAudit(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	e.h.deps.Audit = audit.NewWriterLogger(failingWriter{})
 	if w := e.showValue(); w.Code == http.StatusOK || strings.Contains(w.Body.String(), fakeValue) {
 		t.Fatalf("value sent without an audit line: %d", w.Code)
@@ -211,7 +214,7 @@ func TestNoValueWithoutAudit(t *testing.T) {
 // Cross-site requests: no cookie, no or wrong CSRF token, a GET, and a
 // request a browser marks as coming from elsewhere all get nothing.
 func TestValueRefusesForgedRequests(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	form := url.Values{"path": {"shop/petstore"}, "use": {"show"}, "_csrf": {e.csrf}}
 	try := func(name string, w *httptest.ResponseRecorder) {
 		if w.Code == http.StatusOK || strings.Contains(w.Body.String(), fakeValue) {
@@ -267,7 +270,7 @@ func TestValueRefusesForgedRequests(t *testing.T) {
 // Clickjacking and injected content: every response forbids framing and
 // foreign scripts, and no template relies on an inline script.
 func TestSecurityHeaders(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	for _, p := range []string{"/dashboard/login", "/dashboard/secrets", "/dashboard/approvals", "/dashboard/static/secrets.js", "/dashboard/nothing"} {
 		hd := e.do("GET", p, nil).Header()
 		if hd.Get("X-Frame-Options") != "DENY" || !strings.Contains(hd.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
@@ -291,7 +294,7 @@ func TestSecurityHeaders(t *testing.T) {
 // and every change need it again; typing it opens a fixed window and moves
 // the login to a new cookie, so a copied old cookie is dead.
 func TestRecentPasswordIsNeeded(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	e.age(recentAuthWindow + time.Second)
 	posts := map[string][]string{
 		"value":   {"path", "shop/petstore", "use", "show"},
@@ -355,7 +358,7 @@ func TestRecentPasswordIsNeeded(t *testing.T) {
 // Wrong passwords at the re-ask count in the login limiter, per address and
 // per login, so changing address does not help; the right one then waits too.
 func TestReauthIsRateLimited(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	e.age(time.Hour)
 	for i := 0; i < loginMaxFailures; i++ {
 		form := url.Values{"_csrf": {e.csrf}, "password": {"wrong"}}
@@ -381,18 +384,22 @@ func TestReauthIsRateLimited(t *testing.T) {
 
 // The server's rules hold here too: a sealed-only secret and one tied to
 // other machines are not shown, a forged X-Forwarded-For does not help, and
-// "reveal": false switches showing off without stopping edits.
+// showing is off, without stopping edits, unless the config turns it on.
 func TestRulesAndOffSwitch(t *testing.T) {
 	for name, tc := range map[string]struct {
-		cfg   config.DashboardConfig
+		cfg   *config.DashboardConfig // nil = revealOn
 		rules string
 	}{
 		"sealed":    {rules: `{"attestation":{"shop/*":{"require_sealed":true}}}`},
 		"source ip": {rules: `{"attestation":{"shop/*":{"source_ip":["10.1.2.3"]}}}`},
-		"off":       {cfg: config.DashboardConfig{Reveal: new(bool)}},
+		"off":       {cfg: &config.DashboardConfig{}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			e := newSecretsEnv(t, tc.cfg, tc.rules)
+			cfg := revealOn
+			if tc.cfg != nil {
+				cfg = *tc.cfg
+			}
+			e := newSecretsEnv(t, cfg, tc.rules)
 			form := url.Values{"_csrf": {e.csrf}, "path": {"shop/petstore"}, "use": {"show"}}
 			w := e.do("POST", "/dashboard/secrets/value", form, "X-Forwarded-For", "10.1.2.3")
 			if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), fakeValue) {
@@ -430,7 +437,7 @@ func TestRulesAndOffSwitch(t *testing.T) {
 }
 
 func TestAddReplaceAndDetails(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 
 	if w := e.post("/dashboard/secrets/new", "path", "home/wifi", "value", " pasted-fake\n", "description", "Wifi", "tags", "home, net ,", "url", ""); w.Code != http.StatusOK {
 		t.Fatalf("add: %d %s", w.Code, w.Body)
@@ -479,7 +486,7 @@ func TestAddReplaceAndDetails(t *testing.T) {
 
 // A link put in the store file by hand is never turned into a live one.
 func TestBadStoredLinkIsNotALink(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	bad := "javascript:alert(1)"
 	e.store.Describe("shop/petstore", store.MetadataChange{URL: &bad})
 	if page := e.do("GET", "/dashboard/secrets/open?path=shop/petstore", nil).Body.String(); strings.Contains(page, `id="open-link"`) || strings.Contains(page, "copy-open") {
@@ -490,7 +497,7 @@ func TestBadStoredLinkIsNotALink(t *testing.T) {
 // The service worker stores only listed static files, all of which exist, and
 // everything else it serves is marked as not to be stored.
 func TestServiceWorkerStoresOnlyStaticFiles(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	e.cookie = nil
 	w := e.do("GET", "/dashboard/sw.js", nil)
 	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "javascript") {
@@ -573,7 +580,7 @@ func (w signOutWriter) Write(p []byte) (int, error) {
 // A login that ends, or moves to a new cookie, while the value is being read
 // or the audit line written gets nothing, and the audit still names it.
 func TestLoginEndsDuringSlowRead(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	hook := &hookBackend{SecretBackend: e.h.deps.Backend}
 	e.h.deps.Backend = hook
 	id := e.h.logins.list(time.Now())[0].ID
@@ -621,7 +628,7 @@ func TestLoginEndsDuringSlowRead(t *testing.T) {
 // A backend that also opens a secret under an unlisted spelling must not let
 // that spelling slip past the listed name's rule; and an outage says so.
 func TestUnlistedNamesAndOutages(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	hook := &hookBackend{SecretBackend: e.h.deps.Backend}
 	e.h.deps.Backend = hook
 	if w := e.post("/dashboard/secrets/value", "path", "Shop/Petstore", "use", "show"); w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), fakeValue) {
@@ -644,7 +651,7 @@ func TestUnlistedNamesAndOutages(t *testing.T) {
 
 // The list page must not sort the backend's own slice.
 func TestListIsNotSortedInPlace(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	shared := []string{"z/z", "a/a"}
 	e.h.deps.Backend = &hookBackend{SecretBackend: e.h.deps.Backend, list: shared}
 	e.do("GET", "/dashboard/secrets", nil)
@@ -655,7 +662,7 @@ func TestListIsNotSortedInPlace(t *testing.T) {
 
 // A page left open cannot pair a new password with the old site.
 func TestCopyAndOpenChecksTheLink(t *testing.T) {
-	e := newSecretsEnv(t, config.DashboardConfig{}, "")
+	e := newSecretsEnv(t, revealOn, "")
 	shown := regexp.MustCompile(`data-link="([^"]*)"`).FindStringSubmatch(e.do("GET", "/dashboard/secrets/open?path=shop/petstore", nil).Body.String())[1]
 	fields := []string{"path", "shop/petstore", "use", "copy", "link", shown}
 	if w := e.post("/dashboard/secrets/value", fields...); w.Code != http.StatusOK {
@@ -672,7 +679,7 @@ func TestCopyAndOpenChecksTheLink(t *testing.T) {
 // are tried, whatever order they arrive in.
 func TestParallelGuessesAreLimited(t *testing.T) {
 	for _, path := range []string{"/dashboard/login", "/dashboard/reauth"} {
-		e := newSecretsEnv(t, config.DashboardConfig{}, "")
+		e := newSecretsEnv(t, revealOn, "")
 		form := url.Values{"_csrf": {e.csrf}, "password": {"wrong"}, "credential": {"wrong"}}
 		var wg sync.WaitGroup
 		start := make(chan struct{})

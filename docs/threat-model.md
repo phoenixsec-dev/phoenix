@@ -135,7 +135,7 @@ API and must be evaluated separately.
 ### What the dashboard exposes
 
 The dashboard can: search every secret's name, description, tags and username, see its
-link, show and copy secret values, add secrets and change them, view agent and session counts,
+link, show and copy secret values once its owner turned that on, add secrets and change them, view agent and session counts,
 view and revoke active sessions,
 approve and deny secret access requests and revoke grants, view the full audit log, and view role
 configuration.
@@ -151,11 +151,21 @@ Someone who reads the `--init` output (an agent that ran it, a captured log) has
 the admin token, and the dashboard password too if it was generated (100 random
 bits, shown once). A password typed at the prompt is never printed.
 
-**The dashboard password opens every secret** that no policy rule withholds from it.
-Rules guard values (showing, copying, setting), not names and details.
-Up to v0.24 it could only approve access. Anyone (or any agent) who knows it, or can
-read it where it is stored, can read the store. Change it if it was shared, keep it
-away from agents, or set `"reveal": false`.
+**With `dashboard.reveal` on, the dashboard password opens every secret** that no
+policy rule withholds from it. Rules guard values (showing, copying, setting), not
+names and details. Anyone (or any agent) who knows it, or can read it where it is
+stored, can then read the store. So it is off by default, for upgrades too, and only
+the config file turns it on: whoever has just the password cannot. Change the
+password if it was shared, and keep it away from agents, before turning it on.
+Off, the password can still approve an agent's request, and set a new value for a
+secret without seeing the old one.
+
+Each value shown or copied pings the owner (`dashboard.notify_on_reveal`, on by
+default) and writes an audit line, which has no switch. The ping tells the owner of
+a misuse; it does not prevent one. It is lost if the notification service is down,
+and someone with the password can break it by giving the secret named in
+`notify_token_ref` a new value. Both leave a line in the server log, and the new
+value one in the audit log. The address in a ping is the one in the audit log.
 
 Showing values and approving access are the highest-risk actions.
 
@@ -266,7 +276,7 @@ Phoenix does about them.
 | Lost revoke / phantom grant | Nothing is published before it is saved. A revoke denies at once in memory even if the save fails, and a failed revoke is reported as `REVOKE_NOT_DURABLE`, never as success | **Double disk fault on approve:** if the directory fsync fails after the rename *and* writing the old state back also fails, an approval reported as failed may still be on disk and take effect after a restart. The error message says so; check the grants list and revoke it |
 | Audit loss | An "attempt" line is written before each change and the "committed" line after; committed lines that fail are retried every 30 seconds (at least once) | **No audit hash chain.** Someone with write access to the audit log can edit or delete lines without detection. Accepted inside the LAN envelope |
 | Grants file tampering | `grants.json` is mode `0600`, owned by the server user, same trust level as `acl.json` | Not a new boundary: whoever can write it can already write the ACL |
-| Notification leaks | The notify hook sends agent name, action, number of paths, request id and a dashboard link. Paths only when `notify_include_paths` is on. The reason is never sent. No approve links, no tokens in URLs. The ntfy token comes from Phoenix at send time and is never logged. Redirects are not followed | Whoever can read the notification topic learns that an agent asked for something, and when |
+| Notification leaks | The notify hook sends agent name, action, number of paths, request id and a dashboard link. Paths only when `notify_include_paths` is on. The ping for a secret shown or copied in the dashboard always names the secret, with the login's ID, device and address, never the value. The reason is never sent. No approve links, no tokens in URLs. The ntfy token comes from Phoenix at send time and is never logged. Redirects are not followed | Whoever can read the notification topic learns that an agent asked for something, and when, and which secrets the owner opens in the dashboard (`dashboard.notify_on_reveal: false` stops that) |
 | Revoke after use | Revoke and expiry are checked on every request | Revoking cannot take back a value already delivered. Rotate the secret if that matters |
 | Shared dashboard credential | Unchanged (see above). Approvals are recorded as `dashboard@<ip>` | Anyone with the dashboard password can approve any request |
 

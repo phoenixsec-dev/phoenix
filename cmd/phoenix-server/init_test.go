@@ -39,7 +39,7 @@ func TestInitTurnsDashboardOn(t *testing.T) {
 	defer func() { os.Stdout = stdout }()
 	for _, https := range []bool{false, true} {
 		dir := filepath.Join(t.TempDir(), "data")
-		if err := runInit(dir, initOptions{DashboardPassword: password, HTTPS: https}); err != nil {
+		if err := runInit(dir, initOptions{DashboardPassword: password, HTTPS: https, Reveal: https}); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := config.Load(filepath.Join(dir, "config.json"))
@@ -54,6 +54,9 @@ func TestInitTurnsDashboardOn(t *testing.T) {
 		}
 		if !cfg.AccessRequestsSettings().Enabled || cfg.HTTPSListener.Enabled != https {
 			t.Fatalf("access requests %v, https %v (want %v)", cfg.AccessRequestsSettings().Enabled, cfg.HTTPSListener.Enabled, https)
+		}
+		if cfg.Dashboard.Reveal != https || !cfg.Dashboard.NotifyOnRevealEnabled() {
+			t.Fatalf("showing secrets %v (want %v), ping %v (want true)", cfg.Dashboard.Reveal, https, cfg.Dashboard.NotifyOnRevealEnabled())
 		}
 		files, err := os.ReadDir(dir)
 		if err != nil {
@@ -115,5 +118,17 @@ func TestAskDashboardPassword(t *testing.T) {
 	}
 	if p2, _, _ := ask(""); p1 == p2 {
 		t.Fatal("two generated passwords are the same")
+	}
+}
+
+// Only a clear yes lets the dashboard show secrets, and only at a terminal.
+func TestAskReveal(t *testing.T) {
+	for answer, want := range map[string]bool{"y\n": true, "YES\n": true, "yes": true, "\n": false, "": false, "n\n": false, "yep\n": false, "maybe\ny\n": false} {
+		if got := askReveal(strings.NewReader(answer)); got != want {
+			t.Errorf("%q: %v", answer, got)
+		}
+	}
+	if initReveal() { // tests have no terminal
+		t.Error("on without a terminal")
 	}
 }

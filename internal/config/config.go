@@ -183,13 +183,18 @@ type DashboardConfig struct {
 	Enabled      bool   `json:"enabled"`
 	PasswordHash string `json:"password_hash,omitempty"` // bcrypt hash (generate with: phoenix-server --hash-password)
 	SessionTTL   string `json:"session_ttl,omitempty"`   // default "4h"
-	Reveal       *bool  `json:"reveal,omitempty"`        // show and copy secret values; default true
+	// Reveal lets the dashboard show and copy secret values. Off until the
+	// owner turns it on here: with it on, the password opens the store.
+	Reveal bool `json:"reveal"`
+	// NotifyOnReveal pings the owner when a value is shown or copied.
+	// Default true.
+	NotifyOnReveal *bool `json:"notify_on_reveal,omitempty"`
 }
 
-// RevealEnabled reports whether the dashboard may show and copy secret
-// values. On unless "reveal": false.
-func (d DashboardConfig) RevealEnabled() bool {
-	return d.Reveal == nil || *d.Reveal
+// NotifyOnRevealEnabled reports whether showing or copying a value pings the
+// owner. On unless "notify_on_reveal": false.
+func (d DashboardConfig) NotifyOnRevealEnabled() bool {
+	return d.NotifyOnReveal == nil || *d.NotifyOnReveal
 }
 
 // validBootstrapMethods lists the allowed values for RoleConfig.BootstrapTrust.
@@ -274,9 +279,11 @@ func ExampleConfig() *Config {
 			},
 		},
 	}
+	pingOn := true
 	cfg.Dashboard = DashboardConfig{
-		Enabled:    false,
-		SessionTTL: "4h",
+		Enabled:        false,
+		SessionTTL:     "4h",
+		NotifyOnReveal: &pingOn,
 	}
 	cfg.AccessRequests = NewInstallAccessRequests()
 	return cfg

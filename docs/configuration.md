@@ -108,7 +108,8 @@ troubleshooting: [Access Requests](access-requests.md).
 
 The `notify_*` keys are optional. `notify_url` gets one POST per new request
 (ntfy-style; agent, action, path count, request id, dashboard link; never the
-reason). `notify_token_ref` names a secret in this Phoenix store that is sent
+reason), and one when a secret is shown or copied in the dashboard.
+`notify_token_ref` names a secret in this Phoenix store that is sent
 as a bearer token; never put the token itself in the config. The server
 refuses to start if `notify_url` or `notify_dashboard_url` is not a plain
 `http(s)://` URL or contains a `user:password@` part, or if
@@ -136,7 +137,9 @@ Then put it in the config and restart:
   "dashboard": {
     "enabled": true,
     "password_hash": "$2a$10$...",
-    "session_ttl": "4h"
+    "session_ttl": "4h",
+    "reveal": false,
+    "notify_on_reveal": true
   }
 }
 ```
@@ -146,7 +149,8 @@ Then put it in the config and restart:
 | `dashboard.enabled` | `bool` | Enable the dashboard at `/dashboard/` |
 | `dashboard.password_hash` | `string` | bcrypt hash of operator password (generate with `phoenix-server --hash-password`) |
 | `dashboard.session_ttl` | `string` | Dashboard session lifetime (default `4h`) |
-| `dashboard.reveal` | `bool` | Let the dashboard show and copy secret values (default `true`). `false` keeps finding, adding and editing |
+| `dashboard.reveal` | `bool` | Let the dashboard show and copy secret values (default `false`). Finding, adding and editing work either way. Only this file can turn it on |
+| `dashboard.notify_on_reveal` | `bool` | Ping the owner when a value is shown or copied (default `true`). Goes to `access_requests.notify_url`, also with access requests off. The audit line is always written |
 
 `password_hash` is required when the dashboard is enabled (`dashboard.pin`
 was removed; a config that still sets it will not start).

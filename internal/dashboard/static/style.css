@@ -245,6 +245,8 @@ body {
 .secret-form { max-width: 640px; }
 .form-field { display: block; margin-bottom: 16px; }
 .form-field .hint { display: block; margin-top: 4px; }
+.hint code, .config-line { font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace; overflow-wrap: anywhere; }
+.config-line { margin: 8px 0; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); white-space: pre-wrap; user-select: all; }
 textarea.input { resize: vertical; min-height: 72px; }
 .masked { -webkit-text-security: disc; }
 .check { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 16px; font-size: 0.9em; line-height: 1.4; }
