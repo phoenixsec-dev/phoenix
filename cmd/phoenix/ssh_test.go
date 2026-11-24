@@ -20,6 +20,9 @@ func TestParseSSHArgs(t *testing.T) {
 	if a, err = parseSSHArgs([]string{"lab1"}); err != nil || a.ttl != defaultSSHTTL {
 		t.Fatalf("default ttl: %+v, %v", a, err)
 	}
+	if a, err = parseSSHArgs([]string{"build-node"}); err != nil || a.machine != "build-node" {
+		t.Fatalf("name ending in a letter: %+v, %v", a, err)
+	}
 	for _, list := range [][]string{{}, {"--list"}} {
 		if a, err := parseSSHArgs(list); err != nil || !a.list {
 			t.Errorf("%v should list machines: %+v, %v", list, a, err)
@@ -111,6 +114,14 @@ func TestSSHList(t *testing.T) {
 	printSSHMachines(&b, sshMachineList{Note: "SSH certificates are not enabled on this server"})
 	if b.String() != "SSH certificates are not enabled on this server.\n" {
 		t.Fatalf("off = %q", b.String())
+	}
+}
+
+// A server from before v0.24.0 has no machine list: say so, not a bare 404.
+func TestSSHListOldServer(t *testing.T) {
+	useMockServer(t, http.NotFound)
+	if err := cmdSSH([]string{"--list"}); err == nil || !strings.Contains(err.Error(), "too old") || strings.Contains(err.Error(), "404") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
