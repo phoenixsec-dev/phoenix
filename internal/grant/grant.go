@@ -52,7 +52,8 @@ const (
 	DenyCooldown       = 10 * time.Minute
 	MaxActiveGrants    = 10
 	Retention          = 30 * 24 * time.Hour // resolved requests and dead grants
-	EndedLookback      = 24 * time.Hour      // how long Match reports grant_expired / grant_revoked
+	EndedLookback      = 24 * time.Hour      // how long Match reports why a grant ended
+	MaxUsesLimit       = 1000                // most uses one approval may allow
 )
 
 // Status is a request's lifecycle state: pending -> approved | denied | expired.
@@ -73,6 +74,7 @@ const (
 	GrantActive  GrantState = "active"
 	GrantExpired GrantState = "expired"
 	GrantRevoked GrantState = "revoked"
+	GrantUsed    GrantState = "used" // every allowed use was spent
 )
 
 // Reasons Match gives for a denial when a matching grant recently ended.
@@ -80,6 +82,7 @@ const (
 const (
 	ReasonGrantExpired = "grant_expired"
 	ReasonGrantRevoked = "grant_revoked"
+	ReasonGrantUsedUp  = "grant_used_up"
 )
 
 // Request is an agent's ask for temporary use of exact paths. Values returned
@@ -102,10 +105,18 @@ type Request struct {
 	DecidedAt    time.Time     `json:"decided_at,omitzero"`
 	Note         string        `json:"note,omitempty"`
 	GrantID      string        `json:"grant_id,omitempty"`
+	// Always marks an approval that put GrantedPaths on the agent's own access
+	// list instead of making a grant. The list itself is the truth about what
+	// the agent may read now; this only records the answer.
+	Always       bool     `json:"always,omitempty"`
+	GrantedPaths []string `json:"granted_paths,omitempty"`
 }
 
-// Grant is an approved, time-limited permission. Usable only by the same
-// agent, with the same kind of credential (and the same IP when bound).
+// Grant is an approved permission limited by time, and by uses when MaxUses is
+// set: whichever runs out first ends it. Usable only by the same agent, with
+// the same credential (and the same IP when bound).
+//
+// Uses are counted per path: "once" on two secrets lets each be read one time.
 type Grant struct {
 	ID             string    `json:"id"`
 	RequestID      string    `json:"request_id"`
@@ -124,14 +135,45 @@ type Grant struct {
 	ExpiryRecorded bool      `json:"expiry_recorded,omitempty"` // grant.expired audit event queued
 	LastUsedAt     time.Time `json:"last_used_at,omitzero"`
 	UseCount       int64     `json:"use_count,omitempty"`
+
+	MaxUses  int64            `json:"max_uses,omitempty"`  // uses allowed per path; 0 = any number
+	PathUses map[string]int64 `json:"path_uses,omitempty"` // uses spent per path (only with MaxUses)
+	UsedUpAt time.Time        `json:"used_up_at,omitzero"` // when the last use was spent (never set for logins)
 }
 
-// State returns whether the grant is active, expired or revoked at now.
-// Expiry is exclusive: at exactly ExpiresAt the grant is already expired.
+// UsesLeft is how many more times path may be used, or -1 for any number.
+func (g Grant) UsesLeft(path string) int64 {
+	if g.MaxUses <= 0 {
+		return -1
+	}
+	return max(g.MaxUses-g.PathUses[path], 0)
+}
+
+// usedUp reports whether no path has a use left.
+func (g *Grant) usedUp() bool {
+	if g.MaxUses <= 0 {
+		return false
+	}
+	for _, p := range g.Paths {
+		if g.UsesLeft(p) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// State returns whether the grant is active, used up, expired or revoked at
+// now. Expiry is exclusive: at exactly ExpiresAt the grant is already expired.
 // Once expiry is recorded it is final, even if the clock later steps back.
+//
+// A login whose uses are spent stays active until its time ends: the use was
+// the certificate, and the login it opened is still running and revocable.
 func (g Grant) State(now time.Time) GrantState {
 	if !g.RevokedAt.IsZero() {
 		return GrantRevoked
+	}
+	if !g.UsedUpAt.IsZero() {
+		return GrantUsed
 	}
 	if g.ExpiryRecorded || !now.Before(g.ExpiresAt) {
 		return GrantExpired
@@ -144,12 +186,23 @@ func (g *Grant) endedAt() time.Time {
 	if !g.RevokedAt.IsZero() && g.RevokedAt.Before(g.ExpiresAt) {
 		return g.RevokedAt
 	}
+	if !g.UsedUpAt.IsZero() && g.UsedUpAt.Before(g.ExpiresAt) {
+		return g.UsedUpAt
+	}
 	return g.ExpiresAt
 }
 
 // covers reports whether the grant names this exact path and action.
 func (g *Grant) covers(path, action string) bool {
 	return g.Action == action && slices.Contains(g.Paths, path)
+}
+
+// Approval is how a human said yes.
+type Approval struct {
+	Paths  []string      // nil = every requested path
+	TTL    time.Duration // 0 = the requested time
+	Uses   int64         // uses allowed per path; 0 = any number until the time ends
+	Always bool          // standing read access instead of a grant; TTL and Uses do not apply
 }
 
 // Code is a stable error code. internal/api maps each to an HTTP status and
@@ -174,6 +227,12 @@ const (
 	CodeRevokeNotDurable   Code = "REVOKE_NOT_DURABLE"      // 500: revoked in memory only
 	CodeRequestsDegraded   Code = "REQUESTS_DEGRADED"       // 503
 	CodeDeleteACLFailed    Code = "AGENT_DELETE_ACL_FAILED" // 500: grants revoked durably, ACL entry still there
+	CodeCredentialChanged  Code = "CREDENTIAL_CHANGED"      // 409: the agent's token is not the one that asked
+	CodeAlwaysNotAllowed   Code = "ALWAYS_NOT_ALLOWED"      // 400: this kind of request has no "always"
+	CodeACLWriteFailed     Code = "ACL_WRITE_FAILED"        // 500: the agent's access list could not be saved
+	// Why Spend refused a use. They end up as denial reasons, not HTTP codes.
+	CodeGrantUsedUp Code = "GRANT_USED_UP"
+	CodeGrantEnded  Code = "GRANT_ENDED"
 )
 
 // Error is the error type every Store method returns. Use errors.Is with the
@@ -227,6 +286,9 @@ var (
 	ErrRevokeNotDurable   = &Error{Code: CodeRevokeNotDurable}
 	ErrRequestsDegraded   = &Error{Code: CodeRequestsDegraded}
 	ErrDeleteACLFailed    = &Error{Code: CodeDeleteACLFailed}
+	ErrCredentialChanged  = &Error{Code: CodeCredentialChanged}
+	ErrAlwaysNotAllowed   = &Error{Code: CodeAlwaysNotAllowed}
+	ErrACLWriteFailed     = &Error{Code: CodeACLWriteFailed}
 )
 
 // CodeOf returns the Code of a grant error, or "" for nil / foreign errors.

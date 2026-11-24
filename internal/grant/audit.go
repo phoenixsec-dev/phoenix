@@ -31,6 +31,7 @@ const (
 	EventRequestExpired  = "access_request.expired"
 	EventGrantRevoked    = "grant.revoked"
 	EventGrantExpired    = "grant.expired"
+	EventGrantUsedUp     = "grant.used_up"
 	EventAgentDeleted    = "grant.agent_deleted"
 )
 
